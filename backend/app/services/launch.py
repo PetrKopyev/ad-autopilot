@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.content.images import DEFAULT_FONT, ImageRejected, make_formats
 from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
-from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
+from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
 from app.platforms.base import (
     AdGroupSpec,
@@ -64,7 +64,7 @@ class LaunchService:
         limits: AiLimits,
         *,
         changes: ChangesService | None = None,
-        domain: DomainSettings = DEFAULT_SETTINGS,
+        domain: DomainSettings | None = None,
         font_path: str = DEFAULT_FONT,
     ) -> None:
         self.repository = repository
@@ -72,6 +72,10 @@ class LaunchService:
         self.media_root = media_root
         self.limits = limits
         self.changes = changes or ChangesService(repository, dry_run=False)
+        if domain is None:
+            from app.config import get_domain_settings
+
+            domain = get_domain_settings()
         self.domain = domain
         self.font_path = font_path
 

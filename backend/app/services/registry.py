@@ -90,6 +90,10 @@ class AdapterRegistry:
         self.load = load
         self.mode = mode
         self.http = http
+        if config is None:
+            from app.config import settings
+
+            config = settings
         self.config = config
         self.cache: dict[tuple[int, str], tuple[AccountInfo | None, AdPlatform]] = {}
         self.fakes: dict[tuple[int, str], FakeAdapter] = {}
@@ -118,6 +122,7 @@ class AdapterRegistry:
             return VkAdapter(
                 info.token,
                 href=info.href,
+                package_id=getattr(self.config, "vk_package_id", None),
                 marking_confirmed=info.marking_confirmed,
                 config=self.config,
                 client=self.http,

@@ -21,7 +21,7 @@ from app.domain.types import (
     Verdict,
     total_metrics,
 )
-from app.platforms.base import Operation
+from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend
 from app.services.experiments import completed_hypotheses, group_available
 from app.services.plan import CAP_MULTIPLIER, campaign_limits
@@ -139,13 +139,22 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
 
 
 async def optimize(worker: Worker, business: Business) -> None:
+    from app.config import get_domain_settings
+
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
         return
     ads, groups = await snapshot(worker, business)
     limits = {group.id: group.daily_limit for group in groups}
     # Освободившаяся доля остаётся доступной, но не доливается в пограничные объявления.
     free = sum(group.daily_limit for group in groups if not group.active)
-    decisions = decide(ads, groups, worker.clock.now, reference(worker, business, ads), free_daily_budget=free)
+    decisions = decide(
+        ads,
+        groups,
+        worker.clock.now,
+        reference(worker, business, ads),
+        free_daily_budget=free,
+        settings=get_domain_settings(),
+    )
     campaigns = worker.campaigns(business)
     local_groups = worker.repository.rows(AdGroup, business.id)
     testing = {
@@ -223,6 +232,9 @@ async def optimize(worker: Worker, business: Business) -> None:
 
 
 async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
+    from app.config import get_domain_settings
+
+    domain = get_domain_settings()
     if not force and (business.status != "running" or worker.metadata(business).get("kill_switch")):
         return
     day = today(worker.clock)
@@ -237,7 +249,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     if not platforms:
         return
     shares = {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
-    shares = shares if set(shares) == set(platforms) else platform_shares(platforms)
+    shares = shares if set(shares) == set(platforms) else platform_shares(platforms, domain)
     ads, groups = await snapshot(worker, business, include_paused_campaigns=True)
     prices = {}
     for platform in platforms:
@@ -246,7 +258,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         )
         prices[platform] = metrics.cpl
     previous = datetime.fromisoformat(meta.get("shares_at", worker.clock.now.isoformat()))
-    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days)
+    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain)
     change = meta.get("budget_change", {})
     budget = business.month_budget_kop
     if not force and change.get("effective_on", "") > day.isoformat():
@@ -259,6 +271,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         platforms,
         started_on=day.fromisoformat(meta.get("started_on", month.isoformat())),
         shares=shares,
+        settings=domain,
     )
     group_limits = {group.id: group.daily_limit for group in groups}
     local_groups = worker.repository.rows(AdGroup, business.id)
@@ -318,13 +331,20 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 reason_text="Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
             )
             if not worker.proposed(business):
-                adapter = worker.resolve_adapter(business.id, campaign.platform)
-                if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
-                    await adapter.extend_end_date(campaign.external_id)
-            if not worker.proposed(business):
-                # После частично применённой попытки локальные лимиты берём из подтверждённого результата.
+                # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
                 campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
                 worker.repository.save(campaign)
+                adapter = worker.resolve_adapter(business.id, campaign.platform)
+                if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
+                    try:
+                        await adapter.extend_end_date(campaign.external_id)
+                    except PlatformError:
+                        worker.notice(
+                            business,
+                            "CAMPAIGN_EXTEND_FAILED",
+                            "Не удалось продлить кампанию в Директе. Повторим при следующем пересчёте лимитов.",
+                            target_id=campaign.external_id,
+                        )
         ledger = worker.repository.find(BudgetLedger, business_id=business.id, platform=limit.platform, month=month)
         ledger = ledger or BudgetLedger(business_id=business.id, platform=limit.platform, month=month, spent_kop=0)
         ledger.allocated_kop = plan.authorized * int(shares[limit.platform] * 1_000_000) // 1_000_000
@@ -355,6 +375,14 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             # Дедлайн освобождает группу даже после правок или отката владельца.
             # Просроченные данные не дают права выбирать победителя и менять статусы плеч.
             result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 1.0)
+            if worker.proposed(business) and any(
+                change.kind == "experiment_verdict"
+                and change.reason_code == "EXPERIMENT_NO_DIFF"
+                and change.status == "proposed"
+                and change.evidence.get("experiment_id") == experiment.id
+                for change in worker.repository.rows(ChangeLog, business.id)
+            ):
+                continue
             change = ChangeLog(
                 business_id=business.id,
                 actor="autopilot",

@@ -108,6 +108,9 @@ async def stop_all(
 
 
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:
+    from app.config import get_domain_settings
+
+    domain = get_domain_settings()
     pending_stop = worker.metadata(business).get("pending_stop")
     if pending_stop:
         await stop_all(business, worker=worker, **pending_stop)
@@ -125,6 +128,7 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             continue
         seconds = (worker.clock.now - ledger.spent_at).total_seconds()
         if seconds > 0:
+            seconds = max(seconds, domain.guard_poll_minutes * 60)
             observed_daily += ceil(max(0, spent.get(platform, 0) - ledger.spent_kop) * 86400 / seconds)
     # Ledger — снимок, а не разрешённый расход: во время простоя работают кэпы.
     # Верхняя граница сверки — authorized месяца (PLAN 2.5), включая резерв.
@@ -135,10 +139,15 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
         day,
         ("all",),
         started_on=day.fromisoformat(worker.metadata(business).get("started_on", month.isoformat())),
+        settings=domain,
     ).authorized
     mismatch = reconcile and reported > allowed
     result = decide_guard(
-        business.month_budget_kop, reported, max(daily, observed_daily), recorded_spent=0 if mismatch else None
+        business.month_budget_kop,
+        reported,
+        max(daily, observed_daily),
+        recorded_spent=0 if mismatch else None,
+        settings=domain,
     )
     for platform, value in spent.items():
         ledger = ledgers.get(platform) or BudgetLedger(

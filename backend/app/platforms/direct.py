@@ -117,6 +117,7 @@ class DirectAdapter:
         if strategy == "WB_MAXIMUM_CONVERSION_RATE" and not goals:
             raise ValueError("Для оптимизации конверсий нужны PriorityGoals.")
         self._config = config
+        self._end_dates: dict[str, str] = {}
         self._base_url = config.direct_api_url.rstrip("/")
         self._v501_url = config.direct_api_v501_url.rstrip("/")
         self._sandbox = config.direct_sandbox
@@ -812,6 +813,9 @@ class DirectAdapter:
         )
 
     async def extend_end_date(self, campaign_id: str) -> None:
+        known = self._end_dates.get(campaign_id)
+        if known and (date.fromisoformat(known) - self._today()).days > 2:
+            return
         items = await self._get(
             "campaigns",
             "Campaigns",
@@ -820,12 +824,15 @@ class DirectAdapter:
         if not items:
             raise PlatformError("Кампания не найдена в Директе.")
         end = items[0].get("EndDate")
+        if end is not None:
+            self._end_dates[campaign_id] = end
         if end is None or (date.fromisoformat(end) - self._today()).days > 2:
             return
         next_month = (self._today().replace(day=28) + timedelta(days=4)).replace(day=1)
         desired = min(self._today() + timedelta(days=6), next_month - timedelta(days=1)).isoformat()
         if end < desired:
             await self._api("campaigns", "update", {"Campaigns": [{"Id": int(campaign_id), "EndDate": desired}]})
+            self._end_dates[campaign_id] = desired
 
     def _context_weekly(self, context: dict[str, int]) -> int:
         # WeeklySpendLimit включает уже потраченное на этой неделе. Наш period_cap

@@ -1056,3 +1056,13 @@ async def test_invalid_marking_data_does_not_become_manual_fallback(adapter, api
     api.post(f"{V5}/clients").respond(json={"error": {"error_code": 8000, "error_string": "Неверный ИНН"}})
     with pytest.raises(PlatformError, match="ИНН"):
         await adapter.set_marking(PROFILE)
+
+
+async def test_end_date_known_far_skips_get(adapter, api):
+    server = DirectServer()
+    server.rows["campaigns"] = [{"Id": 1, "EndDate": "2026-10-31"}]
+    route = api.post(f"{V501}/campaigns").mock(side_effect=server)
+    await adapter.extend_end_date("1")
+    calls = route.call_count
+    await adapter.extend_end_date("1")
+    assert route.call_count == calls

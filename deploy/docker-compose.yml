@@ -4,6 +4,8 @@ x-backend: &backend
     context: ../backend
   env_file:
     - ../.env
+  environment:
+    MEDIA_DIR: /data/media
   restart: unless-stopped
 
 services:
@@ -33,6 +35,8 @@ services:
 
   api:
     <<: *backend
+    volumes:
+      - media:/data/media
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -40,6 +44,8 @@ services:
 
   worker:
     <<: *backend
+    volumes:
+      - media:/data/media
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -67,6 +73,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  media:
   postgres_data:
   caddy_data:
   caddy_config:

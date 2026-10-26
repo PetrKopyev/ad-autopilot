@@ -506,3 +506,51 @@ async def test_postgresql_rollback_updates_original_ad_and_experiment(tree, monk
                 transaction.rollback()
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "reason,actor,kind,status,kill_switch,expected",
+    [
+        ("BUDGET_REBALANCE", "system", "budget", "running", False, False),
+        ("BUDGET_STOP", "system", "pause", "running", False, False),
+        ("SPEND_MISMATCH", "system", "pause", "running", False, False),
+        ("MONTH_STOP", "system", "pause", "running", False, False),
+        ("BUDGET_UPDATE_FAILED", "system", "pause", "running", False, False),
+        ("CUSTOM", "system", "pause", "budget_stop", False, False),
+        ("CUSTOM", "system", "pause", "paused", True, False),
+        ("REVERT", "owner", "revert", "running", False, False),
+        ("CUSTOM", "autopilot", "pause", "running", False, True),
+        ("CUSTOM", "external", "pause", "running", False, True),
+    ],
+)
+async def test_history_and_server_share_revert_eligibility(
+    client, repository, tree, reason, actor, kind, status, kill_switch, expected
+):
+    http, resolver, _ = client
+    adapter, refs = tree
+    original = await applied(repository, adapter, refs)
+    original.reason_code, original.actor, original.kind = reason, actor, kind
+    business = repository.business.return_value
+    business.status = status
+    business.settings = {"_worker": {"kill_switch": kill_switch}}
+    repository.history.return_value = ([original], 1)
+    repository.get_owned.return_value = original
+    resolver.return_value = adapter
+    response = http.get("/api/history")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["can_revert"] is expected
+    response = http.post(f"/api/history/{original.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == (200 if expected else 409)
+
+
+async def test_history_hides_dry_run_and_pending_reverts(client, repository, tree):
+    http, _, _ = client
+    adapter, refs = tree
+    original = await applied(repository, adapter, refs)
+    repository.history.return_value = ([original], 1)
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is True
+    original.evidence["_service"]["dry_run"] = True
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is False
+    original.evidence["_service"]["dry_run"] = False
+    repository.save(ChangeLog(kind="revert", reverts_id=original.id, status="pending", evidence={}))
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is False

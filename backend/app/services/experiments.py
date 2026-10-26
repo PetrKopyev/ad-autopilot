@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
@@ -88,15 +87,16 @@ def group_available(worker: Worker, business: Business, group: AdGroup, *, ignor
 @asynccontextmanager
 async def content_service(worker: Worker):
     """Тот же контентный сервис и журнал трат, что при подготовке плана."""
-    from app.config import settings
+    from app.config import get_domain_settings, settings
 
     async with httpx.AsyncClient() as http:
         yield PlanService(
             PlanRepository(worker.repository.db),
             build_llm(settings, http),
             build_art_factory(settings, http),
-            Path(os.environ.get("MEDIA_DIR", "media")),
+            settings.media_dir,
             AiLimits.from_settings(settings),
+            domain=get_domain_settings(settings),
         )
 
 

@@ -109,9 +109,13 @@ class ScreensService:
         return self.status(business)
 
     async def check_remaining(self, business: Business) -> None:
+        from app.config import get_domain_settings
+
         spent, _ = await read_spend(self.worker, business)
         budget = self.budget(business)
-        margin = stop_margin(sum(campaign.daily_limit_kop for campaign in self.worker.campaigns(business)))
+        margin = stop_margin(
+            sum(campaign.daily_limit_kop for campaign in self.worker.campaigns(business)), get_domain_settings()
+        )
         if max(sum(spent.values()), budget["spent_kop"]) >= max(0, business.month_budget_kop - margin):
             raise ChangeConflict(
                 "Остатка бюджета не хватает с учётом защитного запаса. "
@@ -121,6 +125,10 @@ class ScreensService:
     async def resume(self, business: Business) -> dict:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
+            if business.status == "running":
+                raise ChangeConflict("Реклама уже работает")
+            if business.status not in {"paused", "budget_stop"}:
+                raise ChangeConflict("Сначала запустите рекламу")
             await self.check_remaining(business)
             meta = self.worker.metadata(business)
             if meta.get("pending_stop"):
@@ -180,9 +188,9 @@ class ScreensService:
                     suffix="resume",
                 )
                 active = True
-            if not self.worker.proposed(business):
-                business.status = "running" if active else "paused"
-                self.worker.remember(business, kill_switch=not active, kill_switch_campaigns=[])
+            if active and not self.worker.proposed(business):
+                business.status = "running"
+                self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
         return self.status(business)
 
     def ads(self, business: Business, start: date, end: date) -> dict:

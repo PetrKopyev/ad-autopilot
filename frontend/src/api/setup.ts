@@ -31,6 +31,12 @@ export async function getMe(signal?: AbortSignal): Promise<Me> {
   if (mockEnabled) return (await import('./mocks')).mockSetupMe();
   return setupGet('/api/me', signal);
 }
+export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean }> {
+  return setupGet('/api/auth/config', signal);
+}
+export async function demoLogin() {
+  await api('/api/auth/demo', { method: 'POST' });
+}
 export async function logout() {
   if (mockEnabled) (await import('./mocks')).mockSetupLogout();
   else await api('/api/auth/logout', { method: 'POST' });

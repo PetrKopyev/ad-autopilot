@@ -1,7 +1,5 @@
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from decimal import Decimal
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -16,7 +14,6 @@ from app.api.business import human_errors
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.content.images import MAX_BYTES
-from app.domain.settings import DomainSettings
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
 from app.services.plan import PlanRepository, PlanService
@@ -40,15 +37,13 @@ class LaunchIn(BaseModel):
 
 
 def media_root() -> Path:
-    return Path(os.environ.get("MEDIA_DIR", "media"))
+    from app.config import settings
 
-
-def domain_settings(settings) -> DomainSettings:
-    return DomainSettings(budget_reserve=Decimal(settings.budget_reserve_pct) / 100)
+    return settings.media_dir
 
 
 def get_plan_service(request: Request) -> Iterator[PlanService]:
-    from app.config import settings
+    from app.config import get_domain_settings, settings
     from app.db.session import SessionLocal
 
     http = request.app.state.http
@@ -59,12 +54,12 @@ def get_plan_service(request: Request) -> Iterator[PlanService]:
             build_art_factory(settings, http),
             media_root(),
             AiLimits.from_settings(settings),
-            domain_settings(settings),
+            get_domain_settings(settings),
         )
 
 
 def get_launch_service(request: Request) -> Iterator[LaunchService]:
-    from app.config import settings
+    from app.config import get_domain_settings, settings
     from app.db.session import SessionLocal
 
     with SessionLocal() as db:
@@ -73,7 +68,7 @@ def get_launch_service(request: Request) -> Iterator[LaunchService]:
             request.app.state.platform_adapters.resolve,
             media_root(),
             AiLimits.from_settings(settings),
-            domain=domain_settings(settings),
+            domain=get_domain_settings(settings),
         )
 
 

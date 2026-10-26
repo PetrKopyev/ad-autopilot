@@ -1,6 +1,4 @@
-import os
 import secrets
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -26,10 +24,39 @@ router = APIRouter(prefix="/api")
 
 
 def _remove_media(file_path: str) -> None:
-    root = Path(os.environ.get("MEDIA_DIR", "media")).resolve()
+    from app.config import settings
+
+    root = settings.media_dir.resolve()
     path = (root / file_path).resolve()
     if path.is_relative_to(root) and path.is_file():
         path.unlink()
+
+
+def demo_enabled() -> bool:
+    from app.config import settings
+
+    return settings.platform_mode == "fake" and settings.demo_login
+
+
+@router.get("/auth/config")
+def auth_config(response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return {"demo": demo_enabled()}
+
+
+def require_demo() -> None:
+    if not demo_enabled():
+        raise HTTPException(404, "Не найдено.")
+
+
+@router.post("/auth/demo", dependencies=[Depends(require_demo)])
+def demo_login(request: Request, repository: Repository) -> Response:
+    user = repository.save_user("demo", "demo", None)
+    session = create_session(user.id)
+    repository.save_session(session, request.cookies.get(SESSION_COOKIE))
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    set_session_cookies(response, session)
+    return response
 
 
 def _redirect() -> RedirectResponse:

@@ -1,8 +1,11 @@
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.domain.settings import DomainSettings
 
 PLACEHOLDER_SECRET_KEY = "replace-with-random-secret"
 
@@ -16,11 +19,14 @@ class Settings(BaseSettings):
     token_encryption_key: SecretStr
     platform_mode: Literal["live", "fake"] = "live"
     dry_run: bool = True
+    demo_login: bool = False
+    media_dir: Path = Path("media")
     yandex_client_id: str = ""
     yandex_client_secret: SecretStr = SecretStr("")
     direct_api_url: str = "https://api.direct.yandex.com/json/v5"
     direct_api_v501_url: str = "https://api.direct.yandex.com/v501"
     direct_sandbox: bool = False
+    vk_package_id: int | None = Field(default=None, gt=0)
     vk_client_id: str = ""
     vk_client_secret: SecretStr = SecretStr("")
     yc_folder_id: str = ""
@@ -38,6 +44,11 @@ class Settings(BaseSettings):
         if len(secret) < 32 or secret == PLACEHOLDER_SECRET_KEY:
             raise ValueError("SECRET_KEY must be at least 32 characters and not the .env.example placeholder")
         return value
+
+
+def get_domain_settings(config: Settings | None = None) -> DomainSettings:
+    config = config if config is not None else settings
+    return DomainSettings(budget_reserve=Decimal(config.budget_reserve_pct) / 100)
 
 
 settings = Settings()

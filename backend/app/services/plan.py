@@ -21,7 +21,7 @@ from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Asset, Business, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import allocate, plan_budget, platform_shares, split_group_limits
-from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
+from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
 from app.services.onboarding import (
     DESCRIPTION_KEYS,
@@ -89,9 +89,13 @@ def inputs_hash(business: Business, platforms: list[str]) -> str:
 
 
 def budget_limits(
-    business: Business, platforms: list[str], today: date, domain: DomainSettings = DEFAULT_SETTINGS
+    business: Business, platforms: list[str], today: date, domain: DomainSettings | None = None
 ) -> dict[str, PlatformLimit]:
     """Лимиты запуска: резерв и кэпы площадок считает domain/budget, сумма кэпов не превышает бюджет месяца."""
+    if domain is None:
+        from app.config import get_domain_settings
+
+        domain = get_domain_settings()
     budget = plan_budget(business.month_budget_kop, 0, today, tuple(platforms), started_on=today, settings=domain)
     result = {}
     for limit in budget.limits:
@@ -147,7 +151,7 @@ class PlanService:
         art_factory: ArtFactory,
         media_root: Path,
         limits: AiLimits,
-        domain: DomainSettings = DEFAULT_SETTINGS,
+        domain: DomainSettings | None = None,
         font_path: str = DEFAULT_FONT,
         seeds: Callable[[], int] = lambda: secrets.randbits(31),
     ) -> None:
@@ -158,6 +162,10 @@ class PlanService:
         self.art_factory = art_factory
         self.media_root = media_root
         self.limits = limits
+        if domain is None:
+            from app.config import get_domain_settings
+
+            domain = get_domain_settings()
         self.domain = domain
 
     async def get_plan(self, business_id: int, now: datetime, today: date) -> dict:

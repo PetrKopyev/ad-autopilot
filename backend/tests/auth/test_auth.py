@@ -381,7 +381,7 @@ def test_delete_me_requires_login_and_csrf(client: TestClient, repository: FakeR
 def test_delete_me_removes_user_and_own_files_only(
     client: TestClient, repository: FakeRepository, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setattr("app.config.settings.media_dir", tmp_path / "media")
     mine, theirs = tmp_path / "media/1/a.jpg", tmp_path / "media/2/b.jpg"
     outside = tmp_path / "outside.jpg"
     for path in (mine, theirs, outside):
@@ -396,4 +396,46 @@ def test_delete_me_removes_user_and_own_files_only(
     assert not mine.exists()
     assert theirs.exists() and outside.exists()
     assert not client.cookies
+    assert client.get("/api/me").status_code == 401
+
+
+@pytest.mark.parametrize("mode,flag,enabled", [("live", "1", False), ("fake", None, False), ("fake", "0", False),
+                                              ("fake", "1", True)])
+def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, mode, flag, enabled):
+    from app.config import Settings
+
+    monkeypatch.setenv("PLATFORM_MODE", mode)
+    if flag is None:
+        monkeypatch.delenv("DEMO_LOGIN", raising=False)
+    else:
+        monkeypatch.setenv("DEMO_LOGIN", flag)
+    monkeypatch.setattr("app.config.settings", Settings())
+    config = client.get("/api/auth/config")
+    assert config.json() == {"demo": enabled}
+    assert config.headers["cache-control"] == "no-store"
+    assert client.post("/api/auth/demo").status_code == (204 if enabled else 404)
+    assert bool(repository.users) is enabled
+    assert bool(repository.sessions) is enabled
+    assert not repository.businesses
+
+
+def test_demo_login_rotates_session_and_issues_working_csrf(client, repository, monkeypatch):
+    monkeypatch.setattr("app.config.settings.demo_login", True)
+    response = client.post("/api/auth/demo")
+    assert response.status_code == 204
+    assert response.headers["cache-control"] == "no-store"
+    previous = client.cookies["__Host-session"]
+    session = repository.get_session(previous)
+    assert session.csrf_secret == client.cookies["__Host-csrf"]
+    assert client.get("/api/me").json()["login"] == "demo"
+    for cookie in response.headers.get_list("set-cookie"):
+        assert "Secure" in cookie and "SameSite=lax" in cookie
+    assert "HttpOnly" in response.headers.get_list("set-cookie")[0]
+    assert "HttpOnly" not in response.headers.get_list("set-cookie")[1]
+    assert client.post("/api/auth/logout").status_code == 403
+    assert client.post("/api/auth/demo").status_code == 204
+    assert repository.get_session(previous) is None
+    assert client.cookies["__Host-session"] != previous
+    assert len(repository.users) == 1
+    assert client.post("/api/auth/logout", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]}).status_code == 204
     assert client.get("/api/me").status_code == 401

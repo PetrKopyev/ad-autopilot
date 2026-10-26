@@ -36,6 +36,20 @@ def budget_protection(change: ChangeLog, business=None) -> bool:
     )
 
 
+def can_revert(change: ChangeLog, business=None, *, actor: str = "owner", reverts: Sequence[ChangeLog] = ()) -> bool:
+    return (
+        change.status == "applied"
+        and change.kind != "revert"
+        and not (change.evidence or {}).get("_service", {}).get("dry_run")
+        and not budget_protection(change, business)
+        and (change.actor != "external" or actor == "owner")
+        and not any(
+            item.status in {"pending", "applied"} and not (item.evidence or {}).get("_service", {}).get("dry_run")
+            for item in reverts
+        )
+    )
+
+
 def inverse_operations(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> list[Operation]:
     result = []
     archived = set()
@@ -144,17 +158,13 @@ class RollbackService:
             original = self.repository.get(change_id, business_id)
             if original is None:
                 raise ValueError("Изменение не найдено.")
-            if original.status != "applied" or original.kind == "revert":
-                raise ChangeConflict("Повторный откат или откат неприменённого изменения запрещён.")
-            if budget_protection(original, self.repository.business(business_id)):
-                raise ChangeConflict("Это защита бюджета, отменить нельзя.")
-            if original.actor == "external" and actor != "owner":
-                raise ChangeConflict("Изменение в кабинете может отменить только владелец.")
-            if any(
-                item.status in {"pending", "applied"} and not item.evidence.get("_service", {}).get("dry_run")
-                for item in self.repository.reverts(original.id)
-            ):
-                raise ChangeConflict("Откат этого изменения уже выполняется или выполнен.")
+            business = self.repository.business(business_id)
+            if not can_revert(original, business, actor=actor, reverts=self.repository.reverts(original.id)):
+                if budget_protection(original, business):
+                    raise ChangeConflict("Это защита бюджета, отменить нельзя.")
+                if original.actor == "external" and actor != "owner":
+                    raise ChangeConflict("Изменение в кабинете может отменить только владелец.")
+                raise ChangeConflict("Изменение недоступно для отката или откат уже выполняется.")
             refs = load_refs(original)
             states = await adapter.get_state(refs)
             operations = load_operations(original)

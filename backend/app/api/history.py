@@ -7,7 +7,7 @@ from app.auth.sessions import current_user, require_csrf
 from app.db.models import ChangeLog, User
 from app.platforms.base import PlatformError
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository
-from app.services.rollback import ConfirmationRequired, RollbackService
+from app.services.rollback import ConfirmationRequired, RollbackService, can_revert
 
 router = APIRouter(prefix="/api/history")
 
@@ -35,7 +35,7 @@ CurrentUser = Annotated[User, Depends(current_user)]
 Adapters = Annotated[AdapterResolver, Depends(get_adapter_resolver)]
 
 
-def history_item(change: ChangeLog) -> dict:
+def history_item(change: ChangeLog, business=None, reverts=()) -> dict:
     metadata = (change.evidence or {}).get("_service", {})
     return {
         "id": change.id,
@@ -54,7 +54,7 @@ def history_item(change: ChangeLog) -> dict:
         "status": "proposed" if metadata.get("dry_run") else change.status,
         "error": metadata.get("error"),
         "reverts_id": change.reverts_id,
-        "can_revert": change.status == "applied" and change.kind != "revert",
+        "can_revert": can_revert(change, business, reverts=reverts),
         "revert_warning": "Созданное объявление будет остановлено и убрано в архив."
         if any(not op.get("invertible", True) for op in change.operations)
         else None,
@@ -74,7 +74,13 @@ def history(
     items, total = repository.history(
         user.id, business_id=business_id, platform=platform, actor=actor, page=page, page_size=page_size
     )
-    return {"items": [history_item(item) for item in items], "total": total, "page": page, "page_size": page_size}
+    businesses = {business_id: repository.business(business_id) for business_id in {item.business_id for item in items}}
+    return {
+        "items": [history_item(item, businesses[item.business_id], repository.reverts(item.id)) for item in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.post("/{change_id}/revert", dependencies=[Depends(require_csrf)])

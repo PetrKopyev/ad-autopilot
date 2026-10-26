@@ -67,7 +67,8 @@ def setup(monkeypatch):
 @pytest.mark.parametrize("method,path,body", ROUTES)
 def test_each_endpoint(setup, method, path, body):
     client, _ = setup
-    assert client.request(method, path, json=body).status_code == 200
+    expected = 409 if path == "/api/autopilot/resume" else 200
+    assert client.request(method, path, json=body).status_code == expected
 
 
 @pytest.mark.parametrize("method,path,body", ROUTES)
