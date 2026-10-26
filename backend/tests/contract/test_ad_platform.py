@@ -109,10 +109,12 @@ async def test_daily_and_period_limits_are_respected(platform: AdapterHarness) -
 @pytest.mark.parametrize(
     "status,error", [(401, AuthExpired), (429, RateLimited), (500, PlatformError), (503, PlatformError)]
 )
-async def test_errors_use_common_types(platform: AdapterHarness, status: int, error: type[PlatformError]) -> None:
-    platform.inject_error(status)
+async def test_errors_use_common_types(platform_errors, status: int, error: type[PlatformError]) -> None:
+    adapter, inject_error = platform_errors
+    assert isinstance(adapter, AdPlatform)
+    inject_error(status)
     with pytest.raises(error) as caught:
-        await platform.adapter.whoami()
+        await adapter.whoami()
     assert caught.value.status_code == status
     if isinstance(caught.value, RateLimited):
         assert caught.value.retry_after > 0
