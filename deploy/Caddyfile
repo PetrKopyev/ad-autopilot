@@ -1,0 +1,12 @@
+{$APP_DOMAIN:localhost} {
+    @api path /api /api/*
+    handle @api {
+        reverse_proxy api:8000
+    }
+
+    handle {
+        root * /srv/web
+        try_files {path} /index.html
+        file_server
+    }
+}
