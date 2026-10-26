@@ -38,7 +38,11 @@ def test_tables_and_mappers() -> None:
 
 def test_indexes_and_unique_keys() -> None:
     indexes = {index.name: index for table in Base.metadata.tables.values() for index in table.indexes}
-    assert set(indexes) == {"ix_stats_daily_business_id_date", "ix_change_log_business_id_created_at"}
+    assert set(indexes) == {
+        "ix_stats_daily_business_id_date",
+        "ix_change_log_business_id_created_at",
+        "ix_art_calls_operation_id",
+    }
     assert [c.name for c in indexes["ix_stats_daily_business_id_date"].columns] == ["business_id", "date"]
     change_index = str(CreateIndex(indexes["ix_change_log_business_id_created_at"]).compile(dialect=dialect()))
     assert "(business_id, created_at DESC)" in change_index

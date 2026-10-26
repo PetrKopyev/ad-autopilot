@@ -4,11 +4,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, create_mock_engine, inspect, text
+from sqlalchemy import CheckConstraint, MetaData, create_engine, create_mock_engine, inspect, text
 from sqlalchemy.schema import CreateSchema
 
 from alembic import command
@@ -25,6 +26,25 @@ def load_revision():
     return module
 
 
+def metadata_before_additions() -> MetaData:
+    """Metadata as of 0001_initial: without the columns, index and statuses added by 0002."""
+    metadata = MetaData(naming_convention=Base.metadata.naming_convention)
+    for table in Base.metadata.sorted_tables:
+        table.to_metadata(metadata)
+    for name in ("campaigns", "ad_groups", "targets"):
+        metadata.tables[name]._columns.remove(metadata.tables[name].c.frozen_until)
+    art_calls = metadata.tables["art_calls"]
+    for index in list(art_calls.indexes):
+        art_calls.indexes.discard(index)
+    for column in ("operation_id", "seed"):
+        art_calls._columns.remove(art_calls.c[column])
+    for name in ("change_log", "experiments"):
+        for constraint in metadata.tables[name].constraints:
+            if isinstance(constraint, CheckConstraint) and constraint.name == f"ck_{name}_status_values":
+                constraint.sqltext = sa.text(str(constraint.sqltext).replace("'proposed', ", ""))
+    return metadata
+
+
 def canonical(statement, dialect) -> tuple[str, ...]:
     sql = str(statement.compile(dialect=dialect))
     return tuple(sorted(" ".join(line.strip().rstrip(",").split()) for line in sql.splitlines() if line.strip()))
@@ -35,11 +55,12 @@ def test_migration_matches_metadata_without_database() -> None:
     engine = create_mock_engine("postgresql+psycopg://", lambda sql, *args, **kwargs: actual.append(sql))
     context = MigrationContext.configure(connection=engine)
     revision = load_revision()
+    metadata = metadata_before_additions()
     with Operations.context(context):
         revision.upgrade()
     actual_ddl = sorted(canonical(statement, engine.dialect) for statement in actual)
     actual.clear()
-    Base.metadata.create_all(engine, checkfirst=False)
+    metadata.create_all(engine, checkfirst=False)
     expected_ddl = sorted(canonical(statement, engine.dialect) for statement in actual)
     assert actual_ddl == expected_ddl
     actual.clear()
@@ -47,7 +68,7 @@ def test_migration_matches_metadata_without_database() -> None:
         revision.downgrade()
     actual_ddl = sorted(canonical(statement, engine.dialect) for statement in actual)
     actual.clear()
-    Base.metadata.drop_all(engine, checkfirst=False)
+    metadata.drop_all(engine, checkfirst=False)
     expected_ddl = sorted(canonical(statement, engine.dialect) for statement in actual)
     # Explicit index removal is redundant when the parent table is dropped.
     assert [ddl for ddl in actual_ddl if not ddl[0].startswith("DROP INDEX")] == expected_ddl

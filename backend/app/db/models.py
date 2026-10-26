@@ -148,6 +148,7 @@ class Campaign(Base):
     daily_limit_kop: Mapped[int] = mapped_column(BigInteger)
     period_cap_kop: Mapped[int] = mapped_column(BigInteger)
     owner_paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    frozen_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AdGroup(Base):
@@ -159,6 +160,7 @@ class AdGroup(Base):
     theme: Mapped[str] = mapped_column(Text)
     geo: Mapped[dict[str, Any]] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(Text)
+    frozen_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Target(Base):
@@ -171,6 +173,7 @@ class Target(Base):
     value: Mapped[str] = mapped_column(Text)
     external_id: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text)
+    frozen_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Asset(Base):
@@ -263,7 +266,7 @@ class ChangeLog(Base):
         choices(
             "kind", "pause", "resume", "budget", "text", "image", "launch", "revert", "experiment_verdict", "marking"
         ),
-        choices("status", "pending", "applied", "failed", "reverted"),
+        choices("status", "proposed", "pending", "applied", "failed", "reverted"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -290,7 +293,7 @@ class Experiment(Base):
     __tablename__ = "experiments"
     __table_args__ = (
         choices("hypothesis", "text", "image", "audience"),
-        choices("status", "running", "concluded", "cancelled"),
+        choices("status", "proposed", "running", "concluded", "cancelled"),
         choices("verdict", "variant_wins", "control_wins", "no_difference", "inconclusive"),
     )
 
@@ -344,4 +347,6 @@ class ArtCall(Base):
     business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"))
     cost_kop: Mapped[int] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(Text)
+    operation_id: Mapped[str | None] = mapped_column(Text, index=True)
+    seed: Mapped[int | None] = mapped_column(BigInteger)
     rejection_reason: Mapped[str | None] = mapped_column(Text)
