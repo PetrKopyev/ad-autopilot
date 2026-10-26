@@ -12,7 +12,8 @@ function businessId(): number | undefined {
 }
 export function ServiceVkPage() {
   const me = useResource(getMe);
-  const [key, setKey] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [secret, setSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
@@ -20,12 +21,12 @@ export function ServiceVkPage() {
   async function connect(manual: boolean) {
     if (busy) return; setBusy(true); setError('');
     try {
-      if (!id || manual && !key.trim()) throw new Error(copy.launchFlow.keyMissing);
-      if (manual) { await connectVkKey(key.trim(), id); setConnected(true); }
+      if (!id || manual && (!clientId.trim() || !secret.trim())) throw new Error(copy.launchFlow.keyMissing);
+      if (manual) { await connectVkKey(clientId.trim(), secret.trim(), id); setConnected(true); }
       else await connectAccount('vk', id);
       me.reload();
     } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
-    finally { setKey(''); setBusy(false); }
+    finally { setSecret(''); setBusy(false); }
   }
   return <div className="page-stack launch-flow"><h1>{copy.service.vkTitle}</h1>
     {(error || me.error) && <ErrorBanner message={error || me.error!} />}
@@ -36,7 +37,8 @@ export function ServiceVkPage() {
     </Card>
     <Card><form className="page-stack" onSubmit={(event) => { event.preventDefault(); void connect(true); }}>
       <h2>{copy.setup.accounts.keyTab}</h2><ol>{copy.launchFlow.keySteps.map((text) => <li key={text}>{text}</li>)}</ol>
-      <label className="field">{copy.launchFlow.keyLabel}<input type="password" autoComplete="off" required disabled={busy || !id} value={key} aria-describedby="key-hint" onChange={(event) => setKey(event.target.value)} /></label>
+      <label className="field">{copy.launchFlow.clientIdLabel}<input autoComplete="off" required disabled={busy || !id} value={clientId} onChange={(event) => setClientId(event.target.value)} /></label>
+      <label className="field">{copy.launchFlow.keyLabel}<input type="password" autoComplete="off" required disabled={busy || !id} value={secret} aria-describedby="key-hint" onChange={(event) => setSecret(event.target.value)} /></label>
       <p className="muted" id="key-hint">{copy.launchFlow.keyHint}</p><div className="actions"><Button type="submit" disabled={busy || !id}>{copy.launchFlow.keyConnect}</Button></div>
     </form></Card><Link to="/setup/2">{copy.common.back}</Link>
   </div>;

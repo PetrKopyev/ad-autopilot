@@ -1,4 +1,4 @@
-import { createApiClient, ApiError } from './client';
+import { api, ApiError } from './client';
 import { mockEnabled } from './screens';
 import { copy } from '../copy';
 
@@ -22,10 +22,8 @@ export interface Marking {
   subject_type: 'ip' | 'ooo' | 'selfemployed' | 'person'; inn: string; name: string; phone: string;
   confirmed_in_platform: { direct: boolean; vk: boolean };
 }
-// Match the existing session middleware, including on multipart requests.
-export const setupRequest = createApiClient({ csrfCookieName: '__Host-csrf', csrfHeaderName: 'X-CSRF-Token' });
 export async function setupGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const result = await setupRequest<T>(path, { signal });
+  const result = await api<T>(path, { signal });
   if (result === undefined) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
@@ -35,12 +33,12 @@ export async function getMe(signal?: AbortSignal): Promise<Me> {
 }
 export async function logout() {
   if (mockEnabled) (await import('./mocks')).mockSetupLogout();
-  else await setupRequest('/api/auth/logout', { method: 'POST' });
+  else await api('/api/auth/logout', { method: 'POST' });
   try { sessionStorage.removeItem('ad-autopilot-setup-draft'); } catch { /* Storage may be unavailable. */ }
 }
 export async function disconnectAccount(id: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupDisconnect(id); return; }
-  await setupRequest(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  await api(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 export async function connectAccount(platform: 'login' | 'direct' | 'vk', businessId?: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect(platform); return; }
@@ -49,13 +47,13 @@ export async function connectAccount(platform: 'login' | 'direct' | 'vk', busine
   if (businessId) params.set('business_id', String(businessId));
   window.location.assign(`/api/auth/${platform === 'vk' ? 'vk' : 'yandex'}/start?${params}`);
 }
-export async function connectVkKey(key: string, businessId: number) {
+export async function connectVkKey(client_id: string, client_secret: string, businessId: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect('vk'); return; }
-  await setupRequest('/api/accounts/vk/key', { method: 'POST', body: { key, business_id: businessId } });
+  await api('/api/accounts/vk/key', { method: 'POST', body: { client_id, client_secret, business_id: businessId } });
 }
 export async function createBusiness(body: BusinessInput): Promise<Business> {
   if (mockEnabled) return (await import('./mocks')).mockSetupBusiness(body);
-  const result = await setupRequest<Business>('/api/business', { method: 'POST', body });
+  const result = await api<Business>('/api/business', { method: 'POST', body });
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
@@ -65,7 +63,7 @@ export async function checkSite(signal?: AbortSignal): Promise<SiteCheck> {
 }
 export async function saveDescription(description: Description) {
   if (mockEnabled) { (await import('./mocks')).mockSetupDescription(description); return; }
-  await setupRequest('/api/business/description', { method: 'PUT', body: { description, approved: true } });
+  await api('/api/business/description', { method: 'PUT', body: { description, approved: true } });
 }
 export async function getCounters(signal?: AbortSignal): Promise<{ items: Counter[] }> {
   if (mockEnabled) return (await import('./mocks')).mockSetupCounters();
@@ -77,11 +75,11 @@ export async function getGoals(counter: number, signal?: AbortSignal): Promise<{
 }
 export async function saveMetrica(counter_id: number, lead_goal_ids: number[]) {
   if (mockEnabled) { (await import('./mocks')).mockSetupMetrica(counter_id, lead_goal_ids); return; }
-  await setupRequest('/api/business/metrica', { method: 'PUT', body: { counter_id, lead_goal_ids } });
+  await api('/api/business/metrica', { method: 'PUT', body: { counter_id, lead_goal_ids } });
 }
 export async function saveMarking(body: Marking) {
   if (mockEnabled) { (await import('./mocks')).mockSetupMarking(body); return; }
-  await setupRequest('/api/business/marking', { method: 'PUT', body });
+  await api('/api/business/marking', { method: 'PUT', body });
 }
 export function validInn(value: string): boolean {
   if (!/^(?:\d{10}|\d{12})$/.test(value) || /^0+$/.test(value)) return false;

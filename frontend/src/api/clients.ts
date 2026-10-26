@@ -1,5 +1,6 @@
+import { api } from './client';
 import { mockEnabled } from './screens';
-import { setupGet, setupRequest } from './setup';
+import { setupGet } from './setup';
 
 export interface ClientQuestion {
   id: string; week_start: string; week_end: string; leads_count: number;
@@ -14,5 +15,5 @@ export async function getClientQuestions(signal?: AbortSignal): Promise<ClientQu
 export async function answerClientQuestion(id: string, clients: number | 'unknown') {
   const clients_count = clients === 'unknown' ? 'не знаю' : clients;
   if (mockEnabled) { (await import('./mocks')).mockClientAnswer(id, clients === 'unknown' ? null : clients); return; }
-  await setupRequest(`/api/clients/questions/${encodeURIComponent(id)}/answer`, { method: 'POST', body: { clients_count } });
+  await api(`/api/clients/questions/${encodeURIComponent(id)}/answer`, { method: 'POST', body: { clients_count } });
 }

@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StrictBool, StrictInt
+from starlette.concurrency import run_in_threadpool
 
 from app.api.business import human_errors
 from app.api.stats import CurrentBusiness, Today
@@ -122,7 +123,7 @@ async def regenerate(body: RegenerateIn, business: CurrentBusiness, service: Pla
 async def upload_photo(request: Request, business: CurrentBusiness, service: Plans, today: Today) -> dict:
     group_id, data = await read_upload(request)
     with human_errors():
-        return service.upload_photo(business.id, group_id, data, today)
+        return await run_in_threadpool(service.upload_photo, business.id, group_id, data, today)
 
 
 @router.put("/assets", dependencies=[Depends(require_csrf)])

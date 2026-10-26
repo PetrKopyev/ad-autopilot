@@ -4,7 +4,7 @@ import { copy } from '../copy';
 import { answerClientQuestion, getClientQuestions } from '../api/clients';
 import type { ClientQuestion } from '../api/clients';
 import { displayDate } from '../api/period';
-import { formatRubles } from '../api/settings';
+import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
 import './Setup.css';
 
@@ -48,7 +48,7 @@ export function ClientsPage() {
     {questions.error && <ErrorBanner message={questions.error} onRetry={questions.reload} />}
     {questions.data && <>
       <Card className="page-stack"><h2>{labels.costPerClient}</h2>
-        <p>{questions.data.cost_per_client_kop === null ? labels.costPerClientEmpty : formatRubles(questions.data.cost_per_client_kop)}</p></Card>
+        <p>{questions.data.cost_per_client_kop === null ? labels.costPerClientEmpty : formatMoney(questions.data.cost_per_client_kop)}</p></Card>
       <h2>{labels.open}</h2>
       {open.length ? open.map((item) => <QuestionCard key={item.id} question={item} onAnswered={questions.reload} />)
         : <p className="muted">{labels.nothingOpen}</p>}

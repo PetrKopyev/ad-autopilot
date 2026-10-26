@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from app.content.ad_text import ANGLES, SEGMENTS, generate_ad_text
 from app.content.art import ART_COST_KOP, ArtBudget, ArtBudgetExceeded, ArtClient, ArtError
@@ -262,7 +263,9 @@ class PlanService:
             except ArtError:
                 continue
             try:
-                checked = check_image(result.image, existing_hashes=hashes, cost_kop=result.cost_kop)
+                checked = await run_in_threadpool(
+                    check_image, result.image, existing_hashes=hashes, cost_kop=result.cost_kop
+                )
             except ImageRejected:
                 continue
             asset = Asset(
@@ -304,10 +307,10 @@ class PlanService:
     async def regenerate_images(self, business_id: int, group_id: int, now: datetime, today: date) -> dict:
         business = self.repository.business(business_id)
         plan, group = self.draft_group(business_id, group_id)
-        budget = ai_budget(self.repository, business, self.limits, today)
-        if self.generations_remaining(budget) == 0:
-            raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
         with self.repository.business_lock(business_id):
+            budget = ai_budget(self.repository, business, self.limits, today)
+            if self.generations_remaining(budget) == 0:
+                raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
             created = await self.generate_images(business, budget, REGENERATE_COUNT)
         if not created:
             raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")

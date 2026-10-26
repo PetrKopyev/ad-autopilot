@@ -42,8 +42,8 @@ function errorMessage(status: number): string {
 }
 
 export function createApiClient({
-  csrfCookieName = 'csrftoken',
-  csrfHeaderName = 'X-CSRFToken',
+  csrfCookieName = '__Host-csrf',
+  csrfHeaderName = 'X-CSRF-Token',
 }: ApiClientOptions = {}) {
   return async function request<T = unknown>(
     path: string,
@@ -57,7 +57,8 @@ export function createApiClient({
     const method = (options.method ?? 'GET').toUpperCase();
     const headers = new Headers(options.headers);
     headers.set('Accept', 'application/json');
-    if (body !== undefined) headers.set('Content-Type', 'application/json');
+    const form = body instanceof FormData;
+    if (body !== undefined && !form) headers.set('Content-Type', 'application/json');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
       const csrfToken = readCookie(csrfCookieName);
       if (csrfToken) headers.set(csrfHeaderName, csrfToken);
@@ -71,7 +72,7 @@ export function createApiClient({
         headers,
         credentials: 'include',
         redirect: 'error',
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: body === undefined || form ? (body as FormData | undefined) : JSON.stringify(body),
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;

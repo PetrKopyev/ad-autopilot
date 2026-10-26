@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import json
 from collections.abc import Awaitable, Callable
@@ -422,6 +423,37 @@ async def test_site_check_is_cached_and_does_not_repeat_paid_calls(world: World)
     assert world.llm.calls == ["description"]
     await world.onboarding.site_check(world.business.id, NOW + timedelta(minutes=11), TODAY)
     assert world.llm.calls == ["description", "description"]
+
+
+async def test_parallel_site_checks_make_one_paid_call(world: World) -> None:
+    held = False
+
+    @contextmanager
+    def lock(business_id: int):
+        nonlocal held
+        if held:
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    original = world.onboarding.reader
+
+    async def slow_reader(url: str) -> SiteReadResult:
+        await asyncio.sleep(0.01)
+        return await original(url)
+
+    world.repository.business_lock = lock
+    world.onboarding.reader = slow_reader
+    results = await asyncio.gather(
+        world.onboarding.site_check(world.business.id, NOW, TODAY),
+        world.onboarding.site_check(world.business.id, NOW, TODAY),
+        return_exceptions=True,
+    )
+    assert world.llm.calls == ["description"]
+    assert sum(isinstance(item, ChangeConflict) for item in results) == 1
 
 
 async def test_no_counter_means_stop_with_reason(tmp_path: Path) -> None:

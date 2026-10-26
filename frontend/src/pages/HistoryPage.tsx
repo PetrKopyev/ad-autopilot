@@ -4,7 +4,7 @@ import { copy } from '../copy';
 import { getHistoryPage, revertChange } from '../api/history';
 import type { HistoryEntry, HistoryFilter } from '../api/history';
 import { displayDate } from '../api/period';
-import { formatRubles } from '../api/settings';
+import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
 import { platformName } from './StatsShared';
 import './Setup.css';
@@ -34,7 +34,7 @@ function figures(entry: HistoryEntry): [string, string][] {
     .filter((key) => typeof entry.evidence[key] === 'number')
     .map((key) => {
       const value = entry.evidence[key] as number;
-      return [labels.numberLabels[key], key.endsWith('_kop') ? formatRubles(value) : value.toLocaleString('ru-RU')];
+      return [labels.numberLabels[key], key.endsWith('_kop') ? formatMoney(value) : value.toLocaleString('ru-RU')];
     });
 }
 

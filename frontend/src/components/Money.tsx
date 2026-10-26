@@ -7,8 +7,9 @@ export function formatMoney(kopecks: number): string {
   const amount = BigInt(kopecks);
   const absolute = amount < 0n ? -amount : amount;
   const rubles = integerFormat.format(absolute / 100n);
-  const fraction = (absolute % 100n).toString().padStart(2, '0');
-  return `${amount < 0n ? '−' : ''}${rubles},${fraction}\u00a0₽`;
+  const fraction = absolute % 100n;
+  const cents = fraction === 0n ? '' : `,${fraction.toString().padStart(2, '0')}`;
+  return `${amount < 0n ? '−' : ''}${rubles}${cents}\u00a0₽`;
 }
 
 export function Money({ kopecks, className }: { kopecks: number; className?: string }) {

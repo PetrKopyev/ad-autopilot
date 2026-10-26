@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
+import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
 import { connectAccount, disconnectAccount, getMe, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, Me } from '../api/setup';
-import { deleteMyData, formatRubles, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
+import { deleteMyData, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { useResource } from '../api/useResource';
 import './Setup.css';
@@ -78,7 +79,7 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <label className="field">{labels.budgetLabel}
         <input required inputMode="decimal" value={budget} aria-invalid={budgetKop === null} aria-describedby="budget-help" onChange={(event) => setBudget(event.target.value)} /></label>
-      <p className="muted" id="budget-help">{budgetKop === null ? labels.budgetError : `${formatRubles(budgetKop)}. ${copy.settings.budgetHint}`}</p>
+      <p className="muted" id="budget-help">{budgetKop === null ? labels.budgetError : `${formatMoney(budgetKop)}. ${copy.settings.budgetHint}`}</p>
       <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
       <p className="muted" id="continue-help">{labels.nextMonth}</p>
       <label className="field">{labels.averageLabel}

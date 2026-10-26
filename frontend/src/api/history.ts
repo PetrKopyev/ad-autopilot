@@ -1,6 +1,6 @@
-import { ApiError } from './client';
+import { api, ApiError } from './client';
 import { mockEnabled } from './screens';
-import { setupGet, setupRequest } from './setup';
+import { setupGet } from './setup';
 import { copy } from '../copy';
 
 export type ChangeKind = 'pause' | 'resume' | 'budget' | 'text' | 'image' | 'launch' | 'revert' | 'experiment_verdict' | 'marking';
@@ -23,7 +23,7 @@ export async function getHistoryPage(filter: HistoryFilter, pageSize: number, si
 // The owner has already confirmed on the page, so the server's own confirmation step is passed through.
 export async function revertChange(id: number): Promise<HistoryEntry> {
   if (mockEnabled) return (await import('./mocks')).mockRevert(id);
-  const result = await setupRequest<HistoryEntry>(`/api/history/${encodeURIComponent(id)}/revert?confirm=true`, { method: 'POST' });
+  const result = await api<HistoryEntry>(`/api/history/${encodeURIComponent(id)}/revert?confirm=true`, { method: 'POST' });
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }

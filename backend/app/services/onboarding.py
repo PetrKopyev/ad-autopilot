@@ -311,14 +311,15 @@ class OnboardingService:
             and now - datetime.fromisoformat(cached["checked_at"]) < CHECK_TTL
         ):
             return self.check_view(business, cached)
-        site = await self.reader(business.site_url)
-        llm = SpendLLM(
-            self.llm, self.repository, business.id, ai_budget(self.repository, business, self.limits, today), "site"
-        )
-        try:
-            draft = await extract_description(site, llm, owner_text=owner_text)
-        except YandexGPTError:
-            draft = DescriptionDraft(questions=[OwnerQuestion("description", QUESTIONS["services"])])
+        with self.repository.business_lock(business_id):
+            site = await self.reader(business.site_url)
+            llm = SpendLLM(
+                self.llm, self.repository, business.id, ai_budget(self.repository, business, self.limits, today), "site"
+            )
+            try:
+                draft = await extract_description(site, llm, owner_text=owner_text)
+            except YandexGPTError:
+                draft = DescriptionDraft(questions=[OwnerQuestion("description", QUESTIONS["services"])])
         fields = description_fields(draft)
         check = {
             "site_url": business.site_url,
