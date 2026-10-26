@@ -5,9 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.auth.sessions import current_user, require_csrf
 from app.db.models import ChangeLog, User
+from app.demo_flags import demo_now
 from app.platforms.base import PlatformError
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository
-from app.services.demo import demo_now
 from app.services.rollback import ConfirmationRequired, RollbackService, can_revert
 from app.worker.clock import SystemClock
 

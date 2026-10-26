@@ -12,6 +12,7 @@ from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_user, require_csrf
 from app.content.site_reader import read_site
 from app.db.models import User
+from app.demo_flags import demo_enabled
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
 from app.services.changes import ChangeConflict
@@ -93,8 +94,6 @@ CurrentUser = Annotated[User, Depends(current_user)]
 
 @router.post("/business", dependencies=[Depends(require_csrf)])
 def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> dict:
-    from app.api.auth import demo_enabled
-
     with human_errors():
         result = service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
         if demo_enabled():

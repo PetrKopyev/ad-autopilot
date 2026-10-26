@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.content.images import DEFAULT_FONT, ImageRejected, make_formats
 from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
+from app.demo_flags import demo_enabled
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
 from app.platforms.base import (
@@ -17,7 +18,9 @@ from app.platforms.base import (
     PlatformError,
     TargetSpec,
 )
+from app.platforms.fake import FakeAdapter
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
+from app.services.demo import configure_adapter
 from app.services.onboarding import AiLimits, ai_budget
 from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers
 
@@ -173,11 +176,7 @@ class LaunchService:
                     plan, campaigns=plan.payload.get("launch", {}).get("campaigns", {}) | {platform: campaign.id}
                 )
             spec = self.spec(business, campaign, groups, images)
-            from app.config import settings
-            from app.platforms.fake import FakeAdapter
-            from app.services.demo import configure_adapter
-
-            if settings.platform_mode == "fake" and settings.demo_login and isinstance(adapter, FakeAdapter):
+            if demo_enabled() and isinstance(adapter, FakeAdapter):
                 configure_adapter(adapter, spec)
             refs = await adapter.create_campaign_tree(spec)
             self.bind(campaign, refs)

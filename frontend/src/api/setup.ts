@@ -36,7 +36,7 @@ export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boole
   return setupGet('/api/auth/config', signal);
 }
 export async function demoLogin() {
-  await api('/api/auth/demo', { method: 'POST' });
+  await api('/api/auth/demo', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
   try { sessionStorage.removeItem('ad-autopilot-setup-draft'); sessionStorage.removeItem(demoDateKey); } catch { /* Storage may be unavailable. */ }
 }
 export async function logout() {

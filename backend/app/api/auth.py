@@ -1,4 +1,9 @@
 import secrets
+from collections import deque
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from threading import Lock
+from time import monotonic
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -19,6 +24,8 @@ from app.auth.sessions import (
     set_session_cookies,
 )
 from app.db.models import Session, User
+from app.demo_flags import advance_jobs, demo_enabled
+from app.services.demo import DEMO_UID_PREFIX, DemoUsers
 
 router = APIRouter(prefix="/api")
 
@@ -32,12 +39,6 @@ def _remove_media(file_path: str) -> None:
         path.unlink()
 
 
-def demo_enabled() -> bool:
-    from app.config import settings
-
-    return settings.platform_mode == "fake" and settings.demo_login
-
-
 @router.get("/auth/config")
 def auth_config(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -49,9 +50,56 @@ def require_demo() -> None:
         raise HTTPException(404, "Не найдено.")
 
 
-@router.post("/auth/demo", dependencies=[Depends(require_demo)])
-def demo_login(request: Request, repository: Repository) -> Response:
-    user = repository.save_user("demo-" + secrets.token_hex(16), "demo", None)
+MAX_DEMO_USERS = 50
+DEMO_USER_TTL = timedelta(hours=24)
+DEMO_LOGINS_PER_MINUTE = 10
+demo_logins: deque[tuple[float, str]] = deque()
+demo_logins_lock = Lock()
+
+
+def require_same_origin(request: Request) -> None:
+    # Свой заголовок нельзя отправить с чужого сайта без CORS: форма или ссылка не войдут в демо за пользователя.
+    if (
+        request.headers.get("X-Requested-With") != "XMLHttpRequest"
+        or request.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin"
+    ):
+        raise HTTPException(403, "Не удалось проверить запрос. Обновите страницу и попробуйте снова.")
+
+
+def limit_demo_logins(request: Request) -> None:
+    now = monotonic()
+    host = request.client.host if request.client else ""
+    with demo_logins_lock:
+        while demo_logins and demo_logins[0][0] <= now - 60:
+            demo_logins.popleft()
+        if sum(item == host for _, item in demo_logins) >= DEMO_LOGINS_PER_MINUTE:
+            raise HTTPException(429, "Слишком много входов в демо. Подождите минуту.")
+        demo_logins.append((now, host))
+
+
+def get_demo_users() -> Iterator[DemoUsers]:
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        yield DemoUsers(db)
+
+
+@router.post(
+    "/auth/demo", dependencies=[Depends(require_demo), Depends(require_same_origin), Depends(limit_demo_logins)]
+)
+def demo_login(
+    request: Request, repository: Repository, demo_users: Annotated[DemoUsers, Depends(get_demo_users)]
+) -> Response:
+    businesses, paths = demo_users.expire(datetime.now(UTC) - DEMO_USER_TTL)
+    for business_id in businesses:
+        advance_jobs.forget(business_id)
+        for platform in ("direct", "vk"):
+            request.app.state.platform_adapters.fakes.pop((business_id, platform), None)
+    for path in paths:
+        _remove_media(path)
+    if demo_users.count() >= MAX_DEMO_USERS:
+        raise HTTPException(503, "Демо сейчас занято. Попробуйте через несколько часов.")
+    user = repository.save_user(DEMO_UID_PREFIX + secrets.token_hex(16), "demo", None)
     session = create_session(user.id)
     repository.save_session(session, request.cookies.get(SESSION_COOKIE))
     response = Response(status_code=204, headers={"Cache-Control": "no-store"})

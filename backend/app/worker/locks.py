@@ -4,6 +4,7 @@ from contextvars import ContextVar
 
 from sqlalchemy import Connection, text
 
+from app.demo_flags import ADVANCING, advance_jobs
 from app.services.changes import ChangeConflict
 
 _held: ContextVar[frozenset[tuple[int, int]]] = ContextVar("worker_business_locks", default=frozenset())
@@ -20,7 +21,8 @@ def business_lock(bind, business_id: int) -> Iterator[None]:
     with engine.connect() as connection:
         acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id})
         if not acquired:
-            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+            busy = ADVANCING if advance_jobs.holds_lock(business_id) else "Этот бизнес уже обрабатывается."
+            raise ChangeConflict(busy)
         token = _held.set(_held.get() | {key})
         try:
             yield

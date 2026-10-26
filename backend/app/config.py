@@ -1,8 +1,9 @@
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.domain.settings import DomainSettings
@@ -44,6 +45,13 @@ class Settings(BaseSettings):
         if len(secret) < 32 or secret == PLACEHOLDER_SECRET_KEY:
             raise ValueError("SECRET_KEY must be at least 32 characters and not the .env.example placeholder")
         return value
+
+    @model_validator(mode="after")
+    def demo_only_locally(self) -> Self:
+        url = urlsplit(self.app_base_url)
+        if self.demo_login and (url.scheme not in {"http", "https"} or url.hostname not in {"localhost", "127.0.0.1"}):
+            raise ValueError("DEMO_LOGIN is allowed only on a local stand: APP_BASE_URL must be localhost or 127.0.0.1")
+        return self
 
 
 def get_domain_settings(config: Settings | None = None) -> DomainSettings:

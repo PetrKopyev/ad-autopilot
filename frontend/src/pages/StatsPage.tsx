@@ -61,9 +61,9 @@ function DailyChart({ daily }: { daily: Daily }) {
 export function StatsPage() {
   const [choice, setChoice] = useState<PeriodChoice>('month');
   const [level, setLevel] = useState<StatsLevel>('platform');
-  const summary = useResource(useCallback((signal: AbortSignal) => getSummary(getPeriod(choice), signal), [choice]));
-  const daily = useResource(useCallback((signal: AbortSignal) => getDaily(getPeriod(choice), signal), [choice]));
-  const breakdown = useResource(useCallback((signal: AbortSignal) => getBreakdown(getPeriod(choice), level, signal), [choice, level]));
+  const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
+  const daily = useResource(useCallback(async (signal: AbortSignal) => getDaily(await getPeriod(choice, signal), signal), [choice]));
+  const breakdown = useResource(useCallback(async (signal: AbortSignal) => getBreakdown(await getPeriod(choice, signal), level, signal), [choice, level]));
   function rowLabel(id: number | string | null) {
     if (id === null) return copy.screens.unknownGroup;
     return level === 'platform' ? platformName(String(id)) : copy.screens.entity(copy.screens.levels[level], id);

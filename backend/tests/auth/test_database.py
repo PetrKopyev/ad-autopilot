@@ -1,5 +1,5 @@
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -58,6 +58,56 @@ def test_tokens_are_encrypted_in_postgresql(monkeypatch: pytest.MonkeyPatch) -> 
                     assert stored.refresh_token_enc != "test-refresh"
                     db.expire_all()
                     assert db.get(type(account), account.id).access_token_enc == "test-access"
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.db
+def test_demo_users_expire_with_businesses_and_files() -> None:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is required")
+    from app.db.models import Asset
+    from app.services.demo import DemoUsers
+
+    engine = create_engine(database_url)
+    try:
+        if engine.dialect.name != "postgresql":
+            pytest.skip("TEST_DATABASE_URL must point to PostgreSQL")
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                with DBSession(bind=connection, join_transaction_mode="create_savepoint") as db:
+                    now = datetime.now(UTC)
+                    users = DemoUsers(db)
+                    before = users.count()
+                    old, fresh, owner = (
+                        User(yandex_uid=uid + uuid4().hex, login="demo", consent_at=now, created_at=created)
+                        for uid, created in (
+                            ("demo-", now - timedelta(hours=25)),
+                            ("demo-", now),
+                            ("owner-", now - timedelta(days=30)),
+                        )
+                    )
+                    db.add_all([old, fresh, owner])
+                    db.flush()
+                    business = Business(
+                        user_id=old.id, site_url="https://example.test", city="Test", month_budget_kop=0
+                    )
+                    db.add(business)
+                    db.flush()
+                    db.add(Asset(business_id=business.id, kind="image", file_path=f"{business.id}/a.jpg"))
+                    db.flush()
+                    # После commit в expire объекты перечитываются, а удалённые строки уже недоступны.
+                    old_id, fresh_id, owner_id, business_id = old.id, fresh.id, owner.id, business.id
+                    assert users.count() == before + 2
+                    assert users.expire(now - timedelta(hours=24)) == ([business_id], [f"{business_id}/a.jpg"])
+                    db.expire_all()
+                    assert db.get(User, old_id) is None and db.get(Business, business_id) is None
+                    assert db.get(User, fresh_id) and db.get(User, owner_id)
+                    assert users.count() == before + 1
             finally:
                 transaction.rollback()
     finally:

@@ -2,7 +2,6 @@ import asyncio
 import logging
 import signal
 from contextlib import suppress
-from threading import Lock
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.db.session import SessionLocal
+from app.demo_flags import demo_enabled, demo_frozen
 from app.platforms.fake import FakeAdapter
 from app.services.experiments import create_experiment
 from app.services.registry import AdapterRegistry, db_loader
@@ -17,7 +17,6 @@ from app.worker.clock import SystemClock
 from app.worker.jobs import Worker, WorkerRepository
 
 logger = logging.getLogger(__name__)
-demo_tick_lock = Lock()
 
 
 class DemoRegistry(AdapterRegistry):
@@ -27,9 +26,8 @@ class DemoRegistry(AdapterRegistry):
         if self.mode != "fake":
             return super().resolve(business_id, platform)
         key = (business_id, platform)
-        if key not in self.fakes:
-            self.fakes[key] = FakeAdapter(clock=SystemClock())
-        return self.fakes[key]
+        # API и тик планировщика обращаются из разных потоков: setdefault не заменит уже созданный симулятор.
+        return self.fakes.get(key) or self.fakes.setdefault(key, FakeAdapter(clock=SystemClock()))
 
 
 async def run_tick(registry: AdapterRegistry, kind: str = "due") -> None:
@@ -40,8 +38,7 @@ async def run_tick(registry: AdapterRegistry, kind: str = "due") -> None:
 
 
 def run_demo_tick(registry: AdapterRegistry, kind: str) -> None:
-    with demo_tick_lock:
-        asyncio.run(run_worker_tick(registry, kind))
+    asyncio.run(run_worker_tick(registry, kind))
 
 
 async def run_worker_tick(registry: AdapterRegistry, kind: str) -> None:
@@ -57,7 +54,7 @@ async def run_worker_tick(registry: AdapterRegistry, kind: str) -> None:
         elif kind == "heartbeat":
             await worker.run(kind)
         else:
-            await worker.run_due()
+            await worker.run_due(skip=demo_frozen)
 
 
 def build_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
@@ -69,7 +66,11 @@ def build_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
 
 
 async def start_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
+    if demo_enabled():
+        logger.warning("Демо-вход включён: стенд только для локальной проверки, без настоящих площадок.")
     await run_tick(registry, "startup")
+    # Без отметки при старте главная до первой минутной проверки показывает «Проверки ещё не было».
+    await run_tick(registry, "heartbeat")
     scheduler = build_scheduler(registry)
     scheduler.start()
     return scheduler

@@ -67,7 +67,7 @@ async def test_scheduler_calls_shared_run_due_every_half_hour_and_heartbeat_each
         monkeypatch.setattr(main, "Worker", worker_type)
         await jobs["run_due"].func(*jobs["run_due"].args)
         await jobs["heartbeat"].func(*jobs["heartbeat"].args)
-        worker.run_due.assert_awaited_once_with()
+        worker.run_due.assert_awaited_once_with(skip=main.demo_frozen)
         worker.run.assert_awaited_once_with("heartbeat")
         assert worker_type.call_args.args[1] == registry.resolve
 
@@ -121,3 +121,18 @@ async def test_fake_tick_runs_in_thread_and_keeps_event_loop_responsive(worker_m
     asyncio.get_running_loop().call_later(0.01, release.set)
     await main.run_tick(SimpleNamespace(mode="fake"))
     assert len(seen) == 1 and seen[0][0] != caller and seen[0][1]
+
+
+async def test_scheduler_marks_heartbeat_on_start(worker_main, monkeypatch):
+    main = worker_main
+    calls = []
+
+    async def tick(registry, kind="due"):
+        calls.append(kind)
+
+    scheduler = MagicMock()
+    monkeypatch.setattr(main, "run_tick", tick)
+    monkeypatch.setattr(main, "build_scheduler", lambda registry: scheduler)
+    assert await main.start_scheduler(None) is scheduler
+    assert calls == ["startup", "heartbeat"]
+    scheduler.start.assert_called_once_with()

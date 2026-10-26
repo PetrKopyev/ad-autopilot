@@ -20,8 +20,9 @@ from app.db.models import (
     Target,
     WorkerRun,
 )
+from app.demo_flags import demo_now
 from app.platforms.base import AdPlatform, ExternalRefs, Operation
-from app.platforms.fake import FakeAdapter
+from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
 from app.worker.locks import business_lock
@@ -58,6 +59,9 @@ class WorkerRepository(ChangesRepository):
     def save(self, *items) -> None:
         self.db.add_all(items)
         self.db.commit()
+
+    def refresh(self, item) -> None:
+        self.db.refresh(item)
 
     @contextmanager
     def business_lock(self, business_id: int) -> Iterator[None]:
@@ -117,6 +121,9 @@ class MemoryWorkerRepository(WorkerRepository):
     def business_lock(self, business_id: int) -> Iterator[None]:
         # Виртуальный воркер выполняет шаги последовательно; конкуренцию PostgreSQL проверяем отдельно.
         yield
+
+    def refresh(self, item) -> None:
+        pass
 
     def business(self, business_id: int) -> Business:
         business = self.find(Business, id=business_id)
@@ -231,6 +238,19 @@ class Worker:
                 return False
         return True
 
+    @contextmanager
+    def business_clock(self, business: Business) -> Iterator[None]:
+        """Шаг демо-бизнеса идёт в его дате после перемотки; затем часы воркера возвращаются."""
+        base = self.clock
+        fallback = base.now
+        now = demo_now(business, fallback)
+        if now != fallback:
+            self.clock = VirtualClock(now)
+        try:
+            yield
+        finally:
+            self.clock = base
+
     def campaigns(self, business: Business) -> list[Campaign]:
         return [item for item in self.repository.rows(Campaign, business.id) if item.external_id]
 
@@ -337,7 +357,7 @@ class Worker:
         business = self.repository.business(business_id)
         if business.status not in {"running", "budget_stop", "paused"}:
             return
-        with self.repository.business_lock(business.id):
+        with self.repository.business_lock(business.id), self.business_clock(business):
             if not self.demo_available(business):
                 return
             self.step_key = key or schedule_key(kind, self.clock.now)
@@ -375,12 +395,14 @@ class Worker:
                 run.finished_at = self.clock.now
                 self.repository.save(run)
 
-    async def run_due(self) -> None:
+    async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
         self._contexts.clear()
         await self.run("heartbeat")
         now = self.clock.now.astimezone(MOSCOW)
         for business in self.repository.rows(Business):
+            if skip and skip(business):
+                continue
             kinds = ["budget_guard"]
             if now.minute < 30:
                 kinds.append("sync_moderation")

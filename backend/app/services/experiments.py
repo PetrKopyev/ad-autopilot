@@ -13,16 +13,19 @@ from app.content.ad_text import generate_ad_text, offer_matrix, validate_ad_text
 from app.content.art import ART_COST_KOP, ArtError
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, AdGroup, Asset, Business, ChangeLog, Experiment, Plan, Target
+from app.demo_flags import demo_enabled
 from app.domain.experiments import next_hypothesis
 from app.domain.explain import explain
 from app.domain.rules import can_change
 from app.domain.settings import DEFAULT_SETTINGS
 from app.domain.types import AdSnapshot, ExperimentDesign
 from app.platforms.base import Operation, PlatformError
+from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, SpendLLM, ai_budget, description_draft
 from app.services.plan import PlanRepository, PlanService
 from app.services.registry import build_art_factory, build_llm
+from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
@@ -209,7 +212,7 @@ async def prepare_variant(worker: Worker, business: Business, campaign, group, c
     creative = source.creative
     asset_id = control.asset_id
     async with content_service(worker) as service:
-        budget = ai_budget(service.repository, business, service.limits, worker.clock.now.date())
+        budget = ai_budget(service.repository, business, service.limits, today(worker.clock))
         if hypothesis == "text":
             matrix = offer_matrix(business.niche_class or "other")
             original_angle = matrix[0][0]
@@ -308,10 +311,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
         raise ChangeConflict("Добавление варианта пока не подтверждено; требуется повторная сверка.")
     variant = next((item for item in repository.rows(Ad, business.id) if item.external_id == state.entity_id), None)
     if variant is None:
-        from app.config import settings
-        from app.platforms.fake import FakeAdapter
-
-        if settings.platform_mode == "fake" and settings.demo_login and isinstance(adapter, FakeAdapter):
+        if demo_enabled() and isinstance(adapter, FakeAdapter):
             truth = adapter._ad_truths[control.external_id]
             adapter._ad_truths[state.entity_id] = replace(truth, ctr=min(1, truth.ctr * 2), conversion_rate=0.15)
         variant = Ad(

@@ -12,7 +12,7 @@ import './Home.css';
 
 export function HomePage() {
   const [choice, setChoice] = useState<PeriodChoice>('month');
-  const summary = useResource(useCallback((signal: AbortSignal) => getSummary(getPeriod(choice), signal), [choice]));
+  const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
   const autopilot = useResource(getAutopilotStatus);
   const history = useResource(getHistory);
   const dialog = useRef<HTMLDialogElement>(null);

@@ -1,11 +1,15 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+
+from sqlalchemy import delete, func, select
 
 from app.content.site_reader import Page, SiteReadResult
-from app.db.models import Business, PlatformAccount
+from app.db.models import Asset, Business, PlatformAccount, User
+from app.demo_flags import AdvanceProgress, demo_now
 from app.platforms.fake import AdTruth, FakeAdapter, VirtualClock
 from app.services.changes import ChangeConflict
-from app.worker.clock import MOSCOW
 from app.worker.jobs import Worker, WorkerRepository
+
+DEMO_UID_PREFIX = "demo-"
 
 DEMO_DESCRIPTION = {
     "services": [{"name": "Маникюр", "price": 200000, "quote": "Маникюр — 2000 ₽"}],
@@ -34,23 +38,6 @@ def prepare_business(repository, business: Business) -> None:
         )
 
 
-def demo_now(business: Business, fallback: datetime) -> datetime:
-    from app.config import settings
-
-    value = business.settings.get("_demo", {}).get("now")
-    return datetime.fromisoformat(value) if settings.platform_mode == "fake" and value else fallback
-
-
-def bind_worker_clock(worker: Worker, business: Business) -> None:
-    # Планировщик после перемотки продолжает работать в дате этого бизнеса.
-    if not hasattr(worker, "_demo_base_clock"):
-        worker._demo_base_clock = worker.clock
-    base = worker._demo_base_clock
-    fallback = base.now
-    now = demo_now(business, fallback)
-    worker.clock = VirtualClock(now) if now != fallback else base
-
-
 def configure_adapter(adapter: FakeAdapter, spec) -> None:
     """Три группы из обычного плана: сильная, слабая и пограничная; события считает Fake."""
     for group, truth in zip(
@@ -71,48 +58,67 @@ class DemoRepository(WorkerRepository):
         return super().rows(model, self.business_id if business_id is None else business_id)
 
 
+class DemoUsers:
+    """Демо-пользователи живут сутки; вместе с пользователем удаляются его бизнесы и файлы."""
+
+    def __init__(self, db) -> None:
+        self.db = db
+
+    def expire(self, before: datetime) -> tuple[list[int], list[str]]:
+        users = select(User.id).where(User.yandex_uid.startswith(DEMO_UID_PREFIX), User.created_at < before)
+        businesses = list(self.db.scalars(select(Business.id).where(Business.user_id.in_(users))))
+        paths = list(self.db.scalars(select(Asset.file_path).where(Asset.business_id.in_(businesses))))
+        self.db.execute(delete(User).where(User.id.in_(users)))
+        self.db.commit()
+        return businesses, paths
+
+    def count(self) -> int:
+        return self.db.scalar(select(func.count(User.id)).where(User.yandex_uid.startswith(DEMO_UID_PREFIX)))
+
+
 class DemoService:
     def __init__(self, worker: Worker) -> None:
         self.worker = worker
 
-    async def advance(self, business_id: int, days: int) -> dict:
+    def check(self, business: Business, days: int) -> list[FakeAdapter]:
         if type(days) is not int or not 1 <= days <= 35:
             raise ValueError("Можно перемотать от 1 до 35 дней за один раз.")
+        if business.settings.get("_demo", {}).get("days", 0) + days > 120:
+            raise ChangeConflict("Можно перемотать не больше 120 дней на один демо-бизнес.")
+        if business.status not in {"running", "paused", "budget_stop"}:
+            raise ChangeConflict("Сначала запустите рекламу.")
+        if not self.worker.demo_available(business):
+            raise ChangeConflict("Демо-площадки потеряны после перезапуска API. Войдите в новое демо.")
+        adapters = [self.worker.resolve_adapter(business.id, platform) for platform in ("direct", "vk")]
+        if any(not isinstance(adapter, FakeAdapter) for adapter in adapters):
+            raise ChangeConflict("Перемотка доступна только для демо-площадок.")
+        return adapters
+
+    def remember(self, business: Business, **values) -> None:
+        # Под блокировкой бизнеса: перечитываем настройки и меняем только поля _demo.
+        self.worker.repository.refresh(business)
+        business.settings = business.settings | {"_demo": business.settings.get("_demo", {}) | values}
+        self.worker.repository.save(business)
+
+    async def advance(self, business_id: int, progress: AdvanceProgress) -> None:
         repository = self.worker.repository
         with repository.business_lock(business_id):
+            progress.locked = True
             business = repository.business(business_id)
-            meta = business.settings.get("_demo", {})
-            elapsed = meta.get("days", 0)
-            if elapsed + days > 120:
-                raise ChangeConflict("Можно перемотать не больше 120 дней на один демо-бизнес.")
-            if business.status not in {"running", "paused", "budget_stop"}:
-                raise ChangeConflict("Сначала запустите рекламу.")
-            if not self.worker.demo_available(business):
-                raise ChangeConflict("Демо-площадки потеряны после перезапуска API. Войдите в новое демо.")
-            adapters = [self.worker.resolve_adapter(business_id, platform) for platform in ("direct", "vk")]
-            if any(not isinstance(adapter, FakeAdapter) for adapter in adapters):
-                raise ChangeConflict("Перемотка доступна только для демо-площадок.")
+            repository.refresh(business)
+            adapters = self.check(business, progress.days)
             start = demo_now(business, adapters[0].clock.now)
             clock = VirtualClock(start)
             self.worker.clock = clock
             for adapter in adapters:
                 adapter.clock = clock
-            # Резервируем лимит до запуска: прерванный запрос не даёт обойти 120 дней.
-            business.settings = business.settings | {"_demo": {"days": elapsed + days, "now": start.isoformat()}}
-            repository.save(business)
-            end = start + timedelta(days=days)
-            while clock.now < end:
-                clock.advance(hours=0.5)
-                business.settings = business.settings | {
-                    "_demo": {"days": elapsed + days, "now": clock.now.isoformat()}
-                }
-                repository.save(business)
-                await self.worker.run_due()
-                # month_rollover привязывает часы обычного планировщика; здесь нужен тот же движущийся объект.
-                self.worker.clock = clock
-            return {
-                "days": days,
-                "total_days": elapsed + days,
-                "now": clock.now,
-                "today": clock.now.astimezone(MOSCOW).date(),
-            }
+            # Резервируем лимит до запуска: прерванная перемотка не даёт обойти 120 дней.
+            self.remember(
+                business, days=business.settings.get("_demo", {}).get("days", 0) + progress.days, now=start.isoformat()
+            )
+            for day in range(1, progress.days + 1):
+                for _ in range(48):
+                    clock.advance(hours=0.5)
+                    self.remember(business, now=clock.now.isoformat())
+                    await self.worker.run_due()
+                progress.done = day

@@ -23,7 +23,7 @@ from app.services.changes import ChangeConflict
 from app.services.onboarding import MAX_BUDGET_KOP, OnboardingError
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
-from app.worker.clock import today
+from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
 
 
@@ -284,6 +284,7 @@ class ScreensService:
         for experiment in self.repository.rows(Experiment, business.id):
             if experiment.status == "proposed":
                 continue
+            started = experiment.started_at.astimezone(MOSCOW).date()
             arms = []
             for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):
                 arm = [
@@ -291,7 +292,7 @@ class ScreensService:
                     for row in rows
                     if row.ad_id == ad_id
                     and row.is_settled
-                    and experiment.started_at.date() <= row.date <= today(self.worker.clock) - timedelta(days=2)
+                    and started <= row.date <= today(self.worker.clock) - timedelta(days=2)
                 ]
                 arms.append(
                     Metrics(impressions=sum(row.impressions for row in arm), clicks=sum(row.clicks for row in arm))
@@ -301,7 +302,7 @@ class ScreensService:
             if experiment.status == "cancelled":
                 conclusion = "Проверку остановили. Победителя не выбирали."
             remaining = sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
-            days = max(0, (experiment.deadline.date() - today(self.worker.clock)).days)
+            days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудиторию"}[experiment.hypothesis]
             links = " и ".join(
                 f"«{ads[id_].title}» (/ads#{id_})" for id_ in (experiment.control_ad_id, experiment.variant_ad_id)

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, BudgetLedger, Business, LeadsSurvey, StatsDaily
+from app.worker.clock import MOSCOW
 
 Level = Literal["business", "platform", "campaign", "group", "ad"]
 
@@ -114,7 +115,7 @@ def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], 
         if date_from <= survey.week_start <= date_to
         and survey.answered_at is not None
         and survey.clients_count is not None
-        and survey.answered_at.date() <= as_of
+        and survey.answered_at.astimezone(MOSCOW).date() <= as_of
     }
     # Расход неизвестных недель нельзя делить на клиентов из отвеченных недель.
     cost_kop = sum(

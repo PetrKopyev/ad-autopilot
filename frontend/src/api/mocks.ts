@@ -1,6 +1,6 @@
 import { copy } from '../copy';
 import { ApiError } from './client';
-import { getPeriod, isoDate } from './period';
+import { isoDate, periodFor } from './period';
 import type { Ad, AutopilotStatus, Breakdown, Daily, HistoryItem, Metrics, Period, StatsLevel, Summary } from './types';
 
 const timestamp = new Date().toISOString();
@@ -46,7 +46,7 @@ function totals(period: Period): Metrics {
     is_incomplete: daily.is_incomplete, incomplete_days: daily.incomplete_days };
 }
 export function mockSummary(period: Period): Summary {
-  const month = getPeriod('month');
+  const month = periodFor('month');
   const spent = totals(month).cost_kop;
   const today = new Date();
   const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());

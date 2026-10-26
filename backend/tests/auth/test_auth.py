@@ -399,12 +399,16 @@ def test_delete_me_removes_user_and_own_files_only(
     assert client.get("/api/me").status_code == 401
 
 
+DEMO_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
+
 @pytest.mark.parametrize("mode,flag,enabled", [("live", "1", False), ("fake", None, False), ("fake", "0", False),
                                               ("fake", "1", True)])
 def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, mode, flag, enabled):
     from app.config import Settings
 
     monkeypatch.setenv("PLATFORM_MODE", mode)
+    monkeypatch.setenv("APP_BASE_URL", "https://localhost")
     if flag is None:
         monkeypatch.delenv("DEMO_LOGIN", raising=False)
     else:
@@ -413,7 +417,7 @@ def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, 
     config = client.get("/api/auth/config")
     assert config.json() == {"demo": enabled}
     assert config.headers["cache-control"] == "no-store"
-    assert client.post("/api/auth/demo").status_code == (204 if enabled else 404)
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == (204 if enabled else 404)
     assert bool(repository.users) is enabled
     assert bool(repository.sessions) is enabled
     assert not repository.businesses
@@ -421,7 +425,7 @@ def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, 
 
 def test_demo_login_rotates_session_and_issues_working_csrf(client, repository, monkeypatch):
     monkeypatch.setattr("app.config.settings.demo_login", True)
-    response = client.post("/api/auth/demo")
+    response = client.post("/api/auth/demo", headers=DEMO_HEADERS)
     assert response.status_code == 204
     assert response.headers["cache-control"] == "no-store"
     previous = client.cookies["__Host-session"]
@@ -433,9 +437,74 @@ def test_demo_login_rotates_session_and_issues_working_csrf(client, repository, 
     assert "HttpOnly" in response.headers.get_list("set-cookie")[0]
     assert "HttpOnly" not in response.headers.get_list("set-cookie")[1]
     assert client.post("/api/auth/logout").status_code == 403
-    assert client.post("/api/auth/demo").status_code == 204
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
     assert repository.get_session(previous) is None
     assert client.cookies["__Host-session"] != previous
     assert len(repository.users) == 2
     assert client.post("/api/auth/logout", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]}).status_code == 204
     assert client.get("/api/me").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-Requested-With": "fetch"}, DEMO_HEADERS | {"Sec-Fetch-Site": "cross-site"},
+     DEMO_HEADERS | {"Sec-Fetch-Site": "same-site"}],
+)
+def test_demo_login_rejects_cross_site_requests(client, repository, monkeypatch, headers):
+    monkeypatch.setattr("app.config.settings.demo_login", True)
+    assert client.post("/api/auth/demo", headers=headers).status_code == 403
+    assert not repository.users and "__Host-session" not in client.cookies
+    response = client.post("/api/auth/demo", headers=DEMO_HEADERS | {"Sec-Fetch-Site": "same-origin"})
+    assert response.status_code == 204
+
+
+def test_demo_login_rate_limited_per_ip(client, repository, monkeypatch):
+    from app.api import auth
+
+    now = [1000.0]
+    monkeypatch.setattr("app.config.settings.demo_login", True)
+    monkeypatch.setattr(auth, "monotonic", lambda: now[0])
+    auth.demo_logins.extend((now[0], "203.0.113.7") for _ in range(10))
+    for _ in range(10):
+        assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+    response = client.post("/api/auth/demo", headers=DEMO_HEADERS)
+    assert response.status_code == 429 and len(repository.users) == 10
+    now[0] += 60
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+
+
+def test_demo_login_expires_old_demo_users_and_caps_live_ones(client, repository, monkeypatch, tmp_path):
+    from app.config import settings
+    from app.demo_flags import advance_jobs
+    from app.platforms.fake import FakeAdapter
+
+    monkeypatch.setattr(settings, "demo_login", True)
+    monkeypatch.setattr(settings, "media_dir", tmp_path)
+    old = repository.save_user("demo-old", "demo", None)
+    old.created_at -= timedelta(hours=25)
+    owner = repository.save_user("100", "owner", None)
+    owner.created_at -= timedelta(days=30)
+    fresh = repository.save_user("demo-fresh", "demo", None)
+    repository.businesses = {
+        7: Business(id=7, user_id=old.id),
+        8: Business(id=8, user_id=fresh.id),
+        9: Business(id=9, user_id=owner.id),
+    }
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "photo.jpg").write_bytes(b"x")
+    repository.assets = [(7, "7/photo.jpg")]
+    fakes = client.app.state.platform_adapters.fakes
+    fakes.update({(7, "direct"): FakeAdapter(), (7, "vk"): FakeAdapter(), (8, "direct"): FakeAdapter()})
+    advance_jobs.start(7, 1)
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+    assert old.id not in repository.users and {owner.id, fresh.id} <= set(repository.users)
+    assert set(repository.businesses) == {8, 9}
+    assert not (tmp_path / "7" / "photo.jpg").exists()
+    assert set(fakes) == {(8, "direct")} and advance_jobs.get(7) is None
+    for index in range(47):
+        repository.save_user(f"demo-{index}", "demo", None)
+    assert len([user for user in repository.users.values() if user.yandex_uid.startswith("demo-")]) == 49
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+    users = len(repository.users)
+    response = client.post("/api/auth/demo", headers=DEMO_HEADERS)
+    assert response.status_code == 503 and len(repository.users) == users

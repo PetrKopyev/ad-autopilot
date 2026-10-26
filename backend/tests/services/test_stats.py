@@ -174,6 +174,13 @@ def test_historical_clients_ignore_later_answers() -> None:
     assert result["clients"] is None
 
 
+def test_client_answer_date_is_taken_in_moscow() -> None:
+    # 22:00 UTC 18 октября — уже 19 октября по Москве: на 18-е ответа ещё не было.
+    late = survey(date(2026, 10, 5), 5, datetime(2026, 10, 18, 22, tzinfo=UTC))
+    assert aggregate_clients([], [late], date(2026, 10, 18))["clients"] is None
+    assert aggregate_clients([], [late], date(2026, 10, 19))["clients"] == 5
+
+
 def test_month_budget_uses_snapshots_without_double_counting(rows: list[StatsRow]) -> None:
     ledger = [
         BudgetLedger(month=date(2026, 10, 1), platform="direct", spent_kop=5000, spent_at=FETCHED_AT),

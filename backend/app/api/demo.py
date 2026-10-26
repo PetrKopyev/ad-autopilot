@@ -1,63 +1,94 @@
 import asyncio
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from datetime import date
+from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, StrictInt
-from starlette.concurrency import run_in_threadpool
 
 from app.api.auth import require_demo
-from app.api.stats import CurrentBusiness
+from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
+from app.db.models import Business
+from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs
+from app.platforms.base import AdPlatform
 from app.services.changes import ChangeConflict
-from app.services.demo import DemoRepository, DemoService, demo_now
+from app.services.demo import DemoRepository, DemoService
 from app.services.experiments import create_experiment
-from app.worker.clock import MOSCOW, SystemClock
 from app.worker.jobs import Worker
-from app.worker.main import demo_tick_lock
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/demo", dependencies=[Depends(require_demo)])
+
+type OpenService = Callable[[int], AbstractContextManager[DemoService]]
 
 
 class AdvanceIn(BaseModel):
     days: StrictInt = Field(ge=1, le=35)
 
 
-def get_demo_service(request: Request, business: CurrentBusiness) -> Iterator[DemoService]:
+@contextmanager
+def open_demo_service(resolve: Callable[[int, str], AdPlatform], business_id: int) -> Iterator[DemoService]:
     from app.db.session import SessionLocal
 
     with SessionLocal() as db:
         yield DemoService(
-            Worker(
-                DemoRepository(db, business.id),
-                request.app.state.platform_adapters.resolve,
-                dry_run=False,
-                experiment_factory=create_experiment,
-            )
+            Worker(DemoRepository(db, business_id), resolve, dry_run=False, experiment_factory=create_experiment)
         )
 
 
-Service = Annotated[DemoService, Depends(get_demo_service)]
+def get_demo_service(request: Request) -> OpenService:
+    # Перемотка идёт после ответа, поэтому сессию БД открывает сама задача, а не запрос.
+    return partial(open_demo_service, request.app.state.platform_adapters.resolve)
+
+
+Service = Annotated[OpenService, Depends(get_demo_service)]
+
+
+def demo_status(business: Business, today: date) -> dict:
+    progress = advance_jobs.get(business.id)
+    return {
+        "today": today,
+        "total_days": business.settings.get("_demo", {}).get("days", 0),
+        "advance": None
+        if progress is None
+        else {"state": progress.state, "days": progress.days, "done": progress.done, "error": progress.error},
+    }
 
 
 @router.get("/status")
-def status(business: CurrentBusiness) -> dict:
-    now = demo_now(business, SystemClock().now)
-    return {"today": now.astimezone(MOSCOW).date(), "total_days": business.settings.get("_demo", {}).get("days", 0)}
+def status(business: CurrentBusiness, today: Today) -> dict:
+    return demo_status(business, today)
 
 
-def run_advance(service: DemoService, business_id: int, days: int) -> dict:
-    # Fake и фоновый tick используют один mutex, чтобы не менять симулятор одновременно.
-    if not demo_tick_lock.acquire(blocking=False):
-        raise HTTPException(409, "Демо уже обрабатывается. Повторите после завершения.")
+def run_advance(open_service: OpenService, business_id: int, progress: AdvanceProgress) -> None:
     try:
-        return asyncio.run(service.advance(business_id, days))
+        with open_service(business_id) as service:
+            asyncio.run(service.advance(business_id, progress))
+    except ChangeConflict as error:
+        progress.error = str(error)
+    except Exception:
+        logger.exception("Demo advance failed for business %s", business_id)
+        progress.error = "Перемотка прервалась. Попробуйте ещё раз."
+    progress.state = "error" if progress.error else "done"
+
+
+@router.post("/advance", status_code=202, dependencies=[Depends(require_csrf)])
+def advance(
+    body: AdvanceIn, business: CurrentBusiness, today: Today, open_service: Service, background: BackgroundTasks
+) -> dict:
+    if advance_jobs.running(business.id):
+        raise HTTPException(409, ADVANCING)
+    try:
+        with open_service(business.id) as service:
+            service.check(business, body.days)
     except ChangeConflict as error:
         raise HTTPException(409, str(error)) from error
-    finally:
-        demo_tick_lock.release()
-
-
-@router.post("/advance", dependencies=[Depends(require_csrf)])
-async def advance(body: AdvanceIn, business: CurrentBusiness, service: Service) -> dict:
-    return await run_in_threadpool(run_advance, service, business.id, body.days)
+    progress = advance_jobs.start(business.id, body.days)
+    if progress is None:
+        raise HTTPException(409, ADVANCING)
+    background.add_task(run_advance, open_service, business.id, progress)
+    return demo_status(business, today)

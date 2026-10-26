@@ -25,7 +25,7 @@ from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend
 from app.services.experiments import completed_hypotheses, group_available
 from app.services.plan import CAP_MULTIPLIER, campaign_limits
-from app.worker.clock import today
+from app.worker.clock import MOSCOW, today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
@@ -139,9 +139,6 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
 
 
 async def optimize(worker: Worker, business: Business) -> None:
-    from app.services.demo import bind_worker_clock
-
-    bind_worker_clock(worker, business)
     from app.config import get_domain_settings
 
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
@@ -153,7 +150,7 @@ async def optimize(worker: Worker, business: Business) -> None:
     decisions = decide(
         ads,
         groups,
-        worker.clock.now,
+        worker.clock.now.astimezone(MOSCOW),
         reference(worker, business, ads),
         free_daily_budget=free,
         settings=get_domain_settings(),
@@ -235,9 +232,6 @@ async def optimize(worker: Worker, business: Business) -> None:
 
 
 async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
-    from app.services.demo import bind_worker_clock
-
-    bind_worker_clock(worker, business)
     from app.config import get_domain_settings
 
     domain = get_domain_settings()
@@ -371,9 +365,6 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:
-    from app.services.demo import bind_worker_clock
-
-    bind_worker_clock(worker, business)
     local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
     running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]
@@ -434,13 +425,14 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         # История до старта и последние неустоявшиеся дни не входят ни в вердикт,
         # ни в его объяснение и сохранённые доказательства.
         end = today(worker.clock) - timedelta(days=2)
-        control_days = tuple(day for day in control.days if experiment.started_at.date() <= day.day <= end)
-        variant_days = tuple(day for day in variant.days if experiment.started_at.date() <= day.day <= end)
+        started = experiment.started_at.astimezone(MOSCOW).date()
+        control_days = tuple(day for day in control.days if started <= day.day <= end)
+        variant_days = tuple(day for day in variant.days if started <= day.day <= end)
         result = evaluate_experiment(
             design,
             control_days,
             variant_days,
-            experiment.started_at.date(),
+            started,
             today(worker.clock),
             extended=experiment.stats.get("extended", False),
         )
@@ -491,7 +483,8 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             experiment.stats = experiment.stats | {"result": asdict(result)}
             experiment.change_id = change.id
             worker.repository.save(experiment)
-    for ad in select_borderline(ads, worker.clock.now, reference(worker, business, ads), tuple(occupied_groups)):
+    now = worker.clock.now.astimezone(MOSCOW)
+    for ad in select_borderline(ads, now, reference(worker, business, ads), tuple(occupied_groups)):
         group = next(item for item in groups if item.id == ad.group_id)
         days = settled_days(ad.days, today(worker.clock))
         metrics = total_metrics(days)

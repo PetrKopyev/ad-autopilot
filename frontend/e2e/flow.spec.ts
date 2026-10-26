@@ -32,10 +32,13 @@ for (const width of [390, 1280]) {
     await page.getByRole('button', { name: copy.plan.launch, exact: true }).click();
     await page.getByRole('link', { name: copy.launchFlow.openHome, exact: true }).click();
     await expect(page.getByText(/^Работает,/)).toBeVisible();
-    const advance = page.waitForResponse((response) => response.url().endsWith('/api/demo/advance') && response.request().method() === 'POST', { timeout: 240_000 });
+    const advance = page.waitForResponse((response) => response.url().endsWith('/api/demo/advance') && response.request().method() === 'POST');
     await page.getByRole('button', { name: '+30 дней', exact: true }).click();
-    expect((await advance).ok()).toBeTruthy();
-    await expect(page.getByText(/Перемотано 30 из 120 дней/)).toBeVisible();
+    expect((await advance).status()).toBe(202);
+    await expect(page.getByText(/Автопилот обрабатывает прошедшие дни: \d+ из 30/)).toBeVisible();
+    const started = Date.now();
+    await expect(page.getByText(/^Готово\. Демо-дата: .*Перемотано 30 из 120 дней/)).toBeVisible({ timeout: 240_000 });
+    console.log(`+30 дней (${width}px): ${((Date.now() - started) / 1000).toFixed(1)} с`);
     const budget = page.locator('.budget-ring');
     await expect(budget).toBeVisible();
     const numbers = (await budget.getAttribute('aria-label'))!.match(/[\d\s\u00a0\u202f]+(?:[,.]\d+)?/g)!

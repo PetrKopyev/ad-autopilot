@@ -1,4 +1,5 @@
 import hashlib
+from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -70,7 +71,8 @@ class FakeRepository:
     def save_user(self, uid: str, login: str, email: str | None) -> User:
         user = next((user for user in self.users.values() if user.yandex_uid == uid), None)
         if user is None:
-            user = User(id=len(self.users) + 1, yandex_uid=uid, consent_at=datetime.now(UTC))
+            now = datetime.now(UTC)
+            user = User(id=max(self.users, default=0) + 1, yandex_uid=uid, consent_at=now, created_at=now)
             self.users[user.id] = user
         user.login = login
         user.email = email
@@ -140,6 +142,22 @@ class FakeRepository:
         return AuthRepository(FakeDB()).disconnect_account(user_id, account_id)
 
 
+class FakeDemoUsers:
+    def __init__(self, repository: FakeRepository) -> None:
+        self.repository = repository
+
+    def demo(self) -> list[User]:
+        return [user for user in self.repository.users.values() if user.yandex_uid.startswith("demo-")]
+
+    def expire(self, before: datetime) -> tuple[list[int], list[str]]:
+        expired = {user.id for user in self.demo() if user.created_at < before}
+        businesses = [item.id for item in self.repository.businesses.values() if item.user_id in expired]
+        return businesses, [path for user_id in expired for path in self.repository.delete_user(user_id)]
+
+    def count(self) -> int:
+        return len(self.demo())
+
+
 @pytest.fixture
 def repository() -> FakeRepository:
     return FakeRepository()
@@ -157,6 +175,7 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
 
     from unittest.mock import AsyncMock
 
+    from app.api.auth import get_demo_users
     from app.auth import yandex
     from app.auth.sessions import get_repository
     from app.config import Settings
@@ -173,10 +192,13 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
         pytest.fail("Auth unit tests must not connect to a database")
 
     monkeypatch.setattr(engine, "connect", forbid_database)
+    monkeypatch.setattr("app.api.auth.demo_logins", deque())
     app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_demo_users] = lambda: FakeDemoUsers(repository)
     with TestClient(app, base_url="https://testserver", follow_redirects=False) as test_client:
         yield test_client
     app.dependency_overrides.pop(get_repository, None)
+    app.dependency_overrides.pop(get_demo_users, None)
 
 
 @pytest.fixture

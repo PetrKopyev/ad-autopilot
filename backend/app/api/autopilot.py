@@ -8,8 +8,8 @@ from sqlalchemy.orm import load_only
 from app.api.stats import CurrentBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import MarkingProfile, PlatformAccount
+from app.demo_flags import demo_now
 from app.platforms.fake import VirtualClock
-from app.services.demo import demo_now
 from app.services.screens import ScreensService
 from app.worker.clock import SystemClock
 from app.worker.jobs import Worker, WorkerRepository

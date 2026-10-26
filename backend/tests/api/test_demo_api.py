@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+from collections import defaultdict
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -6,7 +7,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.db.models import Ad, BudgetLedger, Business, ChangeLog, Experiment, Session, User, WorkerRun
+from app.demo_flags import ADVANCING, advance_jobs
 from app.platforms.fake import VirtualClock
+from app.services.changes import ChangeConflict
 from app.services.demo import DemoService, prepare_business, read_demo_site
 from app.services.experiments import create_experiment
 from app.services.registry import DemoArt, DemoLLM
@@ -108,16 +111,18 @@ def demo(monkeypatch, tmp_path, request):
     app.dependency_overrides[business.get_onboarding_service] = lambda: world.onboarding
     app.dependency_overrides[plan.get_plan_service] = lambda: world.plans
     app.dependency_overrides[plan.get_launch_service] = lambda: world.launches
-    app.dependency_overrides[get_demo_service] = lambda: DemoService(worker)
+    app.dependency_overrides[get_demo_service] = lambda: lambda business_id: nullcontext(DemoService(worker))
     app.dependency_overrides[history.get_history_repository] = lambda: repository
     app.dependency_overrides[history.get_adapter_resolver] = lambda: worker.resolve_adapter
     app.dependency_overrides[autopilot.get_screens_service] = lambda: ScreensService(worker)
     app.dependency_overrides[get_today] = lambda: world.adapters["direct"].clock.now.date()
+    advance_jobs._items.clear()
     with TestClient(app, base_url="https://testserver") as client:
         client.cookies.set(SESSION_COOKIE, "test-session")
         client.cookies.set(CSRF_COOKIE, "test-csrf")
         client.headers["X-CSRF-Token"] = "test-csrf"
         yield client, world, worker
+    advance_jobs._items.clear()
 
 
 def launch(client):
@@ -193,17 +198,21 @@ def test_requires_launch_and_total_limit(demo):
     world.business.settings = {"_demo": {"days": 119}}
     world.business.status = "paused"
     assert client.post("/api/demo/advance", json={"days": 2}).status_code == 409
-    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 200
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
     assert client.post("/api/demo/advance", json={"days": 1}).status_code == 409
     assert world.business.settings["_demo"]["days"] == 120
 
 
-def test_concurrent_advance_rejected(demo):
-    from app.worker.main import demo_tick_lock
-
-    client, _, _ = demo
-    with demo_tick_lock:
-        assert client.post("/api/demo/advance", json={"days": 1}).status_code == 409
+def test_concurrent_advance_rejected_per_business(demo):
+    client, world, _ = demo
+    launch(client)
+    advance_jobs.start(world.business.id, 1)
+    response = client.post("/api/demo/advance", json={"days": 1})
+    assert response.status_code == 409 and response.json()["detail"] == ADVANCING
+    advance_jobs.forget(world.business.id)
+    advance_jobs.start(world.business.id + 1, 1)
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
+    assert client.get("/api/demo/status").json()["advance"] == {"state": "done", "days": 1, "done": 1, "error": ""}
 
 
 @pytest.mark.parametrize("demo", [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 10, 26, tzinfo=UTC)], indirect=True)
@@ -219,9 +228,12 @@ def test_thirty_days_real_plan_budget_and_autopilot(demo, monkeypatch):
     other = Business(id=999, user_id=999, status="running", settings={})
     worker.repository.save(other)
     response = client.post("/api/demo/advance", json={"days": 30})
-    assert response.status_code == 200, response.text
-    assert response.json()["total_days"] == 30
-    assert client.get("/api/demo/status").json()["today"] == (start + timedelta(days=30)).date().isoformat()
+    assert response.status_code == 202, response.text
+    assert response.json()["advance"] == {"state": "running", "days": 30, "done": 0, "error": ""}
+    status = client.get("/api/demo/status").json()
+    assert status["total_days"] == 30
+    assert status["advance"] == {"state": "done", "days": 30, "done": 30, "error": ""}
+    assert status["today"] == (start + timedelta(days=30)).date().isoformat()
     assert all(row.spent_kop <= world.business.month_budget_kop for row in worker.repository.rows(BudgetLedger))
     assert sum(world.adapters["direct"]._spent.values()) > 0
     monthly = {}
@@ -276,3 +288,233 @@ def test_demo_account_has_token_for_not_null_column():
 
     prepare_business(Repository(), Business(id=1))
     assert [account.access_token_enc for account in added] == ["demo"]
+
+
+class BusyConnection:
+    """Соединение, на котором блокировку бизнеса уже держит другой процесс."""
+
+    engine = None
+
+    def connect(self):
+        return nullcontext(self)
+
+    def scalar(self, *args):
+        return False
+
+
+def enable_demo(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "platform_mode", "fake")
+    monkeypatch.setattr(settings, "demo_login", True)
+
+
+def two_businesses(shifted: datetime) -> MemoryWorkerRepository:
+    repository = MemoryWorkerRepository()
+    repository.save(
+        Business(id=1, user_id=1, status="running", settings={"_demo": {"days": 45, "now": shifted.isoformat()}}),
+        Business(id=2, user_id=2, status="running", settings={}),
+    )
+    return repository
+
+
+async def test_worker_runs_each_business_by_its_own_clock(monkeypatch):
+    from app.worker.jobs import schedule_key
+
+    enable_demo(monkeypatch)
+    base = VirtualClock(datetime(2026, 1, 5, 7, tzinfo=UTC))
+    shifted = datetime(2026, 2, 19, 7, tzinfo=UTC)
+    repository = two_businesses(shifted)
+    seen = []
+
+    async def record(worker, business):
+        seen.append((business.id, worker.clock.now))
+
+    monkeypatch.setattr("app.worker.jobs.handlers", lambda: defaultdict(lambda: record))
+    worker = Worker(repository, lambda business_id, platform: None, clock=base, dry_run=False)
+    await worker.run_due()
+    assert worker.clock is base
+    assert {now for business_id, now in seen if business_id == 1} == {shifted}
+    assert {now for business_id, now in seen if business_id == 2} == {base.now}
+    for business_id, now in ((1, shifted), (2, base.now)):
+        runs = repository.rows(WorkerRun, business_id)
+        assert runs and all(run.log[0]["key"] == schedule_key(run.kind, now) for run in runs)
+        assert all(run.started_at == now for run in runs)
+
+
+async def test_background_tick_skips_businesses_frozen_in_demo(monkeypatch):
+    from app.demo_flags import demo_frozen
+
+    enable_demo(monkeypatch)
+    base = VirtualClock(datetime(2026, 1, 5, 7, tzinfo=UTC))
+    repository = two_businesses(datetime(2026, 2, 19, 7, tzinfo=UTC))
+    plain = repository.business(2)
+    assert demo_frozen(repository.business(1)) and not demo_frozen(plain)
+    advance_jobs.start(2, 1)
+    try:
+        assert demo_frozen(plain)
+    finally:
+        advance_jobs.forget(2)
+
+    async def record(worker, business):
+        pass
+
+    monkeypatch.setattr("app.worker.jobs.handlers", lambda: defaultdict(lambda: record))
+    await Worker(repository, lambda business_id, platform: None, clock=base, dry_run=False).run_due(skip=demo_frozen)
+    assert not repository.rows(WorkerRun, 1)
+    assert repository.rows(WorkerRun, 2)
+
+
+def test_other_actions_get_conflict_while_advance_holds_business(demo, monkeypatch):
+    from app.worker.locks import business_lock
+
+    client, world, worker = demo
+    launch(client)
+    advance_jobs.start(world.business.id, 1).locked = True
+    monkeypatch.setattr(
+        type(worker.repository),
+        "business_lock",
+        lambda self, business_id: business_lock(BusyConnection(), business_id),
+    )
+    for path in ("/api/autopilot/pause", "/api/autopilot/resume"):
+        response = client.post(path)
+        assert response.status_code == 409 and response.json()["detail"] == ADVANCING
+
+
+def test_business_locks_name_the_advance():
+    from types import SimpleNamespace
+
+    from app.services.changes import ChangesRepository
+    from app.worker.locks import business_lock
+
+    def conflict(lock):
+        with pytest.raises(ChangeConflict) as error, lock():
+            pass
+        return str(error.value)
+
+    changes = ChangesRepository(SimpleNamespace(get_bind=BusyConnection))
+    locks = (lambda: changes.business_lock(7), lambda: business_lock(BusyConnection(), 7))
+    try:
+        progress = advance_jobs.start(7, 1)
+        assert ADVANCING not in {conflict(lock) for lock in locks}
+        progress.locked = True
+        assert {conflict(lock) for lock in locks} == {ADVANCING}
+        progress.state = "done"
+        assert ADVANCING not in {conflict(lock) for lock in locks}
+    finally:
+        advance_jobs.forget(7)
+
+
+@pytest.mark.parametrize(
+    "error,message",
+    [(ChangeConflict("Сначала запустите рекламу."), "Сначала запустите рекламу."),
+     (RuntimeError("secret"), "Перемотка прервалась. Попробуйте ещё раз.")],
+)
+def test_background_advance_failure_is_reported(demo, monkeypatch, error, message):
+    client, _, _ = demo
+    launch(client)
+
+    async def fail(self, business_id, progress):
+        raise error
+
+    monkeypatch.setattr(DemoService, "advance", fail)
+    assert client.post("/api/demo/advance", json={"days": 7}).status_code == 202
+    status = client.get("/api/demo/status").json()
+    assert status["advance"] == {"state": "error", "days": 7, "done": 0, "error": message}
+    assert client.post("/api/demo/advance", json={"days": 7}).status_code == 202
+
+
+def test_advance_reports_progress_by_day(demo, monkeypatch):
+    client, world, worker = demo
+    launch(client)
+    done = []
+    run_due = Worker.run_due
+
+    async def watch(self, skip=None):
+        done.append(advance_jobs.get(world.business.id).done)
+        await run_due(self, skip)
+
+    monkeypatch.setattr(Worker, "run_due", watch)
+    assert client.post("/api/demo/advance", json={"days": 3}).status_code == 202
+    assert done == [0] * 48 + [1] * 48 + [2] * 48
+    assert advance_jobs.get(world.business.id).done == 3
+
+
+def test_status_date_uses_configured_timezone(demo, monkeypatch):
+    from app.api.stats import get_today
+    from app.config import settings
+
+    client, world, _ = demo
+    client.app.dependency_overrides.pop(get_today)
+    monkeypatch.setattr(settings, "tz_default", "Asia/Vladivostok")
+    world.business.settings = {"_demo": {"days": 1, "now": "2026-01-01T20:30:00+00:00"}}
+    assert client.get("/api/demo/status").json()["today"] == "2026-01-02"
+
+
+def test_demo_settings_are_reread_under_lock_and_merged(demo, monkeypatch):
+    client, world, worker = demo
+    launch(client)
+    world.business.settings = world.business.settings | {"_demo": {"days": 2, "now": worker.clock.now.isoformat()}}
+    depth = []
+
+    @contextmanager
+    def lock(self, business_id):
+        depth.append(business_id)
+        try:
+            yield
+        finally:
+            depth.pop()
+
+    def refresh(self, item):
+        assert depth, "настройки перечитываются только под блокировкой бизнеса"
+        # Другой процесс успел записать свои поля между шагами перемотки.
+        item.settings = item.settings | {"owner": "kept", "_demo": item.settings["_demo"] | {"note": "kept"}}
+
+    monkeypatch.setattr(type(worker.repository), "business_lock", lock)
+    monkeypatch.setattr(type(worker.repository), "refresh", refresh)
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
+    settings = world.business.settings
+    assert settings["owner"] == "kept"
+    assert settings["_demo"]["note"] == "kept" and settings["_demo"]["days"] == 3
+
+
+@pytest.mark.parametrize(
+    "url,demo_login,allowed",
+    [
+        ("https://localhost", True, True),
+        ("http://localhost:8080", True, True),
+        ("http://127.0.0.1:8000", True, True),
+        ("https://autopilot.example", True, False),
+        ("https://localhost.example", True, False),
+        ("ftp://localhost", True, False),
+        ("https://autopilot.example", False, True),
+    ],
+)
+def test_demo_login_only_with_local_base_url(monkeypatch, url, demo_login, allowed):
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    monkeypatch.setenv("APP_BASE_URL", url)
+    monkeypatch.setenv("DEMO_LOGIN", "1" if demo_login else "0")
+    if allowed:
+        assert Settings().app_base_url == url
+    else:
+        with pytest.raises(ValidationError, match="DEMO_LOGIN is allowed only on a local stand"):
+            Settings()
+
+
+async def test_scheduler_start_warns_about_demo(monkeypatch, caplog):
+    from app.worker import main
+
+    async def tick(registry, kind="due"):
+        pass
+
+    monkeypatch.setattr(main, "run_tick", tick)
+    monkeypatch.setattr(main, "build_scheduler", lambda registry: type("Scheduler", (), {"start": lambda self: None})())
+    for enabled in (False, True):
+        enable_demo(monkeypatch)
+        monkeypatch.setattr("app.config.settings.demo_login", enabled)
+        caplog.clear()
+        await main.start_scheduler(None)
+        assert any(record.levelname == "WARNING" for record in caplog.records) is enabled

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth.sessions import Repository, current_user
 from app.db.models import Business, User
-from app.services.demo import demo_now
+from app.demo_flags import demo_now
 from app.services.stats import Level, StatsRepository, StatsService
 
 router = APIRouter(prefix="/api/stats")

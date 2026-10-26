@@ -108,9 +108,6 @@ async def stop_all(
 
 
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:
-    from app.services.demo import bind_worker_clock
-
-    bind_worker_clock(worker, business)
     from app.config import get_domain_settings
 
     domain = get_domain_settings()

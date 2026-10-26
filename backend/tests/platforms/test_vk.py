@@ -309,7 +309,7 @@ async def test_get_moderation_maps_status_and_reasons(adapter: VkAdapter, api) -
 
 
 async def test_get_stats_converts_rubles_to_kopecks_and_maps_campaign(adapter: VkAdapter, api) -> None:
-    today = datetime.now(UTC).date()
+    today = datetime.now(adapter._tz).date()
     api.get(f"{API}/ad_groups.json").respond(json={"count": 1, "items": [{"id": 20, "ad_plan_id": 10}]})
     api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 30, "ad_group_id": 20}]})
     route = api.get(f"{API}/statistics/banners/day.json").respond(

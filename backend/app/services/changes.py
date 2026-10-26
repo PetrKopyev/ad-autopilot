@@ -8,6 +8,7 @@ from sqlalchemy import Connection, func, select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
+from app.demo_flags import ADVANCING, advance_jobs
 from app.domain.explain import TEMPLATES, explain
 from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
 
@@ -108,7 +109,11 @@ class ChangesRepository:
         with context as connection:
             acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id})
             if not acquired:
-                raise ChangeConflict("Изменение этого бизнеса уже выполняется. Попробуйте позже.")
+                raise ChangeConflict(
+                    ADVANCING
+                    if advance_jobs.holds_lock(business_id)
+                    else "Изменение этого бизнеса уже выполняется. Попробуйте позже."
+                )
             try:
                 yield
             finally:
