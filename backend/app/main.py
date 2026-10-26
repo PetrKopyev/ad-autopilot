@@ -2,6 +2,7 @@ from fastapi import APIRouter, FastAPI
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.auth import router as auth_router
 from app.config import settings
 from app.db.session import engine
 
@@ -23,3 +24,4 @@ def health() -> dict[str, bool | str]:
 
 
 app.include_router(router)
+app.include_router(auth_router)
