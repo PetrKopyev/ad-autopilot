@@ -139,6 +139,9 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
 
 
 async def optimize(worker: Worker, business: Business) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     from app.config import get_domain_settings
 
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
@@ -232,6 +235,9 @@ async def optimize(worker: Worker, business: Business) -> None:
 
 
 async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     from app.config import get_domain_settings
 
     domain = get_domain_settings()
@@ -365,6 +371,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
     running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]

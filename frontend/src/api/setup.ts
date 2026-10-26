@@ -1,6 +1,7 @@
 import { api, ApiError } from './client';
 import { mockEnabled } from './screens';
 import { copy } from '../copy';
+import { demoDateKey } from './demo';
 
 export interface Account {
   id: number; business_id: number; platform: 'direct' | 'vk'; external_login: string;
@@ -36,11 +37,13 @@ export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boole
 }
 export async function demoLogin() {
   await api('/api/auth/demo', { method: 'POST' });
+  try { sessionStorage.removeItem('ad-autopilot-setup-draft'); sessionStorage.removeItem(demoDateKey); } catch { /* Storage may be unavailable. */ }
 }
 export async function logout() {
   if (mockEnabled) (await import('./mocks')).mockSetupLogout();
   else await api('/api/auth/logout', { method: 'POST' });
   try { sessionStorage.removeItem('ad-autopilot-setup-draft'); } catch { /* Storage may be unavailable. */ }
+  try { sessionStorage.removeItem(demoDateKey); } catch { /* Storage may be unavailable. */ }
 }
 export async function disconnectAccount(id: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupDisconnect(id); return; }

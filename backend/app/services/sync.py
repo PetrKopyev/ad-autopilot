@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
 
 async def sync_stats(worker: Worker, business: Business) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     end = today(worker.clock)
     start = end - timedelta(days=6)
     campaigns = worker.campaigns(business)
@@ -67,6 +70,9 @@ async def sync_stats(worker: Worker, business: Business) -> None:
 
 
 async def sync_moderation(worker: Worker, business: Business) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     ads = {ad.external_id: ad for ad in worker.repository.rows(Ad, business.id)}
     meta = worker.metadata(business)
     approvals = meta.get("approvals", {})

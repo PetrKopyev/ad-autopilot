@@ -436,6 +436,6 @@ def test_demo_login_rotates_session_and_issues_working_csrf(client, repository, 
     assert client.post("/api/auth/demo").status_code == 204
     assert repository.get_session(previous) is None
     assert client.cookies["__Host-session"] != previous
-    assert len(repository.users) == 1
+    assert len(repository.users) == 2
     assert client.post("/api/auth/logout", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]}).status_code == 204
     assert client.get("/api/me").status_code == 401

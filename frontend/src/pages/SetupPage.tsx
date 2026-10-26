@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { Button, Card, ErrorBanner, Stepper } from '../components';
 import { copy } from '../copy';
-import { checkSite, connectAccount, createBusiness, disconnectAccount, getCounters, getGoals, getMe,
+import { checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getCounters, getGoals, getMe,
   rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
 import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck } from '../api/setup';
 import { useSession } from '../api/session';
@@ -46,6 +46,16 @@ export function SetupPage() {
   const current = Number(step ?? draft.maxStep);
   const direct = me?.accounts.find((account) => account.platform === 'direct' && account.status === 'ok');
   const vk = me?.accounts.find((account) => account.platform === 'vk' && account.status === 'ok');
+  useEffect(() => {
+    const controller = new AbortController();
+    void getAuthConfig(controller.signal).then((config) => {
+      if (!config.demo || controller.signal.aborted) return;
+      setWebsite((value) => value || 'https://salon.example/');
+      setCity((value) => value || 'Москва');
+      setBudget((value) => value || '30000');
+    }).catch(() => {});
+    return () => controller.abort();
+  }, []);
   useEffect(() => {
     try { sessionStorage.setItem(storageKey, JSON.stringify(draft)); } catch { /* Keep the current form usable. */ }
   }, [draft]);
@@ -106,6 +116,7 @@ export function SetupPage() {
       const input = { site_url: url.href, city: city.trim(), month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }
       const business = await createBusiness(input);
+      session.reload();
       setDraft({ business, counter: 0, goals: [], approved: false, maxStep: 2 }); navigate('/setup/2');
     } else if (current === 2) {
       const fresh = await getMe();

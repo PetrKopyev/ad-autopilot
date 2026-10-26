@@ -172,7 +172,14 @@ class LaunchService:
                 self.save_launch(
                     plan, campaigns=plan.payload.get("launch", {}).get("campaigns", {}) | {platform: campaign.id}
                 )
-            refs = await adapter.create_campaign_tree(self.spec(business, campaign, groups, images))
+            spec = self.spec(business, campaign, groups, images)
+            from app.config import settings
+            from app.platforms.fake import FakeAdapter
+            from app.services.demo import configure_adapter
+
+            if settings.platform_mode == "fake" and settings.demo_login and isinstance(adapter, FakeAdapter):
+                configure_adapter(adapter, spec)
+            refs = await adapter.create_campaign_tree(spec)
             self.bind(campaign, refs)
             created[platform] = (campaign, refs)
             self.repository.commit()

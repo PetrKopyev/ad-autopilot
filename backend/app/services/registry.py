@@ -158,8 +158,13 @@ class DemoLLM:
         if "визуальные идеи" in system:
             return json.dumps({"ideas": [f"Уютная сцена: {segment}" for segment in json.loads(user)["segments"]]})
         if "Напиши объявление" in system:
-            return json.dumps({"title": "Услуги и запись", "title2": "", "text": "Подробности и запись."})
-        return json.dumps({"services": [], "address": {"value": "", "quote": ""}, "advantages": []})
+            data = json.loads(user)
+            title = next(iter(data.get("facts", [])), "Услуги и запись")
+            text = "Подробности и запись." if data.get("angle") == "цена" else "Выберите время для записи."
+            return json.dumps({"title": title, "title2": "", "text": text}, ensure_ascii=False)
+        from app.services.demo import DEMO_DESCRIPTION
+
+        return json.dumps(DEMO_DESCRIPTION, ensure_ascii=False)
 
 
 class DemoArt:

@@ -3,7 +3,7 @@ x-backend: &backend
   build:
     context: ../backend
   env_file:
-    - ../.env
+    - ${BACKEND_ENV_FILE:-../.env}
   environment:
     MEDIA_DIR: /data/media
   restart: unless-stopped

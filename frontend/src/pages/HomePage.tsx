@@ -6,6 +6,8 @@ import { getAutopilotStatus, getHistory, getSummary, stopAllAds } from '../api/s
 import { displayDate, displayTime, getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { ClientsSummary, DemoNotice, PeriodPicker, Sources, SummaryFigures } from './StatsShared';
+import { DemoPanel } from '../components/DemoPanel';
+import { resumeAutopilot } from '../api/settings';
 import './Home.css';
 
 export function HomePage() {
@@ -18,6 +20,8 @@ export function HomePage() {
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string>();
   const [stopped, setStopped] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState('');
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60000);
@@ -41,11 +45,19 @@ export function HomePage() {
       <Button variant="danger" onClick={() => { setStopError(undefined); dialog.current?.showModal(); }} disabled={stopping || stopped || status?.status === 'paused'}>{copy.home.stopAll}</Button>
     </div>
     <DemoNotice />
+    <DemoPanel changed={() => { summary.reload(); autopilot.reload(); history.reload(); }} />
     {stopped && <p role="status">{copy.screens.stopped}</p>}
     <Card className="page-stack">
       {autopilot.loading && <p role="status">{copy.screens.loading}</p>}
       {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
       {status && <StatusBadge tone={stale ? 'danger' : status.status === 'running' ? 'success' : 'warning'}>{statusText}</StatusBadge>}
+      {status?.status === 'paused' && <Button disabled={resuming} onClick={() => {
+        setResuming(true); setResumeError('');
+        void resumeAutopilot().then(() => { setStopped(false); autopilot.reload(); history.reload(); })
+          .catch((reason: unknown) => setResumeError(reason instanceof Error ? reason.message : copy.errors.generic))
+          .finally(() => setResuming(false));
+      }}>{copy.settings.resume}</Button>}
+      {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
       {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
       {summary.data && <BudgetRing spentKopecks={summary.data.budget.spent_kop} budgetKopecks={summary.data.budget.budget_kop} daysRemaining={summary.data.budget.days_remaining} />}
     </Card>

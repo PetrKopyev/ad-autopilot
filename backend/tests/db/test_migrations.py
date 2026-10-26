@@ -10,6 +10,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import CheckConstraint, MetaData, create_engine, create_mock_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.schema import CreateSchema
 
 from alembic import command
@@ -103,4 +104,30 @@ def test_migration_upgrade_downgrade(test_settings) -> None:
             finally:
                 transaction.rollback()
     finally:
+        engine.dispose()
+
+
+@pytest.mark.db
+def test_upgrade_without_external_connection_commits(test_settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is required")
+    url = make_url(database_url)
+    if url.get_backend_name() != "postgresql":
+        pytest.skip("TEST_DATABASE_URL must point to PostgreSQL")
+    schema = "test_migrations_" + uuid4().hex
+    scoped_url = url.update_query_dict({"options": f"-csearch_path={schema}"})
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        monkeypatch.setattr(test_settings, "database_url", scoped_url.render_as_string(hide_password=False))
+        command.upgrade(Config(str(BACKEND / "alembic.ini")), "head")
+        with engine.connect() as connection:
+            assert set(inspect(connection).get_table_names(schema=schema)) == set(Base.metadata.tables) | {
+                "alembic_version"
+            }
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         engine.dispose()

@@ -7,12 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from app.api.autopilot import Screens
+from app.api.demo import router as demo_router
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_user, require_csrf
+from app.content.site_reader import read_site
 from app.db.models import User
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
 from app.services.changes import ChangeConflict
+from app.services.demo import prepare_business, read_demo_site
 from app.services.onboarding import (
     MAX_BUDGET_KOP,
     AiLimits,
@@ -24,6 +27,7 @@ from app.services.onboarding import (
 from app.services.registry import build_llm
 
 router = APIRouter(prefix="/api")
+router.include_router(demo_router)
 
 
 class BusinessIn(BaseModel):
@@ -79,6 +83,7 @@ def get_onboarding_service(request: Request) -> Iterator[OnboardingService]:
             build_llm(settings, request.app.state.http),
             request.app.state.platform_adapters.metrica,
             AiLimits.from_settings(settings),
+            reader=read_demo_site if settings.platform_mode == "fake" else read_site,
         )
 
 
@@ -88,8 +93,13 @@ CurrentUser = Annotated[User, Depends(current_user)]
 
 @router.post("/business", dependencies=[Depends(require_csrf)])
 def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> dict:
+    from app.api.auth import demo_enabled
+
     with human_errors():
-        return service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
+        result = service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
+        if demo_enabled():
+            prepare_business(service.repository, service.repository.business(result["id"]))
+        return result
 
 
 @router.get("/business/site-check")

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth.sessions import Repository, current_user
 from app.db.models import Business, User
+from app.services.demo import demo_now
 from app.services.stats import Level, StatsRepository, StatsService
 
 router = APIRouter(prefix="/api/stats")
@@ -40,10 +41,11 @@ def get_stats_service() -> Iterator[StatsService]:
         yield StatsService(StatsRepository(db))
 
 
-def get_today() -> date:
+def get_today(business: Annotated[Business, Depends(get_business)]) -> date:
     from app.config import settings
 
-    return datetime.now(ZoneInfo(settings.tz_default)).date()
+    zone = ZoneInfo(settings.tz_default)
+    return demo_now(business, datetime.now(zone)).astimezone(zone).date()
 
 
 CurrentBusiness = Annotated[Business, Depends(get_business)]

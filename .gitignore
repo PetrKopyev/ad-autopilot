@@ -11,3 +11,4 @@ dist/
 .mypy_cache/
 *.log
 .tasks/
+!.env.demo.example

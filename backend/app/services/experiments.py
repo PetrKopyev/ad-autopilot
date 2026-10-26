@@ -308,6 +308,12 @@ async def launch_variant(worker, business, campaign, group, control, change, des
         raise ChangeConflict("Добавление варианта пока не подтверждено; требуется повторная сверка.")
     variant = next((item for item in repository.rows(Ad, business.id) if item.external_id == state.entity_id), None)
     if variant is None:
+        from app.config import settings
+        from app.platforms.fake import FakeAdapter
+
+        if settings.platform_mode == "fake" and settings.demo_login and isinstance(adapter, FakeAdapter):
+            truth = adapter._ad_truths[control.external_id]
+            adapter._ad_truths[state.entity_id] = replace(truth, ctr=min(1, truth.ctr * 2), conversion_rate=0.15)
         variant = Ad(
             ad_group_id=group.id,
             external_id=state.entity_id,

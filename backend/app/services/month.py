@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 
 async def month_rollover(worker: Worker, business: Business) -> None:
+    from app.services.demo import bind_worker_clock
+
+    bind_worker_clock(worker, business)
     day = today(worker.clock)
     month = day.replace(day=1)
     meta = worker.metadata(business)

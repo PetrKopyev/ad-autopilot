@@ -51,7 +51,7 @@ def require_demo() -> None:
 
 @router.post("/auth/demo", dependencies=[Depends(require_demo)])
 def demo_login(request: Request, repository: Repository) -> Response:
-    user = repository.save_user("demo", "demo", None)
+    user = repository.save_user("demo-" + secrets.token_hex(16), "demo", None)
     session = create_session(user.id)
     repository.save_session(session, request.cookies.get(SESSION_COOKIE))
     response = Response(status_code=204, headers={"Cache-Control": "no-store"})
