@@ -88,3 +88,114 @@ export function mockExperiments() {
 export function mockHistory() {
   return { items: history.slice(0, 3).map((item) => ({ ...item })), total: history.length, page: 1, page_size: 3 };
 }
+
+// Onboarding demo state is independent of the running-campaign screen fixtures.
+import type { Business, BusinessInput, Description, Marking, Me, SiteCheck } from './setup';
+import type { Plan, PlanAsset } from './plan';
+interface SetupMockState {
+  me: Me; business?: Business; description?: Description; counter?: number; goals?: number[];
+  marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean;
+}
+const setupMockKey = 'ad-autopilot-setup-mock';
+function readSetupMock(): SetupMockState {
+  try { const saved = sessionStorage.getItem(setupMockKey); if (saved) return JSON.parse(saved) as SetupMockState; } catch { /* Storage may be unavailable. */ }
+  return { me: { id: 1, login: copy.launchFlow.mockLogin, email: null, accounts: [] } };
+}
+let setupMock = readSetupMock();
+function persistSetupMock() {
+  try { sessionStorage.setItem(setupMockKey, JSON.stringify(setupMock)); } catch { /* In-memory demo remains usable. */ }
+}
+export function mockSetupMe(): Me {
+  if (setupMock.signedOut) throw new Error(copy.errors.unauthorized);
+  return structuredClone(setupMock.me);
+}
+export function mockSetupConnect(platform: 'login' | 'direct' | 'vk') {
+  setupMock.signedOut = false;
+  if (platform !== 'login') {
+    setupMock.me.accounts = setupMock.me.accounts.filter((item) => item.platform !== platform);
+    setupMock.me.accounts.push({ id: platform === 'direct' ? 1 : 2, business_id: 1, platform,
+      external_login: copy.launchFlow.mockLogin, status: 'ok', scopes: [] });
+  }
+  persistSetupMock();
+}
+export function mockSetupLogout() { setupMock.signedOut = true; persistSetupMock(); }
+export function mockSetupDisconnect(id: number) {
+  setupMock.me.accounts = setupMock.me.accounts.filter((item) => item.id !== id);
+  setupMock.plan = undefined; persistSetupMock();
+}
+export function mockSetupBusiness(body: BusinessInput): Business {
+  setupMock.business = { ...body, id: 1 }; setupMock.description = undefined;
+  setupMock.counter = undefined; setupMock.goals = undefined; setupMock.marking = undefined; setupMock.plan = undefined;
+  persistSetupMock(); return structuredClone(setupMock.business);
+}
+export function mockSetupSite(): SiteCheck {
+  const field = (value: string, question: string) => ({ value, quote: value || null, verified: !!value, question });
+  return { status: setupMock.business?.site_url ? 'ready' : 'blocked', pages_read: 3, services_found: 2,
+    counter_id: setupMock.business?.site_url ? 12345 : null, medical_level: 'none',
+    description: {
+      services: field(copy.launchFlow.mockServices, copy.launchFlow.servicesQuestion),
+      prices: field(copy.launchFlow.mockPrices, copy.launchFlow.pricesQuestion),
+      address: field(copy.launchFlow.mockAddress, copy.launchFlow.addressQuestion),
+      difference: field('', copy.launchFlow.differenceQuestion),
+    } };
+}
+export function mockSetupDescription(description: Description) { setupMock.description = description; setupMock.plan = undefined; persistSetupMock(); }
+export function mockSetupCounters() { return { items: [{ id: 12345, name: copy.launchFlow.mockCounter }] }; }
+export function mockSetupGoals(counter: number) { return { items: counter === 12345 ? [{ id: 1, name: copy.launchFlow.mockGoal }] : [] }; }
+export function mockSetupMetrica(counter: number, goals: number[]) { setupMock.counter = counter; setupMock.goals = goals; persistSetupMock(); }
+export function mockSetupMarking(body: Marking) {
+  // Never keep the INN, phone or manual account key in browser storage.
+  setupMock.marking = body.confirmed_in_platform; setupMock.plan = undefined; persistSetupMock();
+}
+function mockAsset(id: number, selected = false): PlanAsset {
+  const color = id % 2 ? '#e7c2bb' : '#b8cfc3';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="600" height="400" fill="${color}"/><circle cx="180" cy="180" r="110" fill="#fff" opacity=".4"/><path d="M320 340Q200 200 370 60Q520 190 420 340" fill="#245e4c" opacity=".5"/></svg>`;
+  return { id, url: `data:image/svg+xml,${encodeURIComponent(svg)}`, kind: 'image', alt: copy.launchFlow.mockImage(id), selected };
+}
+export function mockSetupPlan(): Plan {
+  const direct = setupMock.me.accounts.some((item) => item.platform === 'direct' && item.status === 'ok');
+  const vk = setupMock.me.accounts.some((item) => item.platform === 'vk' && item.status === 'ok');
+  const budget = setupMock.business?.month_budget_kop ?? 0;
+  const vkBudget = vk ? Math.floor(budget / 2) : 0;
+  const marking = !!setupMock.marking?.direct && (!vk || !!setupMock.marking?.vk);
+  const ready = !!(setupMock.business && direct && setupMock.description && setupMock.counter && setupMock.goals?.length && marking);
+  if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
+    vk_budget_kop: vkBudget, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
+    marking_confirmed: marking, ready_to_launch: ready, status: 'draft',
+    groups: (vk ? ['direct', 'vk'] as const : ['direct'] as const).map((platform, index) => ({
+      id: index + 1, name: copy.plan.groupExample, platform, audience: copy.launchFlow.mockAudience,
+      daily_limit_kop: Math.floor((platform === 'vk' ? vkBudget : budget - vkBudget) / 31),
+      ads: [{ title: copy.screens.mockAdTitle, text: copy.screens.mockAdText }],
+      assets: [mockAsset(index * 100 + 1, true), mockAsset(index * 100 + 2)],
+    })) };
+  setupMock.plan.ready_to_launch = ready; setupMock.plan.marking_confirmed = marking;
+  return structuredClone(setupMock.plan);
+}
+export function mockPlanRegenerate(groupId: number): Plan {
+  mockSetupPlan(); const plan = setupMock.plan!;
+  if (plan.generations_remaining <= 0) throw new Error(copy.plan.generationLimit);
+  const group = plan.groups.find((item) => item.id === groupId);
+  if (!group) throw new Error(copy.errors.notFound);
+  const id = Math.max(...plan.groups.flatMap((item) => item.assets.map((asset) => asset.id))) + 1;
+  group.assets.push(mockAsset(id), mockAsset(id + 1)); plan.generations_remaining--; persistSetupMock(); return mockSetupPlan();
+}
+export async function mockPlanUpload(groupId: number, file: File): Promise<Plan> {
+  const url = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader(); reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error(copy.launchFlow.uploadError)); reader.readAsDataURL(file);
+  });
+  mockSetupPlan(); const group = setupMock.plan!.groups.find((item) => item.id === groupId);
+  if (!group) throw new Error(copy.errors.notFound);
+  group.assets.push({ id: Date.now(), url, kind: 'upload', alt: file.name, selected: true });
+  persistSetupMock(); return mockSetupPlan();
+}
+export function mockPlanAssets(ids: number[]) {
+  mockSetupPlan(); setupMock.plan!.groups.forEach((group) => group.assets.forEach((asset) => { asset.selected = ids.includes(asset.id); }));
+  persistSetupMock();
+}
+export function mockPlanLaunch(acknowledged: boolean) {
+  const plan = mockSetupPlan();
+  if (!plan.ready_to_launch || (plan.medical_level !== 'none' && !acknowledged)
+    || plan.groups.some((group) => !group.assets.some((asset) => asset.selected))) throw new Error(copy.launchFlow.notReady);
+  setupMock.plan!.status = 'launched'; persistSetupMock();
+}

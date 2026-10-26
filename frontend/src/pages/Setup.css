@@ -1,0 +1,25 @@
+.launch-flow { max-width: 900px; }
+.launch-flow .button { overflow-wrap: normal; word-break: normal; max-width: 100%; }
+.launch-flow .actions > .button { flex-basis: auto; }
+.launch-flow .field { display: grid; gap: var(--space-2); min-width: 0; }
+.launch-flow input:not([type=checkbox]), .launch-flow select, .launch-flow textarea { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-small); background: white; color: var(--color-text); }
+.launch-flow textarea { min-height: 100px; resize: vertical; }
+.launch-flow .check { display: flex; align-items: flex-start; gap: 12px; }
+.launch-flow input[type=checkbox] { flex: 0 0 20px; width: 20px; height: 20px; margin: 3px 0; accent-color: var(--color-primary); }
+.launch-flow fieldset { min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--color-border); border-radius: var(--radius-small); }
+.launch-flow legend { padding: 0 8px; font-weight: 650; }
+.launch-flow .notice { padding: 16px; background: var(--color-warning-soft); border-radius: var(--radius-small); color: var(--color-warning); display: grid; gap: 12px; }
+.launch-flow .account-grid, .launch-flow .image-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.launch-flow .image-choice { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--color-border); border-radius: 10px; }
+.launch-flow .image-choice:has(input:checked) { border-color: var(--color-primary); background: var(--color-primary-soft); }
+.launch-flow .image-choice img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: cover; border-radius: 6px; }
+.launch-flow details summary { cursor: pointer; padding: 8px 0; }
+.launch-flow .source { font-size: .9rem; color: var(--color-muted); }
+.launch-flow .stepper { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.launch-flow .stepper li > a, .launch-flow .stepper li > span { flex-direction: column; align-items: flex-start; font-size: .85rem; }
+@media (max-width: 600px) {
+  .launch-flow .account-grid { grid-template-columns: minmax(0, 1fr); }
+  .launch-flow .stepper { grid-template-columns: minmax(0, 1fr); }
+  .launch-flow .stepper li > a, .launch-flow .stepper li > span { flex-direction: row; align-items: center; }
+  .launch-flow .actions > .button { width: 100%; flex: 1 1 100%; }
+}
