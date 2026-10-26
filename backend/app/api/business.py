@@ -4,8 +4,9 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
+from app.api.autopilot import Screens
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_user, require_csrf
 from app.db.models import User
@@ -121,3 +122,29 @@ def save_marking(body: MarkingIn, business: CurrentBusiness, service: Service) -
         return service.save_marking(
             business.id, body.subject_type, body.inn, body.name, body.phone, body.confirmed_in_platform
         )
+
+
+class BudgetIn(BaseModel):
+    month_budget_kop: StrictInt = Field(gt=0)
+
+
+class SettingsIn(BaseModel):
+    auto_continue: StrictBool
+    avg_check_kop: StrictInt | None = Field(default=None, gt=0)
+
+
+@router.get("/business")
+def get_business(business: CurrentBusiness, service: Screens) -> dict:
+    return service.business(business)
+
+
+@router.put("/business/budget", dependencies=[Depends(require_csrf)])
+async def save_budget(body: BudgetIn, business: CurrentBusiness, service: Screens) -> dict:
+    with human_errors():
+        return await service.save_budget(business, body.month_budget_kop)
+
+
+@router.put("/business/settings", dependencies=[Depends(require_csrf)])
+def save_settings(body: SettingsIn, business: CurrentBusiness, service: Screens) -> dict:
+    with human_errors():
+        return service.save_settings(business, body.auto_continue, body.avg_check_kop)

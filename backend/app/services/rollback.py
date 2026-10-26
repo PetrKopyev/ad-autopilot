@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from app.db.models import Ad, AdGroup, Campaign, ChangeLog
+from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Experiment
 from app.platforms.base import AdPlatform, EntityState, Operation
 from app.services.changes import (
     ChangeConflict,
@@ -26,6 +26,13 @@ def inverse_operations(operations: Sequence[Operation], states: Mapping[str, Ent
     for op in reversed(operations):
         if op.entity_id in archived:
             continue
+        if op.kind == "add_ad":
+            state = states.get(op.entity_id)
+            if state is None or state.entity_type != "ad":
+                raise ValueError("Добавленное объявление не найдено на площадке.")
+            result.append(Operation("set_status", "ad", state.entity_id, "status", state.status, "paused_owner"))
+            archived.add(op.entity_id)
+            continue
         if op.invertible:
             result.append(op.inverse())
             continue
@@ -42,6 +49,20 @@ def inverse_operations(operations: Sequence[Operation], states: Mapping[str, Ent
             )
         )
         archived.add(op.entity_id)
+    return result
+
+
+def related_experiments(repository: ChangesRepository, change: ChangeLog) -> list[Experiment]:
+    result = repository.experiments(change)
+    experiment_id = change.evidence.get("experiment_id")
+    if experiment_id is not None and all(item.id != experiment_id for item in result):
+        # change_id после вердикта указывает на вердикт; связь запуска сохраняется в evidence.
+        if hasattr(repository, "rows"):
+            result.extend(item for item in repository.rows(Experiment, change.business_id) if item.id == experiment_id)
+        else:
+            item = repository.db.get(Experiment, experiment_id)
+            if item is not None and item.business_id == change.business_id:
+                result.append(item)
     return result
 
 
@@ -67,7 +88,7 @@ def finish_revert(repository: ChangesRepository, revert: ChangeLog, now: datetim
             frozen_entities[f"target:{op.entity_id}"] = frozen_until.isoformat()
     if original.entity_type == "group":
         frozen_entities = {f"group:{original.entity_id}": frozen_until.isoformat()}
-    for experiment in repository.experiments(original):
+    for experiment in related_experiments(repository, original):
         experiment.status = "cancelled"
         experiment.verdict = "control_wins"
         experiment.stats = dict(experiment.stats or {}) | {
@@ -158,7 +179,7 @@ class RollbackService:
                     preserved.append(replace(op, before=value, after=value))
                 inverse = preserved
             ads = {entity.id: entity for entity in entities.values() if isinstance(entity, Ad)}
-            for experiment in self.repository.experiments(original):
+            for experiment in related_experiments(self.repository, original):
                 for ad_id, status in ((experiment.control_ad_id, "active"), (experiment.variant_ad_id, "paused_owner")):
                     ad = ads.get(ad_id)
                     if ad is None or ad.external_id not in states:
@@ -187,9 +208,13 @@ class RollbackService:
                 evidence={
                     "confirmed": confirm,
                     "conflicts": mismatches,
-                    "warning": "Созданное объявление будет остановлено и убрано в архив."
-                    if any(not op.invertible for op in operations)
-                    else None,
+                    "warning": "Добавленное объявление будет остановлено."
+                    if any(op.kind == "add_ad" for op in operations)
+                    else (
+                        "Созданное объявление будет остановлено и убрано в архив."
+                        if any(not op.invertible for op in operations)
+                        else None
+                    ),
                     **(
                         {
                             "group_limits": {

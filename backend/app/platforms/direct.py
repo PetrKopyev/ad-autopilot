@@ -12,7 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -613,8 +613,60 @@ class DirectAdapter:
             "Загрузка видео требует отдельного процесса AdVideos/Creatives; используйте кабинет Директа."
         )
 
+    def _variant_href(self, ref: str) -> str:
+        parts = urlsplit(self._href)
+        query = [(key, value) for key, value in parse_qsl(parts.query) if key != "ap_ref"]
+        return urlunsplit(parts._replace(query=urlencode([*query, ("ap_ref", ref)])))
+
+    async def _find_added_ad(self, ref: str, group_ids: list[str]) -> str | None:
+        matches = [
+            str(item["Id"])
+            for item in await self._ads({"AdGroupIds": [int(id_) for id_ in group_ids]})
+            if dict(parse_qsl(urlsplit(item.get("TextAd", item.get("ResponsiveAd", {})).get("Href", "")).query)).get(
+                "ap_ref"
+            )
+            == ref
+        ]
+        if len(matches) > 1:
+            raise PlatformError("Неоднозначный ключ варианта в Директе.")
+        return matches[0] if matches else None
+
+    async def _add_ad(self, operation: Operation) -> None:
+        if not self._marking_confirmed or not self._href:
+            raise PlatformError("Для добавления варианта нужны ссылка и подтверждение рекламодателя.")
+        content = operation.after
+        async with self._create_lock:
+            ad_id = await self._find_added_ad(operation.entity_id, [content["group_id"]])
+            if ad_id is None:
+                image = await self._image_ref(content["image_ref"])
+                if self._text_campaign:
+                    kind = "TextAd"
+                    body = {
+                        "Title": content["title"],
+                        "Text": content["text"],
+                        "Href": self._variant_href(operation.entity_id),
+                        "Mobile": "NO",
+                    }
+                    if image:
+                        body["AdImageHash"] = image
+                else:
+                    kind = "ResponsiveAd"
+                    body = {
+                        "Titles": [content["title"]],
+                        "Texts": [content["text"]],
+                        "Href": self._variant_href(operation.entity_id),
+                    }
+                    if image:
+                        body["AdImageHashes"] = [image]
+                ad_id = await self._add("ads", "Ads", {"AdGroupId": int(content["group_id"]), kind: body})
+            # Повтор завершает модерацию после сбоя между Ads.add и moderate.
+            await self.apply(Operation("set_status", "ad", ad_id, "status", "pending", "active"))
+
     async def apply(self, operation: Operation) -> None:
         op = operation
+        if op.kind == "add_ad":
+            await self._add_ad(op)
+            return
         id_ = int(op.entity_id)
         services = {"campaign": "campaigns", "ad": "ads", "target": "keywords"}
         if op.kind == "set_status":
@@ -769,6 +821,20 @@ class DirectAdapter:
         )
 
     async def get_state(self, refs: ExternalRefs) -> dict[str, EntityState]:
+        aliases = {}
+        for ref in refs.ads.values():
+            if not ref.isdecimal():
+                found = await self._find_added_ad(ref, list(refs.groups.values()))
+                if found:
+                    aliases[ref] = found
+        refs = replace(
+            refs,
+            ads={
+                key: aliases.get(value, value)
+                for key, value in refs.ads.items()
+                if value.isdecimal() or value in aliases
+            },
+        )
         kind = "TextCampaign" if self._text_campaign else "UnifiedCampaign"
         campaigns = await self._get(
             "campaigns",
@@ -865,6 +931,7 @@ class DirectAdapter:
                 statuses = {child.status for child in children}
                 status = statuses.pop() if len(statuses) == 1 else "mixed" if statuses else "pending"
                 states[state.entity_id] = replace(state, status=status)
+        states.update({ref: states[id_] for ref, id_ in aliases.items() if id_ in states})
         return states
 
     @staticmethod

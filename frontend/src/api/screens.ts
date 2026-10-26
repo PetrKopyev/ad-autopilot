@@ -45,5 +45,5 @@ export async function getExperiments(signal?: AbortSignal): Promise<ExperimentsR
 }
 export async function getHistory(signal?: AbortSignal): Promise<HistoryResponse> {
   if (mockEnabled) return (await import('./mocks')).mockHistory();
-  return get('/api/history?limit=3&page_size=3', signal);
+  return get('/api/history?page_size=3', signal);
 }

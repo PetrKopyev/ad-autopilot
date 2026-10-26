@@ -1,14 +1,18 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from app.db.models import Experiment, StatsDaily
+from app.db.models import Ad, Experiment, StatsDaily
+from app.platforms.fake import AdTruth
+from app.services.experiments import create_experiment
 from app.services.optimize import experiments_tick
 from app.services.rollback import RollbackService
+from app.services.sync import sync_moderation, sync_stats
 from tests.integration.harness import make_world
+from tests.services.test_experiments import control_snapshot, design, wire_content
 
 
 async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_group_freeze():
-    """Вердикт существующего теста; создание нового блокируется интерфейсом адаптера."""
+    """Существующие до добавления add_ad тесты по-прежнему поддерживаются."""
     world = await make_world()
     control, variant = world.ads["borderline-1"], world.ads["borderline-2"]
     experiment = Experiment(
@@ -69,3 +73,82 @@ async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_gro
     assert control.frozen_until == variant.frozen_until == world.clock.now + timedelta(days=14)
     await experiments_tick(worker, world.business)
     assert len(world.changes(kind="experiment_verdict")) == 1
+
+
+async def test_live_variant_is_added_wins_from_fake_stats_and_rolls_back(tmp_path, monkeypatch):
+    world = await make_world()
+    world.clock.advance(days=7)
+    worker = world.worker(experiment_factory=create_experiment)
+    await sync_moderation(worker, world.business)
+    content = wire_content(world, tmp_path, monkeypatch)
+    before = await world.adapter.get_state(worker.refs(world.campaign))
+    launch = await create_experiment(worker, world.business, control_snapshot(world), design())
+    assert launch.status == "applied"
+    (experiment,) = world.repository.rows(Experiment)
+    control = world.ads["borderline-1"]
+    variant = next(item for item in world.repository.rows(Ad) if item.id == experiment.variant_ad_id)
+    assert variant.external_id not in before
+    assert variant.ad_group_id == control.ad_group_id
+    assert content.llm.calls == ["ad"]
+    # Весь поток показов, кликов, конверсий и расхода формирует Fake; строки не подставляются.
+    for ad_id in world.adapter._ad_truths:
+        world.adapter._ad_truths[ad_id] = AdTruth(0.01, 1, 0.3, 1200)
+    world.adapter._ad_truths[variant.external_id] = AdTruth(0.04, 1, 0.3, 1200)
+    await world.advance(worker, days=8)
+    # Правки бюджета в группе защищены паузой; вердикт читает уже осевшую статистику после неё.
+    world.clock.advance(days=3)
+    await sync_stats(worker, world.business)
+    pre_verdict = await world.adapter.get_state(worker.refs(world.campaign))
+    await experiments_tick(worker, world.business)
+    (change,) = world.changes(kind="experiment_verdict")
+    assert experiment.verdict == "variant_wins" and experiment.status == "concluded"
+    assert change.status == "applied" and change.id == experiment.change_id
+    assert "Оставили Б, А остановили" in change.reason_text
+    assert str(change.evidence["variant"]["impressions"]) in change.reason_text
+    assert str(change.evidence["variant"]["clicks"]) in change.reason_text
+    assert "4,0%" in change.reason_text and "1,0%" in change.reason_text
+    after = await world.adapter.get_state(worker.refs(world.campaign))
+    assert after[control.external_id].status == "paused_auto"
+    assert after[variant.external_id].status == "active"
+    assert after[world.campaign.external_id] == pre_verdict[world.campaign.external_id]
+    assert world.platform_spend() <= world.business.month_budget_kop
+    reverted = await RollbackService(world.repository, dry_run=False).revert(
+        change.id, business_id=world.business.id, adapter=world.adapter, now=world.clock.now
+    )
+    assert reverted.status == "applied" and change.status == "reverted"
+    restored = await world.adapter.get_state(worker.refs(world.campaign))
+    assert restored[control.external_id].status == "active"
+    assert restored[variant.external_id].status == "paused_owner"
+    assert all(restored[id_] == state for id_, state in pre_verdict.items() if id_ != variant.external_id)
+    assert experiment.status == "cancelled"
+    assert control.frozen_until == variant.frozen_until == world.clock.now + timedelta(days=14)
+    await experiments_tick(worker, world.business)
+    assert len(world.changes(kind="experiment_verdict")) == 1
+    assert sum(item.control_ad_id == control.id for item in world.repository.rows(Experiment)) == 1
+    assert world.platform_spend() <= world.business.month_budget_kop
+
+
+async def test_rollback_of_add_ad_pauses_variant_and_freezes_group(tmp_path, monkeypatch):
+    world = await make_world()
+    world.clock.advance(days=7)
+    worker = world.worker()
+    await sync_moderation(worker, world.business)
+    wire_content(world, tmp_path, monkeypatch)
+    before = await world.adapter.get_state(worker.refs(world.campaign))
+    launch = await create_experiment(worker, world.business, control_snapshot(world), design())
+    (experiment,) = world.repository.rows(Experiment)
+    variant = next(item for item in world.repository.rows(Ad) if item.id == experiment.variant_ad_id)
+    result = await RollbackService(world.repository, dry_run=False).revert(
+        launch.id, business_id=world.business.id, adapter=world.adapter, now=world.clock.now
+    )
+    assert result.status == "applied"
+    states = await world.adapter.get_state(worker.refs(world.campaign))
+    assert states[variant.external_id].status == "paused_owner"
+    assert all(states[id_] == state for id_, state in before.items())
+    assert experiment.status == "cancelled"
+    assert all(
+        ad.frozen_until == world.clock.now + timedelta(days=14)
+        for ad in world.repository.rows(Ad)
+        if ad.ad_group_id == variant.ad_group_id
+    )
+    assert await create_experiment(worker, world.business, control_snapshot(world), design()) is None

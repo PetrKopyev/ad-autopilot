@@ -111,7 +111,7 @@ async def snapshot(
                     states[campaign.external_id].status == "active"
                     or (
                         include_paused_campaigns
-                        and campaign.status == "paused_auto"
+                        and (campaign.status == "paused_auto" or campaign.id in meta.get("kill_switch_campaigns", []))
                         and states[campaign.external_id].status in {"paused_auto", "paused_owner"}
                         and not campaign.owner_paused
                     )
@@ -215,13 +215,16 @@ async def optimize(worker: Worker, business: Business) -> None:
         worker.remember(business, group_limits=limits)
 
 
-async def rebalance_budget(worker: Worker, business: Business) -> None:
-    if business.status != "running" or worker.metadata(business).get("kill_switch"):
+async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
+    if not force and (business.status != "running" or worker.metadata(business).get("kill_switch")):
         return
     day = today(worker.clock)
     month = day.replace(day=1)
     meta = worker.metadata(business)
     spent, lifetime = await read_spend(worker, business)
+    for ledger in worker.repository.rows(BudgetLedger, business.id):
+        if ledger.month == month:
+            spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
     campaigns = worker.campaigns(business)
     platforms = sorted({campaign.platform for campaign in campaigns})
     if not platforms:
@@ -237,8 +240,13 @@ async def rebalance_budget(worker: Worker, business: Business) -> None:
         prices[platform] = metrics.cpl
     previous = datetime.fromisoformat(meta.get("shares_at", worker.clock.now.isoformat()))
     shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days)
+    change = meta.get("budget_change", {})
+    budget = business.month_budget_kop
+    if change.get("effective_on", "") > day.isoformat():
+        # Увеличение начнёт работать завтра; снижение ограничивает расход сразу для безопасности.
+        budget = min(budget, change["before"])
     plan = plan_budget(
-        business.month_budget_kop,
+        budget,
         sum(spent.values()),
         day,
         platforms,

@@ -1,3 +1,5 @@
+import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -5,13 +7,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.db.models import Ad, AdGroup, ChangeLog, Experiment, StatsDaily, WorkerRun
+from app.content.ad_text import generate_ad_text
+from app.content.art import ART_COST_KOP
+from app.db.models import Ad, AdGroup, ArtCall, ChangeLog, Experiment, LLMCall, StatsDaily, WorkerRun
 from app.domain.experiments import evaluate_experiment
 from app.domain.types import AdSnapshot, DaySpend, ExperimentDesign, Verdict
 from app.services.experiments import completed_hypotheses, create_experiment
+from app.services.onboarding import AiLimits, Blocked
 from app.services.optimize import experiments_tick
 from app.services.sync import sync_moderation
-from tests.integration.harness import START, make_world
+from tests.integration.harness import START, Crash, CrashingAdapter, make_world
+from tests.services.test_onboarding import make_world as make_content_world
 
 
 @pytest.fixture
@@ -52,9 +58,26 @@ def running_experiment(world, *, group="borderline", hypothesis="text", status="
     return item
 
 
-async def test_factory_declines_unsupported_launch_before_any_paid_or_platform_write(experiment_world, monkeypatch):
+def wire_content(world, tmp_path, monkeypatch):
+    content = make_content_world(tmp_path)
+    content.repository.tables = world.repository.tables
+    world.business.description = {"fields": {"services": {"value": "Уход за волосами"}}}
+    content.llm.ad = json.dumps({"title": "Уход за волосами", "text": "Выберите уход за волосами"})
+    content.llm.cost_kop = 10
+
+    @asynccontextmanager
+    async def service(worker):
+        yield content.plans
+
+    monkeypatch.setattr("app.services.experiments.content_service", service)
+    return content
+
+
+async def test_factory_notifies_once_when_generation_refused_without_platform_write(experiment_world, monkeypatch):
     world = experiment_world
     before = await world.adapter.get_state(world.refs)
+    prepare = AsyncMock(side_effect=Blocked("Генерация отклонена"))
+    monkeypatch.setattr("app.services.experiments.prepare_variant", prepare)
     monkeypatch.setattr(world.adapter, "create_campaign_tree", AsyncMock(side_effect=AssertionError("new campaign")))
     monkeypatch.setattr(world.adapter, "apply", AsyncMock(side_effect=AssertionError("write")))
     worker = world.worker()
@@ -62,9 +85,10 @@ async def test_factory_declines_unsupported_launch_before_any_paid_or_platform_w
         assert await create_experiment(worker, world.business, control_snapshot(world), design()) is None
     assert await world.adapter.get_state(world.refs) == before
     assert not world.repository.rows(Experiment)
+    prepare.assert_awaited_once()
     notices = world.repository.rows(WorkerRun)
     assert len(notices) == 1
-    assert notices[0].log[0]["reason_code"] == "EXPERIMENT_UNSUPPORTED"
+    assert notices[0].log[0]["reason_code"] == "EXPERIMENT_GENERATION_FAILED"
 
 
 @pytest.mark.parametrize("global_dry,business_dry", [(True, False), (False, True), (True, True)])
@@ -244,3 +268,121 @@ async def test_tick_dry_run_does_not_conclude_or_pause_existing_test(experiment_
     assert experiment.status == "running" and experiment.change_id is None
     assert world.changes(kind="experiment_verdict")[0].status == "proposed"
     assert await world.adapter.get_state(world.refs) == before
+
+
+async def test_text_variant_is_added_once_in_same_group_and_uses_another_angle(experiment_world, tmp_path, monkeypatch):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    spy = AsyncMock(wraps=generate_ad_text)
+    monkeypatch.setattr("app.services.experiments.generate_ad_text", spy)
+    before = await world.adapter.get_state(world.refs)
+    first = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    second = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert first is second and first.status == "applied"
+    (experiment,) = world.repository.rows(Experiment)
+    variant = next(item for item in world.repository.rows(Ad) if item.id == experiment.variant_ad_id)
+    assert variant.id not in {item.id for item in world.ads.values()}
+    assert variant.ad_group_id == world.ads["borderline-1"].ad_group_id
+    assert spy.await_args.kwargs["angle"] == "результат"
+    assert content.llm.calls == ["ad"]
+    assert len(world.repository.rows(LLMCall)) == 1
+    assert content.repository.ai_spent(world.business.id) == 10
+    assert len(world.repository.rows(Ad)) == 7
+    refs = world.worker().refs(world.campaign)
+    states = await world.adapter.get_state(refs)
+    assert states[variant.external_id].creative == first.operations[0]["after"]
+    assert states[world.campaign.external_id] == before[world.campaign.external_id]
+    assert not any(op["kind"] == "set_budget" for op in first.operations)
+
+
+@pytest.mark.parametrize("failure", ["fallback", "validation", "same"])
+async def test_rejected_text_never_starts_test_or_pays_again(experiment_world, tmp_path, monkeypatch, failure):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    if failure == "fallback":
+        content.llm.ad = "invalid json"
+    elif failure == "validation":
+        monkeypatch.setattr("app.services.experiments.validate_ad_text", lambda *args, **kwargs: ["unsafe"])
+    else:
+        source = world.ads["borderline-1"]
+        content.llm.ad = json.dumps({"title": source.title, "text": source.text})
+    for _ in range(2):
+        assert await create_experiment(world.worker(), world.business, control_snapshot(world), design()) is None
+    assert not world.repository.rows(Experiment)
+    assert len(world.repository.rows(Ad)) == 6
+    assert len(content.llm.calls) == (3 if failure == "fallback" else 1)
+    assert len(world.repository.rows(WorkerRun)) == 1
+
+
+@pytest.mark.parametrize("weekly_limit,expected", [(2500, True), (0, False), (ART_COST_KOP - 1, False)])
+async def test_image_variant_respects_shared_ai_limit_and_is_not_regenerated(
+    experiment_world, tmp_path, monkeypatch, weekly_limit, expected
+):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    content.plans.limits = AiLimits(6000, weekly_limit)
+    running_experiment(world, hypothesis="text", status="concluded")
+    first = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    spent = content.repository.ai_spent(world.business.id)
+    second = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert bool(first) is expected
+    assert second is first
+    assert content.repository.ai_spent(world.business.id) == spent <= weekly_limit
+    if expected:
+        assert len(world.repository.rows(ArtCall)) == 1
+        (operation,) = first.operations
+        assert operation["after"]["image_ref"] != "fake-image"
+        assert operation["after"]["text"] == world.ads["borderline-1"].text
+    else:
+        assert not [item for item in world.repository.rows(Experiment) if item.status == "running"]
+
+
+async def test_image_upload_retry_does_not_pay_for_second_generation(experiment_world, tmp_path, monkeypatch):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    running_experiment(world, hypothesis="text", status="concluded")
+    upload = world.adapter.upload_image
+    monkeypatch.setattr(world.adapter, "upload_image", AsyncMock(side_effect=RuntimeError("upload failed")))
+    with pytest.raises(RuntimeError, match="upload failed"):
+        await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    spent = content.repository.ai_spent(world.business.id)
+    monkeypatch.setattr(world.adapter, "upload_image", upload)
+    result = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert result.status == "applied"
+    assert content.repository.ai_spent(world.business.id) == spent
+    assert len(world.repository.rows(ArtCall)) == 1
+
+
+async def test_restart_after_platform_add_recovers_by_ref_without_second_variant(tmp_path, monkeypatch):
+    world = await make_world(adapter_class=CrashingAdapter)
+    world.clock.advance(days=7)
+    await sync_moderation(world.worker(), world.business)
+    content = wire_content(world, tmp_path, monkeypatch)
+    world.adapter.crash = "after_apply"
+    with pytest.raises(Crash):
+        await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    worker = world.worker()
+    await worker.changes.recover_pending(worker.resolve_adapter, business_id=world.business.id, now=world.clock.now)
+    result = await create_experiment(worker, world.business, control_snapshot(world), design())
+    assert result.status == "applied"
+    assert len(world.repository.rows(Experiment)) == 1
+    assert len(world.repository.rows(Ad)) == 7
+    assert len(world.adapter._ads) == 7
+    assert content.llm.calls == ["ad"]
+
+
+async def test_restart_during_paid_generation_does_not_pay_again(experiment_world, tmp_path, monkeypatch):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    complete = content.llm.complete_json
+
+    async def crash(*args):
+        await complete(*args)
+        raise Crash
+
+    monkeypatch.setattr(content.llm, "complete_json", crash)
+    with pytest.raises(Crash):
+        await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert await create_experiment(world.worker(), world.business, control_snapshot(world), design()) is None
+    assert content.llm.calls == ["ad"]
+    assert not world.repository.rows(Experiment)

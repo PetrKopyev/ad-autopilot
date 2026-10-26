@@ -53,6 +53,7 @@ async def stop_all(
     reason_code: str = "OWNER_STOP",
     reason_params: dict | None = None,
     budget_stop: bool = False,
+    actor: str = "system",
 ) -> None:
     with worker.repository.business_lock(business.id):
         if not worker.proposed(business):
@@ -62,6 +63,7 @@ async def stop_all(
                     "reason_code": reason_code,
                     "reason_params": reason_params,
                     "budget_stop": budget_stop,
+                    "actor": actor,
                 },
                 **({"kill_switch": True} if not budget_stop else {}),
             )
@@ -72,11 +74,23 @@ async def stop_all(
                 state = states[campaign.external_id]
                 if state.status in {"paused_auto", "paused_owner", "archived"}:
                     continue
+                if actor == "owner" and not worker.proposed(business):
+                    stopped = worker.metadata(business).get("kill_switch_campaigns", [])
+                    worker.remember(business, kill_switch_campaigns=sorted(set(stopped) | {campaign.id}))
                 await worker.apply(
                     business,
                     campaign,
-                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto")],
-                    actor="system",
+                    [
+                        Operation(
+                            "set_status",
+                            "campaign",
+                            campaign.external_id,
+                            "status",
+                            state.status,
+                            "paused_owner" if actor == "owner" else "paused_auto",
+                        )
+                    ],
+                    actor=actor,
                     kind="pause",
                     reason_code=reason_code,
                     reason_params=reason_params,

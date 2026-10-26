@@ -6,9 +6,12 @@ from fastapi import APIRouter, FastAPI
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.ads import router as ads_router
 from app.api.auth import router as auth_router
+from app.api.autopilot import router as autopilot_router
 from app.api.business import router as business_router
 from app.api.clients import router as clients_router
+from app.api.experiments import router as experiments_router
 from app.api.history import router as history_router
 from app.api.plan import router as plan_router
 from app.api.stats import router as stats_router
@@ -59,3 +62,7 @@ app.include_router(clients_router)
 app.include_router(vk_router)
 app.include_router(business_router)
 app.include_router(plan_router)
+
+app.include_router(autopilot_router)
+app.include_router(ads_router)
+app.include_router(experiments_router)

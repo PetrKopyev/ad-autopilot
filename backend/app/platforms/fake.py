@@ -313,6 +313,34 @@ class FakeAdapter:
 
     async def apply(self, operation: Operation) -> None:
         self._request()
+        if operation.kind == "add_ad":
+            content = operation.after
+            group = self._states.get(content["group_id"])
+            if group is None or group.entity_type != "group":
+                raise PlatformError("Группа не найдена.", status_code=404)
+            tree = next(item for item in self._trees.values() if item.campaign_id == group.parent_id)
+            if operation.entity_id in tree.ads:
+                return
+            ad_id = self._external_id(group.entity_id, "ad", operation.entity_id)
+            ad = AdSpec(operation.entity_id, content["title"], content["text"], content["image_ref"])
+            self._states[ad_id] = EntityState(
+                ad_id,
+                "ad",
+                group.entity_id,
+                ad.title,
+                ad.status,
+                title=ad.title,
+                text=ad.text,
+                image_ref=ad.image_ref,
+            )
+            self._ads[ad_id] = ad
+            self._ad_truths[ad_id] = self._truths.get(ad.id, AdTruth())
+            self._campaigns[ad_id] = group.parent_id
+            self._rngs[ad_id] = Random(f"{self.seed}:{ad_id}")
+            tree.ads[operation.entity_id] = ad_id
+            self._submit_review(ad_id)
+            self._finish_reviews(self.clock.now)
+            return
         if operation.kind == "set_status":
             self._check_status(operation.after)
         state = self._states.get(operation.entity_id)
@@ -349,8 +377,16 @@ class FakeAdapter:
 
     async def get_state(self, refs: ExternalRefs) -> dict[str, EntityState]:
         self._request()
-        self._check_refs(refs)
-        return deepcopy({id_: self._states[id_] for id_ in refs.entity_ids()})
+        tree = next((item for item in self._trees.values() if item.campaign_id == refs.campaign_id), None)
+        if tree is None:
+            raise PlatformError("Дерево кампании не найдено.", status_code=404)
+        resolved = {id_: tree.ads.get(id_, id_) for id_ in refs.entity_ids()}
+        unresolved = {value for key, value in refs.ads.items() if key == value and value not in self._states}
+        self._check_refs(replace(refs, ads={key: resolved[value] for key, value in refs.ads.items()
+                                          if value not in unresolved or value in tree.ads}))
+        states = {key: self._states[value] for key, value in resolved.items() if value in self._states}
+        states.update({state.entity_id: state for state in list(states.values())})
+        return deepcopy(states)
 
     async def get_moderation(self, refs: ExternalRefs) -> list[ModerationInfo]:
         self._request()

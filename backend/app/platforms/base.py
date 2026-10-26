@@ -7,7 +7,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 type EntityType = Literal["campaign", "group", "ad", "target"]
 type StatLevel = Literal["campaign", "group", "ad"]
-type OperationKind = Literal["set_status", "set_budget", "update_ad_text", "swap_ad_image", "set_targeting"]
+type OperationKind = Literal["set_status", "set_budget", "update_ad_text", "swap_ad_image", "set_targeting", "add_ad"]
 
 
 def _money(value: int, name: str) -> None:
@@ -101,6 +101,7 @@ class Operation:
             "update_ad_text": {"title", "text"},
             "swap_ad_image": {"image_ref"},
             "set_targeting": {"targeting"},
+            "add_ad": {"creative"},
         }
         if self.kind not in fields or self.field not in fields[self.kind]:
             raise ValueError("Поле не соответствует виду операции.")
@@ -110,10 +111,27 @@ class Operation:
             "update_ad_text": {"ad"},
             "swap_ad_image": {"ad"},
             "set_targeting": {"group"},
+            "add_ad": {"ad"},
         }
         if self.entity_type not in entities[self.kind] or not self.entity_id:
             raise ValueError("Сущность не соответствует виду операции.")
+        if self.kind == "add_ad":
+            if self.before is not None or not isinstance(self.after, dict):
+                raise ValueError("Добавление объявления требует before=None и описание варианта.")
+            required = {"group_id", "title", "text", "image_ref"}
+            if (
+                set(self.after) != required
+                or any(
+                    not isinstance(self.after[name], str) or not self.after[name].strip()
+                    for name in ("group_id", "title", "text")
+                )
+                or self.after["image_ref"] is not None
+                and not isinstance(self.after["image_ref"], str)
+            ):
+                raise ValueError("Нужны группа, заголовок, текст и ссылка на картинку варианта.")
         for value in (self.before, self.after):
+            if self.kind == "add_ad":
+                continue
             if self.kind == "set_budget":
                 _money(value, self.field)
             elif self.kind == "set_targeting":
@@ -130,6 +148,8 @@ class Operation:
         object.__setattr__(self, "budget_context", deepcopy(self.budget_context))
 
     def inverse(self) -> "Operation":
+        if self.kind == "add_ad":
+            return Operation("set_status", "ad", self.entity_id, "status", "active", "paused_owner")
         if not self.invertible:
             raise ValueError("Операция необратима: требуется отдельная операция остановки/архивации.")
         return Operation(
@@ -161,6 +181,11 @@ class EntityState:
         for name in ("daily_limit_kop", "period_cap_kop"):
             if (value := getattr(self, name)) is not None:
                 _money(value, name)
+
+    @property
+    def creative(self) -> dict[str, Any]:
+        """Снимок добавленного объявления для сверки операции add_ad."""
+        return {"group_id": self.parent_id, "title": self.title, "text": self.text, "image_ref": self.image_ref}
 
 
 @dataclass(frozen=True)

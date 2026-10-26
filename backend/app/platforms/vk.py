@@ -1,5 +1,7 @@
+import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
@@ -106,6 +108,7 @@ class VkAdapter(VkClient):
         self._marking_confirmed = marking_confirmed
         self._tz = ZoneInfo(getattr(self._config, "tz_default", "Europe/Moscow"))
         self._trees: dict[str, ExternalRefs] = {}
+        self._add_ad_lock = asyncio.Lock()
 
     def _today(self) -> date:
         return datetime.now(self._tz).date()
@@ -257,8 +260,46 @@ class VkAdapter(VkClient):
     async def upload_video(self, file: Path) -> str:
         return await self._upload("content/video.json", file)
 
+    async def _find_added_ad(self, ref: str, group_ids: list[str]) -> str | None:
+        matches = [
+            str(item["id"])
+            for group_id in group_ids
+            for item in await self._items("banners", {"_ad_group_id": group_id, "fields": "id,name,ad_group_id"})
+            if str(item.get("ad_group_id")) == group_id and item.get("name", "").endswith(f" ap-{ref}")
+        ]
+        if len(matches) > 1:
+            raise PlatformError("Неоднозначный ключ варианта в VK.")
+        return matches[0] if matches else None
+
+    async def _add_ad(self, operation: Operation) -> None:
+        if not self._marking_confirmed or not self._href:
+            raise PlatformError("Для добавления варианта нужны ссылка и подтверждение рекламодателя.")
+        content = operation.after
+        if len(content["title"]) > API_FORMAT["title_limit"] or len(content["text"]) > API_FORMAT["text_limit"]:
+            raise PlatformError("Текст варианта превышает ограничения VK.")
+        async with self._add_ad_lock:
+            if await self._find_added_ad(operation.entity_id, [content["group_id"]]):
+                return
+            url = (await self._add("urls", {"url": self._href}))["id"]
+            body = {
+                "name": _named(content["title"], f"ap-{operation.entity_id}"),
+                "ad_group_id": int(content["group_id"]),
+                "status": "active",
+                "urls": {"primary": {"id": url}},
+                "textblocks": {
+                    API_FORMAT["title_key"]: {"text": content["title"]},
+                    API_FORMAT["text_key"]: {"text": content["text"]},
+                },
+            }
+            if content["image_ref"]:
+                body["content"] = {API_FORMAT["image_key"]: {"id": _integer(content["image_ref"])}}
+            await self._add("banners", body)
+
     async def apply(self, operation: Operation) -> None:
         op = operation
+        if op.kind == "add_ad":
+            await self._add_ad(op)
+            return
         id_ = int(op.entity_id)
         if op.kind == "set_status":
             if op.entity_type == "target":
@@ -297,6 +338,20 @@ class VkAdapter(VkClient):
             await self._update("ad_groups", id_, {"targetings": _targetings(op.after)})
 
     async def get_state(self, refs: ExternalRefs) -> dict[str, EntityState]:
+        aliases = {}
+        for ref in refs.ads.values():
+            if not ref.isdecimal():
+                found = await self._find_added_ad(ref, list(refs.groups.values()))
+                if found:
+                    aliases[ref] = found
+        refs = replace(
+            refs,
+            ads={
+                key: aliases.get(value, value)
+                for key, value in refs.ads.items()
+                if value.isdecimal() or value in aliases
+            },
+        )
         states = {}
         try:
             for item in await self._items(
@@ -349,6 +404,7 @@ class VkAdapter(VkClient):
                     )
         except (KeyError, TypeError, ValueError):
             raise invalid_response() from None
+        states.update({ref: states[id_] for ref, id_ in aliases.items() if id_ in states})
         return states
 
     @staticmethod
