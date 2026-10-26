@@ -252,7 +252,7 @@ async def test_unknown_irreversible_entity_is_not_guessed(tree):
 def client(monkeypatch, repository):
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "https://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "test-only")
     monkeypatch.setenv("DRY_RUN", "false")
 
@@ -354,7 +354,7 @@ async def test_postgresql_rollback_updates_original_ad_and_experiment(tree, monk
 
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "https://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     from app.config import Settings
 

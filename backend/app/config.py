@@ -1,8 +1,10 @@
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PLACEHOLDER_SECRET_KEY = "replace-with-random-secret"
 
 
 class Settings(BaseSettings):
@@ -28,6 +30,14 @@ class Settings(BaseSettings):
     ai_spend_onboarding_limit_rub: Decimal = Field(default=Decimal("60"), ge=0)
     ai_spend_weekly_limit_rub: Decimal = Field(default=Decimal("25"), ge=0)
     tz_default: str = "Europe/Moscow"
+
+    @field_validator("secret_key")
+    @classmethod
+    def strong_secret_key(cls, value: SecretStr) -> SecretStr:
+        secret = value.get_secret_value()
+        if len(secret) < 32 or secret == PLACEHOLDER_SECRET_KEY:
+            raise ValueError("SECRET_KEY must be at least 32 characters and not the .env.example placeholder")
+        return value
 
 
 settings = Settings()

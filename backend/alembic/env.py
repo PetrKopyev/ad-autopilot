@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, pool, text
 
 from alembic import context
 from app.config import settings
@@ -29,6 +29,7 @@ def run_migrations_online() -> None:
     engine = create_engine(settings.database_url, poolclass=pool.NullPool)
     try:
         with engine.connect() as connection:
+            connection.execute(text("SET lock_timeout = '5s'"))
             context.configure(connection=connection, target_metadata=Base.metadata, compare_type=True)
             with context.begin_transaction():
                 context.run_migrations()

@@ -15,7 +15,7 @@ from app.auth import vk
 from app.db.models import Business, PlatformAccount, User
 from app.platforms.base import AuthExpired, AuthSession
 
-from .conftest import FakeRepository
+from .conftest import FakeRepository, hash_token
 
 TOKEN = "https://ads.vk.com/api/v2/oauth2/token.json"
 USER = "https://ads.vk.com/api/v2/user.json"
@@ -85,7 +85,7 @@ def sign_in(client: TestClient, repository: FakeRepository, user_id: int = 1) ->
 
     session = create_session(user_id)
     repository.sessions[session.id] = session
-    client.cookies.set("__Host-session", session.id)
+    client.cookies.set("__Host-session", session.token)
     client.cookies.set("__Host-csrf", session.csrf_secret)
 
 
@@ -98,7 +98,7 @@ def start(client: TestClient) -> dict[str, str]:
 
 
 def key_request(client: TestClient, repository: FakeRepository, **body) -> httpx.Response:
-    csrf = repository.sessions[client.cookies["__Host-session"]].csrf_secret
+    csrf = repository.sessions[hash_token(client.cookies["__Host-session"])].csrf_secret
     payload = {"client_id": "own-id", "client_secret": "own-secret", **body}
     return client.post("/api/accounts/vk/key", json=payload, headers={"X-CSRF-Token": csrf})
 
@@ -171,7 +171,7 @@ def test_state_of_other_session_of_same_user_is_rejected(client, repository, vk_
 
     session = create_session(1)
     repository.sessions[session.id] = session
-    client.cookies.set("__Host-session", session.id)
+    client.cookies.set("__Host-session", session.token)
     assert client.get("/api/auth/vk/callback", params={"state": state, "code": "c"}).status_code == 400
     assert not vk_api.calls
 

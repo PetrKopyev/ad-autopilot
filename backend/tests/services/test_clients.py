@@ -116,7 +116,7 @@ def test_price_excludes_old_weeks_and_unknown_week_blocks_price(setup):
 def test_api_requires_owner_and_csrf(setup, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "https://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "test-only")
     monkeypatch.setenv("PLATFORM_MODE", "fake")
     from fastapi import FastAPI, HTTPException

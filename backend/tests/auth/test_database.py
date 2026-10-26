@@ -17,7 +17,7 @@ def test_tokens_are_encrypted_in_postgresql(monkeypatch: pytest.MonkeyPatch) -> 
         pytest.skip("TEST_DATABASE_URL is required")
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "https://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
     from app.auth.sessions import AuthRepository

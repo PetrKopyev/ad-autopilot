@@ -4,16 +4,15 @@ x-backend: &backend
     context: ../backend
   env_file:
     - ../.env
-  depends_on:
-    db:
-      condition: service_healthy
   restart: unless-stopped
 
 services:
   db:
     image: postgres:16-alpine
-    env_file:
-      - ../.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,18 +23,32 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  migrate:
+    <<: *backend
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
   api:
     <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
   worker:
     <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "app.worker.main"]
 
   caddy:
     image: caddy:2
-    env_file:
-      - ../.env
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
     ports:
       - "80:80"
       - "443:443"

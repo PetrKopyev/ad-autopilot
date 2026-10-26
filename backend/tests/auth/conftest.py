@@ -16,6 +16,10 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "db: requires an explicit TEST_DATABASE_URL and PostgreSQL")
 
 
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
@@ -24,21 +28,29 @@ class FakeRepository:
         self.businesses: dict[int, Business] = {}
         self.accounts: dict[int, PlatformAccount] = {}
         self.used_codes: set[str] = set()
+        self.assets: list[tuple[int, str]] = []
         self.stored_tokens: dict[int, dict[str, str | None]] = {}
 
-    def get_session(self, session_id: str) -> Session | None:
-        session = self.sessions.get(session_id)
+    def get_session(self, token: str) -> Session | None:
+        session = self.sessions.get(hash_token(token))
         return session if session and session.expires_at > datetime.now(UTC) else None
 
     def get_user(self, user_id: int) -> User | None:
         return self.users.get(user_id)
 
-    def save_session(self, session: Session, previous_id: str | None = None) -> None:
-        self.sessions.pop(previous_id, None)
+    def save_session(self, session: Session, previous_token: str | None = None) -> None:
+        self.sessions.pop(hash_token(previous_token) if previous_token else None, None)
         self.sessions[session.id] = session
 
     def delete_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
+
+    def delete_user(self, user_id: int) -> list[str]:
+        business_ids = {business.id for business in self.businesses.values() if business.user_id == user_id}
+        self.users.pop(user_id, None)
+        self.sessions = {key: item for key, item in self.sessions.items() if item.user_id != user_id}
+        self.businesses = {key: item for key, item in self.businesses.items() if key not in business_ids}
+        return [path for business_id, path in self.assets if business_id in business_ids]
 
     def save_state(self, state: OAuthState) -> None:
         self.states[state.state] = state
@@ -137,7 +149,7 @@ def repository() -> FakeRepository:
 def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Iterator[TestClient]:
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "https://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("PLATFORM_MODE", "fake")
     monkeypatch.setenv("YANDEX_CLIENT_ID", "test-client")

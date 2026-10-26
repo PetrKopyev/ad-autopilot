@@ -9,6 +9,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml ./
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY app ./app
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 app

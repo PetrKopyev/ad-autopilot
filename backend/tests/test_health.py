@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@invalid/test")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("SECRET_KEY", "test-only")
+    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-0123456789abcdef")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "test-only")
     monkeypatch.setenv("PLATFORM_MODE", "fake")
 

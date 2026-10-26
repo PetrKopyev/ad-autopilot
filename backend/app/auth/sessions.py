@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import Business, OAuthState, PlatformAccount, Session, User
+from app.db.models import Asset, Business, OAuthState, PlatformAccount, Session, User
 from app.db.session import SessionLocal
 
 SESSION_COOKIE = "__Host-session"
@@ -20,19 +20,25 @@ SESSION_TTL = timedelta(days=30)
 STATE_TTL = timedelta(minutes=10)
 
 
+def hash_session_id(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 class AuthRepository:
     def __init__(self, db: DBSession) -> None:
         self.db = db
 
-    def get_session(self, session_id: str) -> Session | None:
-        return self.db.scalar(select(Session).where(Session.id == session_id, Session.expires_at > datetime.now(UTC)))
+    def get_session(self, token: str) -> Session | None:
+        return self.db.scalar(
+            select(Session).where(Session.id == hash_session_id(token), Session.expires_at > datetime.now(UTC))
+        )
 
     def get_user(self, user_id: int) -> User | None:
         return self.db.get(User, user_id)
 
-    def save_session(self, session: Session, previous_id: str | None = None) -> None:
-        if previous_id:
-            self.db.execute(delete(Session).where(Session.id == previous_id))
+    def save_session(self, session: Session, previous_token: str | None = None) -> None:
+        if previous_token:
+            self.db.execute(delete(Session).where(Session.id == hash_session_id(previous_token)))
         self.db.add(session)
         self.db.commit()
 
@@ -121,6 +127,12 @@ class AuthRepository:
         self.db.commit()
         return accounts
 
+    def delete_user(self, user_id: int) -> list[str]:
+        paths = list(self.db.scalars(select(Asset.file_path).join(Business).where(Business.user_id == user_id)))
+        self.db.execute(delete(User).where(User.id == user_id))
+        self.db.commit()
+        return paths
+
     def disconnect_account(self, user_id: int, account_id: int) -> bool:
         account = self.db.scalar(
             select(PlatformAccount)
@@ -178,17 +190,20 @@ def require_csrf(request: Request, session: Annotated[Session, Depends(current_s
 
 
 def create_session(user_id: int) -> Session:
-    return Session(
-        id=secrets.token_urlsafe(32),
+    token = secrets.token_urlsafe(32)
+    session = Session(
+        id=hash_session_id(token),
         user_id=user_id,
         expires_at=datetime.now(UTC) + SESSION_TTL,
         csrf_secret=secrets.token_urlsafe(32),
     )
+    session.token = token  # only the hash is stored; the raw value goes to the cookie
+    return session
 
 
 def set_session_cookies(response: Response, session: Session) -> None:
     options = {"secure": True, "samesite": "lax", "path": "/", "max_age": int(SESSION_TTL.total_seconds())}
-    response.set_cookie(SESSION_COOKIE, session.id, httponly=True, **options)
+    response.set_cookie(SESSION_COOKIE, session.token, httponly=True, **options)
     response.set_cookie(CSRF_COOKIE, session.csrf_secret, httponly=False, **options)
 
 

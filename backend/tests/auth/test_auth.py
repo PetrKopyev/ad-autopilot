@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.db.models import Business, User
 
-from .conftest import FakeRepository
+from .conftest import FakeRepository, hash_token
 
 
 def start(client: TestClient, purpose: str = "login", **params) -> dict[str, str]:
@@ -64,10 +64,12 @@ def test_login_creates_user_and_30_day_session(
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["cache-control"] == "no-store"
     assert "__Host-oauth" not in client.cookies
-    session = repository.sessions[client.cookies["__Host-session"]]
+    session = repository.sessions[hash_token(client.cookies["__Host-session"])]
     assert timedelta(days=30) - timedelta(seconds=5) <= session.expires_at - datetime.now(UTC) <= timedelta(days=30)
     assert session.csrf_secret == client.cookies["__Host-csrf"]
-    assert len(session.id) >= 43
+    assert session.id == hash_token(client.cookies["__Host-session"])
+    assert session.id != client.cookies["__Host-session"]
+    assert len(client.cookies["__Host-session"]) >= 43
     session_cookie, csrf_cookie = response.headers.get_list("set-cookie")[:2]
     assert "HttpOnly" in session_cookie
     assert "HttpOnly" not in csrf_cookie
@@ -129,7 +131,7 @@ def test_logout_requires_csrf_and_deletes_session(
     session_id = client.cookies["__Host-session"]
     assert client.post("/api/auth/logout").status_code == 403
     assert client.post("/api/auth/logout", headers={"X-CSRF-Token": "wrong"}).status_code == 403
-    assert session_id in repository.sessions
+    assert hash_token(session_id) in repository.sessions
     csrf = client.cookies["__Host-csrf"]
     client.cookies.delete("__Host-csrf")
     assert client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 403
@@ -139,7 +141,7 @@ def test_logout_requires_csrf_and_deletes_session(
     client.cookies.set("__Host-csrf", csrf, domain="testserver.local", path="/")
     response = client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
     assert response.status_code == 204
-    assert session_id not in repository.sessions
+    assert hash_token(session_id) not in repository.sessions
     assert client.get("/api/me").status_code == 401
     assert not client.cookies
 
@@ -193,9 +195,11 @@ def test_direct_state_bound_to_session_purpose_and_business(
         user_id = 2 if change == "other_user" else 1
         session = create_session(user_id)
         repository.save_session(session)
-        client.cookies.set("__Host-session", session.id, domain="testserver.local", path="/")
+        client.cookies.set("__Host-session", session.token, domain="testserver.local", path="/")
     elif change == "expired_session":
-        repository.sessions[client.cookies["__Host-session"]].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        repository.sessions[hash_token(client.cookies["__Host-session"])].expires_at = datetime.now(UTC) - timedelta(
+            seconds=1
+        )
     elif change == "purpose":
         repository.states[state].purpose = "login"
     else:
@@ -320,7 +324,7 @@ def test_login_rotates_session_and_preserves_consent(
     previous_session = client.cookies["__Host-session"]
     consent = repository.users[1].consent_at
     assert callback(client, start(client)["state"], "second-login").status_code == 303
-    assert previous_session not in repository.sessions
+    assert hash_token(previous_session) not in repository.sessions
     assert client.cookies["__Host-session"] != previous_session
     assert len(repository.users) == 1
     assert repository.users[1].consent_at == consent
@@ -335,6 +339,61 @@ def test_expired_and_missing_user_sessions_rejected(
     repository.users.clear()
     assert client.get("/api/me").status_code == 401
     repository.users[1] = User(id=1)
-    repository.sessions[client.cookies["__Host-session"]].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    repository.sessions[hash_token(client.cookies["__Host-session"])].expires_at = datetime.now(UTC) - timedelta(
+        seconds=1
+    )
     assert client.get("/api/me").status_code == 401
     assert client.post("/api/auth/logout").status_code == 401
+
+
+def sign_in(client: TestClient, repository: FakeRepository, user_id: int = 1) -> None:
+    from app.auth.sessions import create_session
+
+    repository.users[user_id] = User(
+        id=user_id, yandex_uid=str(user_id), login=f"owner{user_id}", consent_at=datetime.now(UTC)
+    )
+    repository.businesses[user_id] = Business(id=user_id, user_id=user_id)
+    session = create_session(user_id)
+    repository.sessions[session.id] = session
+    client.cookies.set("__Host-session", session.token, domain="testserver.local", path="/")
+    client.cookies.set("__Host-csrf", session.csrf_secret, domain="testserver.local", path="/")
+
+
+@pytest.mark.parametrize("secret", ["short", "replace-with-random-secret", "x" * 31])
+def test_weak_secret_key_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch, secret: str) -> None:
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    monkeypatch.setenv("SECRET_KEY", secret)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_delete_me_requires_login_and_csrf(client: TestClient, repository: FakeRepository) -> None:
+    assert client.delete("/api/me").status_code == 401
+    sign_in(client, repository)
+    assert client.delete("/api/me").status_code == 403
+    assert client.delete("/api/me", headers={"X-CSRF-Token": "wrong"}).status_code == 403
+    assert 1 in repository.users
+
+
+def test_delete_me_removes_user_and_own_files_only(
+    client: TestClient, repository: FakeRepository, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MEDIA_DIR", str(tmp_path / "media"))
+    mine, theirs = tmp_path / "media/1/a.jpg", tmp_path / "media/2/b.jpg"
+    outside = tmp_path / "outside.jpg"
+    for path in (mine, theirs, outside):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    sign_in(client, repository, user_id=2)
+    sign_in(client, repository)
+    repository.assets = [(1, "1/a.jpg"), (1, "../outside.jpg"), (2, "2/b.jpg")]
+    response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == 204
+    assert 1 not in repository.users and 2 in repository.users
+    assert not mine.exists()
+    assert theirs.exists() and outside.exists()
+    assert not client.cookies
+    assert client.get("/api/me").status_code == 401

@@ -1,4 +1,6 @@
+import os
 import secrets
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -21,6 +23,13 @@ from app.auth.sessions import (
 from app.db.models import Session, User
 
 router = APIRouter(prefix="/api")
+
+
+def _remove_media(file_path: str) -> None:
+    root = Path(os.environ.get("MEDIA_DIR", "media")).resolve()
+    path = (root / file_path).resolve()
+    if path.is_relative_to(root) and path.is_file():
+        path.unlink()
 
 
 def _redirect() -> RedirectResponse:
@@ -111,6 +120,16 @@ async def yandex_callback(
 @router.post("/auth/logout", status_code=204, dependencies=[Depends(require_csrf)])
 def logout(session: Annotated[Session, Depends(current_session)], repository: Repository) -> Response:
     repository.delete_session(session.id)
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    clear_cookies(response)
+    return response
+
+
+@router.delete("/me", status_code=204, dependencies=[Depends(require_csrf)])
+def delete_me(user: Annotated[User, Depends(current_user)], repository: Repository) -> Response:
+    # Platform tokens are not revoked: the Yandex and VK clients have no revoke call; they are deleted with the rows.
+    for path in repository.delete_user(user.id):
+        _remove_media(path)
     response = Response(status_code=204, headers={"Cache-Control": "no-store"})
     clear_cookies(response)
     return response
