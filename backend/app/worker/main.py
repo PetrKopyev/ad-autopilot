@@ -1,86 +1,90 @@
 import asyncio
 import logging
 import signal
-from functools import partial
-from threading import Event
-from types import FrameType
+from contextlib import suppress
 
-from apscheduler.schedulers.background import BackgroundScheduler
+import httpx
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import settings
 from app.db.session import SessionLocal
-from app.platforms.base import AdPlatform
 from app.platforms.fake import FakeAdapter
 from app.services.experiments import create_experiment
-from app.worker.jobs import Worker, WorkerRepository, dispatch
+from app.services.registry import AdapterRegistry, db_loader
+from app.worker.clock import SystemClock
+from app.worker.jobs import Worker, WorkerRepository
 
 logger = logging.getLogger(__name__)
 
-_fake_adapters: dict[int, FakeAdapter] = {}
+
+class DemoRegistry(AdapterRegistry):
+    """Демо живёт в процессе API; API и планировщик используют одни симуляторы."""
+
+    def resolve(self, business_id: int, platform: str):
+        if self.mode != "fake":
+            return super().resolve(business_id, platform)
+        key = (business_id, platform)
+        if key not in self.fakes:
+            self.fakes[key] = FakeAdapter(clock=SystemClock())
+        return self.fakes[key]
 
 
-def resolve_adapter(business_id: int, platform: str) -> AdPlatform:
-    if settings.platform_mode != "fake":
-        raise RuntimeError("Боевые адаптеры подключаются к воркеру вместе с кабинетами площадок.")
-    return _fake_adapters.setdefault(business_id, FakeAdapter())
-
-
-def startup() -> None:
+async def run_tick(registry: AdapterRegistry, kind: str = "due") -> None:
     with SessionLocal() as db:
-        asyncio.run(
-            Worker(
-                WorkerRepository(db),
-                resolve_adapter,
-                dry_run=settings.dry_run,
-                experiment_factory=create_experiment,
-            ).startup()
+        worker = Worker(
+            WorkerRepository(db),
+            registry.resolve,
+            dry_run=settings.dry_run,
+            experiment_factory=create_experiment,
         )
+        if kind == "startup":
+            await worker.startup()
+        elif kind == "heartbeat":
+            await worker.run(kind)
+        else:
+            await worker.run_due()
 
 
-def build_scheduler() -> BackgroundScheduler:
-    scheduler = BackgroundScheduler(timezone=settings.tz_default)
-    job = partial(
-        dispatch,
-        SessionLocal,
-        resolve_adapter,
-        dry_run=settings.dry_run,
-        experiment_factory=create_experiment,
-    )
+def build_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
+    scheduler = AsyncIOScheduler(timezone=settings.tz_default)
     options = {"max_instances": 1, "coalesce": True}
-    scheduler.add_job(job, "interval", ["heartbeat"], minutes=1, id="heartbeat", **options)
-    scheduler.add_job(job, "interval", ["budget_guard"], minutes=30, id="budget_guard", **options)
-    scheduler.add_job(job, "interval", ["sync_moderation"], hours=1, id="sync_moderation", **options)
-    scheduler.add_job(job, "interval", ["sync_stats"], hours=3, id="sync_stats", **options)
-    for kind in ("optimize", "experiments_tick", "rebalance_budget"):
-        scheduler.add_job(job, "cron", [kind], hour=6, minute=kind_minute(kind), id=kind, **options)
-    scheduler.add_job(job, "cron", ["clients_survey"], day_of_week="mon", hour=10, id="clients_survey", **options)
-    scheduler.add_job(job, "cron", ["month_rollover"], hour=0, minute=5, id="month_rollover", **options)
+    scheduler.add_job(run_tick, "interval", args=[registry, "heartbeat"], minutes=1, id="heartbeat", **options)
+    scheduler.add_job(run_tick, "interval", args=[registry], minutes=30, id="run_due", **options)
     return scheduler
 
 
-def kind_minute(kind: str) -> int:
-    # Сначала решения и тесты, потом пересчёт лимитов уже по их итогам.
-    return {"optimize": 0, "experiments_tick": 5, "rebalance_budget": 10}[kind]
+async def start_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
+    await run_tick(registry, "startup")
+    scheduler = build_scheduler(registry)
+    scheduler.start()
+    return scheduler
+
+
+async def serve() -> None:
+    if settings.platform_mode == "fake":
+        logger.info("PLATFORM_MODE=fake: планировщик работает внутри API; отдельный worker не запускается.")
+        return
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, stop_event.set)
+    async with httpx.AsyncClient(timeout=30) as http:
+        registry = AdapterRegistry(db_loader(SessionLocal), mode=settings.platform_mode, http=http)
+        scheduler = await start_scheduler(registry)
+        logger.info("Worker started")
+        try:
+            await stop_event.wait()
+        finally:
+            scheduler.shutdown(wait=True)
+            # APScheduler исполняет shutdown на текущем event loop.
+            await asyncio.sleep(0)
+            logger.info("Worker stopped")
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    stop_event = Event()
-    scheduler = build_scheduler()
-
-    def request_shutdown(signum: int, frame: FrameType | None) -> None:
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, request_shutdown)
-    signal.signal(signal.SIGINT, request_shutdown)
-    startup()
-    scheduler.start()
-    logger.info("Worker started")
-    try:
-        stop_event.wait()
-    finally:
-        scheduler.shutdown(wait=True)
-        logger.info("Worker stopped")
+    with suppress(KeyboardInterrupt):
+        asyncio.run(serve())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog
@@ -53,20 +54,19 @@ def finish_revert(repository: ChangesRepository, revert: ChangeLog, now: datetim
     frozen_until = now + timedelta(days=14)
     affected = set()
     group_ids = set()
-    campaign_ids = set()
+    frozen_entities = {}
     for op in load_operations(revert):
         entity = entities.get((op.entity_type, op.entity_id))
         if isinstance(entity, Ad):
             affected.add(entity.id)
         elif isinstance(entity, AdGroup):
-            group_ids.add(entity.id)
+            frozen_entities[f"group:{op.entity_id}"] = frozen_until.isoformat()
         elif isinstance(entity, Campaign):
-            campaign_ids.add(entity.id)
+            frozen_entities[f"campaign:{op.entity_id}"] = frozen_until.isoformat()
         elif op.entity_type == "target" and entity is not None:
-            group_ids.add(entity.ad_group_id)
-    for entity in entities.values():
-        if isinstance(entity, AdGroup) and entity.campaign_id in campaign_ids:
-            group_ids.add(entity.id)
+            frozen_entities[f"target:{op.entity_id}"] = frozen_until.isoformat()
+    if original.entity_type == "group":
+        frozen_entities = {f"group:{original.entity_id}": frozen_until.isoformat()}
     for experiment in repository.experiments(original):
         experiment.status = "cancelled"
         experiment.verdict = "control_wins"
@@ -78,6 +78,11 @@ def finish_revert(repository: ChangesRepository, revert: ChangeLog, now: datetim
         group_ids.add(experiment.ad_group_id)
         affected.update((experiment.control_ad_id, experiment.variant_ad_id))
     if revert.actor == "owner":
+        if frozen_entities:
+            business = repository.business(revert.business_id)
+            meta = dict(business.settings.get("_worker", {}))
+            meta["frozen_entities"] = meta.get("frozen_entities", {}) | frozen_entities
+            business.settings = business.settings | {"_worker": meta}
         for entity in entities.values():
             if isinstance(entity, Ad) and (entity.id in affected or entity.ad_group_id in group_ids):
                 entity.frozen_until = max(entity.frozen_until or frozen_until, frozen_until)
@@ -104,6 +109,13 @@ class RollbackService:
                 raise ValueError("Изменение не найдено.")
             if original.status != "applied" or original.kind == "revert":
                 raise ChangeConflict("Повторный откат или откат неприменённого изменения запрещён.")
+            if original.actor == "system" and original.reason_code in {
+                "BUDGET_REBALANCE",
+                "BUDGET_STOP",
+                "SPEND_MISMATCH",
+                "MONTH_STOP",
+            }:
+                raise ChangeConflict("Это защита бюджета, отменить нельзя.")
             if original.actor == "external" and actor != "owner":
                 raise ChangeConflict("Изменение в кабинете может отменить только владелец.")
             if any(
@@ -114,11 +126,37 @@ class RollbackService:
             refs = load_refs(original)
             states = await adapter.get_state(refs)
             operations = load_operations(original)
-            mismatches = differences(operations, states)
+            entities = self.repository.local_entities(business_id, original.platform)
+            group_limits = original.evidence.get("group_limits") if original.entity_type == "group" else None
+            if group_limits is not None:
+                current_limits = (
+                    self.repository.business(business_id).settings.get("_worker", {}).get("group_limits", {})
+                )
+                mismatches = [
+                    {
+                        "entity_type": "group",
+                        "entity_id": key,
+                        "field": "daily_limit_kop",
+                        "expected": value,
+                        "current": current_limits.get(key),
+                        "restore": group_limits["before"][key],
+                    }
+                    for key, value in group_limits["after"].items()
+                    if current_limits.get(key) != value
+                ]
+            else:
+                mismatches = differences(operations, states)
             if mismatches and not confirm:
                 raise ConfirmationRequired(mismatches)
             inverse = inverse_operations(operations, states)
-            entities = self.repository.local_entities(business_id, original.platform)
+            if group_limits is not None:
+                # SCALE меняет доли групп. Перебалансированный кэп кампании сохраняем.
+                preserved = []
+                for op in inverse:
+                    entity = entities.get((op.entity_type, op.entity_id), states[op.entity_id])
+                    value = getattr(entity, op.field)
+                    preserved.append(replace(op, before=value, after=value))
+                inverse = preserved
             ads = {entity.id: entity for entity in entities.values() if isinstance(entity, Ad)}
             for experiment in self.repository.experiments(original):
                 for ad_id, status in ((experiment.control_ad_id, "active"), (experiment.variant_ad_id, "paused_owner")):
@@ -152,6 +190,16 @@ class RollbackService:
                     "warning": "Созданное объявление будет остановлено и убрано в архив."
                     if any(not op.invertible for op in operations)
                     else None,
+                    **(
+                        {
+                            "group_limits": {
+                                "before": {key: current_limits.get(key) for key in group_limits["before"]},
+                                "after": original.evidence["group_limits"]["before"],
+                            }
+                        }
+                        if group_limits is not None
+                        else {}
+                    ),
                 },
                 reverts_id=original.id,
                 now=now or datetime.now(UTC),

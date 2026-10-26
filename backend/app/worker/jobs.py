@@ -177,6 +177,23 @@ class Worker:
         groups = {
             item.id: item for item in entities.values() if isinstance(item, AdGroup) and item.campaign_id == campaign.id
         }
+        context = {"daily_limit_kop": campaign.daily_limit_kop, "period_cap_kop": campaign.period_cap_kop}
+        history = sorted(self.repository.rows(ChangeLog, campaign.business_id), key=lambda item: item.id, reverse=True)
+        for change in history:
+            if change.status != "applied":
+                continue
+            contexts = [
+                op["budget_context"]
+                for op in change.operations
+                if op["entity_id"] == campaign.external_id and op.get("budget_context")
+            ]
+            if contexts:
+                context = contexts[-1] | context
+                break
+            stored_refs = change.evidence.get("_service", {}).get("refs", {})
+            if stored_refs.get("campaign_id") == campaign.external_id and stored_refs.get("budget_context"):
+                context = stored_refs["budget_context"] | context
+                break
         return ExternalRefs(
             campaign.external_id,
             {str(item.id): item.external_id for item in groups.values()},
@@ -190,6 +207,7 @@ class Worker:
                 for item in entities.values()
                 if isinstance(item, Target) and item.ad_group_id in groups
             },
+            context,
         )
 
     def campaigns(self, business: Business) -> list[Campaign]:
@@ -207,6 +225,9 @@ class Worker:
         reason_text: str | None = None,
         actor: str = "autopilot",
         suffix: str = "",
+        evidence: dict | None = None,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
     ):
         if not operations:
             return None
@@ -214,8 +235,10 @@ class Worker:
         existing = [
             item for item in self.repository.rows(ChangeLog, business.id) if item.evidence.get("worker_key") == key
         ]
-        if any(item.status == "applied" or item.evidence.get("_service", {}).get("dry_run") for item in existing):
-            return existing[-1]
+        applied = next((item for item in existing if item.status == "applied"), None)
+        proposed = next((item for item in existing if item.evidence.get("_service", {}).get("dry_run")), None)
+        if applied is not None or proposed is not None:
+            return applied if applied is not None else proposed
         change = await self.changes.apply_change(
             business_id=business.id,
             adapter=self.resolve_adapter(business.id, campaign.platform),
@@ -227,7 +250,9 @@ class Worker:
             reason_code=reason_code,
             reason_params=reason_params,
             reason_text=reason_text,
-            evidence={"worker_key": key},
+            evidence={"worker_key": key, **(evidence or {})},
+            entity_type=entity_type,
+            entity_id=entity_id,
             now=self.clock.now,
         )
         if change.status != "applied" and not self.proposed(business):
@@ -236,6 +261,8 @@ class Worker:
 
     def notice(self, business: Business, reason_code: str, text: str, *, key: str = "", **details) -> None:
         notice_key = key or f"{self.step_key}:{reason_code}"
+        if details.get("target_id") is not None:
+            notice_key = f"{notice_key}:{details['target_id']}"
         if any(
             row.kind == "notification" and row.log[0].get("key") == notice_key
             for row in self.repository.rows(WorkerRun, business.id)
@@ -305,7 +332,7 @@ class Worker:
             self.repository.save(run)
             try:
                 await self.changes.recover_pending(self.resolve_adapter, business_id=business.id, now=self.clock.now)
-                if self.repository.pending(business.id):
+                if kind != "budget_guard" and self.repository.pending(business.id):
                     raise ChangeConflict("Площадка пока недоступна для сверки.")
                 await handlers()[kind](self, business)
                 run.status = "ok"

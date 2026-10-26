@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +15,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("PLATFORM_MODE", "fake")
 
     from app.main import app
+
+    monkeypatch.setattr("app.main.start_scheduler", AsyncMock(return_value=None))
 
     with TestClient(app) as test_client:
         yield test_client

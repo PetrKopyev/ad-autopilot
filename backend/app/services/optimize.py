@@ -23,17 +23,16 @@ from app.domain.types import (
 from app.platforms.base import Operation
 from app.services.budget_guard import read_spend
 from app.services.experiments import completed_hypotheses, group_available
+from app.services.plan import CAP_MULTIPLIER, campaign_limits
 from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
 
-# FakeAdapter(evil=True) может превысить и дневной, и периодный лимит на 25%.
-# Дополнительный запас применяется и в обычном режиме: лимиты переживают простой воркера.
-CAP_MULTIPLIER = Decimal("1.25")
 
-
-async def snapshot(worker: Worker, business: Business) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
+async def snapshot(
+    worker: Worker, business: Business, *, include_paused_campaigns: bool = False
+) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
     repository = worker.repository
     campaigns = worker.campaigns(business)
     states = {}
@@ -53,7 +52,10 @@ async def snapshot(worker: Worker, business: Business) -> tuple[list[AdSnapshot]
                 change.created_at
                 for change in history
                 if (actor is None or change.actor == actor)
-                and any(op["entity_id"] == entity_id for op in change.operations)
+                and (
+                    change.entity_id == entity_id
+                    or (change.entity_type != "group" and any(op["entity_id"] == entity_id for op in change.operations))
+                )
             ),
             default=None,
         )
@@ -105,9 +107,20 @@ async def snapshot(worker: Worker, business: Business) -> tuple[list[AdSnapshot]
                 campaign.platform,
                 int(limits.get(group.external_id, equal)),
                 states[group.external_id].status == "active"
-                and states[campaign.external_id].status == "active"
+                and (
+                    states[campaign.external_id].status == "active"
+                    or (
+                        include_paused_campaigns
+                        and campaign.status == "paused_auto"
+                        and states[campaign.external_id].status in {"paused_auto", "paused_owner"}
+                        and not campaign.owner_paused
+                    )
+                )
                 and any(item.active and item.group_id == group.external_id for item in result),
                 changed(group.external_id),
+                frozen_until=datetime.fromisoformat(meta["frozen_entities"][f"group:{group.external_id}"])
+                if f"group:{group.external_id}" in meta.get("frozen_entities", {})
+                else None,
                 owner_edited_at=changed(campaign.external_id, "owner"),
             )
         )
@@ -149,23 +162,55 @@ async def optimize(worker: Worker, business: Business) -> None:
             await worker.apply(
                 business,
                 campaign,
-                [Operation("set_status", "ad", decision.target_id, "status", state.status, "paused")],
+                [Operation("set_status", "ad", decision.target_id, "status", state.status, "paused_auto")],
                 reason_code=decision.reason_code,
                 reason_params=decision.numbers,
                 kind="pause",
                 suffix=decision.target_id,
             )
         elif decision.action == Action.SCALE:
+            before = limits.copy()
+            scaled = limits.copy()
             increment = decision.new_daily_limit - limits[group_id]
             # Сначала забираем средства у остановленных групп; сумма лимитов не растёт.
             for donor in groups:
                 if donor.active or increment <= 0:
                     continue
-                take = min(increment, limits[donor.id])
-                limits[donor.id] -= take
-                limits[group_id] += take
+                take = min(increment, scaled[donor.id])
+                scaled[donor.id] -= take
+                scaled[group_id] += take
                 increment -= take
-            worker.notice(business, decision.reason_code, explain_decision(decision), target_id=group_id)
+            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
+                campaign.external_id
+            ]
+            await worker.apply(
+                business,
+                campaign,
+                [
+                    Operation(
+                        "set_budget",
+                        "campaign",
+                        campaign.external_id,
+                        "daily_limit_kop",
+                        state.daily_limit_kop,
+                        campaign.daily_limit_kop,
+                    )
+                ],
+                kind="budget",
+                reason_code=decision.reason_code,
+                reason_params=decision.numbers,
+                suffix=group_id,
+                entity_type="group",
+                entity_id=group_id,
+                evidence={
+                    "group_limits": {
+                        "before": {key: before[key] for key in scaled if scaled[key] != before[key]},
+                        "after": {key: scaled[key] for key in scaled if scaled[key] != before[key]},
+                    }
+                },
+            )
+            if not worker.proposed(business):
+                limits = scaled
     if not worker.proposed(business):
         worker.remember(business, group_limits=limits)
 
@@ -183,7 +228,7 @@ async def rebalance_budget(worker: Worker, business: Business) -> None:
         return
     shares = {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
     shares = shares if set(shares) == set(platforms) else platform_shares(platforms)
-    ads, groups = await snapshot(worker, business)
+    ads, groups = await snapshot(worker, business, include_paused_campaigns=True)
     prices = {}
     for platform in platforms:
         metrics = total_metrics(
@@ -216,22 +261,37 @@ async def rebalance_budget(worker: Worker, business: Business) -> None:
             own = {group.external_id for group in local_groups if group.campaign_id == campaign.id}
             active = {group.id for group in platform_groups if group.id in own and group.active}
             desired_daily = sum(daily[group_id] for group_id in active)
-            # Периодный лимит ограничиваем текущей неделей/остатком месяца, включая прежний расход.
-            remaining_days = min(
-                7 - day.weekday(), (day.replace(day=28) + timedelta(days=4)).replace(day=1).__sub__(day).days
+            desired_daily, total_cap = campaign_limits(
+                desired_daily,
+                sum(caps[group_id] for group_id in active),
+                day,
+                lifetime.get(campaign.external_id, 0),
             )
-            additional = min(sum(caps[group_id] for group_id in active), desired_daily * remaining_days)
-            total_cap = int((lifetime.get(campaign.external_id, 0) + additional) / CAP_MULTIPLIER)
             states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
             state = states[campaign.external_id]
-            desired_daily = int(Decimal(desired_daily) / CAP_MULTIPLIER)
+            if not desired_daily:
+                await worker.apply(
+                    business,
+                    campaign,
+                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto")]
+                    if state.status == "active"
+                    else [],
+                    reason_code="BUDGET_REBALANCE",
+                    kind="pause",
+                    actor="system",
+                    reason_text="Доступного дневного бюджета нет: кампанию остановили.",
+                )
+                if not worker.proposed(business):
+                    campaign.daily_limit_kop = 0
+                    worker.repository.save(campaign)
+                continue
             operations = [
                 Operation("set_budget", "campaign", campaign.external_id, field, before, after)
                 for field, before, after in (
                     ("period_cap_kop", state.period_cap_kop, total_cap),
                     ("daily_limit_kop", state.daily_limit_kop, desired_daily),
                 )
-                if before != after
+                if before != after or campaign.platform == "direct"
             ]
             await worker.apply(
                 business,
@@ -320,7 +380,7 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         change = await worker.apply(
             business,
             campaign,
-            [Operation("set_status", "ad", loser, "status", "active", "paused")],
+            [Operation("set_status", "ad", loser, "status", "active", "paused_auto")],
             kind="experiment_verdict",
             reason_code="EXPERIMENT_VERDICT",
             reason_text=text,

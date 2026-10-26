@@ -34,10 +34,22 @@ def final_operations(operations: Sequence[Operation]) -> list[Operation]:
     return list(result.values())
 
 
-def differences(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> list[dict]:
+def differences(
+    operations: Sequence[Operation], states: Mapping[str, EntityState], *, platform_pauses: bool = False
+) -> list[dict]:
     result = []
     for op in final_operations(operations):
         state = states.get(op.entity_id)
+        if (
+            platform_pauses
+            and state is not None
+            and state.entity_type == op.entity_type
+            and op.field == "status"
+            and op.after == "paused_auto"
+            and state.status == "paused_owner"
+        ):
+            # API площадок возвращает одну паузу без автора; автора хранит наш журнал.
+            continue
         if state is None or state.entity_type != op.entity_type or getattr(state, op.field) != op.after:
             result.append(
                 {
@@ -197,9 +209,22 @@ class ChangesRepository:
             )
         )
 
-    def check_autopilot(self, business_id: int, platform: str, operations: Sequence[Operation], now: datetime) -> None:
+    def check_autopilot(
+        self,
+        business_id: int,
+        platform: str,
+        operations: Sequence[Operation],
+        now: datetime,
+        *,
+        entity: tuple[str, str] | None = None,
+    ) -> None:
         entities = self.local_entities(business_id, platform)
-        affected = affected_entities(operations, entities)
+        affected = {entity} if entity else affected_entities(operations, entities)
+        frozen = self.business(business_id).settings.get("_worker", {}).get("frozen_entities", {})
+        if any(
+            datetime.fromisoformat(frozen[f"{kind}:{id_}"]) > now for kind, id_ in affected if f"{kind}:{id_}" in frozen
+        ):
+            raise ChangeConflict("После отката владельцем объект временно защищён от изменений автопилота.")
         if any(
             isinstance(entity, Ad) and entity.frozen_until is not None and entity.frozen_until > now
             for key, entity in entities.items()
@@ -207,7 +232,12 @@ class ChangesRepository:
         ):
             raise ChangeConflict("После отката владельцем объект временно защищён от изменений автопилота.")
         for change in self.recent_owner_changes(business_id, now):
-            if change.platform == platform and affected & affected_entities(load_operations(change), entities):
+            previous = (
+                {(change.entity_type, change.entity_id)}
+                if change.entity_type == "group"
+                else affected_entities(load_operations(change), entities)
+            )
+            if change.platform == platform and affected & previous:
                 raise ChangeConflict("После правки владельца нужно подождать 24 часа.")
 
     def sync_local(self, change: ChangeLog, operations: Sequence[Operation]) -> None:
@@ -221,6 +251,45 @@ class ChangesRepository:
                 if isinstance(entity, Ad) and value == "paused":
                     value = "paused_owner" if change.actor == "owner" else "paused_auto"
                 setattr(entity, op.field, value)
+        if "group_limits" in change.evidence:
+            business = self.business(change.business_id)
+            meta = deepcopy(business.settings.get("_worker", {}))
+            meta["group_limits"] = meta.get("group_limits", {}) | change.evidence["group_limits"]["after"]
+            business.settings = business.settings | {"_worker": meta}
+
+
+async def budget_operations(repository, business, adapter, refs, operations, now):
+    """Директ получает полную пару лимитов из Campaign, а не из памяти адаптера."""
+    if not any(op.kind == "set_budget" for op in operations):
+        return refs, operations
+    entities = repository.local_entities(business.id, "direct")
+    campaign = entities.get(("campaign", refs.campaign_id))
+    context = dict(refs.budget_context)
+    if campaign is not None:
+        context.update(daily_limit_kop=campaign.daily_limit_kop, period_cap_kop=campaign.period_cap_kop)
+    if not context:
+        state = (await adapter.get_state(refs))[refs.campaign_id]
+        context = {"daily_limit_kop": state.daily_limit_kop, "period_cap_kop": state.period_cap_kop}
+    day = now.astimezone(adapter._tz).date()
+    month = day.replace(day=1)
+    start = min(month, day.fromisoformat(business.settings.get("_worker", {}).get("started_on", month.isoformat())))
+    rows = await adapter.get_stats(start, day, "campaign")
+    week = day - timedelta(days=day.weekday())
+    context["spent_before_week_kop"] = sum(
+        row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date < week
+    )
+    context["spent_week_kop"] = sum(
+        row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date >= week
+    )
+    refs = replace(refs, budget_context=context.copy())
+    prepared = []
+    for op in operations:
+        if op.kind == "set_budget":
+            context[op.field] = op.after
+            context["weekly_limit_kop"] = adapter._context_weekly(context)
+            op = replace(op, budget_context=context.copy())
+        prepared.append(op)
+    return refs, prepared
 
 
 class ChangesService:
@@ -260,16 +329,31 @@ class ChangesService:
 
             dry_run = settings.dry_run
         dry_run = (dry_run or business.settings.get("dry_run", False)) and actor != "external"
-        if self.repository.pending(business_id):
+        protective_stop = actor == "system" and all(
+            op.kind == "set_status" and op.after == "paused_auto" for op in operations
+        )
+        if not protective_stop and any(item.platform == platform for item in self.repository.pending(business_id)):
             raise ChangeConflict("Сначала требуется сверить незавершённые изменения бизнеса.")
         if any(op.entity_id not in refs.entity_ids() for op in operations):
             raise ValueError("Операции должны относиться к переданному дереву кампании.")
         if actor == "autopilot" and not dry_run:
-            self.repository.check_autopilot(business_id, platform, operations, now or datetime.now(UTC))
+            self.repository.check_autopilot(
+                business_id,
+                platform,
+                operations,
+                now or datetime.now(UTC),
+                entity=(entity_type, entity_id) if entity_type == "group" else None,
+            )
         params = deepcopy(reason_params or {})
         message = explain(reason_code, params) if reason_code in TEMPLATES else reason_text
         if not message:
             raise ValueError("Для неизвестного кода причины нужен готовый текст.")
+        from app.platforms.direct import DirectAdapter
+
+        if isinstance(adapter, DirectAdapter) and not dry_run:
+            refs, operations = await budget_operations(
+                self.repository, business, adapter, refs, operations, now or datetime.now(UTC)
+            )
         if not dry_run and actor != "external":
             operations = with_current_before(operations, await adapter.get_state(refs))
         change = ChangeLog(
@@ -308,7 +392,19 @@ class ChangesService:
 
     async def _reconcile(self, change: ChangeLog, adapter: AdPlatform, *, now: datetime | None = None) -> None:
         try:
-            mismatches = differences(load_operations(change), await adapter.get_state(load_refs(change)))
+            operations = load_operations(change)
+            refs = load_refs(change)
+            contexts = [op.budget_context for op in operations if op.budget_context]
+            if contexts:
+                refs = replace(refs, budget_context=contexts[-1])
+            from app.platforms.direct import DirectAdapter
+            from app.platforms.vk import VkAdapter
+
+            mismatches = differences(
+                operations,
+                await adapter.get_state(refs),
+                platform_pauses=isinstance(adapter, (DirectAdapter, VkAdapter)),
+            )
         except PlatformError:
             # При недоступном чтении исход неизвестен: pending будет проверен после рестарта.
             self._metadata(change, error="Не удалось сверить состояние площадки. Проверим повторно.")

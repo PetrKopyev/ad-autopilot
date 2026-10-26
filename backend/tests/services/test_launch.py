@@ -11,6 +11,7 @@ from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchBlocked, LaunchFailed
+from app.services.plan import budget_limits
 from app.services.registry import AccountInfo, AdapterRegistry
 from tests.services.test_onboarding import (
     BUDGET_KOP,
@@ -83,7 +84,8 @@ async def test_full_path_creates_limited_campaigns_within_budget(tmp_path: Path)
     created = campaigns(world)
     assert {item.platform for item in created} == {"direct", "vk"}
     caps = {item.platform: item.period_cap_kop for item in created}
-    assert caps["direct"] == pytest.approx(caps["vk"] * 70 / 30, abs=2)
+    expected = budget_limits(world.business, ["direct", "vk"], TODAY)
+    assert caps == {platform: limit.remaining_cap for platform, limit in expected.items()}
     assert sum(caps.values()) <= BUDGET_KOP * 92 // 100 and all(item.daily_limit_kop > 0 for item in created)
     for item in created:
         campaign_states = await states(world, item)
@@ -141,9 +143,10 @@ async def test_failure_midway_leaves_no_unlimited_or_active_campaign(tmp_path: P
     assert world.business.status == "plan_ready" and not world.repository.rows(ChangeLog)
     direct = next(item for item in campaigns(world) if item.platform == "direct")
     state = (await states(world, direct))[direct.external_id]
-    assert state.status == "paused" and state.daily_limit_kop > 0 and state.period_cap_kop > 0
+    assert state.status == "paused_auto" and state.daily_limit_kop > 0 and state.period_cap_kop > 0
     assert (
-        direct.status == "paused" and not next(item for item in campaigns(world) if item.platform == "vk").external_id
+        direct.status == "paused_auto"
+        and not next(item for item in campaigns(world) if item.platform == "vk").external_id
     )
     adapters["direct"].clock.advance(days=3)
     assert await adapters["direct"].get_spend_today() == 0
@@ -170,7 +173,7 @@ async def test_activation_failure_pauses_already_started_platform(tmp_path: Path
         await launch(world, plan)
     for item in campaigns(world):
         state = (await states(world, item))[item.external_id]
-        assert state.status == "paused" and state.period_cap_kop > 0 and item.status == "paused"
+        assert state.status == "paused_auto" and state.period_cap_kop > 0 and item.status == "paused_auto"
     assert world.business.status == "plan_ready"
     for adapter in adapters.values():
         adapter.clock.advance(days=3)

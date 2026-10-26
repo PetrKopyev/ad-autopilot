@@ -16,14 +16,22 @@ from app.api.vk import router as vk_router
 from app.config import settings
 from app.db.session import SessionLocal, engine
 from app.services.registry import AdapterRegistry, db_loader
+from app.worker.main import DemoRegistry, start_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with httpx.AsyncClient(timeout=30) as http:
         app.state.http = http
-        app.state.platform_adapters = AdapterRegistry(db_loader(SessionLocal), mode=settings.platform_mode, http=http)
-        yield
+        registry_type = DemoRegistry if settings.platform_mode == "fake" else AdapterRegistry
+        registry = registry_type(db_loader(SessionLocal), mode=settings.platform_mode, http=http)
+        app.state.platform_adapters = registry
+        scheduler = await start_scheduler(registry) if settings.platform_mode == "fake" else None
+        try:
+            yield
+        finally:
+            if scheduler:
+                scheduler.shutdown(wait=True)
 
 
 app = FastAPI(title="Автопилот рекламы", lifespan=lifespan)

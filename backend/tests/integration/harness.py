@@ -1,10 +1,24 @@
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
-from app.db.models import Ad, AdGroup, BudgetLedger, Business, Campaign, ChangeLog, Target
+from app.db.models import (
+    Ad,
+    Asset,
+    BudgetLedger,
+    Business,
+    Campaign,
+    ChangeLog,
+    MarkingProfile,
+    Plan,
+    PlatformAccount,
+)
 from app.platforms.base import EntityState, ExternalRefs, PlatformError
 from app.platforms.fake import FakeAdapter, VirtualClock, salon_scenario
+from app.services.launch import LaunchService
+from app.services.plan import inputs_hash
 from app.worker.jobs import MemoryWorkerRepository, Worker
+from tests.services.test_onboarding import LIMITS, MemoryRepository
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 BUDGET_KOP = 10_000_000
@@ -103,13 +117,10 @@ async def make_world(
     seed: int = 7,
 ) -> World:
     clock = VirtualClock(START)
-    # Стартовые лимиты кампании уже учитывают запас: период × 1,25 не больше 92% бюджета.
-    scenario = salon_scenario("salon", daily_limit_kop=int(budget * 0.03), period_cap_kop=int(budget * 0.73))
-    # Сотня показов в час на объявление: данных набирается достаточно, а бюджет остаётся основным ограничением.
+    scenario = salon_scenario("salon")
     truths = {ad_id: replace(truth, impressions_per_hour=100) for ad_id, truth in scenario.truths.items()}
     adapter = adapter_class(clock=clock, seed=seed, evil=evil, scenario=scenario, truths=truths)
-    refs = await adapter.create_campaign_tree(scenario.plan)
-    repository = MemoryWorkerRepository()
+    launch_repository = MemoryRepository()
     business = Business(
         id=1,
         user_id=1,
@@ -118,54 +129,59 @@ async def make_world(
         medical_level="none",
         month_budget_kop=budget,
         auto_continue=auto_continue,
-        status="running",
-        lead_goal_ids=[],
-        settings=business_settings or {},
+        status="plan_ready",
+        metrica_counter_id=12345,
+        lead_goal_ids=[1],
+        description_approved_at=START,
+        settings={},
     )
-    repository.save(business)
-    campaign = Campaign(
+    launch_repository.put(business)
+    launch_repository.put(PlatformAccount(business_id=1, platform="direct", status="ok"))
+    launch_repository.put(MarkingProfile(business_id=1, confirmed_in_platform={"direct": True}))
+    asset = Asset(business_id=1, kind="upload", selected=True, platform_refs={"direct": "fake-image"})
+    launch_repository.put(asset)
+    plan = Plan(
         business_id=1,
-        platform_account_id=1,
-        platform="fake",
-        external_id=refs.campaign_id,
-        type="unified",
-        name="Салон",
-        status="active",
-        daily_limit_kop=scenario.plan.daily_limit_kop,
-        period_cap_kop=scenario.plan.period_cap_kop,
-        owner_paused=False,
+        version=1,
+        status="approved",
+        payload={
+            "platforms": ["direct"],
+            "inputs_hash": inputs_hash(business, ["direct"]),
+            "groups": [
+                {
+                    "id": group.id,
+                    "platform": "direct",
+                    "name": group.name,
+                    "segment": group.id,
+                    "phrases": [target.value for target in group.targets],
+                    "ads": [{"title": ad.title, "text": ad.text} for ad in group.ads],
+                }
+                for group in scenario.plan.groups
+            ],
+            "assets": {group.id: [asset.id] for group in scenario.plan.groups},
+        },
     )
-    repository.save(campaign)
+    launch_repository.put(plan)
+    await LaunchService(launch_repository, lambda *_: adapter, Path("/unused"), LIMITS).launch(
+        business.id, plan.id, True, START, START.date()
+    )
+    business.settings = business.settings | (business_settings or {})
+    campaign = launch_repository.campaign(plan.payload["launch"]["campaigns"]["direct"])
+    repository = MemoryWorkerRepository()
+    repository.tables = launch_repository.tables
+    groups, local_ads, targets = launch_repository.tree_rows(campaign.id)
+    refs = ExternalRefs(campaign.external_id, {}, {}, {})
     ads = {}
-    for group_spec in scenario.plan.groups:
-        group = AdGroup(
-            campaign_id=campaign.id,
-            external_id=refs.groups[group_spec.id],
-            theme=group_spec.name,
-            geo={},
-            status="active",
-        )
-        repository.save(group)
-        for target in group_spec.targets:
-            repository.save(
-                Target(
-                    ad_group_id=group.id,
-                    kind=target.kind,
-                    value=target.value,
-                    external_id=refs.targets[target.id],
-                    status="active",
-                )
-            )
-        for ad_spec in group_spec.ads:
-            ad = Ad(
-                ad_group_id=group.id,
-                external_id=refs.ads[ad_spec.id],
-                title=ad_spec.title,
-                text=ad_spec.text,
-                status="active",
-                role="base",
-                frozen_until=None,
-            )
-            repository.save(ad)
+    for spec, group in zip(scenario.plan.groups, groups, strict=True):
+        refs.groups[spec.id] = group.external_id
+        own_ads = [ad for ad in local_ads if ad.ad_group_id == group.id]
+        for ad_spec, ad in zip(spec.ads, own_ads, strict=True):
+            refs.ads[ad_spec.id] = ad.external_id
             ads[ad_spec.id] = ad
+            adapter._ad_truths[ad.external_id] = truths[ad_spec.id]
+        for target_spec, target in zip(spec.targets, (t for t in targets if t.ad_group_id == group.id), strict=True):
+            refs.targets[target_spec.id] = target.external_id
+    # История запуска остаётся в общем журнале. На старте ещё нет снимка расхода.
+    for ledger in repository.rows(BudgetLedger):
+        ledger.spent_kop = 0
     return World(clock, adapter, repository, refs, business, campaign, ads)

@@ -10,6 +10,7 @@ from app.domain.experiments import evaluate_experiment
 from app.domain.types import AdSnapshot, DaySpend, ExperimentDesign, Verdict
 from app.services.experiments import completed_hypotheses, create_experiment
 from app.services.optimize import experiments_tick
+from app.services.sync import sync_moderation
 from tests.integration.harness import START, make_world
 
 
@@ -17,6 +18,7 @@ from tests.integration.harness import START, make_world
 async def experiment_world():
     world = await make_world()
     world.clock.advance(days=7)
+    await sync_moderation(world.worker(), world.business)
     return world
 
 
@@ -82,7 +84,7 @@ async def test_dry_run_proposal_is_idempotent_and_does_not_touch_platform(
     assert first.status == "proposed"
     assert "≈ 10 дней" in first.reason_text
     assert first.evidence["metric"] == "ctr"
-    assert len(world.repository.rows(ChangeLog)) == 1
+    assert len([change for change in world.repository.rows(ChangeLog) if change.status == "proposed"]) == 1
     assert not world.repository.rows(Experiment)
     assert len(world.repository.rows(Ad)) == 6
 
@@ -94,7 +96,7 @@ async def test_factory_enforces_one_test_per_group_and_two_per_business(experime
         running_experiment(world, group=group)
     result = await create_experiment(world.worker(dry_run=True), world.business, control_snapshot(world), design())
     assert result is None
-    assert not world.repository.rows(ChangeLog)
+    assert not [change for change in world.repository.rows(ChangeLog) if change.kind != "launch"]
 
 
 @pytest.mark.parametrize(
@@ -114,7 +116,7 @@ async def test_factory_rejects_unfeasible_design_and_budget_over_quarter(experim
         world.worker(dry_run=True), world.business, control_snapshot(world), replace(design(), **changes)
     )
     assert result is None
-    assert not world.repository.rows(ChangeLog)
+    assert not [change for change in world.repository.rows(ChangeLog) if change.kind != "launch"]
 
 
 @pytest.mark.parametrize("protection", ["frozen", "sibling_frozen", "cooldown", "group_cooldown", "owner"])
@@ -196,14 +198,14 @@ async def test_tick_applies_existing_test_and_saves_exact_evidence(
             world.repository.save(
                 StatsDaily(
                     business_id=world.business.id,
-                    platform="fake",
+                    platform="direct",
                     campaign_id=world.campaign.id,
                     ad_id=ad_id,
                     date=(world.clock.now + timedelta(days=offset)).date(),
                     cost_kop=10_000,
                     impressions=impressions,
                     clicks=clicks,
-                    conversions={"lead": leads},
+                    conversions={"1": leads},
                     is_settled=True,
                 )
             )
@@ -217,7 +219,7 @@ async def test_tick_applies_existing_test_and_saves_exact_evidence(
     assert changes[0].evidence["variant"]["impressions"] == 10_000
     states = await world.adapter.get_state(world.refs)
     loser = "borderline-1" if verdict == "variant_wins" else "borderline-2"
-    assert states[world.ads[loser].external_id].status == "paused"
+    assert states[world.ads[loser].external_id].status == "paused_auto"
     factory.assert_not_called()
 
 

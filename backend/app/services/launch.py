@@ -219,7 +219,7 @@ class LaunchService:
             platform=platform,
             type=CAMPAIGN_TYPES[platform],
             name=f"Автопилот: {business.city}",
-            status="paused",
+            status="paused_auto",
             daily_limit_kop=limit.daily_limit,
             period_cap_kop=limit.remaining_cap,
         )
@@ -282,7 +282,7 @@ class LaunchService:
                 )
                 for group in groups
             ),
-            "paused",
+            "paused_auto",
         )
 
     @staticmethod
@@ -307,9 +307,9 @@ class LaunchService:
     ) -> None:
         for platform, (campaign, refs) in created.items():
             operations = [
-                Operation("set_status", "ad", external_id, "status", "paused", "active")
+                Operation("set_status", "ad", external_id, "status", "paused_auto", "active")
                 for external_id in refs.ads.values()
-            ] + [Operation("set_status", "campaign", refs.campaign_id, "status", "paused", "active")]
+            ] + [Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")]
             change = await self.changes.apply_change(
                 business_id=business.id,
                 adapter=adapters[platform],
@@ -340,11 +340,11 @@ class LaunchService:
                 continue
             try:
                 await adapters[platform].apply(
-                    Operation("set_status", "campaign", campaign.external_id, "status", "active", "paused")
+                    Operation("set_status", "campaign", campaign.external_id, "status", "active", "paused_auto")
                 )
             except PlatformError:
                 continue
-            campaign.status = "paused"
+            campaign.status = "paused_auto"
         self.repository.commit()
 
     def finish(

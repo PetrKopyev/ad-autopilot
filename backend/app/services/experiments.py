@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, Business, ChangeLog, Experiment
@@ -26,6 +26,9 @@ def completed_hypotheses(worker: Worker, business: Business, group_id: int) -> t
 def group_available(worker: Worker, business: Business, group: AdGroup) -> bool:
     """Откат любого объявления защищает всю группу, включая новое плечо теста."""
     now = worker.clock.now
+    frozen = worker.metadata(business).get("frozen_entities", {}).get(f"group:{group.external_id}")
+    if frozen is not None and datetime.fromisoformat(frozen) > now:
+        return False
     ads = [item for item in worker.repository.rows(Ad, business.id) if item.ad_group_id == group.id]
     if any(item.frozen_until is not None and item.frozen_until > now for item in ads):
         return False
@@ -34,7 +37,10 @@ def group_available(worker: Worker, business: Business, group: AdGroup) -> bool:
     return not any(
         change.status == "applied"
         and now - change.created_at < timedelta(hours=DEFAULT_SETTINGS.cooldown_hours)
-        and any(op["entity_id"] in affected for op in change.operations)
+        and (
+            change.entity_id in affected
+            or (change.entity_type != "group" and any(op["entity_id"] in affected for op in change.operations))
+        )
         for change in worker.repository.rows(ChangeLog, business.id)
     )
 

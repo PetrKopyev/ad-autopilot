@@ -4,14 +4,18 @@ from typing import TYPE_CHECKING
 
 from app.db.models import BudgetLedger, Business
 from app.domain.budget import budget_guard as decide_guard
-from app.platforms.base import Operation
+from app.domain.budget import plan_budget
+from app.platforms.base import Operation, PlatformError
+from app.services.changes import ChangeConflict
 from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
 
 
-async def read_spend(worker: Worker, business: Business) -> tuple[dict[str, int], dict[str, int]]:
+async def read_spend(
+    worker: Worker, business: Business, *, tolerate_errors: bool = False
+) -> tuple[dict[str, int], dict[str, int]]:
     """Расход по дате клика до сейчас, включая два неустоявшихся дня."""
     day = today(worker.clock)
     month = day.replace(day=1)
@@ -20,15 +24,20 @@ async def read_spend(worker: Worker, business: Business) -> tuple[dict[str, int]
     meta = worker.metadata(business)
     started_on = min(month, day.fromisoformat(meta.get("started_on", month.isoformat())))
     for platform in sorted(platforms):
-        adapter = worker.resolve_adapter(business.id, platform)
-        rows = await adapter.get_stats(started_on, day, "campaign")
+        try:
+            adapter = worker.resolve_adapter(business.id, platform)
+            rows = await adapter.get_stats(started_on, day, "campaign")
+            reported_today = await adapter.get_spend_today()
+        except PlatformError:
+            if not tolerate_errors:
+                raise
+            continue
         known = {campaign.external_id for campaign in worker.campaigns(business) if campaign.platform == platform}
         for row in rows:
             if row.campaign_id not in known:
                 continue
             lifetime[row.campaign_id] = lifetime.get(row.campaign_id, 0) + row.cost_kop
         total = sum(row.cost_kop for row in rows if row.date >= month and row.campaign_id in known)
-        reported_today = await adapter.get_spend_today()
         # День площадки может не совпадать с московским: сравниваем с последней датой отчёта.
         latest = max((row.date for row in rows if row.campaign_id in known), default=None)
         stats_today = sum(row.cost_kop for row in rows if row.date == latest and row.campaign_id in known)
@@ -47,38 +56,75 @@ async def stop_all(
 ) -> None:
     with worker.repository.business_lock(business.id):
         if not worker.proposed(business):
-            business.status = "budget_stop" if budget_stop else "paused"
-            worker.repository.save(business)
-            if not budget_stop:
-                worker.remember(business, kill_switch=True)
-        for campaign in worker.campaigns(business):
-            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-            state = states[campaign.external_id]
-            if state.status in {"paused", "paused_auto", "paused_owner", "archived"}:
-                continue
-            await worker.apply(
+            worker.remember(
                 business,
-                campaign,
-                [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused")],
-                actor="system",
-                kind="pause",
-                reason_code=reason_code,
-                reason_params=reason_params,
-                reason_text="Вся реклама остановлена по запросу владельца.",
-                suffix="stop_all",
+                pending_stop={
+                    "reason_code": reason_code,
+                    "reason_params": reason_params,
+                    "budget_stop": budget_stop,
+                },
+                **({"kill_switch": True} if not budget_stop else {}),
             )
+        failed = False
+        for campaign in worker.campaigns(business):
+            try:
+                states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+                state = states[campaign.external_id]
+                if state.status in {"paused_auto", "paused_owner", "archived"}:
+                    continue
+                await worker.apply(
+                    business,
+                    campaign,
+                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto")],
+                    actor="system",
+                    kind="pause",
+                    reason_code=reason_code,
+                    reason_params=reason_params,
+                    reason_text="Останавливаем рекламу на всех площадках.",
+                    suffix="stop_all",
+                )
+            except (PlatformError, ChangeConflict):
+                failed = True
+        if failed:
+            raise ChangeConflict("Не все площадки подтвердили остановку. Повторим в следующем тике.")
+        if not worker.proposed(business):
+            business.status = "budget_stop" if budget_stop else "paused"
+            worker.remember(business, pending_stop=None)
 
 
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:
+    pending_stop = worker.metadata(business).get("pending_stop")
+    if pending_stop:
+        await stop_all(business, worker=worker, **pending_stop)
+        return
     month = today(worker.clock).replace(day=1)
-    spent, _ = await read_spend(worker, business)
+    spent, _ = await read_spend(worker, business, tolerate_errors=True)
     ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id) if row.month == month}
-    recorded = sum(row.spent_kop for row in ledgers.values())
-    reported = sum(spent.values())
-    daily = sum(campaign.daily_limit_kop for campaign in worker.campaigns(business))
-    result = decide_guard(
-        business.month_budget_kop, reported, daily, recorded_spent=recorded if reconcile and ledgers else None
-    )
+    reported = sum(max(spent.get(platform, 0), row.spent_kop) for platform, row in ledgers.items())
+    reported += sum(value for platform, value in spent.items() if platform not in ledgers)
+    daily = 0
+    for campaign in worker.campaigns(business):
+        limit = campaign.daily_limit_kop
+        try:
+            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
+                campaign.external_id
+            ]
+            limit = max(limit, state.daily_limit_kop or 0)
+        except PlatformError:
+            pass
+        daily += limit
+    # Ledger — снимок, а не разрешённый расход: во время простоя работают кэпы.
+    # Верхняя граница сверки — authorized месяца (PLAN 2.5), включая резерв.
+    day = today(worker.clock)
+    allowed = plan_budget(
+        business.month_budget_kop,
+        0,
+        day,
+        ("all",),
+        started_on=day.fromisoformat(worker.metadata(business).get("started_on", month.isoformat())),
+    ).authorized
+    mismatch = reconcile and reported > allowed
+    result = decide_guard(business.month_budget_kop, reported, daily, recorded_spent=0 if mismatch else None)
     for platform, value in spent.items():
         ledger = ledgers.get(platform) or BudgetLedger(
             business_id=business.id,

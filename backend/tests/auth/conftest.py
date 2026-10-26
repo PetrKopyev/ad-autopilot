@@ -155,11 +155,15 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
     monkeypatch.setenv("YANDEX_CLIENT_ID", "test-client")
     monkeypatch.setenv("YANDEX_CLIENT_SECRET", "test-secret")
 
+    from unittest.mock import AsyncMock
+
     from app.auth import yandex
     from app.auth.sessions import get_repository
     from app.config import Settings
     from app.db.session import engine
     from app.main import app
+
+    monkeypatch.setattr("app.main.start_scheduler", AsyncMock(return_value=None))
 
     settings = Settings()
     monkeypatch.setattr("app.config.settings", settings)

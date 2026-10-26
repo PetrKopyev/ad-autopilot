@@ -32,6 +32,31 @@ def make_adapter(**kwargs) -> FakeAdapter:
     )
 
 
+@pytest.mark.parametrize("status", ["paused", "stopped", "unknown"])
+async def test_fake_rejects_unknown_statuses_on_create_and_apply(status):
+    adapter = make_adapter()
+    plan = single_plan()
+    with pytest.raises(PlatformError, match="статус"):
+        await adapter.create_campaign_tree(replace(plan, status=status))
+    refs = await adapter.create_campaign_tree(plan)
+    with pytest.raises(PlatformError, match="статус"):
+        await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "active", status))
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
+
+
+async def test_evil_period_overrun_only_multiplies_newly_authorized_spend():
+    adapter = make_adapter(evil=True)
+    refs = await adapter.create_campaign_tree(single_plan(period=1_000))
+    adapter.clock.advance(hours=1)
+    await adapter.get_state(refs)
+    spent = adapter._spent[refs.campaign_id]
+    assert spent == 1_200
+    await adapter.apply(Operation("set_budget", "campaign", refs.campaign_id, "period_cap_kop", 1_000, spent + 400))
+    adapter.clock.advance(hours=1)
+    await adapter.get_state(refs)
+    assert adapter._spent[refs.campaign_id] == spent + 500
+
+
 def test_clock_advances_without_wall_time() -> None:
     clock = VirtualClock(datetime(2026, 1, 31, 23, tzinfo=UTC))
     assert clock.advance(hours=1, days=1) == datetime(2026, 2, 2, tzinfo=UTC)

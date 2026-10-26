@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, Business, StatsDaily
+from app.platforms.fake import FakeAdapter
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -48,6 +49,8 @@ async def sync_stats(worker: Worker, business: Business) -> None:
             )
             for name in ("impressions", "clicks", "cost_kop", "conversions"):
                 setattr(stored, name, getattr(row, name))
+            if isinstance(adapter, FakeAdapter) and business.lead_goal_ids:
+                stored.conversions = {str(business.lead_goal_ids[0]): row.conversions.get("lead", 0)}
             stored.fetched_at = worker.clock.now
             stored.is_settled = row.is_settled and row.date <= end - timedelta(days=2)
             changed.append(stored)

@@ -4,7 +4,7 @@ import secrets
 import shutil
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -34,6 +34,17 @@ from app.services.onboarding import (
     description_draft,
     lines,
 )
+
+CAP_MULTIPLIER = Decimal("1.25")
+
+
+def campaign_limits(daily: int, remaining: int, today: date, lifetime: int = 0) -> tuple[int, int]:
+    """Кэп накопленный; запас применяется только к новым разрешённым тратам."""
+    next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days = min(7 - today.weekday(), (next_month - today).days)
+    additional = min(remaining, daily * days)
+    return int(Decimal(daily) / CAP_MULTIPLIER), lifetime + int(Decimal(additional) / CAP_MULTIPLIER)
+
 
 PLATFORMS = ("direct", "vk")
 ANGLES_PER_GROUP = 2
@@ -82,7 +93,11 @@ def budget_limits(
 ) -> dict[str, PlatformLimit]:
     """Лимиты запуска: резерв и кэпы площадок считает domain/budget, сумма кэпов не превышает бюджет месяца."""
     budget = plan_budget(business.month_budget_kop, 0, today, tuple(platforms), started_on=today, settings=domain)
-    return {limit.platform: limit for limit in budget.limits}
+    result = {}
+    for limit in budget.limits:
+        daily, cap = campaign_limits(limit.daily_limit, limit.remaining_cap, today)
+        result[limit.platform] = PlatformLimit(limit.platform, cap, daily, cap)
+    return result
 
 
 def phrases(business: Business) -> list[str]:

@@ -77,6 +77,7 @@ class ExternalRefs:
     groups: dict[str, str]
     ads: dict[str, str]
     targets: dict[str, str]
+    budget_context: dict[str, int] = field(default_factory=dict)
 
     def entity_ids(self) -> tuple[str, ...]:
         return (self.campaign_id, *self.groups.values(), *self.ads.values(), *self.targets.values())
@@ -91,6 +92,7 @@ class Operation:
     before: Any
     after: Any
     invertible: bool = True
+    budget_context: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         fields = {
@@ -123,11 +125,22 @@ class Operation:
                 raise ValueError("Значение операции должно быть строкой.")
         object.__setattr__(self, "before", deepcopy(self.before))
         object.__setattr__(self, "after", deepcopy(self.after))
+        for name, value in self.budget_context.items():
+            _money(value, name)
+        object.__setattr__(self, "budget_context", deepcopy(self.budget_context))
 
     def inverse(self) -> "Operation":
         if not self.invertible:
             raise ValueError("Операция необратима: требуется отдельная операция остановки/архивации.")
-        return Operation(self.kind, self.entity_type, self.entity_id, self.field, self.after, self.before)
+        return Operation(
+            self.kind,
+            self.entity_type,
+            self.entity_id,
+            self.field,
+            self.after,
+            self.before,
+            budget_context=self.budget_context,
+        )
 
 
 @dataclass(frozen=True)

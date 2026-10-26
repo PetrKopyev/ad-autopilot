@@ -140,7 +140,6 @@ class DirectAdapter:
         self._create_lock = asyncio.Lock()
         self._limits = PlatformLimits()
         self._trees: dict[str, ExternalRefs] = {}
-        self._budgets: dict[int, tuple[int, int]] = {}
         self._tz = ZoneInfo(getattr(config, "tz_default", "Europe/Moscow"))
 
     @staticmethod
@@ -465,7 +464,17 @@ class DirectAdapter:
                 },
             )
             await self._api("campaigns", "suspend", {"SelectionCriteria": {"Ids": [int(campaign_id)]}})
-        refs = ExternalRefs(campaign_id, {}, {}, {})
+        refs = ExternalRefs(
+            campaign_id,
+            {},
+            {},
+            {},
+            {
+                "daily_limit_kop": plan.daily_limit_kop,
+                "period_cap_kop": plan.period_cap_kop,
+                "weekly_limit_kop": self._weekly_limit(plan.daily_limit_kop, plan.period_cap_kop),
+            },
+        )
         groups = await self._get(
             "adgroups",
             "AdGroups",
@@ -542,7 +551,6 @@ class DirectAdapter:
                     if target.status != "active" or group.status != "active":
                         await self._api("keywords", "suspend", {"SelectionCriteria": {"Ids": [int(target_id)]}})
                 refs.targets[target.id] = target_id
-        self._budgets[int(campaign_id)] = (plan.daily_limit_kop, plan.period_cap_kop)
         if not found and plan.status == "active" and self._marking_confirmed:
             for group in plan.groups:
                 for ad in group.ads:
@@ -668,7 +676,7 @@ class DirectAdapter:
                 await self._api("ads", "moderate", {"SelectionCriteria": {"Ids": [id_]}})
             await self._api(services[op.entity_type], method, {"SelectionCriteria": {"Ids": [id_]}})
         elif op.kind == "set_budget":
-            await self._set_budget(id_, op.field, op.after)
+            await self._set_budget(id_, op.field, op.after, op.budget_context)
         elif op.kind in {"update_ad_text", "swap_ad_image"}:
             if self._text_campaign:
                 field = {"title": "Title", "text": "Text", "image_ref": "AdImageHash"}[op.field]
@@ -690,7 +698,7 @@ class DirectAdapter:
         elif op.kind == "set_targeting":
             await self._api("adgroups", "update", {"AdGroups": [{"Id": id_, **self._targeting(op.after)}]})
 
-    async def _set_budget(self, id_: int, field: str, value: int) -> None:
+    async def _set_budget(self, id_: int, field: str, value: int, context: dict[str, int]) -> None:
         if value == 0:
             raise PlatformError("Нулевой недельный бюджет недопустим; остановите кампанию операцией set_status.")
         kind = "TextCampaign" if self._text_campaign else "UnifiedCampaign"
@@ -718,10 +726,9 @@ class DirectAdapter:
             if len(active) != 1:
                 raise KeyError
             current = _integer(active[0]["WeeklySpendLimit"])
-            if id_ in self._budgets:
-                daily, period = self._budgets[id_]
-                daily, period = (value, period) if field == "daily_limit_kop" else (daily, value)
-                weekly = self._weekly_limit(daily, period) * MICROS_PER_KOP
+            if context:
+                values = context | {field: value}
+                weekly = self._context_weekly(values) * MICROS_PER_KOP
             else:
                 weekly = (
                     self._weekly_limit(value, value * 7) * MICROS_PER_KOP
@@ -729,9 +736,9 @@ class DirectAdapter:
                     else value * MICROS_PER_KOP
                 )
                 if weekly > current:
-                    raise PlatformError(
-                        "Для повышения бюджета после перезапуска нужен план с дневным и остаточным лимитами."
-                    )
+                    raise PlatformError("Для повышения бюджета нужен план с дневным и накопленным лимитами.")
+            if weekly <= 0:
+                raise PlatformError("Бюджет исчерпан; остановите кампанию операцией set_status.")
             active[0]["WeeklySpendLimit"] = weekly
         except (KeyError, IndexError, TypeError, ValueError):
             raise PlatformError(
@@ -750,8 +757,16 @@ class DirectAdapter:
                 ]
             },
         )
-        if id_ in self._budgets:
-            self._budgets[id_] = (daily, period)
+
+    def _context_weekly(self, context: dict[str, int]) -> int:
+        # WeeklySpendLimit включает уже потраченное на этой неделе. Наш period_cap
+        # накопленный за жизнь кампании: убираем только расход предыдущих недель.
+        before = context.get("spent_before_week_kop", 0)
+        week = context.get("spent_week_kop", 0)
+        return min(
+            max(0, context["period_cap_kop"] - before),
+            week + self._weekly_limit(context["daily_limit_kop"], context["period_cap_kop"]),
+        )
 
     async def get_state(self, refs: ExternalRefs) -> dict[str, EntityState]:
         kind = "TextCampaign" if self._text_campaign else "UnifiedCampaign"
@@ -771,12 +786,22 @@ class DirectAdapter:
                 key = STRATEGIES.get(strategy.get("BiddingStrategyType"))
                 if key and "WeeklySpendLimit" in strategy.get(key, {}):
                     budgets[placement] = _kop(strategy[key]["WeeklySpendLimit"])
+            weekly = sum(budgets.values())
+            context = refs.budget_context
+            if context and weekly == context.get("weekly_limit_kop", self._context_weekly(context)):
+                daily, period = context["daily_limit_kop"], context["period_cap_kop"]
+            else:
+                days = (self._budget_end() - self._today()).days + 1
+                daily = weekly // days
+                period = weekly + context.get("spent_before_week_kop", 0)
             states[str(item["Id"])] = EntityState(
                 str(item["Id"]),
                 "campaign",
                 None,
                 item["Name"],
                 _status(item),
+                daily_limit_kop=daily,
+                period_cap_kop=period,
                 targeting={"weekly_limits_kop": budgets},
             )
         if refs.groups:

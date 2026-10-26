@@ -1,12 +1,12 @@
 import os
-from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from integration.harness import BUDGET_KOP, Crash, CrashingAdapter, FlakyReadAdapter, make_world
 from sqlalchemy import create_engine
 
-from app.db.models import BudgetLedger, WorkerRun
+from app.db.models import BudgetLedger, StatsDaily, WorkerRun
+from app.platforms.base import Operation
 from app.services.budget_guard import stop_all
 from app.services.changes import ChangeConflict
 from app.worker.clock import MOSCOW, SystemClock, today
@@ -77,10 +77,12 @@ async def test_crash_after_apply_is_reconciled_on_restart() -> None:
     restarted = world.worker()
     await restarted.startup()
     assert not world.repository.pending()
-    change = world.changes(status="applied")[0]
+    change = world.changes(status="applied", reason_code="BUDGET_REBALANCE")[0]
     state = world.adapter._states[world.refs.campaign_id]
     assert (state.daily_limit_kop, state.period_cap_kop) == (
-        world.campaign.daily_limit_kop, world.campaign.period_cap_kop)
+        world.campaign.daily_limit_kop,
+        world.campaign.period_cap_kop,
+    )
     assert change.reason_code == "BUDGET_REBALANCE"
     await world.advance(restarted, days=1)
     assert not world.repository.pending()
@@ -95,11 +97,13 @@ async def test_crash_halfway_is_repeated_after_restart() -> None:
     restarted = world.worker()
     await restarted.startup()
     assert not world.repository.pending()
-    assert [item.status for item in world.changes()] == ["failed"]
+    assert [item.status for item in world.changes(reason_code="BUDGET_REBALANCE")] == ["failed"]
     await restarted.run("rebalance_budget", 1)
     state = world.adapter._states[world.refs.campaign_id]
     assert (state.daily_limit_kop, state.period_cap_kop) == (
-        world.campaign.daily_limit_kop, world.campaign.period_cap_kop)
+        world.campaign.daily_limit_kop,
+        world.campaign.period_cap_kop,
+    )
     assert not world.repository.pending()
 
 
@@ -112,7 +116,7 @@ async def test_crash_before_apply_is_repeated_after_restart() -> None:
     restarted = world.worker()
     await restarted.startup()
     assert not world.repository.pending()
-    assert [item.status for item in world.changes()] == ["failed"]
+    assert [item.status for item in world.changes(reason_code="BUDGET_REBALANCE")] == ["failed"]
     assert world.adapter._states[world.refs.campaign_id].period_cap_kop == initial
     await restarted.run("rebalance_budget", 1)
     assert world.changes(status="applied")
@@ -134,9 +138,17 @@ async def test_unreadable_platform_leaves_pending_until_next_run() -> None:
 async def test_dry_run_proposes_without_touching_platform() -> None:
     world = await make_world()
     before = world.adapter._states[world.refs.campaign_id]
-    await world.advance(world.worker(dry_run=True), days=16)
+    worker = world.worker(dry_run=True)
+    await world.advance(worker, days=8)
+    # Без перебалансировки стартовый кэп исчерпывается до накопления 80 кликов.
+    # Устоявшаяся выборка проверяет предложение паузы независимо от этого кэпа.
+    row = next(
+        row for row in world.repository.rows(StatsDaily) if row.ad_id == world.ads["weak-1"].id and row.date == JAN
+    )
+    row.impressions, row.clicks, row.cost_kop, row.conversions = 20_000, 80, 200_000, {"1": 0}
+    await world.advance(worker, days=8)
     assert world.adapter._states[world.refs.campaign_id] == before
-    proposed = world.changes()
+    proposed = [change for change in world.changes() if change.kind != "launch"]
     assert proposed and all(item.evidence["_service"]["dry_run"] for item in proposed)
     assert {item.status for item in proposed} == {"pending"}
     assert any(item.kind == "pause" for item in proposed)
@@ -149,13 +161,16 @@ async def test_business_dry_run_setting() -> None:
     before = world.adapter._states[world.refs.campaign_id]
     await world.advance(world.worker(dry_run=False), days=3)
     assert world.adapter._states[world.refs.campaign_id] == before
-    assert world.changes() and all(item.evidence["_service"]["dry_run"] for item in world.changes())
+    assert all(item.evidence["_service"]["dry_run"] for item in world.changes() if item.kind != "launch")
 
 
 async def test_budget_guard_stops_everything_and_next_month_resumes() -> None:
     world = await make_world(budget=1_000_000)
     key = world.refs.campaign_id
-    world.adapter._states[key] = replace(world.adapter._states[key], daily_limit_kop=10**8, period_cap_kop=10**9)
+    for field, value in (("daily_limit_kop", 10**8), ("period_cap_kop", 10**9)):
+        await world.adapter.apply(
+            Operation("set_budget", "campaign", key, field, getattr(world.adapter._states[key], field), value)
+        )
     worker = world.worker()
     for _ in range(200):
         world.clock.advance(hours=0.5)
@@ -163,7 +178,7 @@ async def test_budget_guard_stops_everything_and_next_month_resumes() -> None:
         if world.business.status == "budget_stop":
             break
     assert world.business.status == "budget_stop"
-    assert world.adapter._states[key].status == "paused"
+    assert world.adapter._states[key].status == "paused_auto"
     ledger = world.ledger()[0]
     assert ledger.hard_stop_at is not None
     spent = world.platform_spend()
@@ -179,7 +194,7 @@ async def test_month_rollover_without_auto_continue_stays_stopped() -> None:
     world = await make_world(auto_continue=False)
     worker = world.worker()
     await world.advance(worker, days=34)
-    assert world.adapter._states[world.refs.campaign_id].status == "paused"
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
     assert world.spend_in_month(date(2026, 2, 1)) == 0
     stopped_at = world.platform_spend()
     await world.advance(worker, days=2)
@@ -191,7 +206,7 @@ async def test_kill_switch_stops_all_and_blocks_autopilot() -> None:
     worker = world.worker()
     await world.advance(worker, days=2)
     await stop_all(world.business, worker=worker)
-    assert world.adapter._states[world.refs.campaign_id].status == "paused"
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
     assert world.business.status == "paused"
     changes = len(world.changes())
     spent = world.platform_spend()

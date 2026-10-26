@@ -172,6 +172,7 @@ class FakeAdapter:
         self._injected: deque[int] = deque()
         self._stats: dict[tuple[str, date], _Counters] = {}
         self._spent: dict[str, int] = {}
+        self._period_ceiling: dict[str, int] = {}
         self._spent_daily: dict[tuple[str, date], int] = {}
         self._pending: list[tuple[datetime, int, str, date]] = []
         self._sequence = 0
@@ -240,6 +241,13 @@ class FakeAdapter:
 
     async def create_campaign_tree(self, plan_part: CampaignTreeSpec) -> ExternalRefs:
         self._request()
+        for status in (
+            plan_part.status,
+            *(group.status for group in plan_part.groups),
+            *(ad.status for group in plan_part.groups for ad in group.ads),
+            *(target.status for group in plan_part.groups for target in group.targets),
+        ):
+            self._check_status(status)
         key = plan_part.idempotency_key
         if key in self._trees:
             return deepcopy(self._trees[key])
@@ -255,6 +263,7 @@ class FakeAdapter:
             plan_part.period_cap_kop,
         )
         self._spent[campaign_id] = 0
+        self._period_ceiling[campaign_id] = self._effective_cap(plan_part.period_cap_kop)
         for group in plan_part.groups:
             group_id = self._external_id(key, "group", group.id)
             refs.groups[group.id] = group_id
@@ -304,6 +313,8 @@ class FakeAdapter:
 
     async def apply(self, operation: Operation) -> None:
         self._request()
+        if operation.kind == "set_status":
+            self._check_status(operation.after)
         state = self._states.get(operation.entity_id)
         if state is None or state.entity_type != operation.entity_type:
             raise PlatformError("Сущность не найдена.", status_code=404)
@@ -313,6 +324,9 @@ class FakeAdapter:
                 raise ModerationRejected(state.entity_id, review.reason or "Отклонено модерацией.")
         if getattr(state, operation.field) == operation.after:
             return
+        if operation.kind == "set_budget" and operation.field == "period_cap_kop":
+            spent = self._spent[state.entity_id]
+            self._period_ceiling[state.entity_id] = spent + self._effective_cap(max(0, operation.after - spent))
         self._states[state.entity_id] = replace(state, **{operation.field: deepcopy(operation.after)})
         if operation.kind in ("update_ad_text", "swap_ad_image"):
             self._submit_review(state.entity_id)
@@ -346,6 +360,11 @@ class FakeAdapter:
     def _effective_cap(self, cap: int) -> int:
         return cap * 125 // 100 if self.evil else cap
 
+    @staticmethod
+    def _check_status(status: str) -> None:
+        if status not in {"active", "paused_auto", "paused_owner", "archived"}:
+            raise PlatformError("Неизвестный статус.")
+
     def _simulate_minute(self, tick: datetime) -> None:
         # Слот [tick - 1 минута, tick) относится к дню начала слота, в том числе у полуночи.
         slot = tick - timedelta(minutes=1)
@@ -362,7 +381,7 @@ class FakeAdapter:
             daily_key = (campaign.entity_id, day)
             remaining = min(
                 self._effective_cap(campaign.daily_limit_kop) - self._spent_daily.get(daily_key, 0),
-                self._effective_cap(campaign.period_cap_kop) - self._spent[campaign.entity_id],
+                self._period_ceiling[campaign.entity_id] - self._spent[campaign.entity_id],
             )
             if remaining < truth.cpc_kop:
                 continue

@@ -106,6 +106,47 @@ async def test_rollback_appends_inverse_and_freezes_owner_ad(repository, tree):
         await RollbackService(repository, dry_run=False).revert(revert.id, business_id=1, adapter=adapter)
 
 
+@pytest.mark.parametrize("reason", ["BUDGET_REBALANCE", "BUDGET_STOP", "SPEND_MISMATCH", "MONTH_STOP"])
+async def test_budget_protection_cannot_be_rolled_back_even_with_confirmation(repository, tree, reason):
+    adapter, refs = tree
+    original = await applied(repository, adapter, refs)
+    original.actor, original.reason_code = "system", reason
+    before = await adapter.get_state(refs)
+    with pytest.raises(ChangeConflict, match="защита бюджета, отменить нельзя"):
+        await RollbackService(repository, dry_run=False).revert(
+            original.id,
+            business_id=1,
+            adapter=adapter,
+            confirm=True,
+        )
+    assert original.status == "applied" and await adapter.get_state(refs) == before
+
+
+async def test_campaign_budget_rollback_freezes_campaign_without_freezing_its_ads(repository, tree):
+    adapter, refs = tree
+    campaign = Campaign(id=1, external_id=refs.campaign_id, daily_limit_kop=10_000, period_cap_kop=300_000)
+    ads = [
+        Ad(id=index, ad_group_id=1, external_id=external_id) for index, external_id in enumerate(refs.ads.values(), 1)
+    ]
+    repository.local_entities.return_value = {
+        ("campaign", refs.campaign_id): campaign,
+        **{("ad", ad.external_id): ad for ad in ads},
+    }
+    original = await applied(
+        repository,
+        adapter,
+        refs,
+        operations=[
+            Operation("set_budget", "campaign", refs.campaign_id, "daily_limit_kop", 10_000, 12_000),
+        ],
+    )
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    assert revert.status == "applied"
+    assert all(ad.frozen_until is None for ad in ads)
+    frozen = repository.business(1).settings["_worker"]["frozen_entities"]
+    assert set(frozen) == {f"campaign:{refs.campaign_id}"}
+
+
 async def test_conflict_requires_confirmation_and_records_real_before(repository, tree):
     adapter, refs = tree
     original = await applied(repository, adapter, refs)

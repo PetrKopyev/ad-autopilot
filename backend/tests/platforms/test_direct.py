@@ -145,6 +145,10 @@ class DirectServer:
                 )
             self.rows[service].append(item)
             return httpx.Response(200, json={"result": {"AddResults": [{"Id": item["Id"]}]}})
+        if method == "update":
+            for update in params[key]:
+                next(row for row in self.rows[service] if row["Id"] == update["Id"]).update(update)
+            return httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 1}]}})
         for item in self.rows[service]:
             if item["Id"] in params.get("SelectionCriteria", {}).get("Ids", []):
                 item["State"] = {"suspend": "SUSPENDED", "resume": "ON", "archive": "ARCHIVED"}[method]
@@ -255,7 +259,17 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     server = DirectServer()
     api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
     first = await adapter.create_campaign_tree(plan)
-    assert first == ExternalRefs("101", {"nails": "102"}, {"ad": "103"}, {"phrase": "104"})
+    assert first == ExternalRefs(
+        "101",
+        {"nails": "102"},
+        {"ad": "103"},
+        {"phrase": "104"},
+        {
+            "daily_limit_kop": plan.daily_limit_kop,
+            "period_cap_kop": plan.period_cap_kop,
+            "weekly_limit_kop": 500_000,
+        },
+    )
     campaign = server.rows["campaigns"][0]
     assert campaign["Name"] == "Салон ap-salon"
     settings = campaign["UnifiedCampaign"]
@@ -286,8 +300,13 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     async with DirectAdapter(
         "test-only", config=configuration(), counter_ids=(12,), href="https://salon.example"
     ) as another:
+        another._today = lambda: TODAY
         assert await another.create_campaign_tree(plan) == ExternalRefs(
-            "101", {"nails": "102"}, {"ad": "103"}, {"phrase": "104"}
+            "101",
+            {"nails": "102"},
+            {"ad": "103"},
+            {"phrase": "104"},
+            first.budget_context,
         )
     assert len(server.writes) == writes
 
@@ -474,7 +493,8 @@ async def test_state_and_moderation(adapter, api, plan):
     state = await adapter.get_state(refs)
     assert set(state) == set(refs.entity_ids())
     assert state[refs.campaign_id].status == "paused_owner"
-    assert state[refs.campaign_id].daily_limit_kop is None
+    assert state[refs.campaign_id].daily_limit_kop == plan.daily_limit_kop
+    assert state[refs.campaign_id].period_cap_kop == plan.period_cap_kop
     assert state[refs.campaign_id].targeting == {"weekly_limits_kop": {"Search": 500000}}
     assert state[refs.ads["ad"]].title == "Маникюр"
     assert state[refs.ads["ad"]].image_ref == "image-hash"
@@ -865,7 +885,7 @@ async def test_sandbox_reports_are_requested_per_campaign(api):
 
 
 async def test_budget_rollback_preserves_other_limit(adapter, api):
-    adapter._budgets[1] = (100, 500)
+    context = {"daily_limit_kop": 100, "period_cap_kop": 500}
     settings = adapter._campaign_settings(500)
 
     def respond(request):
@@ -876,24 +896,116 @@ async def test_budget_rollback_preserves_other_limit(adapter, api):
         return httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 1}]}})
 
     api.post(f"{V501}/campaigns").mock(side_effect=respond)
-    operation = Operation("set_budget", "campaign", "1", "daily_limit_kop", 100, 20)
+    operation = Operation("set_budget", "campaign", "1", "daily_limit_kop", 100, 20, budget_context=context)
     await adapter.apply(operation)
     assert settings["BiddingStrategy"]["Search"]["WbMaximumClicks"]["WeeklySpendLimit"] == 1200000
     await adapter.apply(operation.inverse())
     assert settings["BiddingStrategy"]["Search"]["WbMaximumClicks"]["WeeklySpendLimit"] == 5000000
-    await adapter.apply(Operation("set_budget", "campaign", "1", "period_cap_kop", 500, 50))
+    await adapter.apply(Operation("set_budget", "campaign", "1", "period_cap_kop", 500, 50, budget_context=context))
     assert settings["BiddingStrategy"]["Search"]["WbMaximumClicks"]["WeeklySpendLimit"] == 500000
-    await adapter.apply(Operation("set_budget", "campaign", "1", "daily_limit_kop", 100, 1000))
+    await adapter.apply(
+        Operation(
+            "set_budget", "campaign", "1", "daily_limit_kop", 100, 1000, budget_context=context | {"period_cap_kop": 50}
+        )
+    )
     assert settings["BiddingStrategy"]["Search"]["WbMaximumClicks"]["WeeklySpendLimit"] == 500000
 
 
 async def test_unknown_budget_cannot_be_increased_without_plan(adapter, api):
     route = result(api, "campaigns", Campaigns=[{"Id": 1, "UnifiedCampaign": adapter._campaign_settings(10)}])
-    with pytest.raises(PlatformError, match="после перезапуска"):
+    with pytest.raises(PlatformError, match="нужен план"):
         await adapter.apply(Operation("set_budget", "campaign", "1", "daily_limit_kop", 1, 100))
     assert len(route.calls) == 1
     with pytest.raises(PlatformError, match="set_status"):
         await adapter.apply(Operation("set_budget", "campaign", "1", "daily_limit_kop", 1, 0))
+
+
+async def test_service_confirms_direct_auto_pause_and_preserves_local_author(adapter, api, plan):
+    from app.db.models import Campaign
+    from app.services.changes import ChangesService
+    from tests.services.test_changes import MemoryRepository
+
+    server = DirectServer()
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    adapter._marking_confirmed = True
+    await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "paused_owner", "active"))
+    repository = MemoryRepository()
+    campaign = Campaign(id=1, external_id=refs.campaign_id, status="active")
+    repository.entities = {("campaign", refs.campaign_id): campaign}
+    change = await ChangesService(repository, dry_run=False).apply_change(
+        business_id=1,
+        adapter=adapter,
+        refs=refs,
+        actor="system",
+        kind="pause",
+        platform="direct",
+        reason_code="MONTH_STOP",
+        reason_text="Остановили рекламу.",
+        operations=[Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto")],
+    )
+    assert change.status == "applied" and campaign.status == "paused_auto"
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_owner"
+
+
+async def test_service_budget_update_after_restart_converts_lifetime_cap_and_extends_end_date(api):
+    from app.db.models import Campaign
+    from app.platforms.base import StatRow
+    from app.services.changes import ChangesService, load_operations, load_refs
+    from tests.services.test_changes import MemoryRepository
+
+    day = date(2026, 11, 2)
+    now = datetime(2026, 11, 2, 12, tzinfo=UTC)
+    server = DirectServer()
+    repository = MemoryRepository()
+    repository.current_business.settings = {"_worker": {"started_on": "2026-10-26"}}
+    campaign = Campaign(id=1, external_id="1", daily_limit_kop=100_000, period_cap_kop=1_000_000)
+    repository.entities = {("campaign", "1"): campaign}
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    async with DirectAdapter("test-only", config=configuration()) as restarted:
+        restarted._today = lambda: day
+        server.rows["campaigns"] = [
+            {
+                "Id": 1,
+                "Name": "Салон",
+                "State": "ON",
+                "EndDate": "2026-10-31",
+                "UnifiedCampaign": restarted._campaign_settings(500_000),
+            }
+        ]
+        restarted.get_stats = AsyncMock(
+            return_value=[
+                StatRow("1", "1", row_day, "campaign", 10, 1, cost, {}, now, True)
+                for row_day, cost in ((date(2026, 10, 28), 400_000), (day, 100_000))
+            ]
+        )
+        change = await ChangesService(repository, dry_run=False).apply_change(
+            business_id=1,
+            adapter=restarted,
+            refs=ExternalRefs("1", {}, {}, {}),
+            actor="system",
+            kind="budget",
+            platform="direct",
+            reason_code="BUDGET_REBALANCE",
+            reason_text="Пересчитали бюджет.",
+            now=now,
+            operations=[
+                Operation("set_budget", "campaign", "1", "period_cap_kop", 1_000_000, 1_300_000),
+                Operation("set_budget", "campaign", "1", "daily_limit_kop", 100_000, 150_000),
+            ],
+        )
+    assert change.status == "applied"
+    assert campaign.daily_limit_kop == 150_000 and campaign.period_cap_kop == 1_300_000
+    assert server.rows["campaigns"][0]["EndDate"] == "2026-11-08"
+    weekly = server.rows["campaigns"][0]["UnifiedCampaign"]["BiddingStrategy"]["Search"]["WbMaximumClicks"]
+    assert weekly["WeeklySpendLimit"] == 900_000 * 10_000
+    context = load_operations(change)[-1].budget_context
+    assert context["spent_before_week_kop"] == 400_000 and context["spent_week_kop"] == 100_000
+    async with DirectAdapter("test-only", config=configuration()) as another:
+        another._today = lambda: day
+        refs = replace(load_refs(change), budget_context=context)
+        state = (await another.get_state(refs))["1"]
+        assert (state.daily_limit_kop, state.period_cap_kop) == (150_000, 1_300_000)
 
 
 async def test_invalid_mutation_result_does_not_confirm_marking(adapter, api):

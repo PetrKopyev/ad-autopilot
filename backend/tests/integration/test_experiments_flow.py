@@ -30,14 +30,14 @@ async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_gro
         world.repository.save(
             StatsDaily(
                 business_id=world.business.id,
-                platform="fake",
+                platform="direct",
                 campaign_id=world.campaign.id,
                 ad_id=ad.id,
                 date=world.clock.now.date(),
                 impressions=10_000,
                 clicks=clicks,
                 cost_kop=10_000,
-                conversions={"lead": leads},
+                conversions={"1": leads},
                 is_settled=True,
             )
         )
@@ -52,7 +52,7 @@ async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_gro
     assert "10000" in change.reason_text and "300" in change.reason_text
     assert "3,0%" in change.reason_text and "1,0%" in change.reason_text
     after = await world.adapter.get_state(world.refs)
-    assert after[control.external_id].status == "paused"
+    assert after[control.external_id].status == "paused_auto"
     assert after[variant.external_id].status == "active"
     # Кампания с общим бюджетом не получает дополнительных денег при выборе победителя.
     assert after[world.campaign.external_id] == before[world.campaign.external_id]

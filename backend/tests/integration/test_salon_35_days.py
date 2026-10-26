@@ -18,7 +18,7 @@ async def test_35_days_salon_budget_is_not_exceeded() -> None:
     await world.advance(world.worker(), days=35)
     result = summary(world)
     print("normal", result)
-    assert 0 < result["january"] <= BUDGET_KOP
+    assert BUDGET_KOP * 80 // 100 <= result["january"] <= BUDGET_KOP
     assert 0 < result["february"] <= BUDGET_KOP
     assert not world.repository.pending()
     assert {"weak-1", "weak-2"} <= set(result["paused"])

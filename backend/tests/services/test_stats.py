@@ -251,10 +251,14 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: MemoryRepository) -> Ite
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "test-only")
     monkeypatch.setenv("PLATFORM_MODE", "fake")
 
+    from unittest.mock import AsyncMock
+
     from app.api.stats import get_stats_service, get_today
     from app.auth.sessions import current_user, get_repository
     from app.db.session import engine
     from app.main import app
+
+    monkeypatch.setattr("app.main.start_scheduler", AsyncMock(return_value=None))
 
     def forbid_database(*args, **kwargs):
         pytest.fail("Stats unit tests must not connect to a database")
