@@ -1,9 +1,12 @@
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Route, Routes } from 'react-router';
 import { Button, Card } from './components';
 import { Layout } from './components/Layout';
 import { copy } from './copy';
 import { NotFoundPage, PlaceholderPage } from './pages/PlaceholderPage';
 import { SetupPage } from './pages/SetupPage';
+import { HomePage } from './pages/HomePage';
+import { AdsPage } from './pages/AdsPage';
+import { StatsPage } from './pages/StatsPage';
 
 function LoginPage() {
   return (
@@ -21,13 +24,13 @@ export function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<PlaceholderPage title={copy.home.title} />} />
+        <Route index element={<HomePage />} />
         <Route path="login" element={<LoginPage />} />
         <Route path="setup" element={<SetupPage />} />
         <Route path="setup/:step" element={<SetupPage />} />
         <Route path="plan" element={<PlaceholderPage title={copy.plan.title} description={copy.plan.promise} />} />
-        <Route path="ads" element={<PlaceholderPage title={copy.ads.title} />} />
-        <Route path="statistics" element={<PlaceholderPage title={copy.statistics.title} description={copy.statistics.provisional} />} />
+        <Route path="ads" element={<AdsPage />} />
+        <Route path="statistics" element={<StatsPage />} />
         <Route path="history" element={<PlaceholderPage title={copy.history.title} />} />
         <Route path="clients" element={<PlaceholderPage title={copy.clients.title} description={copy.clients.weekly} />} />
         <Route path="settings" element={<PlaceholderPage title={copy.settings.title} description={copy.settings.budgetHint} />} />

@@ -1,0 +1,10 @@
+.ads-branch summary { min-height: 48px; padding: 12px 0; cursor: pointer; font-weight: 650; }
+.ads-group { margin-left: 16px; }
+.ads-ad { border: 1px solid var(--color-border); border-radius: 12px; padding: 20px; }
+.ads-ad h3 { font-size: 1.1rem; margin: 0; }
+.ads-ad-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.ads-image { max-width: 100%; width: 260px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; }
+.ads-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 16px; margin: 0; }
+.ads-metrics dt { color: var(--color-muted); font-size: .875rem; }
+.ads-metrics dd { margin: 4px 0 0; font-weight: 650; }
+@media (max-width: 720px) { .ads-group { margin-left: 0; } .ads-ad { padding: 16px; } }

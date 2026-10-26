@@ -1,4 +1,4 @@
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router';
 import { Card, Stepper } from '../components';
 import { copy } from '../copy';
 import { NotFoundPage, PlaceholderPage } from './PlaceholderPage';
