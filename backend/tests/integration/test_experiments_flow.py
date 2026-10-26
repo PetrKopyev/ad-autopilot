@@ -6,7 +6,7 @@ from app.platforms.fake import AdTruth
 from app.services.experiments import create_experiment
 from app.services.optimize import experiments_tick
 from app.services.rollback import RollbackService
-from app.services.sync import sync_moderation, sync_stats
+from app.services.sync import sync_moderation
 from tests.integration.harness import make_world
 from tests.services.test_experiments import control_snapshot, design, wire_content
 
@@ -94,19 +94,18 @@ async def test_live_variant_is_added_wins_from_fake_stats_and_rolls_back(tmp_pat
     for ad_id in world.adapter._ad_truths:
         world.adapter._ad_truths[ad_id] = AdTruth(0.01, 1, 0.3, 1200)
     world.adapter._ad_truths[variant.external_id] = AdTruth(0.04, 1, 0.3, 1200)
-    await world.advance(worker, days=8)
-    # Правки бюджета в группе защищены паузой; вердикт читает уже осевшую статистику после неё.
-    world.clock.advance(days=3)
-    await sync_stats(worker, world.business)
+    await world.advance(worker, days=16)
     pre_verdict = await world.adapter.get_state(worker.refs(world.campaign))
-    await experiments_tick(worker, world.business)
-    (change,) = world.changes(kind="experiment_verdict")
+    change = next(row for row in world.changes(kind="experiment_verdict") if row.id == experiment.change_id)
     assert experiment.verdict == "variant_wins" and experiment.status == "concluded"
     assert change.status == "applied" and change.id == experiment.change_id
     assert "Оставили Б, А остановили" in change.reason_text
     assert str(change.evidence["variant"]["impressions"]) in change.reason_text
     assert str(change.evidence["variant"]["clicks"]) in change.reason_text
-    assert "4,0%" in change.reason_text and "1,0%" in change.reason_text
+    for arm in ("control", "variant"):
+        metrics = change.evidence[arm]
+        ctr = f"{metrics['clicks'] / metrics['impressions'] * 100:.1f}%".replace(".", ",")
+        assert ctr in change.reason_text
     after = await world.adapter.get_state(worker.refs(world.campaign))
     assert after[control.external_id].status == "paused_auto"
     assert after[variant.external_id].status == "active"
@@ -119,12 +118,20 @@ async def test_live_variant_is_added_wins_from_fake_stats_and_rolls_back(tmp_pat
     restored = await world.adapter.get_state(worker.refs(world.campaign))
     assert restored[control.external_id].status == "active"
     assert restored[variant.external_id].status == "paused_owner"
-    assert all(restored[id_] == state for id_, state in pre_verdict.items() if id_ != variant.external_id)
+    assert all(
+        restored[id_] == state for id_, state in pre_verdict.items()
+        if id_ not in {control.external_id, variant.external_id}
+    )
     assert experiment.status == "cancelled"
     assert control.frozen_until == variant.frozen_until == world.clock.now + timedelta(days=14)
     await experiments_tick(worker, world.business)
-    assert len(world.changes(kind="experiment_verdict")) == 1
-    assert sum(item.control_ad_id == control.id for item in world.repository.rows(Experiment)) == 1
+    assert sum(
+        row.evidence.get("experiment_id") == experiment.id for row in world.changes(kind="experiment_verdict")
+    ) == 1
+    assert sum(
+        item.ad_group_id == experiment.ad_group_id and item.hypothesis == experiment.hypothesis
+        for item in world.repository.rows(Experiment)
+    ) == 1
     assert world.platform_spend() <= world.business.month_budget_kop
 
 

@@ -337,3 +337,29 @@ def test_settings_values_are_saved(setup):
     assert world.business.avg_check_kop is None
     assert client.get("/api/business").json()["auto_continue"] is False
     assert client.put("/api/business/settings", json={"auto_continue": True, "avg_check_kop": -1}).status_code == 422
+
+
+@pytest.mark.parametrize("amount", [0, -1, 1_000_000_001])
+def test_budget_bounds_are_validated_before_platform_calls(setup, monkeypatch, amount):
+    from unittest.mock import AsyncMock
+
+    client, world = setup
+    limits = AsyncMock(side_effect=AssertionError("недопустимый бюджет"))
+    monkeypatch.setattr(world.adapter, "min_budgets", limits)
+    response = client.put("/api/business/budget", json={"month_budget_kop": amount})
+    assert response.status_code == 422
+    limits.assert_not_awaited()
+
+
+def test_budget_cannot_be_lower_than_sum_of_connected_platform_minimums(setup, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.db.models import PlatformAccount
+
+    client, world = setup
+    world.repository.save(PlatformAccount(business_id=world.business.id, platform="vk", status="ok"))
+    monkeypatch.setattr(world.adapter, "min_budgets", AsyncMock(return_value={"period_cap_kop": 100_000}))
+    response = client.put("/api/business/budget", json={"month_budget_kop": 199_999})
+    assert response.status_code == 422
+    assert "суммы минимумов" in response.json()["detail"]
+    assert world.business.month_budget_kop == 10_000_000

@@ -13,7 +13,7 @@ import httpx
 from app.content.ad_text import generate_ad_text, offer_matrix, validate_ad_text
 from app.content.art import ART_COST_KOP, ArtError
 from app.content.yandexgpt import YandexGPTError
-from app.db.models import Ad, AdGroup, Asset, Business, ChangeLog, Experiment, Plan
+from app.db.models import Ad, AdGroup, Asset, Business, ChangeLog, Experiment, Plan, Target
 from app.domain.experiments import next_hypothesis
 from app.domain.explain import explain
 from app.domain.rules import can_change
@@ -33,7 +33,8 @@ def completed_hypotheses(worker: Worker, business: Business, group_id: int) -> t
     return tuple(
         item.hypothesis
         for item in worker.repository.rows(Experiment, business.id)
-        if item.ad_group_id == group_id and item.status == "concluded"
+        if item.ad_group_id == group_id
+        and (item.status == "concluded" or (item.stats or {}).get("reverted_by_change_id") is not None)
     )
 
 
@@ -47,15 +48,39 @@ def group_available(worker: Worker, business: Business, group: AdGroup, *, ignor
     if any(item.frozen_until is not None and item.frozen_until > now for item in ads):
         return False
     campaign = next(item for item in worker.campaigns(business) if item.id == group.campaign_id)
-    affected = {group.external_id, campaign.external_id, *(item.external_id for item in ads)}
+    child_ids = {item.external_id for item in ads} | {
+        item.external_id for item in worker.repository.rows(Target, business.id) if item.ad_group_id == group.id
+    }
+    affected = {group.external_id, campaign.external_id, *child_ids}
+
+    def blocks(change: ChangeLog) -> bool:
+        if change.actor == "system" and change.kind == "budget":
+            return False
+        # SCALE другой группы хранит операцию с общим кэпом кампании.
+        if change.entity_type == "group" and change.entity_id != group.external_id:
+            return False
+        if change.entity_id in child_ids or change.entity_id == group.external_id:
+            return True
+        if change.actor in {"owner", "external"} and (
+            change.entity_id in affected or change.entity_type == "business"
+        ):
+            return True
+        return any(
+            op["entity_id"] in child_ids
+            or op["entity_id"] in affected
+            and (
+                op.get("field") in {"status", "targeting"}
+                or change.actor in {"owner", "external"}
+                or "field" not in op
+            )
+            for op in change.operations
+        )
+
     return not any(
         change.id != ignore_change_id
         and change.status == "applied"
         and now - change.created_at < timedelta(hours=DEFAULT_SETTINGS.cooldown_hours)
-        and (
-            change.entity_id in affected
-            or (change.entity_type != "group" and any(op["entity_id"] in affected for op in change.operations))
-        )
+        and blocks(change)
         for change in worker.repository.rows(ChangeLog, business.id)
     )
 

@@ -796,6 +796,8 @@ class DirectAdapter:
             raise PlatformError(
                 "Изменение бюджета поддерживается для одной общей недельной стратегии Search/Network."
             ) from None
+        if weekly == current:
+            return
         await self._api(
             "campaigns",
             "update",
@@ -803,12 +805,27 @@ class DirectAdapter:
                 "Campaigns": [
                     {
                         "Id": id_,
-                        "EndDate": self._budget_end().isoformat(),
                         kind: {"BiddingStrategy": bidding},
                     }
                 ]
             },
         )
+
+    async def extend_end_date(self, campaign_id: str) -> None:
+        items = await self._get(
+            "campaigns",
+            "Campaigns",
+            {"SelectionCriteria": {"Ids": [int(campaign_id)]}, "FieldNames": ["Id", "EndDate"]},
+        )
+        if not items:
+            raise PlatformError("Кампания не найдена в Директе.")
+        end = items[0].get("EndDate")
+        if end is None or (date.fromisoformat(end) - self._today()).days > 2:
+            return
+        next_month = (self._today().replace(day=28) + timedelta(days=4)).replace(day=1)
+        desired = min(self._today() + timedelta(days=6), next_month - timedelta(days=1)).isoformat()
+        if end < desired:
+            await self._api("campaigns", "update", {"Campaigns": [{"Id": int(campaign_id), "EndDate": desired}]})
 
     def _context_weekly(self, context: dict[str, int]) -> int:
         # WeeklySpendLimit включает уже потраченное на этой неделе. Наш period_cap

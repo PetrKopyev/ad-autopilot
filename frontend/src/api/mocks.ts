@@ -106,7 +106,8 @@ interface SetupMockState {
 const setupMockKey = 'ad-autopilot-setup-mock';
 function readSetupMock(): SetupMockState {
   try { const saved = sessionStorage.getItem(setupMockKey); if (saved) return JSON.parse(saved) as SetupMockState; } catch { /* Storage may be unavailable. */ }
-  return { me: { id: 1, login: copy.launchFlow.mockLogin, email: null, accounts: [] } };
+  return { me: { id: 1, login: copy.launchFlow.mockLogin, email: null, accounts: [{ id: 1, business_id: 1, platform: 'direct',
+    external_login: copy.launchFlow.mockLogin, status: 'ok', scopes: [] }] } };
 }
 let setupMock = readSetupMock();
 function persistSetupMock() {

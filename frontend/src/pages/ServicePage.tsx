@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { connectAccount, connectVkKey, logout } from '../api/setup';
@@ -44,6 +44,11 @@ export function ServiceVkPage() {
   </div>;
 }
 export function ServicePolicyPage() {
+  useEffect(() => {
+    const previousTitle = document.title;
+    document.title = copy.service.policyTitle;
+    return () => { document.title = previousTitle; };
+  }, []);
   const me = useSession();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);

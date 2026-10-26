@@ -167,7 +167,7 @@ export function SetupPage() {
         })}</div>
         <Button variant="secondary" onClick={() => { session.reload(); setRevision((value) => value + 1); }}>{copy.launchFlow.refresh}</Button>
         <label className="field">{copy.setup.accounts.counter}<select disabled={!direct} required value={draft.counter || ''} onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
-          <option value="">{copy.common.noData}</option>{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
+          {!counters.length && <option value="">{copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
         </select></label>
         <fieldset className="page-stack"><legend>{copy.setup.accounts.goal}</legend>{goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}</fieldset>
         <details><summary>{copy.setup.accounts.createGoal}</summary><ol>{copy.launchFlow.goalSteps.map((text) => <li key={text}>{text}</li>)}</ol></details>

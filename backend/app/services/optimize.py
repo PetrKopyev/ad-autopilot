@@ -16,6 +16,7 @@ from app.domain.types import (
     ClientAnswer,
     DaySpend,
     ExperimentDesign,
+    ExperimentResult,
     GroupSnapshot,
     Verdict,
     total_metrics,
@@ -147,6 +148,9 @@ async def optimize(worker: Worker, business: Business) -> None:
     decisions = decide(ads, groups, worker.clock.now, reference(worker, business, ads), free_daily_budget=free)
     campaigns = worker.campaigns(business)
     local_groups = worker.repository.rows(AdGroup, business.id)
+    testing = {
+        item.ad_group_id for item in worker.repository.rows(Experiment, business.id) if item.status == "running"
+    }
     ad_map = {ad.id: ad for ad in ads}
     for decision in decisions:
         if decision.action == Action.NOTIFY:
@@ -154,6 +158,8 @@ async def optimize(worker: Worker, business: Business) -> None:
             continue
         group_id = ad_map[decision.target_id].group_id if decision.action == Action.PAUSE else decision.target_id
         group = next(item for item in local_groups if item.external_id == group_id)
+        if group.id in testing:
+            continue
         campaign = next(item for item in campaigns if item.id == group.campaign_id)
         if decision.action == Action.PAUSE:
             state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
@@ -174,7 +180,8 @@ async def optimize(worker: Worker, business: Business) -> None:
             increment = decision.new_daily_limit - limits[group_id]
             # Сначала забираем средства у остановленных групп; сумма лимитов не растёт.
             for donor in groups:
-                if donor.active or increment <= 0:
+                donor_group = next(item for item in local_groups if item.external_id == donor.id)
+                if donor.active or donor_group.id in testing or increment <= 0:
                     continue
                 take = min(increment, scaled[donor.id])
                 scaled[donor.id] -= take
@@ -242,7 +249,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days)
     change = meta.get("budget_change", {})
     budget = business.month_budget_kop
-    if change.get("effective_on", "") > day.isoformat():
+    if not force and change.get("effective_on", "") > day.isoformat():
         # Увеличение начнёт работать завтра; снижение ограничивает расход сразу для безопасности.
         budget = min(budget, change["before"])
     plan = plan_budget(
@@ -299,7 +306,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     ("period_cap_kop", state.period_cap_kop, total_cap),
                     ("daily_limit_kop", state.daily_limit_kop, desired_daily),
                 )
-                if before != after or campaign.platform == "direct"
+                if before != after
             ]
             await worker.apply(
                 business,
@@ -310,6 +317,10 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 actor="system",
                 reason_text="Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
             )
+            if not worker.proposed(business):
+                adapter = worker.resolve_adapter(business.id, campaign.platform)
+                if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
+                    await adapter.extend_end_date(campaign.external_id)
             if not worker.proposed(business):
                 # После частично применённой попытки локальные лимиты берём из подтверждённого результата.
                 campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
@@ -334,17 +345,46 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:
-    if business.status != "running" or worker.metadata(business).get("kill_switch"):
-        return
-    ads, groups = await snapshot(worker, business)
-    by_id = {ad.id: ad for ad in ads}
-    local_ads = {ad.id: ad for ad in worker.repository.rows(Ad, business.id)}
     local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
     running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]
     # Завершённая группа остаётся занята до следующего запуска этого шага.
     occupied_groups = {local_groups[item.ad_group_id].external_id for item in running}
     for experiment in running:
+        if worker.clock.now >= experiment.deadline:
+            # Дедлайн освобождает группу даже после правок или отката владельца.
+            # Просроченные данные не дают права выбирать победителя и менять статусы плеч.
+            result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 1.0)
+            change = ChangeLog(
+                business_id=business.id,
+                actor="autopilot",
+                kind="experiment_verdict",
+                platform=campaigns[local_groups[experiment.ad_group_id].campaign_id].platform,
+                entity_type="group",
+                entity_id=local_groups[experiment.ad_group_id].external_id,
+                operations=[],
+                reason_code="EXPERIMENT_NO_DIFF",
+                reason_params={},
+                reason_text="Срок проверки истёк. Победителя не выбирали.",
+                evidence={"experiment_id": experiment.id, "result": asdict(result)},
+                status="proposed" if worker.proposed(business) else "applied",
+                created_at=worker.clock.now,
+            )
+            worker.repository.save(change)
+            if not worker.proposed(business):
+                experiment.status = "concluded"
+                experiment.verdict = "no_difference"
+                experiment.stats = experiment.stats | {"result": asdict(result)}
+                experiment.change_id = change.id
+                worker.repository.save(experiment)
+    if business.status != "running" or worker.metadata(business).get("kill_switch"):
+        return
+    ads, groups = await snapshot(worker, business)
+    by_id = {ad.id: ad for ad in ads}
+    local_ads = {ad.id: ad for ad in worker.repository.rows(Ad, business.id)}
+    for experiment in running:
+        if worker.clock.now >= experiment.deadline:
+            continue
         control_id, variant_id = (
             local_ads[ad_id].external_id for ad_id in (experiment.control_ad_id, experiment.variant_ad_id)
         )

@@ -20,6 +20,22 @@ class ConfirmationRequired(ChangeConflict):
         self.changes = changes
 
 
+def budget_protection(change: ChangeLog, business=None) -> bool:
+    if change.actor != "system":
+        return False
+    if change.reason_code in {
+        "BUDGET_REBALANCE",
+        "BUDGET_STOP",
+        "SPEND_MISMATCH",
+        "MONTH_STOP",
+        "BUDGET_UPDATE_FAILED",
+    }:
+        return True
+    return change.kind == "pause" and business is not None and (
+        business.status == "budget_stop" or business.settings.get("_worker", {}).get("kill_switch", False)
+    )
+
+
 def inverse_operations(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> list[Operation]:
     result = []
     archived = set()
@@ -130,12 +146,7 @@ class RollbackService:
                 raise ValueError("Изменение не найдено.")
             if original.status != "applied" or original.kind == "revert":
                 raise ChangeConflict("Повторный откат или откат неприменённого изменения запрещён.")
-            if original.actor == "system" and original.reason_code in {
-                "BUDGET_REBALANCE",
-                "BUDGET_STOP",
-                "SPEND_MISMATCH",
-                "MONTH_STOP",
-            }:
+            if budget_protection(original, self.repository.business(business_id)):
                 raise ChangeConflict("Это защита бюджета, отменить нельзя.")
             if original.actor == "external" and actor != "owner":
                 raise ChangeConflict("Изменение в кабинете может отменить только владелец.")

@@ -21,6 +21,7 @@ from app.db.models import (
     WorkerRun,
 )
 from app.platforms.base import AdPlatform, ExternalRefs, Operation
+from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
 from app.worker.locks import business_lock
@@ -161,6 +162,8 @@ class Worker:
         self.rewrite_rejected = rewrite_rejected
         self.experiment_factory = experiment_factory
         self.step_key = ""
+        self._context_at = None
+        self._contexts: dict[int, dict[tuple[str, str], dict]] = {}
 
     def proposed(self, business: Business) -> bool:
         return self.dry_run or business.settings.get("dry_run", False)
@@ -178,22 +181,16 @@ class Worker:
             item.id: item for item in entities.values() if isinstance(item, AdGroup) and item.campaign_id == campaign.id
         }
         context = {"daily_limit_kop": campaign.daily_limit_kop, "period_cap_kop": campaign.period_cap_kop}
-        history = sorted(self.repository.rows(ChangeLog, campaign.business_id), key=lambda item: item.id, reverse=True)
-        for change in history:
-            if change.status != "applied":
-                continue
-            contexts = [
-                op["budget_context"]
-                for op in change.operations
-                if op["entity_id"] == campaign.external_id and op.get("budget_context")
-            ]
-            if contexts:
-                context = contexts[-1] | context
-                break
-            stored_refs = change.evidence.get("_service", {}).get("refs", {})
-            if stored_refs.get("campaign_id") == campaign.external_id and stored_refs.get("budget_context"):
-                context = stored_refs["budget_context"] | context
-                break
+        slot = schedule_key("budget_guard", self.clock.now)
+        if self._context_at != slot:
+            self._contexts.clear()
+            self._context_at = slot
+        if campaign.business_id not in self._contexts:
+            self._contexts[campaign.business_id] = {}
+            history = sorted(self.repository.rows(ChangeLog, campaign.business_id), key=lambda item: item.id)
+            for change in history:
+                self.cache_context(change)
+        context = self._contexts[campaign.business_id].get((campaign.platform, campaign.external_id), {}) | context
         return ExternalRefs(
             campaign.external_id,
             {str(item.id): item.external_id for item in groups.values()},
@@ -209,6 +206,30 @@ class Worker:
             },
             context,
         )
+
+    def cache_context(self, change: ChangeLog) -> None:
+        if change.status != "applied" or change.business_id not in self._contexts:
+            return
+        contexts = self._contexts[change.business_id]
+        stored = change.evidence.get("_service", {}).get("refs", {})
+        if stored.get("budget_context"):
+            contexts[(change.platform, stored["campaign_id"])] = stored["budget_context"]
+        for op in change.operations:
+            if op.get("budget_context"):
+                contexts[(change.platform, op["entity_id"])] = op["budget_context"]
+
+    def demo_available(self, business: Business) -> bool:
+        for campaign in self.campaigns(business):
+            adapter = self.resolve_adapter(business.id, campaign.platform)
+            if isinstance(adapter, FakeAdapter) and campaign.external_id not in adapter._states:
+                self.notice(
+                    business,
+                    "DEMO_STATE_LOST",
+                    "Демо-данные площадки потеряны после перезапуска API. Создайте новый демо-запуск.",
+                    key=f"demo_state_lost:{business.id}",
+                )
+                return False
+        return True
 
     def campaigns(self, business: Business) -> list[Campaign]:
         return [item for item in self.repository.rows(Campaign, business.id) if item.external_id]
@@ -257,6 +278,7 @@ class Worker:
         )
         if change.status != "applied" and not self.proposed(business):
             raise ChangeConflict("Применение не подтверждено; шаг будет повторён после сверки.")
+        self.cache_context(change)
         return change
 
     def notice(self, business: Business, reason_code: str, text: str, *, key: str = "", **details) -> None:
@@ -287,6 +309,8 @@ class Worker:
         for business in self.repository.rows(Business):
             try:
                 with self.repository.business_lock(business.id):
+                    if not self.demo_available(business):
+                        continue
                     await self.changes.recover_pending(
                         self.resolve_adapter, business_id=business.id, now=self.clock.now
                     )
@@ -314,6 +338,8 @@ class Worker:
         if business.status not in {"running", "budget_stop", "paused"}:
             return
         with self.repository.business_lock(business.id):
+            if not self.demo_available(business):
+                return
             self.step_key = key or schedule_key(kind, self.clock.now)
             runs = self.repository.rows(WorkerRun, business.id)
             if any(
@@ -331,7 +357,11 @@ class Worker:
             )
             self.repository.save(run)
             try:
-                await self.changes.recover_pending(self.resolve_adapter, business_id=business.id, now=self.clock.now)
+                recovered = await self.changes.recover_pending(
+                    self.resolve_adapter, business_id=business.id, now=self.clock.now
+                )
+                for change in recovered:
+                    self.cache_context(change)
                 if kind != "budget_guard" and self.repository.pending(business.id):
                     raise ChangeConflict("Площадка пока недоступна для сверки.")
                 await handlers()[kind](self, business)
@@ -347,6 +377,7 @@ class Worker:
 
     async def run_due(self) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
+        self._contexts.clear()
         await self.run("heartbeat")
         now = self.clock.now.astimezone(MOSCOW)
         for business in self.repository.rows(Business):

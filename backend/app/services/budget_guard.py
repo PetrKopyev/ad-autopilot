@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import ceil
 from typing import TYPE_CHECKING
 
 from app.db.models import BudgetLedger, Business
@@ -110,23 +111,21 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
     pending_stop = worker.metadata(business).get("pending_stop")
     if pending_stop:
         await stop_all(business, worker=worker, **pending_stop)
-        return
     month = today(worker.clock).replace(day=1)
     spent, _ = await read_spend(worker, business, tolerate_errors=True)
     ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id) if row.month == month}
     reported = sum(max(spent.get(platform, 0), row.spent_kop) for platform, row in ledgers.items())
     reported += sum(value for platform, value in spent.items() if platform not in ledgers)
-    daily = 0
-    for campaign in worker.campaigns(business):
-        limit = campaign.daily_limit_kop
-        try:
-            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
-                campaign.external_id
-            ]
-            limit = max(limit, state.daily_limit_kop or 0)
-        except PlatformError:
-            pass
-        daily += limit
+    daily = sum(campaign.daily_limit_kop for campaign in worker.campaigns(business))
+    # При внешнем повышении кэпа фактический темп может превышать сохранённый лимит.
+    # Увеличиваем защитный запас по приросту ledger, без запроса состояния кампаний.
+    observed_daily = 0
+    for platform, ledger in ledgers.items():
+        if ledger.spent_at is None:
+            continue
+        seconds = (worker.clock.now - ledger.spent_at).total_seconds()
+        if seconds > 0:
+            observed_daily += ceil(max(0, spent.get(platform, 0) - ledger.spent_kop) * 86400 / seconds)
     # Ledger — снимок, а не разрешённый расход: во время простоя работают кэпы.
     # Верхняя граница сверки — authorized месяца (PLAN 2.5), включая резерв.
     day = today(worker.clock)
@@ -138,7 +137,9 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
         started_on=day.fromisoformat(worker.metadata(business).get("started_on", month.isoformat())),
     ).authorized
     mismatch = reconcile and reported > allowed
-    result = decide_guard(business.month_budget_kop, reported, daily, recorded_spent=0 if mismatch else None)
+    result = decide_guard(
+        business.month_budget_kop, reported, max(daily, observed_daily), recorded_spent=0 if mismatch else None
+    )
     for platform, value in spent.items():
         ledger = ledgers.get(platform) or BudgetLedger(
             business_id=business.id,

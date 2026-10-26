@@ -1,0 +1,255 @@
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.db.models import AdGroup, ChangeLog, Experiment, WorkerRun
+from app.domain.budget import stop_margin
+from app.domain.types import Action, Decision
+from app.platforms.base import Operation
+from app.platforms.fake import FakeAdapter
+from app.services.budget_guard import budget_guard, stop_all
+from app.services.changes import ChangeConflict
+from app.services.experiments import completed_hypotheses, create_experiment, group_available
+from app.services.month import month_rollover
+from app.services.optimize import experiments_tick, optimize, rebalance_budget
+from app.services.rollback import RollbackService
+from app.services.screens import ScreensService
+from app.services.sync import sync_moderation
+from tests.integration.harness import make_world
+from tests.services.test_experiments import control_snapshot, design, running_experiment, wire_content
+
+
+async def test_experiment_starts_after_eight_days_of_scheduler_ticks(tmp_path, monkeypatch):
+    world = await make_world()
+    worker = world.worker(experiment_factory=create_experiment)
+    await world.advance(worker, days=8)
+    await sync_moderation(worker, world.business)
+    wire_content(world, tmp_path, monkeypatch)
+    launch = await create_experiment(worker, world.business, control_snapshot(world), design())
+    assert launch is not None and launch.status == "applied"
+    assert any(item.status == "running" for item in world.repository.rows(Experiment))
+
+
+@pytest.mark.parametrize("status", ["running", "paused", "budget_stop"])
+async def test_expired_experiment_closes_before_platform_reads_or_cooldown(monkeypatch, status):
+    world = await make_world()
+    experiment = running_experiment(world)
+    world.clock.advance(days=14)
+    world.business.status = status
+    world.ads["borderline-2"].status = "paused_owner"
+    worker = world.worker()
+    worker.remember(world.business, kill_switch=status == "paused")
+    monkeypatch.setattr("app.services.optimize.snapshot", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(world.adapter, "apply", AsyncMock(side_effect=AssertionError("статус владельца")))
+    await experiments_tick(worker, world.business)
+    assert experiment.status == "concluded" and experiment.verdict == "no_difference"
+    assert world.ads["borderline-2"].status == "paused_owner"
+
+
+@pytest.mark.parametrize("owner_pause", [False, True])
+async def test_resume_protection_stop_after_month_rollover(owner_pause):
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=3)
+    await stop_all(
+        world.business,
+        worker=worker,
+        budget_stop=True,
+        reason_code="BUDGET_STOP",
+        reason_params={"spent": world.platform_spend(), "budget": world.business.month_budget_kop, "margin": 0},
+    )
+    if owner_pause:
+        await ScreensService(world.worker()).pause(world.business)
+    else:
+        world.business.auto_continue = False
+    world.clock.advance(days=29)
+    worker.step_key = "rollover"
+    await month_rollover(worker, world.business)
+    status = await ScreensService(world.worker()).resume(world.business)
+    assert status["status"] == "running"
+    before = world.platform_spend()
+    await world.advance(worker, days=2)
+    assert world.campaign.status == "active" and world.platform_spend() > before
+    state = (await world.adapter.get_state(worker.refs(world.campaign)))[world.campaign.external_id]
+    assert state.status == "active"
+
+
+async def test_increasing_budget_allows_resume_after_budget_stop():
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=3)
+    spent = world.platform_spend()
+    margin = stop_margin(world.campaign.daily_limit_kop)
+    world.business.month_budget_kop = spent + margin
+    await budget_guard(worker, world.business)
+    assert world.business.status == "budget_stop"
+    service = ScreensService(world.worker())
+    with pytest.raises(ChangeConflict, match="защитного запаса"):
+        await service.resume(world.business)
+    await service.save_budget(world.business, 20_000_000)
+    status = await ScreensService(world.worker()).resume(world.business)
+    assert status["status"] == "running" and world.campaign.daily_limit_kop > 0
+    assert world.campaign.status == "active"
+    assert world.changes(reason_code="BUDGET_REBALANCE", status="applied")
+
+
+async def test_resume_without_available_daily_budget_does_not_report_running(monkeypatch):
+    world = await make_world()
+    service = ScreensService(world.worker())
+    await service.pause(world.business)
+    world.campaign.daily_limit_kop = 0
+    monkeypatch.setattr("app.services.screens.rebalance_budget", AsyncMock())
+    status = await service.resume(world.business)
+    assert status["status"] == "paused"
+    assert service.worker.metadata(world.business)["kill_switch"]
+
+
+@pytest.mark.parametrize("action", [Action.PAUSE, Action.SCALE])
+async def test_optimize_does_not_pause_or_scale_running_test(monkeypatch, action):
+    world = await make_world()
+    experiment = running_experiment(world)
+    group = next(row for row in world.repository.rows(AdGroup) if row.id == experiment.ad_group_id)
+    target = world.ads["borderline-1"].external_id if action == Action.PAUSE else group.external_id
+    monkeypatch.setattr(
+        "app.services.optimize.decide",
+        lambda *args, **kwargs: [Decision(target, action, "TEST", new_daily_limit=100_000)],
+    )
+    before = await world.adapter.get_state(world.refs)
+    await optimize(world.worker(), world.business)
+    assert await world.adapter.get_state(world.refs) == before
+    assert not world.changes(reason_code="TEST")
+
+
+@pytest.mark.parametrize(
+    "actor,kind,field,blocked",
+    [
+        ("system", "budget", "daily_limit_kop", False),
+        ("autopilot", "budget", "daily_limit_kop", False),
+        ("system", "pause", "status", True),
+        ("owner", "budget", "daily_limit_kop", True),
+        ("external", "targeting", "targeting", True),
+    ],
+)
+async def test_group_cooldown_distinguishes_budget_and_owner_changes(actor, kind, field, blocked):
+    world = await make_world()
+    world.clock.advance(days=8)
+    group = next(row for row in world.repository.rows(AdGroup) if row.id == world.ads["borderline-1"].ad_group_id)
+    world.repository.save(
+        ChangeLog(
+            business_id=world.business.id,
+            actor=actor,
+            kind=kind,
+            status="applied",
+            platform="direct",
+            entity_type="campaign",
+            entity_id=world.campaign.external_id,
+            created_at=world.clock.now,
+            operations=[{"entity_id": world.campaign.external_id, "field": field}],
+        )
+    )
+    assert group_available(world.worker(), world.business, group) is not blocked
+
+
+async def test_pending_owner_stop_does_not_skip_budget_guard(monkeypatch):
+    world = await make_world()
+    worker = world.worker()
+    worker.remember(world.business, pending_stop={"actor": "owner"})
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": 10_000_000}, {})))
+    await budget_guard(worker, world.business)
+    assert world.business.status == "budget_stop"
+    assert not worker.metadata(world.business)["pending_stop"]
+
+
+async def test_owner_stop_bypasses_unrelated_pending_change():
+    world = await make_world()
+    world.repository.save(
+        ChangeLog(
+            business_id=world.business.id,
+            platform="direct",
+            status="pending",
+            operations=[],
+            evidence={"_service": {"dry_run": False}},
+        )
+    )
+    await ScreensService(world.worker()).pause(world.business)
+    assert world.campaign.status == "paused_owner" and world.business.status == "paused"
+
+
+async def test_guard_uses_local_daily_limits_without_state_requests(monkeypatch):
+    world = await make_world()
+    monkeypatch.setattr(world.adapter, "get_state", AsyncMock(side_effect=AssertionError("лишний запрос")))
+    await budget_guard(world.worker(), world.business)
+    assert world.business.status == "running"
+
+
+async def test_rebalance_does_not_log_or_send_unchanged_limits(monkeypatch):
+    world = await make_world()
+    worker = world.worker()
+    await rebalance_budget(worker, world.business)
+    count = len(world.changes())
+    apply = AsyncMock(wraps=world.adapter.apply)
+    monkeypatch.setattr(world.adapter, "apply", apply)
+    worker.step_key = "next-rebalance"
+    await rebalance_budget(worker, world.business)
+    assert len(world.changes()) == count
+    apply.assert_not_awaited()
+
+
+async def test_reverted_hypothesis_stays_completed_after_freeze_expires():
+    world = await make_world()
+    world.clock.advance(days=7)
+    worker = world.worker()
+    experiment = running_experiment(world, status="concluded")
+    change = await worker.apply(
+        world.business,
+        world.campaign,
+        [Operation("set_status", "ad", world.ads["borderline-1"].external_id, "status", "active", "paused_auto")],
+        kind="experiment_verdict",
+        reason_code="EXPERIMENT_VERDICT",
+        reason_text="Выбрали вариант Б.",
+        evidence={"experiment_id": experiment.id},
+    )
+    experiment.change_id = change.id
+    await RollbackService(world.repository, dry_run=False).revert(
+        change.id,
+        business_id=world.business.id,
+        adapter=world.adapter,
+        now=world.clock.now,
+    )
+    world.clock.advance(days=15)
+    assert "text" in completed_hypotheses(worker, world.business, experiment.ad_group_id)
+    proposal = await create_experiment(world.worker(dry_run=True), world.business, control_snapshot(world), design())
+    assert proposal.reason_params["hypothesis"] == "image"
+    assert world.ads["borderline-2"].status == "paused_owner"
+
+
+async def test_fake_restart_skips_jobs_and_notifies_once():
+    world = await make_world()
+    worker = world.worker()
+    empty = FakeAdapter(clock=world.clock)
+    worker.resolve_adapter = lambda *_: empty
+    await worker.startup()
+    await world.advance(worker, hours=1)
+    notices = [row for row in world.repository.rows(WorkerRun) if row.business_id == world.business.id]
+    assert len(notices) == 1
+    assert notices[0].log[0]["reason_code"] == "DEMO_STATE_LOST"
+
+
+async def test_refs_reads_change_history_once_per_tick(monkeypatch):
+    world = await make_world()
+    worker = world.worker()
+    rows = world.repository.rows
+    calls = []
+
+    def observed(model, business_id=None):
+        if model is ChangeLog:
+            calls.append(business_id)
+        return rows(model, business_id)
+
+    monkeypatch.setattr(world.repository, "rows", observed)
+    first = worker.refs(world.campaign)
+    assert worker.refs(world.campaign) == first
+    assert calls == [world.business.id]
+    world.clock.advance(hours=0.5)
+    assert worker.refs(world.campaign) == first
+    assert calls == [world.business.id, world.business.id]

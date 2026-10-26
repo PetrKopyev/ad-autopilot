@@ -247,15 +247,15 @@ async def test_tick_applies_existing_test_and_saves_exact_evidence(
     factory.assert_not_called()
 
 
-async def test_tick_leaves_running_test_untouched_when_group_frozen(experiment_world):
+async def test_tick_closes_expired_test_without_changing_frozen_group(experiment_world):
     world = experiment_world
     experiment = running_experiment(world)
     world.ads["borderline-1"].frozen_until = world.clock.now + timedelta(days=30)
     world.clock.advance(days=14)
     before = await world.adapter.get_state(world.refs)
     await experiments_tick(world.worker(), world.business)
-    assert experiment.status == "running"
-    assert not world.changes(kind="experiment_verdict")
+    assert experiment.status == "concluded" and experiment.verdict == "no_difference"
+    assert world.changes(kind="experiment_verdict")[0].operations == []
     assert await world.adapter.get_state(world.refs) == before
 
 

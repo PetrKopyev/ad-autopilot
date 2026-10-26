@@ -329,8 +329,8 @@ class ChangesService:
 
             dry_run = settings.dry_run
         dry_run = (dry_run or business.settings.get("dry_run", False)) and actor != "external"
-        protective_stop = actor == "system" and all(
-            op.kind == "set_status" and op.after == "paused_auto" for op in operations
+        protective_stop = actor in {"system", "owner"} and all(
+            op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )
         if not protective_stop and any(item.platform == platform for item in self.repository.pending(business_id)):
             raise ChangeConflict("Сначала требуется сверить незавершённые изменения бизнеса.")

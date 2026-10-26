@@ -14,11 +14,13 @@ from app.db.models import (
     StatsDaily,
     WorkerRun,
 )
+from app.domain.budget import stop_margin
 from app.domain.explain import explain_experiment, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
+from app.services.onboarding import MAX_BUDGET_KOP, OnboardingError
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
 from app.worker.clock import today
@@ -109,12 +111,11 @@ class ScreensService:
     async def check_remaining(self, business: Business) -> None:
         spent, _ = await read_spend(self.worker, business)
         budget = self.budget(business)
-        if (
-            business.status == "budget_stop"
-            or max(sum(spent.values()), budget["spent_kop"]) >= business.month_budget_kop
-        ):
+        margin = stop_margin(sum(campaign.daily_limit_kop for campaign in self.worker.campaigns(business)))
+        if max(sum(spent.values()), budget["spent_kop"]) >= max(0, business.month_budget_kop - margin):
             raise ChangeConflict(
-                "Бюджет месяца израсходован. Рекламу можно возобновить с 1 числа или увеличить бюджет."
+                "Остатка бюджета не хватает с учётом защитного запаса. "
+                "Рекламу можно возобновить с 1 числа или увеличить бюджет."
             )
 
     async def resume(self, business: Business) -> dict:
@@ -122,16 +123,15 @@ class ScreensService:
         with self.repository.business_lock(business.id):
             await self.check_remaining(business)
             meta = self.worker.metadata(business)
-            if not meta.get("kill_switch"):
-                return self.status(business)
             if meta.get("pending_stop"):
                 raise ChangeConflict("Площадки ещё подтверждают остановку. Повторите попытку после проверки.")
             await rebalance_budget(self.worker, business, force=True)
             stopped = set(meta.get("kill_switch_campaigns", []))
+            active = False
+            history = sorted(self.repository.rows(ChangeLog, business.id), key=lambda row: row.id, reverse=True)
             for campaign in self.worker.campaigns(business):
-                if campaign.id not in stopped or not campaign.daily_limit_kop:
+                if campaign.owner_paused or not campaign.daily_limit_kop:
                     continue
-                history = sorted(self.repository.rows(ChangeLog, business.id), key=lambda row: row.id, reverse=True)
                 last = next(
                     (
                         row
@@ -147,14 +147,27 @@ class ScreensService:
                     ),
                     None,
                 )
-                if last is None or last.reason_code != "OWNER_STOP" or last.actor != "owner":
-                    continue
                 state = (
                     await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
                         self.worker.refs(campaign)
                     )
                 )[campaign.external_id]
-                if campaign.status != "paused_owner" or state.status not in {"paused_owner", "paused_auto"}:
+                if state.status == "active":
+                    active = True
+                    continue
+                owner_stop = (
+                    campaign.id in stopped
+                    and last is not None
+                    and last.reason_code == "OWNER_STOP"
+                    and last.actor == "owner"
+                )
+                protection_stop = (
+                    campaign.status == "paused_auto"
+                    and last is not None
+                    and last.actor == "system"
+                    and last.reason_code in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
+                )
+                if not (owner_stop or protection_stop) or state.status not in {"paused_owner", "paused_auto"}:
                     continue
                 await self.worker.apply(
                     business,
@@ -163,11 +176,13 @@ class ScreensService:
                     actor="owner",
                     kind="resume",
                     reason_code="OWNER_RESUME",
-                    reason_text="Вы возобновили рекламу, которую остановили общей кнопкой.",
+                    reason_text="Вы возобновили рекламу после остановки.",
                     suffix="resume",
                 )
-            business.status = "running"
-            self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
+                active = True
+            if not self.worker.proposed(business):
+                business.status = "running" if active else "paused"
+                self.worker.remember(business, kill_switch=not active, kill_switch_campaigns=[])
         return self.status(business)
 
     def ads(self, business: Business, start: date, end: date) -> dict:
@@ -328,6 +343,19 @@ class ScreensService:
     async def save_budget(self, business: Business, amount: int) -> dict:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
+            if type(amount) is not int or not 0 < amount <= MAX_BUDGET_KOP:
+                raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {MAX_BUDGET_KOP // 100} ₽.")
+            minimum = 0
+            platforms = {row.platform for row in self.repository.rows(PlatformAccount, business.id)}
+            for platform in sorted(platforms):
+                limits = await self.worker.resolve_adapter(business.id, platform).min_budgets()
+                minimum += max(
+                    limits.get("period_cap_kop", limits.get("period", 0)),
+                    limits.get("weekly_limit_kop", 0),
+                    limits.get("daily_limit_kop", limits.get("day", 0)),
+                )
+            if amount < minimum:
+                raise OnboardingError(f"Бюджет ниже суммы минимумов подключённых площадок: {rubles(minimum)} ₽.")
             spent, _ = await read_spend(self.worker, business)
             if amount <= max(sum(spent.values()), self.budget(business)["spent_kop"]):
                 raise ChangeConflict("Этот бюджет уже потрачен. Укажите сумму больше расхода за месяц.")

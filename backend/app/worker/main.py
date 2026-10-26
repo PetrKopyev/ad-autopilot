@@ -2,9 +2,11 @@ import asyncio
 import logging
 import signal
 from contextlib import suppress
+from threading import Lock
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.db.session import SessionLocal
@@ -15,6 +17,7 @@ from app.worker.clock import SystemClock
 from app.worker.jobs import Worker, WorkerRepository
 
 logger = logging.getLogger(__name__)
+demo_tick_lock = Lock()
 
 
 class DemoRegistry(AdapterRegistry):
@@ -30,6 +33,18 @@ class DemoRegistry(AdapterRegistry):
 
 
 async def run_tick(registry: AdapterRegistry, kind: str = "due") -> None:
+    if registry.mode == "fake":
+        await run_in_threadpool(run_demo_tick, registry, kind)
+    else:
+        await run_worker_tick(registry, kind)
+
+
+def run_demo_tick(registry: AdapterRegistry, kind: str) -> None:
+    with demo_tick_lock:
+        asyncio.run(run_worker_tick(registry, kind))
+
+
+async def run_worker_tick(registry: AdapterRegistry, kind: str) -> None:
     with SessionLocal() as db:
         worker = Worker(
             WorkerRepository(db),
@@ -61,13 +76,14 @@ async def start_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
 
 
 async def serve() -> None:
-    if settings.platform_mode == "fake":
-        logger.info("PLATFORM_MODE=fake: планировщик работает внутри API; отдельный worker не запускается.")
-        return
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop_event.set)
+    if settings.platform_mode == "fake":
+        logger.info("демо: планировщик внутри API")
+        await stop_event.wait()
+        return
     async with httpx.AsyncClient(timeout=30) as http:
         registry = AdapterRegistry(db_loader(SessionLocal), mode=settings.platform_mode, http=http)
         scheduler = await start_scheduler(registry)

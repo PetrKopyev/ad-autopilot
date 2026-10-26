@@ -17,7 +17,7 @@
 .launch-flow .source { font-size: .9rem; color: var(--color-muted); }
 .launch-flow .stepper { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .launch-flow .stepper li > a, .launch-flow .stepper li > span { flex-direction: column; align-items: flex-start; font-size: .85rem; }
-.launch-flow .file-input { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.launch-flow input.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; margin: -1px; }
 .launch-flow .file-input:focus-visible + label { outline: 3px solid #537dd1; outline-offset: 4px; }
 .launch-flow fieldset:disabled .photo-upload label { opacity: .55; cursor: not-allowed; }
 .clients-answers { list-style: none; margin: 0; padding: 0; }

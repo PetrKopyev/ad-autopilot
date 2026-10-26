@@ -52,7 +52,7 @@ export function PlanPage() {
             </label>)}</div>
             <p className="muted">{copy.launchFlow.remaining(plan.generations_remaining)}</p>
             <div className="actions"><Button variant="secondary" disabled={busy || plan.generations_remaining <= 0} onClick={() => void act(() => updateImages(() => regenerateImages(group.id)))}>{copy.plan.generate}</Button></div>
-            <div className="photo-upload"><input className="file-input" id={`photo-${group.id}`} type="file" accept="image/jpeg,image/png,image/webp" aria-describedby={`photo-hint-${group.id}`} onChange={(event) => {
+            <div className="photo-upload"><input className="file-input sr-only" id={`photo-${group.id}`} type="file" accept="image/jpeg,image/png,image/webp" aria-describedby={`photo-hint-${group.id}`} onChange={(event) => {
               const file = event.target.files?.[0]; event.target.value = '';
               if (file) void act(() => updateImages(() => uploadPhoto(group.id, file)));
             }} /><label className="button button--secondary" htmlFor={`photo-${group.id}`}>{copy.plan.upload}</label></div><p className="muted" id={`photo-hint-${group.id}`}>{copy.launchFlow.photoHint}</p>

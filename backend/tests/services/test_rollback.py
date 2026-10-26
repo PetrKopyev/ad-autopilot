@@ -106,7 +106,9 @@ async def test_rollback_appends_inverse_and_freezes_owner_ad(repository, tree):
         await RollbackService(repository, dry_run=False).revert(revert.id, business_id=1, adapter=adapter)
 
 
-@pytest.mark.parametrize("reason", ["BUDGET_REBALANCE", "BUDGET_STOP", "SPEND_MISMATCH", "MONTH_STOP"])
+@pytest.mark.parametrize(
+    "reason", ["BUDGET_REBALANCE", "BUDGET_STOP", "SPEND_MISMATCH", "MONTH_STOP", "BUDGET_UPDATE_FAILED"]
+)
 async def test_budget_protection_cannot_be_rolled_back_even_with_confirmation(repository, tree, reason):
     adapter, refs = tree
     original = await applied(repository, adapter, refs)
@@ -120,6 +122,20 @@ async def test_budget_protection_cannot_be_rolled_back_even_with_confirmation(re
             confirm=True,
         )
     assert original.status == "applied" and await adapter.get_state(refs) == before
+
+
+@pytest.mark.parametrize("stopped", ["budget_stop", "kill_switch"])
+async def test_any_system_pause_is_protected_while_business_stopped(repository, tree, stopped):
+    adapter, refs = tree
+    original = await applied(repository, adapter, refs)
+    original.actor = "system"
+    business = repository.business(1)
+    business.status = "budget_stop" if stopped == "budget_stop" else "paused"
+    business.settings = {"_worker": {"kill_switch": stopped == "kill_switch"}}
+    with pytest.raises(ChangeConflict, match="защита бюджета"):
+        await RollbackService(repository, dry_run=False).revert(
+            original.id, business_id=1, adapter=adapter, confirm=True,
+        )
 
 
 async def test_campaign_budget_rollback_freezes_campaign_without_freezing_its_ads(repository, tree):

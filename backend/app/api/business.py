@@ -13,7 +13,14 @@ from app.db.models import User
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
 from app.services.changes import ChangeConflict
-from app.services.onboarding import AiLimits, Blocked, OnboardingError, OnboardingRepository, OnboardingService
+from app.services.onboarding import (
+    MAX_BUDGET_KOP,
+    AiLimits,
+    Blocked,
+    OnboardingError,
+    OnboardingRepository,
+    OnboardingService,
+)
 from app.services.registry import build_llm
 
 router = APIRouter(prefix="/api")
@@ -125,7 +132,7 @@ def save_marking(body: MarkingIn, business: CurrentBusiness, service: Service) -
 
 
 class BudgetIn(BaseModel):
-    month_budget_kop: StrictInt = Field(gt=0)
+    month_budget_kop: StrictInt = Field(gt=0, le=MAX_BUDGET_KOP)
 
 
 class SettingsIn(BaseModel):

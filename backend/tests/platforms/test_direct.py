@@ -486,6 +486,26 @@ async def test_budget_preserves_strategy_and_uses_micros(adapter, api, field, va
     assert updated["Network"] == settings["BiddingStrategy"]["Network"]
 
 
+async def test_unchanged_weekly_limit_does_not_update_campaign(adapter, api):
+    server = DirectServer()
+    server.rows["campaigns"] = [{"Id": 1, "UnifiedCampaign": adapter._campaign_settings(600)}]
+    api.post(f"{V501}/campaigns").mock(side_effect=server)
+    await adapter.apply(Operation("set_budget", "campaign", "1", "daily_limit_kop", 100, 100))
+    assert not server.writes
+
+
+@pytest.mark.parametrize("end,updates", [("2026-10-31", False), ("2026-10-28", True)])
+async def test_end_date_extension_is_separate_from_budget_update(adapter, api, end, updates):
+    server = DirectServer()
+    server.rows["campaigns"] = [{"Id": 1, "EndDate": end}]
+    api.post(f"{V501}/campaigns").mock(side_effect=server)
+    await adapter.extend_end_date("1")
+    assert bool(server.writes) is updates
+    if updates:
+        assert server.rows["campaigns"][0]["EndDate"] == "2026-10-31"
+        assert server.writes == [("campaigns", "update", {"Campaigns": [{"Id": 1, "EndDate": "2026-10-31"}]})]
+
+
 async def test_state_and_moderation(adapter, api, plan):
     server = DirectServer()
     api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
@@ -994,6 +1014,7 @@ async def test_service_budget_update_after_restart_converts_lifetime_cap_and_ext
                 Operation("set_budget", "campaign", "1", "daily_limit_kop", 100_000, 150_000),
             ],
         )
+        await restarted.extend_end_date("1")
     assert change.status == "applied"
     assert campaign.daily_limit_kop == 150_000 and campaign.period_cap_kop == 1_300_000
     assert server.rows["campaigns"][0]["EndDate"] == "2026-11-08"

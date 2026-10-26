@@ -1,3 +1,5 @@
+import asyncio
+from threading import Event, get_ident
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -98,5 +100,24 @@ async def test_fake_mode_does_not_start_a_separate_worker(worker_main, monkeypat
     main.settings.platform_mode = "fake"
     start = AsyncMock(side_effect=AssertionError("Демо работает в API"))
     monkeypatch.setattr(main, "start_scheduler", start)
+    wait = AsyncMock()
+    monkeypatch.setattr(main.asyncio, "Event", lambda: SimpleNamespace(wait=wait, set=MagicMock()))
+    monkeypatch.setattr(main.asyncio, "get_running_loop", MagicMock())
     await main.serve()
+    wait.assert_awaited_once()
     start.assert_not_awaited()
+
+
+async def test_fake_tick_runs_in_thread_and_keeps_event_loop_responsive(worker_main, monkeypatch):
+    main = worker_main
+    release = Event()
+    caller = get_ident()
+    seen = []
+
+    async def tick(registry, kind):
+        seen.append((get_ident(), release.wait(timeout=1)))
+
+    monkeypatch.setattr(main, "run_worker_tick", tick)
+    asyncio.get_running_loop().call_later(0.01, release.set)
+    await main.run_tick(SimpleNamespace(mode="fake"))
+    assert len(seen) == 1 and seen[0][0] != caller and seen[0][1]
