@@ -1,0 +1,202 @@
+import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+import { useNavigate } from 'react-router';
+import { Button, Card, ErrorBanner } from '../components';
+import { copy } from '../copy';
+import { getAutopilotStatus } from '../api/screens';
+import { connectAccount, disconnectAccount, getMe, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
+import type { Description, DescriptionKey, Marking, Me } from '../api/setup';
+import { deleteMyData, formatRubles, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
+import type { BusinessSettings } from '../api/settings';
+import { useResource } from '../api/useResource';
+import './Setup.css';
+
+const labels = copy.settingsScreen;
+const descriptionKeys: DescriptionKey[] = ['services', 'prices', 'address', 'difference'];
+const emptyMarking: Marking = { subject_type: 'ip', inn: '', name: '', phone: '', confirmed_in_platform: { direct: false, vk: false } };
+const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(kopecks / 100).replace('.', ',');
+
+// One section with its own save status, so a failed save never hides the others.
+function useSection() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+  async function run(action: () => Promise<void>, message?: string) {
+    setBusy(true); setError(undefined); setDone(undefined);
+    try { await action(); setDone(message); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    finally { setBusy(false); }
+  }
+  return { busy, error, done, run, clear: () => setError(undefined) };
+}
+type Section = ReturnType<typeof useSection>;
+function Status({ section }: { section: Section }) {
+  return <>{section.error && <ErrorBanner message={section.error} onDismiss={section.clear} />}
+    {section.done && <p role="status">{section.done}</p>}</>;
+}
+function SaveButton({ section }: { section: Section }) {
+  return <div className="actions"><Button type="submit" disabled={section.busy}>{section.busy ? labels.saving : labels.save}</Button></div>;
+}
+function Block({ title, children }: { title: string; children: ReactNode }) {
+  return <Card className="page-stack"><h2>{title}</h2>{children}</Card>;
+}
+
+function DescriptionBlock({ business }: { business: BusinessSettings }) {
+  const section = useSection();
+  const [values, setValues] = useState<Record<DescriptionKey, string>>(() => Object.fromEntries(
+    descriptionKeys.map((key) => [key, business.description?.[key].value ?? ''])) as Record<DescriptionKey, string>);
+  function submit() {
+    const description = Object.fromEntries(descriptionKeys.map((key) => [key,
+      { ...(business.description?.[key] ?? { quote: null, question: '' }), value: values[key].trim(), verified: true }])) as Description;
+    void section.run(() => saveDescription(description), labels.saved);
+  }
+  return <Block title={copy.settings.business}>
+    <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      {descriptionKeys.map((key) => <label key={key} className="field">{labels.description[key]}
+        <textarea value={values[key]} onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></label>)}
+      <Status section={section} /><SaveButton section={section} />
+    </form>
+  </Block>;
+}
+
+function BudgetBlock({ business }: { business: BusinessSettings }) {
+  const section = useSection();
+  const [budget, setBudget] = useState(rublesText(business.month_budget_kop));
+  const [average, setAverage] = useState(rublesText(business.avg_check_kop));
+  const [autoContinue, setAutoContinue] = useState(business.auto_continue);
+  const budgetKop = rublesToKopecks(budget.trim());
+  const averageKop = average.trim() === '' ? null : rublesToKopecks(average.trim());
+  const averageBad = average.trim() !== '' && averageKop === null;
+  function submit() {
+    if (budgetKop === null || averageBad) return;
+    void section.run(async () => {
+      await saveBudget(budgetKop);
+      await saveBusinessSettings(autoContinue, averageKop);
+    }, labels.saved);
+  }
+  return <Block title={labels.budgetTitle}>
+    <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <label className="field">{labels.budgetLabel}
+        <input required inputMode="decimal" value={budget} aria-invalid={budgetKop === null} aria-describedby="budget-help" onChange={(event) => setBudget(event.target.value)} /></label>
+      <p className="muted" id="budget-help">{budgetKop === null ? labels.budgetError : `${formatRubles(budgetKop)}. ${copy.settings.budgetHint}`}</p>
+      <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
+      <p className="muted" id="continue-help">{labels.nextMonth}</p>
+      <label className="field">{labels.averageLabel}
+        <input inputMode="decimal" value={average} aria-invalid={averageBad} aria-describedby="average-help" onChange={(event) => setAverage(event.target.value)} /></label>
+      <p className="muted" id="average-help">{averageBad ? labels.averageError : labels.averageHint}</p>
+      <Status section={section} />
+      <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null || averageBad}>{section.busy ? labels.saving : labels.save}</Button></div>
+    </form>
+  </Block>;
+}
+
+function AccountsBlock() {
+  const section = useSection();
+  const [revision, setRevision] = useState(0);
+  const [me, setMe] = useState<Me>();
+  const [loadError, setLoadError] = useState<string>();
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoadError(undefined);
+    getMe(controller.signal).then((value) => { if (!controller.signal.aborted) setMe(value); }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setLoadError(reason instanceof Error ? reason.message : copy.errors.generic);
+    });
+    return () => controller.abort();
+  }, [revision]);
+  const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
+  return <Block title={copy.settings.accounts}>
+    <p className="muted">{labels.accountsHint}</p>
+    {loadError && <ErrorBanner message={loadError} onRetry={() => setRevision((value) => value + 1)} />}
+    <Status section={section} />
+    {me && <div className="account-grid">{platforms.map((platform) => {
+      const account = me.accounts.find((item) => item.platform === platform.id);
+      return <Card key={platform.id} className="page-stack"><h3>{platform.name}</h3>
+        <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected
+          : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
+        <div className="actions">
+          <Button variant="secondary" onClick={() => void connectAccount(platform.id, account?.business_id)}>{copy.settings.reconnect}</Button>
+          {account && <Button variant="secondary" disabled={section.busy}
+            onClick={() => void section.run(async () => { await disconnectAccount(account.id); setRevision((value) => value + 1); })}>{copy.settings.disconnect}</Button>}
+        </div></Card>;
+    })}</div>}
+  </Block>;
+}
+
+function MarkingBlock({ business }: { business: BusinessSettings }) {
+  const section = useSection();
+  const [marking, setMarking] = useState<Marking>(business.marking ?? emptyMarking);
+  const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
+  const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
+  function submit() {
+    if (!innOk) { void section.run(() => Promise.reject(new Error(copy.launchFlow.innError))); return; }
+    if (!marking.name.trim() || marking.phone.replace(/\D/g, '').length < 10) {
+      void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
+    }
+    void section.run(() => saveMarking(marking), labels.markingSaved);
+  }
+  return <Block title={copy.settings.marking}>
+    <p className="muted">{labels.markingHint}</p>
+    <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
+        {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={!!marking.inn && !validInn(marking.inn)}
+        aria-describedby="settings-inn-help" onChange={(event) => set({ inn: event.target.value.trim() })} /></label>
+      <p className="muted" id="settings-inn-help">{copy.launchFlow.innError}</p>
+      <label className="field">{copy.launchFlow.fullName}<input required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></label>
+      <label className="field">{copy.launchFlow.phone}<input type="tel" required value={marking.phone} onChange={(event) => set({ phone: event.target.value })} /></label>
+      <p className="muted">{copy.launchFlow.markingOverwrite}</p>
+      {(['direct', 'vk'] as const).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
+        onChange={(event) => set({ confirmed_in_platform: { ...marking.confirmed_in_platform, [platform]: event.target.checked } })} />
+        {platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
+      <Status section={section} /><SaveButton section={section} />
+    </form>
+  </Block>;
+}
+
+function AutopilotBlock() {
+  const section = useSection();
+  const status = useResource(useCallback((signal: AbortSignal) => getAutopilotStatus(signal), []));
+  const paused = status.data?.status === 'paused';
+  return <Block title={labels.autopilot}>
+    {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
+    {status.data && <p>{paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
+    <Status section={section} />
+    {status.data && <div className="actions"><Button variant={paused ? 'primary' : 'secondary'} disabled={section.busy}
+      onClick={() => void section.run(async () => { await (paused ? resumeAutopilot() : pauseAutopilot()); status.reload(); })}>
+      {paused ? copy.settings.resume : labels.pause}</Button></div>}
+  </Block>;
+}
+
+function DeleteBlock() {
+  const section = useSection();
+  const navigate = useNavigate();
+  const [word, setWord] = useState('');
+  const confirmed = word.trim().toLowerCase() === labels.deleteWord;
+  return <Block title={labels.deleteTitle}>
+    <p>{labels.deleteHint}</p>
+    <form className="page-stack" onSubmit={(event) => {
+      event.preventDefault();
+      if (confirmed) void section.run(async () => { await deleteMyData(); navigate('/login'); });
+    }}>
+      <label className="field">{labels.deleteLabel}<input autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></label>
+      <Status section={section} />
+      <div className="actions"><Button type="submit" variant="danger" disabled={!confirmed || section.busy}>{labels.deleteButton}</Button></div>
+    </form>
+  </Block>;
+}
+
+export function SettingsPage() {
+  const business = useResource(useCallback((signal: AbortSignal) => getBusiness(signal), []));
+  return <div className="page-stack launch-flow">
+    <h1>{copy.settings.title}</h1>
+    <p className="muted">{labels.intro}</p>
+    {business.loading && <p role="status">{copy.screens.loading}</p>}
+    {business.error && <ErrorBanner message={business.error} onRetry={business.reload} />}
+    {business.data && <>
+      <BudgetBlock business={business.data} /><DescriptionBlock business={business.data} />
+      <AccountsBlock /><MarkingBlock business={business.data} />
+      <Block title={copy.settings.license}><p>{labels.licenseText}</p></Block>
+      <AutopilotBlock /><DeleteBlock />
+    </>}
+  </div>;
+}

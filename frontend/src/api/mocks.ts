@@ -92,6 +92,9 @@ export function mockHistory() {
 // Onboarding demo state is independent of the running-campaign screen fixtures.
 import type { Business, BusinessInput, Description, Marking, Me, SiteCheck } from './setup';
 import type { Plan, PlanAsset } from './plan';
+import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
+import type { ClientQuestion, ClientQuestions } from './clients';
+import type { BusinessSettings } from './settings';
 interface SetupMockState {
   me: Me; business?: Business; description?: Description; counter?: number; goals?: number[];
   marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean;
@@ -199,3 +202,60 @@ export function mockPlanLaunch(acknowledged: boolean) {
     || plan.groups.some((group) => !group.assets.some((asset) => asset.selected))) throw new Error(copy.launchFlow.notReady);
   setupMock.plan!.status = 'launched'; persistSetupMock();
 }
+
+// History, clients and settings demo state.
+const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
+const historyEntries: HistoryEntry[] = [
+  { id: 3, business_id: 1, created_at: hoursAgo(2), actor: 'autopilot', kind: 'pause', platform: 'direct', entity_type: 'ad', entity_id: '1',
+    reason_text: 'Объявление потратило втрое больше обычного и не принесло ни одного обращения.',
+    evidence: { cost_kop: 450000, leads: 0, clicks: 120 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
+  { id: 2, business_id: 1, created_at: hoursAgo(30), actor: 'owner', kind: 'budget', platform: null, entity_type: 'business', entity_id: '1',
+    reason_text: 'Вы увеличили бюджет на месяц.', evidence: { budget_kop: 3000000 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
+  { id: 1, business_id: 1, created_at: hoursAgo(55), actor: 'external', kind: 'text', platform: 'vk', entity_type: 'ad', entity_id: '2',
+    reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null },
+];
+export function mockHistoryPage(filter: HistoryFilter, pageSize: number): HistoryPage {
+  const items = historyEntries.filter((item) => (!filter.platform || item.platform === filter.platform)
+    && (!filter.actor || item.actor === filter.actor)).map((item) => structuredClone(item));
+  return { items: items.slice(0, pageSize), total: items.length, page: 1, page_size: pageSize };
+}
+export function mockRevert(id: number): HistoryEntry {
+  const original = historyEntries.find((item) => item.id === id);
+  if (!original || !original.can_revert) throw new Error(copy.errors.conflict);
+  original.status = 'reverted'; original.can_revert = false;
+  const entry: HistoryEntry = { ...original, id: historyEntries[0].id + 1, created_at: new Date().toISOString(), actor: 'owner', kind: 'revert',
+    reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false };
+  historyEntries.unshift(entry); return structuredClone(entry);
+}
+const weekStart = (weeksAgo: number) => { const day = new Date(); day.setDate(day.getDate() - ((day.getDay() + 6) % 7) - 7 * weeksAgo); return isoDate(day); };
+const weekEnd = (start: string) => { const day = new Date(`${start}T12:00:00`); day.setDate(day.getDate() + 6); return isoDate(day); };
+const questions: ClientQuestion[] = [
+  { id: weekStart(1), week_start: weekStart(1), week_end: weekEnd(weekStart(1)), leads_count: 8, clients_count: null, asked_at: timestamp, answered_at: null },
+  { id: weekStart(2), week_start: weekStart(2), week_end: weekEnd(weekStart(2)), leads_count: 11, clients_count: 4, asked_at: timestamp, answered_at: timestamp },
+  { id: weekStart(3), week_start: weekStart(3), week_end: weekEnd(weekStart(3)), leads_count: 6, clients_count: null, asked_at: timestamp, answered_at: timestamp },
+];
+export function mockClientQuestions(): ClientQuestions {
+  const answered = questions.filter((item) => item.answered_at && item.clients_count !== null);
+  const leads = answered.reduce((sum, item) => sum + item.leads_count, 0);
+  const clients = answered.reduce((sum, item) => sum + (item.clients_count ?? 0), 0);
+  return { items: structuredClone(questions), cost_per_client_kop: clients ? Math.round(leads * 90000 / clients) : null };
+}
+export function mockClientAnswer(id: string, clients: number | null) {
+  const question = questions.find((item) => item.id === id);
+  if (!question) throw new Error(copy.errors.notFound);
+  if (clients !== null && (clients < 0 || clients > question.leads_count)) throw new Error(copy.errors.validation);
+  question.clients_count = clients; question.answered_at = new Date().toISOString();
+}
+let businessSettings: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
+  auto_continue: true, marking: null,
+  description: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
+    { value: { services: copy.launchFlow.mockServices, prices: copy.launchFlow.mockPrices, address: copy.launchFlow.mockAddress, difference: '' }[key],
+      quote: null, verified: true, question: '' }])) as unknown as BusinessSettings['description'] };
+export function mockBusinessSettings(): BusinessSettings { return structuredClone(businessSettings); }
+export function mockSaveBudget(kopecks: number) { businessSettings.month_budget_kop = kopecks; }
+export function mockSaveBusinessSettings(autoContinue: boolean, average: number | null) {
+  businessSettings.auto_continue = autoContinue; businessSettings.avg_check_kop = average;
+}
+export function mockPauseAutopilot() { paused = true; }
+export function mockResumeAutopilot() { paused = false; }
+export function mockDeleteMyData() { businessSettings = { ...businessSettings, marking: null }; mockSetupLogout(); }
