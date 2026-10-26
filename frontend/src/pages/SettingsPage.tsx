@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
-import { connectAccount, disconnectAccount, getMe, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
-import type { Description, DescriptionKey, Marking, Me } from '../api/setup';
+import { connectAccount, disconnectAccount, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
+import type { Description, DescriptionKey, Marking } from '../api/setup';
+import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { useResource } from '../api/useResource';
@@ -93,21 +94,12 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
 
 function AccountsBlock() {
   const section = useSection();
-  const [revision, setRevision] = useState(0);
-  const [me, setMe] = useState<Me>();
-  const [loadError, setLoadError] = useState<string>();
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoadError(undefined);
-    getMe(controller.signal).then((value) => { if (!controller.signal.aborted) setMe(value); }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setLoadError(reason instanceof Error ? reason.message : copy.errors.generic);
-    });
-    return () => controller.abort();
-  }, [revision]);
+  const session = useSession();
+  const me = session.data;
   const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
   return <Block title={copy.settings.accounts}>
     <p className="muted">{labels.accountsHint}</p>
-    {loadError && <ErrorBanner message={loadError} onRetry={() => setRevision((value) => value + 1)} />}
+    {session.error && <ErrorBanner message={session.error} onRetry={session.reload} />}
     <Status section={section} />
     {me && <div className="account-grid">{platforms.map((platform) => {
       const account = me.accounts.find((item) => item.platform === platform.id);
@@ -115,9 +107,9 @@ function AccountsBlock() {
         <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected
           : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
         <div className="actions">
-          <Button variant="secondary" onClick={() => void connectAccount(platform.id, account?.business_id)}>{copy.settings.reconnect}</Button>
-          {account && <Button variant="secondary" disabled={section.busy}
-            onClick={() => void section.run(async () => { await disconnectAccount(account.id); setRevision((value) => value + 1); })}>{copy.settings.disconnect}</Button>}
+          <Button variant="secondary" disabled={section.busy} onClick={() => void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); })}>{!account || account.status === 'revoked' ? copy.settings.connect : copy.settings.reconnect}</Button>
+          {account && account.status !== 'revoked' && <Button variant="secondary" disabled={section.busy}
+            onClick={() => void section.run(async () => { await disconnectAccount(account.id); session.reload(); })}>{copy.settings.disconnect}</Button>}
         </div></Card>;
     })}</div>}
   </Block>;
@@ -126,10 +118,14 @@ function AccountsBlock() {
 function MarkingBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
   const [marking, setMarking] = useState<Marking>(business.marking ?? emptyMarking);
+  const [innTouched, setInnTouched] = useState(false);
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
+  const showInnError = (innTouched || !!marking.inn) && !innOk;
+  const innError = validInn(marking.inn) ? copy.launchFlow.innTypeError : copy.launchFlow.innError;
   function submit() {
-    if (!innOk) { void section.run(() => Promise.reject(new Error(copy.launchFlow.innError))); return; }
+    setInnTouched(true);
+    if (!innOk) { void section.run(() => Promise.reject(new Error(innError))); return; }
     if (!marking.name.trim() || marking.phone.replace(/\D/g, '').length < 10) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
@@ -140,9 +136,9 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
         {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-      <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={!!marking.inn && !validInn(marking.inn)}
-        aria-describedby="settings-inn-help" onChange={(event) => set({ inn: event.target.value.trim() })} /></label>
-      <p className="muted" id="settings-inn-help">{copy.launchFlow.innError}</p>
+      <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError}
+        aria-describedby={showInnError ? 'settings-inn-help' : undefined} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></label>
+      {showInnError && <p className="muted" id="settings-inn-help">{innError}</p>}
       <label className="field">{copy.launchFlow.fullName}<input required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></label>
       <label className="field">{copy.launchFlow.phone}<input type="tel" required value={marking.phone} onChange={(event) => set({ phone: event.target.value })} /></label>
       <p className="muted">{copy.launchFlow.markingOverwrite}</p>
@@ -170,6 +166,7 @@ function AutopilotBlock() {
 
 function DeleteBlock() {
   const section = useSection();
+  const session = useSession();
   const navigate = useNavigate();
   const [word, setWord] = useState('');
   const confirmed = word.trim().toLowerCase() === labels.deleteWord;
@@ -177,7 +174,7 @@ function DeleteBlock() {
     <p>{labels.deleteHint}</p>
     <form className="page-stack" onSubmit={(event) => {
       event.preventDefault();
-      if (confirmed) void section.run(async () => { await deleteMyData(); navigate('/login'); });
+      if (confirmed) void section.run(async () => { await deleteMyData(); session.reload(); navigate('/login'); });
     }}>
       <label className="field">{labels.deleteLabel}<input autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></label>
       <Status section={section} />

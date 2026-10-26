@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
-import { connectAccount, connectVkKey, getMe, logout } from '../api/setup';
-import { useResource } from '../api/useResource';
+import { connectAccount, connectVkKey, logout } from '../api/setup';
+import { useSession } from '../api/session';
 import { copy } from '../copy';
 import './Setup.css';
 
@@ -11,7 +11,7 @@ function businessId(): number | undefined {
   catch { return undefined; }
 }
 export function ServiceVkPage() {
-  const me = useResource(getMe);
+  const me = useSession();
   const [clientId, setClientId] = useState('');
   const [secret, setSecret] = useState('');
   const [busy, setBusy] = useState(false);
@@ -44,7 +44,7 @@ export function ServiceVkPage() {
   </div>;
 }
 export function ServicePolicyPage() {
-  const me = useResource(getMe);
+  const me = useSession();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   return <div className="page-stack launch-flow"><h1>{copy.service.policyTitle}</h1>
@@ -54,7 +54,7 @@ export function ServicePolicyPage() {
       setBusy(true); setError('');
       void logout().then(() => me.reload()).catch(() => setError(copy.errors.network)).finally(() => setBusy(false));
     }}>{copy.launchFlow.logout}</Button></div></Card>}
-    <Link to="/login">{copy.login.title}</Link>
+    {me.data === null && <Link to="/login">{copy.login.title}</Link>}
   </div>;
 }
 export function ServiceErrorPage() {

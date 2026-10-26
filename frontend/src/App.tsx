@@ -11,10 +11,11 @@ import { StatsPage } from './pages/StatsPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { ClientsPage } from './pages/ClientsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { SessionProvider } from './api/session';
 
 export function App() {
   return (
-    <Routes>
+    <SessionProvider><Routes>
       <Route element={<Layout />}>
         <Route index element={<HomePage />} />
         <Route path="login" element={<LoginPage />} />
@@ -31,6 +32,6 @@ export function App() {
         <Route path="policy" element={<ServicePolicyPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
-    </Routes>
+    </Routes></SessionProvider>
   );
 }

@@ -4,7 +4,8 @@ import { Button, Card, ErrorBanner, Stepper } from '../components';
 import { copy } from '../copy';
 import { checkSite, connectAccount, createBusiness, disconnectAccount, getCounters, getGoals, getMe,
   rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
-import type { Business, Counter, Description, DescriptionKey, Goal, Marking, Me, SiteCheck } from '../api/setup';
+import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck } from '../api/setup';
+import { useSession } from '../api/session';
 import { NotFoundPage } from './PlaceholderPage';
 import { MedicalNotice, SiteInstructions } from './SetupShared';
 import './Setup.css';
@@ -29,7 +30,8 @@ export function SetupPage() {
   const [budget, setBudget] = useState(draft.business ? String(draft.business.month_budget_kop / 100) : '');
   const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(draft.business.avg_check_kop / 100) : '');
   const [noSite, setNoSite] = useState(false);
-  const [me, setMe] = useState<Me>();
+  const session = useSession();
+  const me = session.data;
   const [counters, setCounters] = useState<Counter[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [revision, setRevision] = useState(0);
@@ -37,6 +39,10 @@ export function SetupPage() {
   const [reading, setReading] = useState(false);
   const [error, setError] = useState('');
   const [marking, setMarking] = useState<Marking>({ subject_type: 'ip', inn: '', name: '', phone: '', confirmed_in_platform: { direct: false, vk: false } });
+  const [innTouched, setInnTouched] = useState(false);
+  const innError = !validInn(marking.inn) ? copy.launchFlow.innError
+    : marking.inn.length !== (marking.subject_type === 'ooo' ? 10 : 12) ? copy.launchFlow.innTypeError : '';
+  const showInnError = (innTouched || !!marking.inn) && !!innError;
   const current = Number(step ?? draft.maxStep);
   const direct = me?.accounts.find((account) => account.platform === 'direct' && account.status === 'ok');
   const vk = me?.accounts.find((account) => account.platform === 'vk' && account.status === 'ok');
@@ -45,15 +51,17 @@ export function SetupPage() {
   }, [draft]);
   useEffect(() => {
     const controller = new AbortController();
-    getMe(controller.signal).then(async (value) => {
+    if (direct) getCounters(controller.signal).then((result) => {
       if (controller.signal.aborted) return;
-      setMe(value);
-      if (value.accounts.some((account) => account.platform === 'direct' && account.status === 'ok')) {
-        const result = await getCounters(controller.signal); if (!controller.signal.aborted) setCounters(result.items);
-      }
+      setCounters(result.items);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : copy.errors.generic); });
     return () => controller.abort();
-  }, [revision]);
+  }, [direct, revision]);
+  useEffect(() => {
+    if (current !== 2 || !direct || counters.length !== 1) return;
+    setDraft((value) => value.counter === counters[0].id ? value
+      : { ...value, counter: counters[0].id, goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 });
+  }, [counters, current, direct]);
   useEffect(() => {
     const controller = new AbortController(); setGoals([]);
     if (draft.counter) getGoals(draft.counter, controller.signal).then((value) => {
@@ -100,7 +108,7 @@ export function SetupPage() {
       const business = await createBusiness(input);
       setDraft({ business, counter: 0, goals: [], approved: false, maxStep: 2 }); navigate('/setup/2');
     } else if (current === 2) {
-      const fresh = await getMe(); setMe(fresh);
+      const fresh = await getMe();
       if (!fresh.accounts.some((account) => account.platform === 'direct' && account.status === 'ok')
         || !counters.some((item) => item.id === draft.counter) || !draft.goals.length
         || draft.goals.some((id) => !goals.some((goal) => goal.id === id))) throw new Error(copy.launchFlow.accountsError);
@@ -113,6 +121,7 @@ export function SetupPage() {
       if (!draft.approved || !draft.description?.services.value.trim()) throw new Error(copy.launchFlow.draftError);
       await saveDescription(draft.description); next();
     } else {
+      setInnTouched(true);
       if (!validInn(marking.inn)) throw new Error(copy.launchFlow.innError);
       if ((marking.subject_type === 'ooo' ? 10 : 12) !== marking.inn.length) throw new Error(copy.launchFlow.innTypeError);
       if (!marking.name.trim() || !/^\+?[\d ()-]{10,25}$/.test(marking.phone) || marking.phone.replace(/\D/g, '').length < 10
@@ -149,13 +158,14 @@ export function SetupPage() {
           return <Card key={platform} className="page-stack">
             <h2>{copy.setup.accounts[platform]}</h2><p className="muted">{platform === 'direct' ? copy.setup.accounts.required : copy.setup.accounts.optional}</p>
             <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
-            {platform === 'direct' ? <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setRevision((value) => value + 1); })}>{copy.setup.accounts.connectDirect}</Button>
+            {platform === 'direct' ? account?.status === 'ok' ? <p role="status">{copy.setup.accounts.directConnected}</p>
+              : <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
               : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
-            {account && <Button variant="secondary" onClick={() => void act(async () => { await disconnectAccount(account.id); setDraft((value) => ({ ...value, maxStep: 2 })); setRevision((value) => value + 1); })}>{copy.launchFlow.disconnect}</Button>}
+            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { await disconnectAccount(account.id); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
             <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
           </Card>;
         })}</div>
-        <Button variant="secondary" onClick={() => setRevision((value) => value + 1)}>{copy.launchFlow.refresh}</Button>
+        <Button variant="secondary" onClick={() => { session.reload(); setRevision((value) => value + 1); }}>{copy.launchFlow.refresh}</Button>
         <label className="field">{copy.setup.accounts.counter}<select disabled={!direct} required value={draft.counter || ''} onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
           <option value="">{copy.common.noData}</option>{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
         </select></label>
@@ -174,16 +184,16 @@ export function SetupPage() {
         {draft.site?.medical_level !== 'none' && <MedicalNotice />}
         {!fields.some((key) => draft.description![key].verified) && <><h2>{copy.launchFlow.ownDescription}</h2><p>{copy.launchFlow.ownDescriptionHint}</p></>}
         {fields.map((key) => { const field = draft.description![key]; return <div className="field" key={key}>
-          <label className="field">{copy.setup.draft[key]}<textarea required={key === 'services'} value={field.value} aria-describedby={`source-${key}`} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: false, description: { ...value.description!, [key]: { ...field, value: event.target.value } } }))} /></label>
-          <p className="source" id={`source-${key}`}>{field.verified && field.quote ? copy.setup.draft.source(field.quote) : `${copy.setup.draft.missing}. ${field.question || copy.setup.draft.question}`}</p>
+          <label className="field">{copy.setup.draft[key]}<textarea required={key === 'services'} value={field.value} aria-describedby={field.verified && field.quote?.trim() === field.value.trim() ? undefined : `source-${key}`} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: false, description: { ...value.description!, [key]: { ...field, value: event.target.value } } }))} /></label>
+          {!(field.verified && field.quote?.trim() === field.value.trim()) && <p className="source" id={`source-${key}`}>{field.verified && field.quote ? copy.setup.draft.source(field.quote) : `${copy.setup.draft.missing}. ${field.question || copy.setup.draft.question}`}</p>}
         </div>; })}
         <label className="check"><input type="checkbox" checked={draft.approved} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: event.target.checked }))} />{copy.launchFlow.approved}</label>
       </>}
       {current === 5 && <>
         <p>{copy.setup.advertiser.explanation}</p>
         <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => setMarking((value) => ({ ...value, subject_type: event.target.value as Marking['subject_type'] }))}>{Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={!!marking.inn && !validInn(marking.inn)} aria-describedby="inn-help" onChange={(event) => setMarking((value) => ({ ...value, inn: event.target.value.trim() }))} /></label>
-        <p className="muted" id="inn-help">{copy.launchFlow.innError}</p>
+        <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError} aria-describedby={showInnError ? 'inn-help' : undefined} onBlur={() => setInnTouched(true)} onChange={(event) => setMarking((value) => ({ ...value, inn: event.target.value.trim() }))} /></label>
+        {showInnError && <p className="muted" id="inn-help">{innError}</p>}
         <label className="field">{copy.launchFlow.fullName}<input required value={marking.name} onChange={(event) => setMarking((value) => ({ ...value, name: event.target.value }))} /></label>
         <label className="field">{copy.launchFlow.phone}<input type="tel" required value={marking.phone} onChange={(event) => setMarking((value) => ({ ...value, phone: event.target.value }))} /></label>
         <ol>{copy.launchFlow.markingSteps.map((text) => <li key={text}>{text}</li>)}</ol><p className="muted">{copy.launchFlow.markingOverwrite}</p>
@@ -192,8 +202,9 @@ export function SetupPage() {
       </fieldset>
       <div className="actions">
         {current > 1 && <Link className="button button--secondary" to={`/setup/${current - 1}`}>{copy.common.back}</Link>}
-        <Button type="submit" disabled={busy || blocked || current === 3 && (reading || !siteReady) || current === 4 && !draft.approved}>{busy ? copy.launchFlow.saving : current === 5 ? copy.plan.title : copy.common.next}</Button>
+        <Button type="submit" aria-describedby={current === 4 && !draft.approved ? 'approval-help' : undefined} disabled={busy || blocked || current === 3 && (reading || !siteReady) || current === 4 && !draft.approved}>{busy ? copy.launchFlow.saving : current === 5 ? copy.plan.title : copy.common.next}</Button>
       </div>
+      {current === 4 && !draft.approved && <p className="muted" id="approval-help">{copy.launchFlow.approvalHint}</p>}
     </form></Card>
   </div>;
 }

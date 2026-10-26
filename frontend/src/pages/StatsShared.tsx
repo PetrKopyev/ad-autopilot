@@ -7,10 +7,10 @@ import './Stats.css';
 
 export function DemoNotice() { return mockEnabled ? <p className="stats-demo">{copy.screens.demo}</p> : null; }
 export function PeriodPicker({ value, onChange }: { value: PeriodChoice; onChange: (value: PeriodChoice) => void }) {
-  return <div className="actions" role="group" aria-label={copy.statistics.period}>
+  return <div className="period-picker" role="group" aria-label={copy.statistics.period}>
     {(Object.keys(copy.screens.periods) as PeriodChoice[]).map((period) => <Button key={period}
       variant={value === period ? 'primary' : 'secondary'} aria-pressed={value === period}
-      onClick={() => onChange(period)}>{copy.screens.periods[period]}</Button>)}
+      onClick={() => onChange(period)}><span className="period-label-full">{copy.screens.periods[period]}</span><span className="period-label-short">{copy.screens.shortPeriods[period]}</span></Button>)}
   </div>;
 }
 export function NullableMoney({ value }: { value: number | null }) {
@@ -28,7 +28,7 @@ export function ClientsSummary({ summary }: { summary: Summary }) {
   const window = summary.clients_window;
   return <Card className="page-stack"><h2>{copy.statistics.clients}</h2>
     <p>{copy.screens.clientsWindow}</p><p className="muted">{copy.screens.dates(displayDate(window.from), displayDate(window.to))}</p>
-    {window.clients === null ? <p>{copy.screens.noClients}. {copy.statistics.clientsHint}.</p> : <div className="actions">
+    {window.clients === null ? <p>{copy.screens.noClients}. {copy.statistics.clientsHint}</p> : <div className="actions">
       <p>{copy.home.clients}: <strong>{window.clients}</strong></p>
       <p>{copy.home.clientPrice}: <NullableMoney value={window.cost_per_client_kop} /></p>
     </div>}

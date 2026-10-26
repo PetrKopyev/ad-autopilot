@@ -53,7 +53,7 @@ export function ClientsPage() {
       {open.length ? open.map((item) => <QuestionCard key={item.id} question={item} onAnswered={questions.reload} />)
         : <p className="muted">{labels.nothingOpen}</p>}
       <h2>{labels.answered}</h2>
-      {answered.length ? <ul className="page-stack">{answered.map((item) => <li key={item.id}><Card>
+      {answered.length ? <ul className="page-stack clients-answers">{answered.map((item) => <li key={item.id}><Card>
         <strong>{labels.week(displayDate(item.week_start), displayDate(item.week_end))}</strong>
         <p>{item.clients_count === null ? labels.answerUnknown(item.leads_count) : labels.answerLine(item.clients_count, item.leads_count)}</p>
       </Card></li>)}</ul> : <p className="muted">{labels.nothingAnswered}</p>}

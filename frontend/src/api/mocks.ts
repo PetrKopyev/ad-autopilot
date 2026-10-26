@@ -1,4 +1,5 @@
 import { copy } from '../copy';
+import { ApiError } from './client';
 import { getPeriod, isoDate } from './period';
 import type { Ad, AutopilotStatus, Breakdown, Daily, HistoryItem, Metrics, Period, StatsLevel, Summary } from './types';
 
@@ -20,7 +21,7 @@ const ads: Ad[] = [
     group_id: 1, group_name: copy.screens.mockGroup, title: copy.screens.mockAdTitle, text: copy.screens.mockAdText,
     image_url: null, status: 'active', reason: null, metrics: base(185000, 7) },
   { id: 2, platform: 'direct', campaign_id: 1, campaign_name: copy.screens.mockCampaign,
-    group_id: 1, group_name: copy.screens.mockGroup, title: copy.screens.mockAdTitle, text: copy.screens.mockAdText,
+    group_id: 1, group_name: copy.screens.mockGroup, title: copy.screens.mockSecondAdTitle, text: copy.screens.mockSecondAdText,
     image_url: null, status: 'paused_auto', reason: copy.screens.mockReason, metrics: base(75000, 0, 900, 30) },
 ];
 export function mockDaily(period: Period): Daily {
@@ -52,10 +53,12 @@ export function mockSummary(period: Period): Summary {
   weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
   const end = new Date(weekStart); end.setDate(end.getDate() - 1);
   const start = new Date(weekStart); start.setDate(start.getDate() - 28);
-  return { business_id: 1, ...period, ...totals(period),
-    clients_window: { from: isoDate(start), to: isoDate(end), clients: null, cost_kop: 0,
-      cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
-    budget: { month: month.from, budget_kop: 1500000, spent_kop: spent, remaining_kop: Math.max(0, 1500000 - spent),
+  const budget = mockMonthBudget();
+  const clients = clientResults(period);
+  const window = clientResults({ from: isoDate(start), to: isoDate(end) });
+  return { business_id: 1, ...period, ...totals(period), clients: clients.clients, cost_per_client_kop: clients.cost_per_client_kop,
+    clients_window: { from: isoDate(start), to: isoDate(end), ...window, unknown_weeks: 4 - window.answered_weeks },
+    budget: { month: month.from, budget_kop: budget, spent_kop: spent, remaining_kop: Math.max(0, budget - spent),
       days_remaining: new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate() - today.getDate() + 1,
       platforms: [{ platform: 'direct', spent_kop: spent, source: 'stats_daily', spent_at: null }] },
   };
@@ -67,7 +70,8 @@ export function mockBreakdown(period: Period, level: StatsLevel): Breakdown {
 }
 export function mockStatus(): AutopilotStatus {
   return { status: paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
-    needs_attention: [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] };
+    needs_attention: questions.some((item) => !item.answered_at)
+      ? [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] : [] };
 }
 export function mockAds() { return { items: ads.map((ad) => ({ ...ad })) }; }
 export function mockAdAction(id: number, action: 'pause' | 'resume') {
@@ -89,7 +93,7 @@ export function mockHistory() {
   return { items: history.slice(0, 3).map((item) => ({ ...item })), total: history.length, page: 1, page_size: 3 };
 }
 
-// Onboarding demo state is independent of the running-campaign screen fixtures.
+// Onboarding and running screens share the business budget and account state.
 import type { Business, BusinessInput, Description, Marking, Me, SiteCheck } from './setup';
 import type { Plan, PlanAsset } from './plan';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
@@ -109,7 +113,7 @@ function persistSetupMock() {
   try { sessionStorage.setItem(setupMockKey, JSON.stringify(setupMock)); } catch { /* In-memory demo remains usable. */ }
 }
 export function mockSetupMe(): Me {
-  if (setupMock.signedOut) throw new Error(copy.errors.unauthorized);
+  if (setupMock.signedOut) throw new ApiError(copy.errors.unauthorized, 401);
   return structuredClone(setupMock.me);
 }
 export function mockSetupConnect(platform: 'login' | 'direct' | 'vk') {
@@ -158,10 +162,11 @@ function mockAsset(id: number, selected = false): PlanAsset {
 export function mockSetupPlan(): Plan {
   const direct = setupMock.me.accounts.some((item) => item.platform === 'direct' && item.status === 'ok');
   const vk = setupMock.me.accounts.some((item) => item.platform === 'vk' && item.status === 'ok');
-  const budget = setupMock.business?.month_budget_kop ?? 0;
+  const budget = mockMonthBudget();
   const vkBudget = vk ? Math.floor(budget / 2) : 0;
   const marking = !!setupMock.marking?.direct && (!vk || !!setupMock.marking?.vk);
   const ready = !!(setupMock.business && direct && setupMock.description && setupMock.counter && setupMock.goals?.length && marking);
+  if (setupMock.plan?.month_budget_kop !== budget) setupMock.plan = undefined;
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
     vk_budget_kop: vkBudget, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
     marking_confirmed: marking, ready_to_launch: ready, status: 'draft',
@@ -234,11 +239,16 @@ const questions: ClientQuestion[] = [
   { id: weekStart(2), week_start: weekStart(2), week_end: weekEnd(weekStart(2)), leads_count: 11, clients_count: 4, asked_at: timestamp, answered_at: timestamp },
   { id: weekStart(3), week_start: weekStart(3), week_end: weekEnd(weekStart(3)), leads_count: 6, clients_count: null, asked_at: timestamp, answered_at: timestamp },
 ];
-export function mockClientQuestions(): ClientQuestions {
-  const answered = questions.filter((item) => item.answered_at && item.clients_count !== null);
-  const leads = answered.reduce((sum, item) => sum + item.leads_count, 0);
+function clientResults(period?: Period) {
+  const answered = questions.filter((item) => item.answered_at && item.clients_count !== null
+    && (!period || item.week_start >= period.from && item.week_end <= period.to));
+  const cost = answered.reduce((sum, item) => sum + item.leads_count * 90000, 0);
   const clients = answered.reduce((sum, item) => sum + (item.clients_count ?? 0), 0);
-  return { items: structuredClone(questions), cost_per_client_kop: clients ? Math.round(leads * 90000 / clients) : null };
+  return { clients: answered.length ? clients : null, cost_kop: cost,
+    cost_per_client_kop: clients ? Math.round(cost / clients) : null, answered_weeks: answered.length };
+}
+export function mockClientQuestions(): ClientQuestions {
+  return { items: structuredClone(questions), cost_per_client_kop: clientResults().cost_per_client_kop };
 }
 export function mockClientAnswer(id: string, clients: number | null) {
   const question = questions.find((item) => item.id === id);
@@ -251,8 +261,15 @@ let businessSettings: BusinessSettings = { id: 1, site_url: 'https://example.ru'
   description: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
     { value: { services: copy.launchFlow.mockServices, prices: copy.launchFlow.mockPrices, address: copy.launchFlow.mockAddress, difference: '' }[key],
       quote: null, verified: true, question: '' }])) as unknown as BusinessSettings['description'] };
-export function mockBusinessSettings(): BusinessSettings { return structuredClone(businessSettings); }
-export function mockSaveBudget(kopecks: number) { businessSettings.month_budget_kop = kopecks; }
+function mockMonthBudget() { return setupMock.business?.month_budget_kop ?? businessSettings.month_budget_kop; }
+export function mockBusinessSettings(): BusinessSettings {
+  return structuredClone({ ...businessSettings, ...setupMock.business, description: setupMock.description ?? businessSettings.description });
+}
+export function mockSaveBudget(kopecks: number) {
+  businessSettings.month_budget_kop = kopecks;
+  if (setupMock.business) setupMock.business.month_budget_kop = kopecks;
+  setupMock.plan = undefined; persistSetupMock();
+}
 export function mockSaveBusinessSettings(autoContinue: boolean, average: number | null) {
   businessSettings.auto_continue = autoContinue; businessSettings.avg_check_kop = average;
 }

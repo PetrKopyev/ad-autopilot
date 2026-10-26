@@ -29,13 +29,13 @@ export function PlanPage() {
     await saveAssets(selected); setEdited(await action());
   }
   return <div className="page-stack launch-flow">
-    <h1>{copy.plan.title}</h1>
+    <h1>{plan?.status === 'launched' ? copy.launchFlow.launched : copy.plan.title}</h1>
     {resource.loading && <p role="status">{copy.launchFlow.loading}</p>}
     {resource.error && <ErrorBanner message={resource.error} onRetry={resource.reload} />}
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {plan && <>
       <p>{copy.plan.summary(formatMoney(plan.month_budget_kop), formatMoney(plan.direct_budget_kop), formatMoney(plan.vk_budget_kop))}</p>
-      {plan.status === 'launched' ? <Card className="page-stack"><h2>{copy.launchFlow.launched}</h2><Link to="/">{copy.launchFlow.openHome}</Link></Card> : <>
+      {plan.status === 'launched' ? <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card> : <>
         {(!plan.marking_confirmed || !plan.ready_to_launch) && <div className="notice"><p>{copy.plan.marking}</p><p>{copy.launchFlow.notReady}</p><Link to="/setup">{copy.common.start}</Link></div>}
         {medical && <><MedicalNotice /><label className="check"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} />{copy.launchFlow.understand}</label></>}
         {plan.groups.map((group) => <Card key={group.id} className="page-stack">
@@ -50,12 +50,12 @@ export function PlanPage() {
                 setEdited({ ...plan, groups: plan.groups.map((item) => ({ ...item, assets: item.assets.map((image) => image.id === asset.id ? { ...image, selected: event.target.checked } : image) })) });
               }} /><span>{asset.kind === 'upload' ? copy.launchFlow.ownPhoto : copy.launchFlow.illustration}</span></span>
             </label>)}</div>
-            <p className="muted">{copy.plan.generationLimit}. {copy.launchFlow.remaining(plan.generations_remaining)}</p>
+            <p className="muted">{copy.launchFlow.remaining(plan.generations_remaining)}</p>
             <div className="actions"><Button variant="secondary" disabled={busy || plan.generations_remaining <= 0} onClick={() => void act(() => updateImages(() => regenerateImages(group.id)))}>{copy.plan.generate}</Button></div>
-            <label className="field">{copy.plan.upload}<input type="file" accept="image/jpeg,image/png,image/webp" aria-describedby={`photo-hint-${group.id}`} onChange={(event) => {
+            <div className="photo-upload"><input className="file-input" id={`photo-${group.id}`} type="file" accept="image/jpeg,image/png,image/webp" aria-describedby={`photo-hint-${group.id}`} onChange={(event) => {
               const file = event.target.files?.[0]; event.target.value = '';
               if (file) void act(() => updateImages(() => uploadPhoto(group.id, file)));
-            }} /></label><p className="muted" id={`photo-hint-${group.id}`}>{copy.launchFlow.photoHint}</p>
+            }} /><label className="button button--secondary" htmlFor={`photo-${group.id}`}>{copy.plan.upload}</label></div><p className="muted" id={`photo-hint-${group.id}`}>{copy.launchFlow.photoHint}</p>
           </fieldset>
         </Card>)}
         {!imagesReady && <p role="status">{copy.launchFlow.chooseImages}</p>}

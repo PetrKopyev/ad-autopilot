@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, EmptyState, ErrorBanner, Money } from '../components';
 import { copy } from '../copy';
 import { getBreakdown, getDaily, getSummary } from '../api/screens';
@@ -6,34 +6,47 @@ import { displayDate, getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import type { Daily, StatsLevel } from '../api/types';
 import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, platformName } from './StatsShared';
+import { formatMoney } from '../components/Money';
 
 function DailyChart({ daily }: { daily: Daily }) {
+  const chart = useRef<SVGSVGElement>(null);
+  const [width, setWidth] = useState(700);
   const points = daily.items;
+  const hasData = points.some((point) => point.sources.length > 0);
+  useEffect(() => {
+    if (!chart.current) return;
+    const observer = new ResizeObserver(([entry]) => { if (entry.contentRect.width > 0) setWidth(entry.contentRect.width); });
+    observer.observe(chart.current);
+    return () => observer.disconnect();
+  }, [hasData]);
   const maxCost = Math.max(100, ...points.map((point) => point.cost_kop));
   const maxLeads = Math.max(1, ...points.map((point) => point.leads));
-  const x = (index: number) => points.length === 1 ? 350 : 60 + index * 580 / (points.length - 1);
+  const left = 88; const right = width - 40;
+  const x = (index: number) => points.length === 1 ? (left + right) / 2 : left + index * (right - left) / (points.length - 1);
   const y = (value: number, max: number) => 210 - value / max * 160;
   const line = (metric: 'cost_kop' | 'leads', max: number) => points.map((point, index) => `${x(index)},${y(point[metric], max)}`).join(' ');
-  const hasData = points.some((point) => point.sources.length > 0);
   if (!hasData) return <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />;
   return <>
     <div className="stats-chart-key"><span>{copy.screens.chartSpend}</span><span>{copy.screens.chartLeads}</span></div>
     <p className="muted">{copy.screens.chartExplanation}</p>
-    <svg className="stats-chart" viewBox="0 0 700 260" role="img" aria-label={copy.statistics.chart}>
+    <svg ref={chart} className="stats-chart" viewBox={`0 0 ${width} 260`} role="img" aria-label={copy.statistics.chart}>
       <title>{copy.statistics.chart}</title>
-      {[0, 0.5, 1].map((fraction) => <g key={fraction}>
-        <line x1="60" x2="640" y1={y(fraction, 1)} y2={y(fraction, 1)} stroke="#dce2e9" />
-        <text x="52" y={y(fraction, 1) + 4} textAnchor="end">{(maxCost * fraction / 100).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}</text>
-        <text x="648" y={y(fraction, 1) + 4}>{(maxLeads * fraction).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}</text>
-      </g>)}
-      <text x="60" y="24">{copy.screens.chartSpend}</text><text x="640" y="24" textAnchor="end">{copy.screens.chartLeads}</text>
+      {[...new Set([0, Math.ceil(maxLeads / 2), maxLeads])].map((leads) => {
+        const fraction = leads / maxLeads;
+        return <g key={leads}>
+          <line x1={left} x2={right} y1={y(fraction, 1)} y2={y(fraction, 1)} stroke="#dce2e9" />
+          <text x={left - 8} y={y(fraction, 1) + 4} textAnchor="end">{formatMoney(Math.round(maxCost * fraction))}</text>
+          <text x={right + 8} y={y(fraction, 1) + 4}>{leads}</text>
+        </g>;
+      })}
+      <text x="0" y="24">{copy.home.spent}</text><text x={width} y="24" textAnchor="end">{copy.screens.chartLeads}</text>
       <polyline points={line('cost_kop', maxCost)} fill="none" stroke="#245e4c" strokeWidth="3" strokeLinejoin="round" />
       <polyline points={line('leads', maxLeads)} fill="none" stroke="#326bc0" strokeWidth="3" strokeLinejoin="round" strokeDasharray="7 4" />
       {points.map((point, index) => <g key={point.date}>
         <circle cx={x(index)} cy={y(point.cost_kop, maxCost)} r="3" fill="#245e4c" />
         <circle cx={x(index)} cy={y(point.leads, maxLeads)} r="3" fill="#326bc0" />
       </g>)}
-      <text x="60" y="242">{displayDate(points[0].date)}</text><text x="640" y="242" textAnchor="end">{displayDate(points[points.length - 1].date)}</text>
+      <text x={left} y="242">{displayDate(points[0].date)}</text><text x={right} y="242" textAnchor="end">{displayDate(points[points.length - 1].date)}</text>
     </svg>
     <details className="stats-chart-details"><summary>{copy.screens.chartDetails}</summary>
       <div className="stats-table-scroll" tabIndex={0} role="region" aria-label={copy.screens.chartDetails}><table className="stats-table">
@@ -74,14 +87,16 @@ export function StatsPage() {
       </select></label>
       {breakdown.loading && <p role="status">{copy.screens.loading}</p>}
       {breakdown.error && <ErrorBanner message={breakdown.error} onRetry={breakdown.reload} />}
-      {breakdown.data && (breakdown.data.items.length ? <div className="stats-table-scroll" role="region" aria-label={copy.screens.levels[level]} tabIndex={0}>
-        <table className="stats-table"><caption>{copy.screens.levels[level]}</caption>
-          <thead><tr><th scope="col">{copy.screens.levels[level]}</th><th scope="col">{copy.home.spent}</th><th scope="col">{copy.ads.impressions}</th>
+      {breakdown.data && (breakdown.data.items.length ? <>
+        <p className="muted stats-scroll-hint" id="stats-scroll-help">{copy.screens.scrollHint}</p>
+        <div className="stats-table-scroll" role="region" aria-label={copy.screens.breakdown} aria-describedby="stats-scroll-help" tabIndex={0}>
+        <table className="stats-table">
+          <thead><tr><th scope="col">{copy.screens.rowLabels[level]}</th><th scope="col">{copy.home.spent}</th><th scope="col">{copy.ads.impressions}</th>
             <th scope="col">{copy.ads.clicks}</th><th scope="col">{copy.home.leads}</th><th scope="col">{copy.home.leadPrice}</th></tr></thead>
           <tbody>{breakdown.data.items.map((item) => <tr key={String(item.id)}><th scope="row">{rowLabel(item.id)}</th>
             <td><Money kopecks={item.cost_kop} /></td><td>{item.impressions.toLocaleString('ru-RU')}</td><td>{item.clicks.toLocaleString('ru-RU')}</td>
             <td>{item.leads.toLocaleString('ru-RU')}</td><td><NullableMoney value={item.cost_per_lead_kop} /></td></tr>)}</tbody>
-        </table></div> : <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />)}
+        </table></div></> : <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />)}
     </Card>
     <Sources sources={summary.data?.sources ?? []} />
   </div>;

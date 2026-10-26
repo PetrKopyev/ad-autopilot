@@ -37,15 +37,11 @@ function AdCard({ ad, changed }: { ad: Ad; changed: () => void }) {
     </dl>
     {error && <ErrorBanner message={error} onRetry={() => void toggle()} />}
     {success && <p role="status">{copy.screens.updatedAd}</p>}
-    <div className="actions">
+    <div className="actions ads-actions">
       <Button variant="secondary" disabled={busy || (!canPause && !canResume)} onClick={() => void toggle()}>
         {busy ? copy.screens.changing : canResume ? copy.common.enable : copy.common.stop}
       </Button>
-      <Button variant="secondary" disabled>{copy.ads.editText}</Button>
-      <Button variant="secondary" disabled>{copy.ads.replaceImage}</Button>
-      <Button variant="secondary" disabled>{copy.common.budget}</Button>
     </div>
-    <p className="muted">{copy.screens.editorUnavailable}</p>
   </article>;
 }
 

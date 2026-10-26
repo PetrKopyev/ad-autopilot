@@ -6,10 +6,9 @@ export function formatMoney(kopecks: number): string {
   if (!Number.isSafeInteger(kopecks)) throw new RangeError(copy.common.invalidMoney);
   const amount = BigInt(kopecks);
   const absolute = amount < 0n ? -amount : amount;
-  const rubles = integerFormat.format(absolute / 100n);
-  const fraction = absolute % 100n;
-  const cents = fraction === 0n ? '' : `,${fraction.toString().padStart(2, '0')}`;
-  return `${amount < 0n ? '−' : ''}${rubles}${cents}\u00a0₽`;
+  const rounded = (absolute + 50n) / 100n;
+  const rubles = integerFormat.format(rounded);
+  return `${amount < 0n && rounded !== 0n ? '−' : ''}${rubles}\u00a0₽`;
 }
 
 export function Money({ kopecks, className }: { kopecks: number; className?: string }) {

@@ -1,5 +1,10 @@
-import { Link, NavLink, Outlet } from 'react-router';
+import { useState } from 'react';
+import { Link, NavLink, Outlet, useNavigate } from 'react-router';
 import { copy } from '../copy';
+import { logout } from '../api/setup';
+import { useSession } from '../api/session';
+import { Button } from './Button';
+import { ErrorBanner } from './ErrorBanner';
 
 const navigation = [
   { to: '/', label: copy.navigation.home },
@@ -11,12 +16,24 @@ const navigation = [
 ];
 
 export function Layout() {
+  const session = useSession();
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function signOut() {
+    setBusy(true); setError('');
+    try { await logout(); session.reload(); navigate('/login'); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    finally { setBusy(false); }
+  }
   return (
     <div className="app-layout">
       <a className="skip-link" href="#main">{copy.navigation.skip}</a>
       <header className="app-header">
         <Link to="/" className="brand">{copy.appName}</Link>
-        <Link to="/login" className="header-link">{copy.login.title}</Link>
+        {session.data ? <div className="header-account"><span>{session.data.login}</span>
+          <Button variant="secondary" disabled={busy} onClick={() => void signOut()}>{copy.launchFlow.logout}</Button>
+        </div> : session.data === null && <Link to="/login" className="header-link">{copy.login.title}</Link>}
       </header>
       <aside className="sidebar">
         <nav aria-label={copy.navigation.label}>
@@ -28,7 +45,10 @@ export function Layout() {
         </nav>
         <Link className="setup-link" to="/setup">{copy.common.start}</Link>
       </aside>
-      <main id="main" className="main-content" tabIndex={-1}><Outlet /></main>
+      <main id="main" className="main-content" tabIndex={-1}>
+        {(error || session.error) && <ErrorBanner message={error || session.error!} onRetry={error ? () => void signOut() : session.reload} />}
+        <Outlet />
+      </main>
       <footer className="app-footer">
         <Link to="/policy">{copy.service.policyTitle}</Link>
         <Link to="/connect/vk">{copy.setup.accounts.vk}</Link>

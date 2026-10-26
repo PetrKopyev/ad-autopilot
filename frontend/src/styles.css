@@ -37,8 +37,10 @@ h2 { font-size: 1.15rem; line-height: 1.4; }
 .muted { color: var(--color-muted); }
 .app-layout { min-height: 100vh; display: grid; grid-template-columns: 228px minmax(0, 1fr); grid-template-rows: auto 1fr auto; }
 .app-header { grid-column: 1 / -1; display: flex; gap: var(--space-4); justify-content: space-between; align-items: center; padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
-.brand { font-size: 1.1rem; font-weight: 750; color: var(--color-text); text-decoration: none; }
-.header-link { padding: var(--space-3); }
+.brand { display: inline-flex; align-items: center; min-height: 44px; font-size: 1.1rem; font-weight: 750; color: var(--color-text); text-decoration: none; }
+.header-account { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.header-account span { overflow-wrap: anywhere; }
+.header-link { display: inline-flex; align-items: center; min-height: 44px; padding: var(--space-3); }
 .sidebar { padding: var(--space-5) var(--space-4); border-right: 1px solid var(--color-border); }
 .sidebar nav { display: grid; gap: var(--space-2); }
 .nav-link { display: flex; align-items: center; min-height: 48px; padding: var(--space-3) var(--space-4); border-radius: var(--radius-small); color: var(--color-muted); text-decoration: none; font-weight: 600; }
@@ -78,7 +80,7 @@ h2 { font-size: 1.15rem; line-height: 1.4; }
 .budget-ring__amount { font-size: 1.5rem; font-weight: 700; }
 .stepper { display: grid; gap: var(--space-2); list-style: none; padding: 0; margin: 0; }
 .stepper li > a, .stepper li > span { display: flex; gap: var(--space-3); align-items: center; min-height: 48px; padding: var(--space-2); color: var(--color-muted); text-decoration: none; border-radius: var(--radius-small); }
-.stepper__number { display: grid; place-items: center; flex: 0 0 32px; height: 32px; border-radius: 50%; background: #edf0f5; }
+.stepper__number { display: grid; place-items: center; flex: 0 0 auto; flex-shrink: 0; width: 32px; height: 32px; aspect-ratio: 1; border-radius: 50%; background: #edf0f5; }
 .stepper__current > a, .stepper__current > span { background: var(--color-primary-soft); color: var(--color-primary) !important; font-weight: 650; }
 .stepper__current .stepper__number { background: var(--color-primary); color: #fff; }
 .step-title { margin: var(--space-5) 0; }
@@ -87,8 +89,9 @@ h2 { font-size: 1.15rem; line-height: 1.4; }
 
 @media (max-width: 720px) {
   .app-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; }
-  .app-header { padding: var(--space-3) var(--space-4); }
+  .app-header { flex-wrap: wrap; padding: var(--space-3) var(--space-4); }
   .brand { font-size: 1rem; }
+  .header-account { margin-left: auto; }
   .sidebar { padding: var(--space-3); border-right: 0; border-bottom: 1px solid var(--color-border); }
   .sidebar nav { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
   .nav-link { padding: var(--space-2); justify-content: center; font-size: 0.875rem; }
