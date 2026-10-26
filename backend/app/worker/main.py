@@ -11,6 +11,7 @@ from app.config import settings
 from app.db.session import SessionLocal
 from app.platforms.base import AdPlatform
 from app.platforms.fake import FakeAdapter
+from app.services.experiments import create_experiment
 from app.worker.jobs import Worker, WorkerRepository, dispatch
 
 logger = logging.getLogger(__name__)
@@ -26,12 +27,25 @@ def resolve_adapter(business_id: int, platform: str) -> AdPlatform:
 
 def startup() -> None:
     with SessionLocal() as db:
-        asyncio.run(Worker(WorkerRepository(db), resolve_adapter, dry_run=settings.dry_run).startup())
+        asyncio.run(
+            Worker(
+                WorkerRepository(db),
+                resolve_adapter,
+                dry_run=settings.dry_run,
+                experiment_factory=create_experiment,
+            ).startup()
+        )
 
 
 def build_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone=settings.tz_default)
-    job = partial(dispatch, SessionLocal, resolve_adapter, dry_run=settings.dry_run)
+    job = partial(
+        dispatch,
+        SessionLocal,
+        resolve_adapter,
+        dry_run=settings.dry_run,
+        experiment_factory=create_experiment,
+    )
     options = {"max_instances": 1, "coalesce": True}
     scheduler.add_job(job, "interval", ["heartbeat"], minutes=1, id="heartbeat", **options)
     scheduler.add_job(job, "interval", ["budget_guard"], minutes=30, id="budget_guard", **options)

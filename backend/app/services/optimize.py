@@ -22,6 +22,7 @@ from app.domain.types import (
 )
 from app.platforms.base import Operation
 from app.services.budget_guard import read_spend
+from app.services.experiments import completed_hypotheses, group_available
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -265,7 +266,7 @@ async def rebalance_budget(worker: Worker, business: Business) -> None:
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:
-    if business.status != "running":
+    if business.status != "running" or worker.metadata(business).get("kill_switch"):
         return
     ads, groups = await snapshot(worker, business)
     by_id = {ad.id: ad for ad in ads}
@@ -273,18 +274,27 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
     local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
     running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]
+    # Завершённая группа остаётся занята до следующего запуска этого шага.
+    occupied_groups = {local_groups[item.ad_group_id].external_id for item in running}
     for experiment in running:
         control_id, variant_id = (
             local_ads[ad_id].external_id for ad_id in (experiment.control_ad_id, experiment.variant_ad_id)
         )
         if control_id not in by_id or variant_id not in by_id:
             continue
+        if not group_available(worker, business, local_groups[experiment.ad_group_id]):
+            continue
         design = ExperimentDesign(experiment.planned_n_per_arm, 14, 1, experiment.hypothesis, True, "EXPERIMENT_START")
         control, variant = by_id[control_id], by_id[variant_id]
+        # История до старта и последние неустоявшиеся дни не входят ни в вердикт,
+        # ни в его объяснение и сохранённые доказательства.
+        end = today(worker.clock) - timedelta(days=2)
+        control_days = tuple(day for day in control.days if experiment.started_at.date() <= day.day <= end)
+        variant_days = tuple(day for day in variant.days if experiment.started_at.date() <= day.day <= end)
         result = evaluate_experiment(
             design,
-            control.days,
-            variant.days,
+            control_days,
+            variant_days,
             experiment.started_at.date(),
             today(worker.clock),
             extended=experiment.stats.get("extended", False),
@@ -304,11 +314,8 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             continue
         loser = control_id if result.verdict == Verdict.VARIANT else variant_id
         campaign = campaigns[local_groups[experiment.ad_group_id].campaign_id]
-        text = explain_experiment(
-            result,
-            total_metrics(settled_days(control.days, today(worker.clock))),
-            total_metrics(settled_days(variant.days, today(worker.clock))),
-        )
+        control_metrics, variant_metrics = total_metrics(control_days), total_metrics(variant_days)
+        text = explain_experiment(result, control_metrics, variant_metrics)
         # Готовый текст содержит все параметры эксперимента и сохраняется единым откатываемым изменением.
         change = await worker.apply(
             business,
@@ -319,6 +326,16 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             reason_text=text,
             suffix=f"experiment:{experiment.id}",
         )
+        evidence = {
+            "experiment_id": experiment.id,
+            "control": asdict(control_metrics),
+            "variant": asdict(variant_metrics),
+            "result": asdict(result),
+        }
+        change.evidence = change.evidence | evidence
+        if worker.proposed(business):
+            change.status = "proposed"
+        worker.repository.save(change)
         if not worker.proposed(business):
             experiment.status = "concluded"
             experiment.verdict = (
@@ -329,12 +346,15 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             experiment.stats = experiment.stats | {"result": asdict(result)}
             experiment.change_id = change.id
             worker.repository.save(experiment)
-    active_groups = [local_groups[item.ad_group_id].external_id for item in running if item.status == "running"]
-    for ad in select_borderline(ads, worker.clock.now, reference(worker, business, ads), active_groups):
+    for ad in select_borderline(ads, worker.clock.now, reference(worker, business, ads), tuple(occupied_groups)):
         group = next(item for item in groups if item.id == ad.group_id)
         days = settled_days(ad.days, today(worker.clock))
         metrics = total_metrics(days)
-        design = design_experiment(float(metrics.ctr), metrics.impressions // max(1, len(days)), group.daily_limit)
+        local_group = next(item for item in local_groups.values() if item.external_id == group.id)
+        completed = completed_hypotheses(worker, business, local_group.id)
+        design = design_experiment(
+            float(metrics.ctr), metrics.impressions // max(1, len(days)), group.daily_limit, completed
+        )
         if not design.accepted:
             worker.notice(
                 business,

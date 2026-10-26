@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from test_onboarding import (
+
+from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
+from app.content.art import ART_COST_KOP
+from app.db.models import ArtCall, Asset, LLMCall
+from app.services.onboarding import AiLimits, Blocked, OnboardingError
+from app.services.plan import launch_blockers
+from tests.services.test_onboarding import (
     BUDGET_KOP,
     NOW,
     TODAY,
@@ -16,12 +22,6 @@ from test_onboarding import (
     page_text,
     picture,
 )
-
-from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
-from app.content.art import ART_COST_KOP
-from app.db.models import ArtCall, Asset, LLMCall
-from app.services.onboarding import AiLimits, Blocked, OnboardingError
-from app.services.plan import launch_blockers
 
 
 @pytest.fixture

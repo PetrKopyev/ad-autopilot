@@ -4,15 +4,6 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from test_onboarding import (
-    BUDGET_KOP,
-    NOW,
-    TODAY,
-    World,
-    make_world,
-    onboard,
-    page_text,
-)
 
 from app.db.models import AdGroup, BudgetLedger, Campaign, ChangeLog
 from app.platforms.base import ExternalRefs, PlatformError
@@ -21,6 +12,15 @@ from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchBlocked, LaunchFailed
 from app.services.registry import AccountInfo, AdapterRegistry
+from tests.services.test_onboarding import (
+    BUDGET_KOP,
+    NOW,
+    TODAY,
+    World,
+    make_world,
+    onboard,
+    page_text,
+)
 
 
 class FailingCreate(FakeAdapter):
