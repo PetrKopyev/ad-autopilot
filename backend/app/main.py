@@ -6,6 +6,7 @@ from app.api.auth import router as auth_router
 from app.api.clients import router as clients_router
 from app.api.history import router as history_router
 from app.api.stats import router as stats_router
+from app.api.vk import router as vk_router
 from app.config import settings
 from app.db.session import engine
 
@@ -31,3 +32,4 @@ app.include_router(auth_router)
 app.include_router(history_router)
 app.include_router(stats_router)
 app.include_router(clients_router)
+app.include_router(vk_router)
