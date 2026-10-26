@@ -101,3 +101,18 @@
 PostgreSQL, миграции alembic (`backend/alembic/`). Деньги хранятся целыми копейками. Токены кабинетов, ИНН и телефон шифруются Fernet-ключом из `TOKEN_ENCRYPTION_KEY` на уровне колонок. Идентификаторы сессий хранятся хешем. Основные таблицы: `users`, `businesses`, `platform_accounts`, `plans`, `campaigns`, `ad_groups`, `ads`, `targets`, `stats_daily`, `budget_ledger`, `change_log`, `experiments`, `leads_survey`, `worker_runs`, `llm_calls`, `art_calls`.
 
 Статистика хранится по дням и объявлениям; расход считается как его списывает площадка (с НДС). Для решений используются только устоявшиеся дни, для стража и сверки данные «до сейчас».
+
+### Миграции
+
+Миграции выполняет сервис `migrate` (`alembic upgrade head`) до старта `api` и `worker`; воркер на время миграции останавливают, чтобы старый код не писал строк без новых ключей. В `alembic/env.py` задан `lock_timeout = 5s`: если таблицу держит запрос, миграция падает и повторяется, а не вешает API в очереди за блокировкой.
+
+`0003_storage_integrity` выполнена одной транзакцией без `CONCURRENTLY` и `NOT VALID`, потому что прод в тот момент был пуст. С `0004` таблицы уже с данными, и работают правила:
+
+- индекс создаётся `CREATE INDEX CONCURRENTLY` (`postgresql_concurrently=True`) внутри `with op.get_context().autocommit_block():`, удаляется так же `DROP INDEX CONCURRENTLY`;
+- уникальность — `CREATE UNIQUE INDEX CONCURRENTLY`, затем `ALTER TABLE … ADD CONSTRAINT … UNIQUE USING INDEX`;
+- `CHECK` и внешний ключ добавляются с `NOT VALID` (`postgresql_not_valid=True`), проверка существующих строк — отдельным `ALTER TABLE … VALIDATE CONSTRAINT`;
+- новый столбец добавляется допускающим `NULL` или с постоянным `DEFAULT`; заполнение — пачками, `NOT NULL` — после заполнения;
+- схема каждой миграции совместима с кодом предыдущего релиза: старый код работает, пока его не перезапустят;
+- у каждой миграции есть `downgrade`; потери данных при откате описываются в docstring миграции.
+
+Тест `tests/db/test_migrations.py` на PostgreSQL проходит `upgrade head` → сравнение с моделями → `downgrade base` → `upgrade head`, в том числе на базе с данными.

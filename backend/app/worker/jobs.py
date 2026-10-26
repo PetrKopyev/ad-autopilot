@@ -6,7 +6,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, cast, delete, func, literal_column, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 
 from app.db.models import (
     Ad,
@@ -20,6 +21,7 @@ from app.db.models import (
     Target,
     WorkerRun,
 )
+from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
 from app.platforms.base import AdPlatform, ExternalRefs, Operation
 from app.platforms.fake import FakeAdapter, VirtualClock
@@ -30,10 +32,25 @@ from app.worker.locks import business_lock
 logger = logging.getLogger(__name__)
 
 
+RUN_SLOT = ("business_id", "kind", "slot_key")
+HEARTBEAT_KEEP = timedelta(days=2)
+RUNS_KEEP = timedelta(days=90)
+# Прогон старше этого считается брошенным (процесс воркера умер), и слот можно занять снова.
+RUN_STALE = timedelta(minutes=30)
+INTERRUPTED = [{"reason_code": "JOB_INTERRUPTED"}]
+
+
+def budget_contexts(change: ChangeLog) -> bool:
+    """Применённое изменение, из которого воркер восстанавливает контекст бюджета кампании."""
+    stored = change.evidence.get("_service", {}).get("refs", {}).get("budget_context")
+    return bool(stored) or any(op.get("budget_context") for op in change.operations)
+
+
 class WorkerRepository(ChangesRepository):
     """Хранилище воркера; тот же журнал и та же блокировка, что у ChangesService."""
 
-    def rows(self, model, business_id: int | None = None) -> list:
+    def rows(self, model, business_id: int | None = None, **filters) -> list:
+        """Строки бизнеса; фильтры — значение, набор значений или Window — выполняются в SQL."""
         statement = select(model)
         if business_id is not None:
             if model is Business:
@@ -44,17 +61,12 @@ class WorkerRepository(ChangesRepository):
                 statement = statement.join(AdGroup).join(Campaign).where(Campaign.business_id == business_id)
             else:
                 statement = statement.where(model.business_id == business_id)
+        for name, value in filters.items():
+            statement = statement.where(condition(getattr(model, name), value))
         return list(self.db.scalars(statement))
 
     def find(self, model, **keys):
-        return next(
-            (
-                item
-                for item in self.rows(model, keys.get("business_id"))
-                if all(getattr(item, name) == value for name, value in keys.items())
-            ),
-            None,
-        )
+        return next(iter(self.rows(model, keys.pop("business_id", None), **keys)), None)
 
     def save(self, *items) -> None:
         self.db.add_all(items)
@@ -68,24 +80,121 @@ class WorkerRepository(ChangesRepository):
         with business_lock(self.db.get_bind(), business_id):
             yield
 
-    def pending(self, business_id: int | None = None) -> list[ChangeLog]:
-        return [
-            item
-            for item in self.rows(ChangeLog, business_id)
-            if item.status == "pending" and not item.evidence.get("_service", {}).get("dry_run")
-        ]
+    def start_run(self, business_id: int, kind: str, slot_key: str, now: datetime) -> WorkerRun | None:
+        """Занимает слот шага.
 
-    def local_entities(self, business_id: int, platform: str | None) -> dict:
-        campaigns = [item for item in self.rows(Campaign, business_id) if item.platform == platform]
-        groups = [item for item in self.rows(AdGroup, business_id) if item.campaign_id in {c.id for c in campaigns}]
-        ads = [item for item in self.rows(Ad, business_id) if item.ad_group_id in {g.id for g in groups}]
-        targets = [item for item in self.rows(Target, business_id) if item.ad_group_id in {g.id for g in groups}]
-        return {
-            (kind, item.external_id): item
-            for kind, items in (("campaign", campaigns), ("group", groups), ("ad", ads), ("target", targets))
-            for item in items
-            if item.external_id
-        }
+        Слот с успешным прогоном не выдаётся. Упавший прогон перезапускается сразу, а идущий — только когда он старше
+        RUN_STALE: второй воркер обычно сюда не доходит из-за блокировки бизнеса, а прогон умершего процесса
+        перезапускается после RUN_STALE или сразу после старта нового процесса (interrupt_runs). Журнал прошлых попыток
+        сохраняется, к нему добавляется новая запись.
+        """
+        statement = insert(WorkerRun).values(
+            kind=kind,
+            business_id=business_id,
+            slot_key=slot_key,
+            units_spent=0,
+            status="running",
+            started_at=now,
+            finished_at=None,
+            log=[{"key": slot_key}],
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=RUN_SLOT,
+            set_={
+                "status": "running",
+                "started_at": now,
+                "finished_at": None,
+                "log": WorkerRun.log.op("||")(statement.excluded.log),
+            },
+            where=and_(
+                WorkerRun.status != "ok", or_(WorkerRun.status != "running", WorkerRun.started_at <= now - RUN_STALE)
+            ),
+        ).returning(WorkerRun)
+        run = self.db.scalar(statement, execution_options={"populate_existing": True})
+        self.db.commit()
+        return run
+
+    def interrupt_runs(self, business_id: int, now: datetime) -> None:
+        """Вызывается при старте воркера под блокировкой бизнеса: прогон в статусе running брошен умершим процессом."""
+        self.db.execute(
+            update(WorkerRun)
+            .where(WorkerRun.business_id == business_id, WorkerRun.status == "running")
+            .values(status="failed", finished_at=now, log=WorkerRun.log.op("||")(cast(INTERRUPTED, JSONB)))
+        )
+        self.db.commit()
+
+    def notify(self, run: WorkerRun) -> None:
+        """Одно уведомление на ключ, в том числе при одновременной записи из API и воркера.
+
+        Уведомления не чистятся: ключ вида experiment:… или demo_state_lost:… должен защищать от повтора всегда.
+        """
+        values = {column.key: getattr(run, column.key) for column in WorkerRun.__table__.columns if column.key != "id"}
+        self.db.execute(insert(WorkerRun).values(values).on_conflict_do_nothing(index_elements=RUN_SLOT))
+        self.db.commit()
+
+    def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
+        """Последнее применённое изменение статуса объекта; поиск по операциям идёт в JSONB, а не в Python."""
+        operation = {"entity_type": entity_type, "entity_id": entity_id, "field": "status"}
+        return self.db.scalar(
+            select(ChangeLog)
+            .where(
+                ChangeLog.business_id == business_id,
+                ChangeLog.platform == platform,
+                ChangeLog.status == "applied",
+                ChangeLog.operations.contains([operation]),
+            )
+            .order_by(ChangeLog.id.desc())
+            .limit(1)
+        )
+
+    def last_check(self, business_id: int) -> datetime | None:
+        return self.db.scalar(
+            select(func.max(WorkerRun.finished_at)).where(
+                or_(WorkerRun.business_id.is_(None), WorkerRun.business_id == business_id),
+                WorkerRun.kind.in_(("heartbeat", "budget_guard")),
+                WorkerRun.status == "ok",
+            )
+        )
+
+    def latest_run(self, business_id: int, kind: str) -> WorkerRun | None:
+        return self.db.scalar(
+            select(WorkerRun)
+            .where(WorkerRun.business_id == business_id, WorkerRun.kind == kind)
+            .order_by(WorkerRun.started_at.desc(), WorkerRun.id.desc())
+            .limit(1)
+        )
+
+    def applied_budget_contexts(self, business_id: int) -> list[ChangeLog]:
+        """Применённые изменения с контекстом бюджета, по порядку; остальная история воркеру для refs не нужна."""
+        stored = ChangeLog.evidence[("_service", "refs", "budget_context")]
+        return list(
+            self.db.scalars(
+                select(ChangeLog)
+                .where(
+                    ChangeLog.business_id == business_id,
+                    ChangeLog.status == "applied",
+                    or_(
+                        and_(stored.astext.is_not(None), stored.astext != "{}"),
+                        func.jsonb_path_exists(
+                            ChangeLog.operations, literal_column("'$[*] ? (@.budget_context != null)'::jsonpath")
+                        ),
+                    ),
+                )
+                .order_by(ChangeLog.id)
+            )
+        )
+
+    def prune_runs(self, now: datetime) -> None:
+        """Пульс хранится HEARTBEAT_KEEP, прогоны шагов — RUNS_KEEP; уведомления не удаляются (см. notify)."""
+        self.db.execute(
+            delete(WorkerRun).where(
+                or_(
+                    and_(WorkerRun.kind == "heartbeat", WorkerRun.started_at < now - HEARTBEAT_KEEP),
+                    and_(WorkerRun.kind != "notification", WorkerRun.started_at < now - RUNS_KEEP),
+                )
+            )
+        )
+        self.db.commit()
 
 
 class MemoryWorkerRepository(WorkerRepository):
@@ -95,19 +204,19 @@ class MemoryWorkerRepository(WorkerRepository):
         self.tables: dict[type, list] = {}
         self._locked: set[int] = set()
 
-    def rows(self, model, business_id: int | None = None) -> list:
-        items = list(self.tables.get(model, ()))
+    def rows(self, model, business_id: int | None = None, **filters) -> list:
+        items = [item for item in self.tables.get(model, ()) if matches(item, filters)]
         if business_id is None:
             return items
         if model is Business:
-            return [item for item in items if item.id == business_id]
-        if model is AdGroup:
-            ids = {item.id for item in self.rows(Campaign, business_id)}
-            return [item for item in items if item.campaign_id in ids]
-        if model in (Ad, Target):
-            ids = {item.id for item in self.rows(AdGroup, business_id)}
-            return [item for item in items if item.ad_group_id in ids]
-        return [item for item in items if item.business_id == business_id]
+            scope = {"id": business_id}
+        elif model is AdGroup:
+            scope = {"campaign_id": {item.id for item in self.rows(Campaign, business_id)}}
+        elif model in (Ad, Target):
+            scope = {"ad_group_id": {item.id for item in self.rows(AdGroup, business_id)}}
+        else:
+            scope = {"business_id": business_id}
+        return [item for item in items if matches(item, scope)]
 
     def save(self, *items) -> None:
         for item in items:
@@ -134,6 +243,28 @@ class MemoryWorkerRepository(WorkerRepository):
     def get(self, change_id: int, business_id: int) -> ChangeLog | None:
         return self.find(ChangeLog, id=change_id, business_id=business_id)
 
+    def pending(self, business_id: int | None = None) -> list[ChangeLog]:
+        return [
+            item
+            for item in self.rows(ChangeLog, business_id, status="pending")
+            if not item.evidence.get("_service", {}).get("dry_run")
+        ]
+
+    def change_by_key(self, business_id: int, key: str) -> ChangeLog | None:
+        return self.find(ChangeLog, business_id=business_id, idempotency_key=key)
+
+    def local_entities(self, business_id: int, platform: str | None) -> dict:
+        campaigns = self.rows(Campaign, business_id, platform=platform)
+        groups = self.rows(AdGroup, business_id, campaign_id={item.id for item in campaigns})
+        ads = self.rows(Ad, business_id, ad_group_id={item.id for item in groups})
+        targets = self.rows(Target, business_id, ad_group_id={item.id for item in groups})
+        return {
+            (kind, item.external_id): item
+            for kind, items in (("campaign", campaigns), ("group", groups), ("ad", ads), ("target", targets))
+            for item in items
+            if item.external_id
+        }
+
     def recent_owner_changes(self, business_id: int, now: datetime) -> list[ChangeLog]:
         return [
             item
@@ -144,10 +275,71 @@ class MemoryWorkerRepository(WorkerRepository):
         ]
 
     def experiments(self, change: ChangeLog) -> list[Experiment]:
-        return [item for item in self.rows(Experiment, change.business_id) if item.change_id == change.id]
+        return self.rows(Experiment, change.business_id, change_id=change.id)
 
     def reverts(self, change_id: int) -> list[ChangeLog]:
-        return [item for item in self.rows(ChangeLog) if item.reverts_id == change_id]
+        return self.rows(ChangeLog, reverts_id=change_id)
+
+    def start_run(self, business_id: int, kind: str, slot_key: str, now: datetime) -> WorkerRun | None:
+        run = self.find(WorkerRun, business_id=business_id, kind=kind, slot_key=slot_key)
+        if run is not None and (run.status == "ok" or run.status == "running" and run.started_at > now - RUN_STALE):
+            return None
+        log = run.log if run is not None else []
+        run = run or WorkerRun(kind=kind, business_id=business_id, slot_key=slot_key, units_spent=0)
+        run.status, run.started_at, run.finished_at, run.log = "running", now, None, log + [{"key": slot_key}]
+        self.save(run)
+        return run
+
+    def interrupt_runs(self, business_id: int, now: datetime) -> None:
+        for run in self.rows(WorkerRun, business_id, status="running"):
+            run.status, run.finished_at, run.log = "failed", now, run.log + INTERRUPTED
+
+    def notify(self, run: WorkerRun) -> None:
+        # Как UNIQUE в PostgreSQL: ключ с NULL ни с чем не совпадает.
+        keys = {name: getattr(run, name) for name in RUN_SLOT}
+        if None in keys.values() or self.find(WorkerRun, **keys) is None:
+            self.save(run)
+
+    def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
+        return max(
+            (
+                row
+                for row in self.rows(ChangeLog, business_id, platform=platform, status="applied")
+                if any(
+                    (op.get("entity_type"), op.get("entity_id"), op.get("field")) == (entity_type, entity_id, "status")
+                    for op in row.operations
+                )
+            ),
+            key=lambda row: row.id,
+            default=None,
+        )
+
+    def last_check(self, business_id: int) -> datetime | None:
+        return max(
+            (
+                row.finished_at
+                for row in self.rows(WorkerRun, kind={"heartbeat", "budget_guard"}, status="ok")
+                if row.business_id in (None, business_id) and row.finished_at
+            ),
+            default=None,
+        )
+
+    def latest_run(self, business_id: int, kind: str) -> WorkerRun | None:
+        return max(self.rows(WorkerRun, business_id, kind=kind), key=lambda row: (row.started_at, row.id), default=None)
+
+    def applied_budget_contexts(self, business_id: int) -> list[ChangeLog]:
+        return sorted(
+            (row for row in self.rows(ChangeLog, business_id, status="applied") if budget_contexts(row)),
+            key=lambda row: row.id,
+        )
+
+    def prune_runs(self, now: datetime) -> None:
+        self.tables[WorkerRun] = [
+            row
+            for row in self.tables.get(WorkerRun, [])
+            if row.kind == "notification"
+            or row.started_at >= now - (HEARTBEAT_KEEP if row.kind == "heartbeat" else RUNS_KEEP)
+        ]
 
 
 class Worker:
@@ -194,8 +386,7 @@ class Worker:
             self._context_at = slot
         if campaign.business_id not in self._contexts:
             self._contexts[campaign.business_id] = {}
-            history = sorted(self.repository.rows(ChangeLog, campaign.business_id), key=lambda item: item.id)
-            for change in history:
+            for change in self.repository.applied_budget_contexts(campaign.business_id):
                 self.cache_context(change)
         context = self._contexts[campaign.business_id].get((campaign.platform, campaign.external_id), {}) | context
         return ExternalRefs(
@@ -273,13 +464,20 @@ class Worker:
         if not operations:
             return None
         key = f"{self.step_key}:{campaign.id}:{suffix}"
-        existing = [
-            item for item in self.repository.rows(ChangeLog, business.id) if item.evidence.get("worker_key") == key
-        ]
-        applied = next((item for item in existing if item.status == "applied"), None)
-        proposed = next((item for item in existing if item.evidence.get("_service", {}).get("dry_run")), None)
-        if applied is not None or proposed is not None:
-            return applied if applied is not None else proposed
+        existing = self.repository.change_by_key(business.id, key)
+        if existing is not None:
+            dry = existing.status == "proposed" or existing.evidence.get("_service", {}).get("dry_run")
+            if existing.status == "pending" and not dry:
+                # Сверка в начале шага не прочитала площадку: исход неизвестен, шаг повторится после сверки.
+                raise ChangeConflict("Применение не подтверждено; шаг будет повторён после сверки.")
+            if existing.status != "failed" and not (dry and not self.proposed(business)):
+                # Применённое, предложенное или отменённое владельцем действие слота повторно не выполняется:
+                # после отмены объект и так защищён от автопилота на время frozen_until.
+                return existing
+            # Неудачная попытка или предложение пробного режима, из которого бизнес уже вышел, остаются в журнале,
+            # а ключ переходит к настоящему применению.
+            existing.idempotency_key = None
+            self.repository.save(existing)
         change = await self.changes.apply_change(
             business_id=business.id,
             adapter=self.resolve_adapter(business.id, campaign.platform),
@@ -294,6 +492,7 @@ class Worker:
             evidence={"worker_key": key, **(evidence or {})},
             entity_type=entity_type,
             entity_id=entity_id,
+            idempotency_key=key,
             now=self.clock.now,
         )
         if change.status != "applied" and not self.proposed(business):
@@ -305,16 +504,11 @@ class Worker:
         notice_key = key or f"{self.step_key}:{reason_code}"
         if details.get("target_id") is not None:
             notice_key = f"{notice_key}:{details['target_id']}"
-        if any(
-            row.kind == "notification" and row.log[0].get("key") == notice_key
-            for row in self.repository.rows(WorkerRun, business.id)
-            if row.log
-        ):
-            return
-        self.repository.save(
+        self.repository.notify(
             WorkerRun(
                 kind="notification",
                 business_id=business.id,
+                slot_key=notice_key,
                 started_at=self.clock.now,
                 finished_at=self.clock.now,
                 status="proposed" if self.proposed(business) else "ok",
@@ -331,6 +525,8 @@ class Worker:
                 with self.repository.business_lock(business.id):
                     if not self.demo_available(business):
                         continue
+                    # Блокировка взята: ни один живой процесс не выполняет шаг этого бизнеса.
+                    self.repository.interrupt_runs(business.id, self.clock.now)
                     await self.changes.recover_pending(
                         self.resolve_adapter, business_id=business.id, now=self.clock.now
                     )
@@ -361,21 +557,9 @@ class Worker:
             if not self.demo_available(business):
                 return
             self.step_key = key or schedule_key(kind, self.clock.now)
-            runs = self.repository.rows(WorkerRun, business.id)
-            if any(
-                item.kind == kind and item.status == "ok" and item.log and item.log[0].get("key") == self.step_key
-                for item in runs
-            ):
+            run = self.repository.start_run(business.id, kind, self.step_key, self.clock.now)
+            if run is None:
                 return
-            run = WorkerRun(
-                kind=kind,
-                business_id=business.id,
-                started_at=self.clock.now,
-                status="running",
-                units_spent=0,
-                log=[{"key": self.step_key}],
-            )
-            self.repository.save(run)
             try:
                 recovered = await self.changes.recover_pending(
                     self.resolve_adapter, business_id=business.id, now=self.clock.now
@@ -394,6 +578,10 @@ class Worker:
             finally:
                 run.finished_at = self.clock.now
                 self.repository.save(run)
+
+    def prune(self) -> None:
+        """Раз в сутки: пульс хранится двое суток, прогоны шагов — 90 дней, уведомления не удаляются."""
+        self.repository.prune_runs(self.clock.now)
 
     async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
@@ -442,8 +630,9 @@ async def clients_survey(worker: Worker, business: Business) -> None:
     goals = {str(goal) for goal in business.lead_goal_ids} or {"lead"}
     leads = sum(
         sum(value for goal, value in row.conversions.items() if goal in goals)
-        for row in worker.repository.rows(StatsDaily, business.id)
-        if week_start <= row.date < week_start + timedelta(days=7)
+        for row in worker.repository.rows(
+            StatsDaily, business.id, date=Window(week_start, week_start + timedelta(days=6))
+        )
     )
     if leads:
         worker.repository.save(

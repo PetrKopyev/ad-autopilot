@@ -1,7 +1,7 @@
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -13,10 +13,11 @@ from app.content.medical import MedicalLevel, classify
 from app.content.site_reader import SiteReadResult, extract_description, read_site, safe_url
 from app.content.verify import DescriptionDraft, Fact, OwnerQuestion, Service
 from app.content.yandexgpt import CompletionResult, YandexGPTError
-from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, PlatformAccount
+from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
 from app.services.changes import ChangesRepository
+from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
 SUBJECT_TYPES = ("ip", "ooo", "selfemployed", "person")
@@ -93,17 +94,24 @@ def worst_medical(*levels: str) -> MedicalLevel:
     return max(levels, key=MEDICAL_ORDER.index)  # type: ignore[return-value]
 
 
+def launch_time(value: str) -> datetime:
+    """Время запуска из плана; запись без пояса считается UTC, чтобы сравнение с началом недели не падало."""
+    launched = datetime.fromisoformat(value)
+    return launched if launched.tzinfo else launched.replace(tzinfo=UTC)
+
+
 def ai_budget(repository: "OnboardingRepository", business: Business, limits: AiLimits, today: date) -> ArtBudget:
-    """Общий потолок трат на ИИ: до запуска — на онбординг, после — на неделю (по снимку счётчика)."""
-    total = repository.ai_spent(business.id)
+    """Общий потолок трат на ИИ: до запуска — на онбординг, после — на московскую неделю с момента запуска.
+
+    В демо (DemoLLM, DemoArt) ИИ бесплатный: вызовы не пишутся в llm_calls и art_calls, траты всегда 0, и сдвиг
+    виртуальной даты демо относительно created_at (время базы) на лимит не влияет. Деньги в демо не тратятся.
+    """
     if business.status in ("draft", "plan_ready"):
-        limit, spent = limits.onboarding_kop, total
+        limit, spent = limits.onboarding_kop, repository.ai_spent(business.id)
     else:
-        week = (today - timedelta(days=today.weekday())).isoformat()
-        if business.settings.get("_ai", {}).get("week") != week:
-            business.settings = business.settings | {"_ai": {"week": week, "base": total}}
-            repository.commit()
-        limit, spent = limits.weekly_kop, total - business.settings["_ai"]["base"]
+        since = datetime.combine(today - timedelta(days=today.weekday()), time(), MOSCOW)
+        launched = repository.launched_at(business.id)
+        limit, spent = limits.weekly_kop, repository.ai_spent(business.id, max(since, launched) if launched else since)
     return ArtBudget(limit, min(max(spent, 0), limit))
 
 
@@ -153,14 +161,23 @@ class OnboardingRepository(ChangesRepository):
     def accounts(self, business_id: int) -> list[PlatformAccount]:
         return list(self.db.scalars(select(PlatformAccount).where(PlatformAccount.business_id == business_id)))
 
-    def ai_spent(self, business_id: int) -> int:
-        llm = self.db.scalar(
-            select(func.coalesce(func.sum(LLMCall.cost_kop), 0)).where(LLMCall.business_id == business_id)
+    def ai_spent(self, business_id: int, since: datetime | None = None) -> int:
+        total = 0
+        for model in (LLMCall, ArtCall):
+            statement = select(func.coalesce(func.sum(model.cost_kop), 0)).where(model.business_id == business_id)
+            if since is not None:
+                statement = statement.where(model.created_at >= since)
+            total += int(self.db.scalar(statement))
+        return total
+
+    def launched_at(self, business_id: int) -> datetime | None:
+        value = self.db.scalar(
+            select(Plan.payload["launch"]["launched_at"].astext)
+            .where(Plan.business_id == business_id, Plan.status == "launched")
+            .order_by(Plan.version.desc())
+            .limit(1)
         )
-        art = self.db.scalar(
-            select(func.coalesce(func.sum(ArtCall.cost_kop), 0)).where(ArtCall.business_id == business_id)
-        )
-        return int(llm) + int(art)
+        return launch_time(value) if value else None
 
     def record_llm(self, business_id: int, purpose: str, result: CompletionResult) -> None:
         self.add(

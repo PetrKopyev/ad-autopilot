@@ -1,0 +1,371 @@
+"""Один и тот же сценарий на MemoryWorkerRepository и на WorkerRepository с PostgreSQL: память ведёт себя как SQL."""
+
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+from app.db.models import (
+    Ad,
+    AdGroup,
+    Business,
+    Campaign,
+    ChangeLog,
+    Experiment,
+    LeadsSurvey,
+    PlatformAccount,
+    StatsDaily,
+    User,
+    WorkerRun,
+)
+from app.db.query import Window, matches
+from app.domain.settings import DEFAULT_SETTINGS
+from app.platforms.base import ModerationInfo, Operation, StatRow
+from app.platforms.fake import VirtualClock
+from app.services.experiments import group_available
+from app.services.screens import ScreensService
+from app.services.sync import sync_moderation, sync_stats
+from app.worker.jobs import (
+    HEARTBEAT_KEEP,
+    RUN_STALE,
+    RUNS_KEEP,
+    MemoryWorkerRepository,
+    Worker,
+    WorkerRepository,
+    clients_survey,
+)
+
+NOW = datetime(2026, 3, 11, 9, tzinfo=UTC)
+TODAY = date(2026, 3, 11)
+
+
+@pytest.fixture(params=["memory", pytest.param("sql", marks=pytest.mark.db)])
+def repository(request) -> WorkerRepository:
+    if request.param == "memory":
+        return MemoryWorkerRepository()
+    return WorkerRepository(request.getfixturevalue("db_session"))
+
+
+def tree(repository: WorkerRepository, platforms: tuple[str, ...] = ("direct",)) -> SimpleNamespace:
+    """Бизнес и по кампании на площадку; внешние id на площадках совпадают."""
+    user = User(yandex_uid="parity-" + uuid4().hex, login="test", consent_at=NOW)
+    repository.save(user)
+    business = Business(
+        user_id=user.id,
+        site_url="https://example.test",
+        city="Самара",
+        month_budget_kop=100_000,
+        status="running",
+        settings={},
+        lead_goal_ids=[1],
+    )
+    repository.save(business)
+    result = SimpleNamespace(business=business, campaigns={}, groups={}, ads={})
+    for platform in platforms:
+        account = PlatformAccount(business_id=business.id, platform=platform, auth_mode="oauth", access_token_enc="t")
+        repository.save(account)
+        campaign = Campaign(
+            business_id=business.id,
+            platform_account_id=account.id,
+            platform=platform,
+            external_id="c-1",
+            type="unified",
+            name="Тест",
+            status="active",
+            daily_limit_kop=1_000,
+            period_cap_kop=10_000,
+            owner_paused=False,
+        )
+        repository.save(campaign)
+        group = AdGroup(campaign_id=campaign.id, external_id="g-1", theme="Тест", geo={}, status="active")
+        repository.save(group)
+        ads = [
+            Ad(ad_group_id=group.id, external_id=f"a-{index}", title=f"Т{index}", text="Т", status="active")
+            for index in (1, 2)
+        ]
+        repository.save(*ads)
+        result.campaigns[platform], result.groups[platform], result.ads[platform] = campaign, group, ads
+    return result
+
+
+def change(business: Business, **values) -> ChangeLog:
+    defaults = {
+        "business_id": business.id,
+        "actor": "autopilot",
+        "kind": "pause",
+        "platform": "direct",
+        "entity_type": "ad",
+        "entity_id": "a-1",
+        "operations": [],
+        "reason_code": "CUSTOM",
+        "reason_params": {},
+        "reason_text": "Тест.",
+        "evidence": {},
+        "status": "applied",
+        "created_at": NOW,
+    }
+    return ChangeLog(**defaults | values)
+
+
+def run(business_id: int | None, **values) -> WorkerRun:
+    defaults = {"business_id": business_id, "kind": "optimize", "status": "ok", "started_at": NOW, "units_spent": 0}
+    return WorkerRun(**defaults | {"log": []} | values)
+
+
+def stats(world, platform: str, day: date, **values) -> StatsDaily:
+    ad = world.ads[platform][values.pop("ad", 0)]
+    defaults = {
+        "business_id": world.business.id,
+        "platform": platform,
+        "campaign_id": world.campaigns[platform].id,
+        "ad_id": ad.id,
+        "date": day,
+        "impressions": 0,
+        "clicks": 0,
+        "cost_kop": 0,
+        "conversions": {},
+        "fetched_at": NOW,
+        "is_settled": True,
+    }
+    return StatsDaily(**defaults | values)
+
+
+def worker(repository: WorkerRepository, adapters: dict | None = None, now: datetime = NOW) -> Worker:
+    return Worker(repository, lambda business_id, platform: adapters[platform], clock=VirtualClock(now), dry_run=False)
+
+
+def test_null_never_matches_window_or_set_like_sql() -> None:
+    item = SimpleNamespace(value=None)
+    assert not matches(item, {"value": Window(None, None)})
+    assert not matches(item, {"value": {None, 1}})
+    assert matches(item, {"value": None})
+
+
+def test_last_status_change_skips_operations_without_field(repository) -> None:
+    world = tree(repository)
+    status = change(world.business, operations=[{"entity_type": "ad", "entity_id": "a-1", "field": "status"}])
+    budget = change(world.business, operations=[{"kind": "add_ad", "entity_type": "ad", "entity_id": "a-1"}])
+    repository.save(status)
+    repository.save(budget)
+    assert repository.last_status_change(world.business.id, "direct", "ad", "a-1") is status
+
+
+def test_latest_run_breaks_ties_by_id_and_last_check_ignores_other_businesses(repository) -> None:
+    world, other = tree(repository), tree(repository)
+    first, second = run(world.business.id), run(world.business.id)
+    repository.save(first)
+    repository.save(second)
+    assert repository.latest_run(world.business.id, "optimize") is second
+    repository.save(run(other.business.id, kind="budget_guard", finished_at=NOW + timedelta(minutes=5)))
+    assert repository.last_check(world.business.id) is None
+    repository.save(run(None, kind="heartbeat", finished_at=NOW + timedelta(minutes=1)))
+    repository.save(
+        run(world.business.id, kind="budget_guard", status="failed", finished_at=NOW + timedelta(minutes=2))
+    )
+    assert repository.last_check(world.business.id) == NOW + timedelta(minutes=1)
+
+
+def test_notifications_with_null_key_parts_are_never_merged(repository) -> None:
+    world = tree(repository)
+    for _ in range(2):
+        repository.notify(run(None, kind="notification", slot_key="x"))
+        repository.notify(run(world.business.id, kind="notification", slot_key=None))
+        repository.notify(run(world.business.id, kind="notification", slot_key="same"))
+    keys = sorted(
+        (row.business_id is None, row.slot_key or "") for row in repository.rows(WorkerRun, kind="notification")
+    )
+    assert keys[-2:] == [(True, "x"), (True, "x")]
+    assert len(repository.rows(WorkerRun, world.business.id, kind="notification", slot_key="same")) == 1
+    assert len([row for row in repository.rows(WorkerRun, world.business.id) if row.slot_key is None]) == 2
+
+
+def test_pending_includes_changes_without_service_metadata(repository) -> None:
+    world = tree(repository)
+    plain = change(world.business, status="pending", evidence={})
+    other = change(world.business, status="pending", evidence={"_service": {"refs": {}}})
+    dry = change(world.business, status="pending", evidence={"_service": {"dry_run": True}})
+    repository.save(plain, other, dry)
+    assert {item.id for item in repository.pending(world.business.id)} == {plain.id, other.id}
+
+
+def test_start_run_keeps_fresh_running_slot_and_history_of_attempts(repository) -> None:
+    world = tree(repository)
+    business_id = world.business.id
+    first = repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW)
+    assert first is not None
+    # Второй воркер не перехватывает идущий прогон до RUN_STALE.
+    assert repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUN_STALE / 2) is None
+    stale = repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUN_STALE)
+    assert stale is not None and stale.id == first.id
+    stale.status, stale.log = "failed", stale.log + [{"reason_code": "JOB_FAILED"}]
+    repository.save(stale)
+    retry = repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUN_STALE)
+    assert retry.status == "running"
+    assert retry.log == [
+        {"key": "optimize:2026-03-11"},
+        {"key": "optimize:2026-03-11"},
+        {"reason_code": "JOB_FAILED"},
+        {"key": "optimize:2026-03-11"},
+    ]
+    repository.interrupt_runs(business_id, NOW + RUN_STALE)
+    restarted = repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUN_STALE)
+    assert restarted is not None and restarted.log[-2:] == [
+        {"reason_code": "JOB_INTERRUPTED"},
+        {"key": "optimize:2026-03-11"},
+    ]
+    restarted.status = "ok"
+    repository.save(restarted)
+    assert repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUNS_KEEP) is None
+
+
+def test_prune_keeps_notifications_and_runs_on_the_boundary(repository) -> None:
+    world = tree(repository)
+    business_id = world.business.id
+    rows = {
+        "heartbeat_edge": run(None, kind="heartbeat", started_at=NOW - HEARTBEAT_KEEP),
+        "heartbeat_old": run(None, kind="heartbeat", started_at=NOW - HEARTBEAT_KEEP - timedelta(seconds=1)),
+        "run_edge": run(business_id, started_at=NOW - RUNS_KEEP, slot_key="a"),
+        "run_old": run(business_id, started_at=NOW - RUNS_KEEP - timedelta(seconds=1), slot_key="b"),
+        "notice_old": run(business_id, kind="notification", started_at=NOW - 2 * RUNS_KEEP, slot_key="experiment:1"),
+        "notice_null": run(None, kind="notification", started_at=NOW - 2 * RUNS_KEEP),
+    }
+    repository.save(*rows.values())
+    repository.prune_runs(NOW)
+    left = {row.id for row in repository.rows(WorkerRun)}
+    assert {name for name, row in rows.items() if row.id in left} == {
+        "heartbeat_edge",
+        "run_edge",
+        "notice_old",
+        "notice_null",
+    }
+
+
+@pytest.mark.parametrize("age,available", [(timedelta(0), True), (timedelta(seconds=1), False)])
+def test_group_cooldown_ends_exactly_at_its_boundary(repository, age, available) -> None:
+    world = tree(repository)
+    group = world.groups["direct"]
+    cooldown = timedelta(hours=DEFAULT_SETTINGS.cooldown_hours)
+    repository.save(change(world.business, entity_type="group", entity_id="g-1", created_at=NOW - cooldown + age))
+    assert group_available(worker(repository), world.business, group) is available
+
+
+async def test_clients_survey_counts_only_the_previous_week(repository) -> None:
+    world = tree(repository)
+    week_start = date(2026, 3, 2)
+    for day, leads in [(week_start - timedelta(days=1), 100), (week_start, 1), (week_start + timedelta(days=6), 2)]:
+        repository.save(stats(world, "direct", day, conversions={"1": leads}))
+    repository.save(stats(world, "direct", week_start + timedelta(days=7), conversions={"1": 1000}))
+    await clients_survey(worker(repository), world.business)
+    (survey,) = repository.rows(LeadsSurvey, world.business.id)
+    assert (survey.week_start, survey.leads_count) == (week_start, 3)
+
+
+def test_refs_take_budget_context_only_from_applied_changes(repository) -> None:
+    world = tree(repository)
+    campaign = world.campaigns["direct"]
+    stored = {"refs": {"campaign_id": "c-1", "budget_context": {"strategy": "applied"}}}
+    repository.save(change(world.business, evidence={"_service": stored}))
+    operation = {"entity_type": "campaign", "entity_id": "c-1", "budget_context": {"strategy": "operation"}}
+    repository.save(change(world.business, operations=[operation]))
+    for status in ("failed", "pending", "reverted"):
+        late = {"refs": {"campaign_id": "c-1", "budget_context": {"strategy": status}}}
+        repository.save(change(world.business, status=status, evidence={"_service": late}))
+    repository.save(change(world.business, evidence={"_service": {"refs": {"budget_context": None}}}))
+    assert len(repository.applied_budget_contexts(world.business.id)) == 2
+    assert worker(repository).refs(campaign).budget_context["strategy"] == "operation"
+
+
+def test_sync_local_keeps_status_that_platform_reports_without_local_equivalent(repository) -> None:
+    world = tree(repository)
+    campaign, group = world.campaigns["direct"], world.groups["direct"]
+    reverted = change(world.business, kind="revert", entity_type="campaign", entity_id="c-1", status="pending")
+    repository.save(reverted)
+    repository.sync_local(
+        reverted,
+        [
+            Operation("set_status", "campaign", "c-1", "status", "active", "pending"),
+            Operation("set_status", "group", "g-1", "status", "active", "mixed"),
+            Operation("set_status", "ad", "a-1", "status", "active", "paused"),
+            Operation("set_status", "ad", "a-2", "status", "paused_auto", "pending"),
+        ],
+    )
+    reverted.status = "applied"
+    repository.save(reverted)
+    first, second = world.ads["direct"]
+    assert (campaign.status, group.status, first.status, second.status) == (
+        "active",
+        "active",
+        "paused_auto",
+        "active",
+    )
+
+
+def test_experiments_screen_counts_only_settled_days_of_arms(repository) -> None:
+    world = tree(repository)
+    service = ScreensService(worker(repository))
+    assert service.experiments(world.business) == {"items": []}
+    control, variant = world.ads["direct"]
+    repository.save(
+        Experiment(
+            business_id=world.business.id,
+            ad_group_id=world.groups["direct"].id,
+            control_ad_id=control.id,
+            variant_ad_id=variant.id,
+            hypothesis="text",
+            metric="ctr",
+            planned_n_per_arm=100,
+            min_effect=Decimal("0.2"),
+            started_at=NOW - timedelta(days=7),
+            deadline=NOW + timedelta(days=7),
+            status="running",
+            stats={},
+        )
+    )
+    repository.save(
+        stats(world, "direct", TODAY - timedelta(days=3), impressions=30),
+        stats(world, "direct", TODAY - timedelta(days=4), impressions=500, is_settled=False),
+        stats(world, "direct", TODAY - timedelta(days=3), ad=1, impressions=40),
+    )
+    (item,) = service.experiments(world.business)["items"]
+    assert item["remaining_impressions"] == 70 + 60
+
+
+def test_budget_screen_counts_only_current_month_up_to_today(repository) -> None:
+    world = tree(repository)
+    repository.save(
+        stats(world, "direct", TODAY.replace(day=1), cost_kop=100),
+        stats(world, "direct", TODAY, ad=1, cost_kop=20),
+        stats(world, "direct", TODAY.replace(day=1) - timedelta(days=1), cost_kop=5_000),
+        stats(world, "direct", TODAY + timedelta(days=1), cost_kop=7_000),
+    )
+    budget = ScreensService(worker(repository)).budget(world.business)
+    assert (budget["spent_kop"], budget["remaining_kop"]) == (120, 100_000 - 120)
+
+
+class StubPlatform:
+    def __init__(self, cost: int, moderation: str) -> None:
+        self.cost = cost
+        self.moderation = moderation
+
+    async def get_stats(self, date_from: date, date_to: date, level: str = "ad") -> list[StatRow]:
+        return [StatRow("a-1", "c-1", TODAY - timedelta(days=3), "ad", 10, 1, self.cost, {"1": 1}, NOW, True)]
+
+    async def get_moderation(self, refs) -> list[ModerationInfo]:
+        return [ModerationInfo("a-1", self.moderation, None, NOW)]
+
+
+async def test_sync_keeps_same_external_ids_of_two_platforms_apart_and_is_idempotent(repository) -> None:
+    world = tree(repository, ("direct", "vk"))
+    adapters = {"direct": StubPlatform(100, "approved"), "vk": StubPlatform(200, "rejected")}
+    for _ in range(2):
+        await sync_stats(worker(repository, adapters), world.business)
+    rows = repository.rows(StatsDaily, world.business.id)
+    assert sorted((row.platform, row.ad_id, row.cost_kop) for row in rows) == [
+        ("direct", world.ads["direct"][0].id, 100),
+        ("vk", world.ads["vk"][0].id, 200),
+    ]
+    await sync_moderation(worker(repository, adapters), world.business)
+    assert (world.ads["direct"][0].moderation_status, world.ads["vk"][0].moderation_status) == ("approved", "rejected")
+    assert (world.ads["direct"][0].status, world.ads["vk"][0].status) == ("active", "rejected")

@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, BudgetLedger, Business, ChangeLog, Experiment, StatsDaily
+from app.db.query import Window
 from app.domain.budget import allocate, plan_budget, platform_shares, rebalance_platform_shares
 from app.domain.experiments import design_experiment, evaluate_experiment, select_borderline
 from app.domain.explain import explain_decision, explain_experiment
@@ -45,7 +46,12 @@ async def snapshot(
     group_map = {group.id: group for group in groups}
     meta = worker.metadata(business)
     limits = meta.get("group_limits", {})
-    history = [change for change in repository.rows(ChangeLog, business.id) if change.status == "applied"]
+    from app.config import get_domain_settings
+
+    # Время изменения нужно правилам только внутри окна охлаждения: старые записи журнала не читаем.
+    domain = get_domain_settings()
+    recent = timedelta(hours=max(domain.cooldown_hours, domain.owner_cooldown_hours))
+    history = repository.rows(ChangeLog, business.id, status="applied", created_at=Window(worker.clock.now - recent))
 
     def changed(entity_id: str, actor: str | None = None):
         return max(
@@ -157,9 +163,7 @@ async def optimize(worker: Worker, business: Business) -> None:
     )
     campaigns = worker.campaigns(business)
     local_groups = worker.repository.rows(AdGroup, business.id)
-    testing = {
-        item.ad_group_id for item in worker.repository.rows(Experiment, business.id) if item.status == "running"
-    }
+    testing = {item.ad_group_id for item in worker.repository.rows(Experiment, business.id, status="running")}
     ad_map = {ad.id: ad for ad in ads}
     for decision in decisions:
         if decision.action == Action.NOTIFY:
@@ -241,9 +245,8 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     month = day.replace(day=1)
     meta = worker.metadata(business)
     spent, lifetime = await read_spend(worker, business)
-    for ledger in worker.repository.rows(BudgetLedger, business.id):
-        if ledger.month == month:
-            spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
+    for ledger in worker.repository.rows(BudgetLedger, business.id, month=month):
+        spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
     campaigns = worker.campaigns(business)
     platforms = sorted({campaign.platform for campaign in campaigns})
     if not platforms:
@@ -367,7 +370,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
 async def experiments_tick(worker: Worker, business: Business) -> None:
     local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
-    running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]
+    running = worker.repository.rows(Experiment, business.id, status="running")
     # Завершённая группа остаётся занята до следующего запуска этого шага.
     occupied_groups = {local_groups[item.ad_group_id].external_id for item in running}
     for experiment in running:
@@ -376,11 +379,14 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             # Просроченные данные не дают права выбирать победителя и менять статусы плеч.
             result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 1.0)
             if worker.proposed(business) and any(
-                change.kind == "experiment_verdict"
-                and change.reason_code == "EXPERIMENT_NO_DIFF"
-                and change.status == "proposed"
-                and change.evidence.get("experiment_id") == experiment.id
-                for change in worker.repository.rows(ChangeLog, business.id)
+                change.evidence.get("experiment_id") == experiment.id
+                for change in worker.repository.rows(
+                    ChangeLog,
+                    business.id,
+                    kind="experiment_verdict",
+                    reason_code="EXPERIMENT_NO_DIFF",
+                    status="proposed",
+                )
             ):
                 continue
             change = ChangeLog(

@@ -241,10 +241,10 @@ async def test_refs_reads_change_history_once_per_tick(monkeypatch):
     rows = world.repository.rows
     calls = []
 
-    def observed(model, business_id=None):
+    def observed(model, business_id=None, **filters):
         if model is ChangeLog:
             calls.append(business_id)
-        return rows(model, business_id)
+        return rows(model, business_id, **filters)
 
     monkeypatch.setattr(world.repository, "rows", observed)
     first = worker.refs(world.campaign)

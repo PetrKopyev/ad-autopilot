@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from app.db.models import Ad, AdGroup, Business, StatsDaily
+from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
+from app.db.query import Window
 from app.platforms.fake import FakeAdapter
 from app.worker.clock import today
 
@@ -11,13 +12,21 @@ if TYPE_CHECKING:
     from app.worker.jobs import Worker
 
 
+def platform_ads(worker: Worker, business: Business, platform: str) -> dict[str, Ad]:
+    """Внешние id уникальны только внутри площадки: объявления ищутся по паре (площадка, внешний id)."""
+    entities = worker.repository.local_entities(business.id, platform)
+    return {external_id: item for (kind, external_id), item in entities.items() if kind == "ad"}
+
+
 async def sync_stats(worker: Worker, business: Business) -> None:
     end = today(worker.clock)
     start = end - timedelta(days=6)
     campaigns = worker.campaigns(business)
-    ads = {ad.external_id: ad for ad in worker.repository.rows(Ad, business.id)}
-    groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
     for platform in sorted({campaign.platform for campaign in campaigns}):
+        entities = worker.repository.local_entities(business.id, platform)
+        ads = {external_id: item for (kind, external_id), item in entities.items() if kind == "ad"}
+        groups = {item.id: item for item in entities.values() if isinstance(item, AdGroup)}
+        own = {item.id: item for item in entities.values() if isinstance(item, Campaign)}
         adapter = worker.resolve_adapter(business.id, platform)
         fetched = await adapter.get_stats(start, end, "ad")
         # Удалённая из отчёта строка тоже перезаписывается, а не остаётся старым расходом.
@@ -26,24 +35,20 @@ async def sync_stats(worker: Worker, business: Business) -> None:
             incoming[row.entity_id].append(row)
         existing = {
             (row.ad_id, row.date): row
-            for row in worker.repository.rows(StatsDaily, business.id)
-            if row.platform == platform and start <= row.date <= end
+            for row in worker.repository.rows(StatsDaily, business.id, platform=platform, date=Window(start, end))
         }
         seen = set()
         changed = []
         for row in fetched:
             ad = ads.get(row.entity_id)
-            if ad is None or groups[ad.ad_group_id].campaign_id not in {
-                campaign.id
-                for campaign in campaigns
-                if campaign.external_id == row.campaign_id and campaign.platform == platform
-            }:
+            group = groups.get(ad.ad_group_id) if ad else None
+            if group is None or own[group.campaign_id].external_id != row.campaign_id:
                 continue
             key = (ad.id, row.date)
             stored = existing.get(key) or StatsDaily(
                 business_id=business.id,
                 platform=platform,
-                campaign_id=groups[ad.ad_group_id].campaign_id,
+                campaign_id=group.campaign_id,
                 ad_id=ad.id,
                 date=row.date,
             )
@@ -67,11 +72,11 @@ async def sync_stats(worker: Worker, business: Business) -> None:
 
 
 async def sync_moderation(worker: Worker, business: Business) -> None:
-    ads = {ad.external_id: ad for ad in worker.repository.rows(Ad, business.id)}
     meta = worker.metadata(business)
     approvals = meta.get("approvals", {})
     rewritten = meta.get("rewritten", [])
     for campaign in worker.campaigns(business):
+        ads = platform_ads(worker, business, campaign.platform)
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         for info in await adapter.get_moderation(worker.refs(campaign)):
             ad = ads.get(info.entity_id)

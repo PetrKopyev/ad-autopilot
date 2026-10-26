@@ -5,16 +5,18 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.db.models import AdGroup, BudgetLedger, Campaign, ChangeLog
+from app.db.models import AdGroup, ArtCall, BudgetLedger, Campaign, ChangeLog, LLMCall
 from app.platforms.base import ExternalRefs, PlatformError
 from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchBlocked, LaunchFailed
+from app.services.onboarding import ai_budget
 from app.services.plan import budget_limits
 from app.services.registry import AccountInfo, AdapterRegistry
 from tests.services.test_onboarding import (
     BUDGET_KOP,
+    LIMITS,
     NOW,
     TODAY,
     World,
@@ -269,11 +271,15 @@ async def test_concurrent_launch_is_rejected_without_marking_plan_failed(tmp_pat
     assert world.repository.latest_plan(world.business.id).status == "draft" and not campaigns(world)
 
 
-async def test_launch_after_first_week_resets_ai_week_snapshot(tmp_path: Path) -> None:
+async def test_weekly_ai_limit_starts_at_launch_without_onboarding_spend(tmp_path: Path) -> None:
     world, plan = await ready(tmp_path)
+    assert world.repository.ai_spent(world.business.id) > 0
+    for call in world.repository.rows(LLMCall) + world.repository.rows(ArtCall):
+        call.created_at = NOW - timedelta(minutes=5)
     await launch(world, plan)
-    assert world.business.settings["_ai"]["base"] == world.repository.ai_spent(world.business.id)
-    assert (TODAY - timedelta(days=TODAY.weekday())).isoformat() == world.business.settings["_ai"]["week"]
+    assert world.repository.launched_at(world.business.id) == NOW
+    assert ai_budget(world.repository, world.business, LIMITS, TODAY).spent_kop == 0
+    assert "_ai" not in world.business.settings
 
 
 @pytest.fixture

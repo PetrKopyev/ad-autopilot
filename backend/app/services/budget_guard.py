@@ -116,7 +116,7 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
         await stop_all(business, worker=worker, **pending_stop)
     month = today(worker.clock).replace(day=1)
     spent, _ = await read_spend(worker, business, tolerate_errors=True)
-    ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id) if row.month == month}
+    ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id, month=month)}
     reported = sum(max(spent.get(platform, 0), row.spent_kop) for platform, row in ledgers.items())
     reported += sum(value for platform, value in spent.items() if platform not in ledgers)
     daily = sum(campaign.daily_limit_kop for campaign in worker.campaigns(business))

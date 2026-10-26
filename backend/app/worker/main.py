@@ -53,6 +53,8 @@ async def run_worker_tick(registry: AdapterRegistry, kind: str) -> None:
             await worker.startup()
         elif kind == "heartbeat":
             await worker.run(kind)
+        elif kind == "prune":
+            worker.prune()
         else:
             await worker.run_due(skip=demo_frozen)
 
@@ -62,6 +64,7 @@ def build_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
     options = {"max_instances": 1, "coalesce": True}
     scheduler.add_job(run_tick, "interval", args=[registry, "heartbeat"], minutes=1, id="heartbeat", **options)
     scheduler.add_job(run_tick, "interval", args=[registry], minutes=30, id="run_due", **options)
+    scheduler.add_job(run_tick, "cron", args=[registry, "prune"], hour=4, minute=10, id="prune", **options)
     return scheduler
 
 

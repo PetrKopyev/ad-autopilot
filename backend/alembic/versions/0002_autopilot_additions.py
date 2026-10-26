@@ -1,4 +1,10 @@
-"""Freeze timestamps, proposed statuses and art call operation ids."""
+"""Freeze timestamps, proposed statuses and art call operation ids.
+
+Downgrade необратим по данным: статус proposed старой схеме неизвестен, поэтому предложенные эксперименты
+становятся cancelled, а предложенные изменения журнала — failed; frozen_until (защита после отката владельцем)
+и operation_id/seed генераций YandexART удаляются вместе со столбцами — оплаченную генерацию после сбоя уже
+не найти по operation_id.
+"""
 
 import sqlalchemy as sa
 
@@ -31,6 +37,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("UPDATE experiments SET status = 'cancelled' WHERE status = 'proposed'")
+    op.execute("UPDATE change_log SET status = 'failed' WHERE status = 'proposed'")
     op.drop_constraint(op.f("ck_experiments_status_values"), "experiments", type_="check")
     op.create_check_constraint(
         op.f("ck_experiments_status_values"), "experiments", "status IN ('running', 'concluded', 'cancelled')"

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import Connection, func, select, text
 from sqlalchemy.orm import Session
 
-from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
+from app.db.models import AD_STATUSES, ENTITY_STATUSES, Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
 from app.demo_flags import ADVANCING, advance_jobs
 from app.domain.explain import TEMPLATES, explain
 from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
@@ -142,14 +142,18 @@ class ChangesRepository:
         self.db.commit()
 
     def pending(self, business_id: int | None = None) -> list[ChangeLog]:
-        statement = select(ChangeLog).where(ChangeLog.status == "pending")
+        # Предложения пробного режима остаются pending навсегда; сверять их не нужно.
+        statement = select(ChangeLog).where(
+            ChangeLog.status == "pending", ChangeLog.evidence["_service"]["dry_run"].as_boolean().is_not(True)
+        )
         if business_id is not None:
             statement = statement.where(ChangeLog.business_id == business_id)
-        return [
-            item
-            for item in self.db.scalars(statement.order_by(ChangeLog.created_at, ChangeLog.id))
-            if not item.evidence.get("_service", {}).get("dry_run")
-        ]
+        return list(self.db.scalars(statement.order_by(ChangeLog.created_at, ChangeLog.id)))
+
+    def change_by_key(self, business_id: int, key: str) -> ChangeLog | None:
+        return self.db.scalar(
+            select(ChangeLog).where(ChangeLog.business_id == business_id, ChangeLog.idempotency_key == key)
+        )
 
     def reverts(self, change_id: int) -> list[ChangeLog]:
         return list(self.db.scalars(select(ChangeLog).where(ChangeLog.reverts_id == change_id)))
@@ -255,6 +259,12 @@ class ChangesRepository:
                 value = op.after
                 if isinstance(entity, Ad) and value == "paused":
                     value = "paused_owner" if change.actor == "owner" else "paused_auto"
+                if op.field == "status" and value not in (AD_STATUSES if isinstance(entity, Ad) else ENTITY_STATUSES):
+                    # Площадка отдаёт pending или mixed для состояний без нашего аналога (черновик, модерация,
+                    # остановка мониторингом, смешанные статусы группы). Откат к такому before может совпасть при
+                    # сверке; локальный статус тогда не меняется, иначе CHECK отклонит запись и изменение навсегда
+                    # останется pending.
+                    continue
                 setattr(entity, op.field, value)
         if "group_limits" in change.evidence:
             business = self.business(change.business_id)
@@ -323,6 +333,7 @@ class ChangesService:
         entity_type: str | None = None,
         entity_id: str | None = None,
         reverts_id: int | None = None,
+        idempotency_key: str | None = None,
         now: datetime | None = None,
     ) -> ChangeLog:
         if not operations:
@@ -375,6 +386,7 @@ class ChangesService:
             evidence=deepcopy(evidence or {}) | {"_service": {"refs": asdict(refs), "dry_run": dry_run}},
             status="pending",
             reverts_id=reverts_id,
+            idempotency_key=idempotency_key,
             created_at=now or datetime.now(UTC),
         )
         self.repository.save(change)

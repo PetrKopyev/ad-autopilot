@@ -8,6 +8,7 @@ from sqlalchemy.orm import load_only
 from app.api.stats import CurrentBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import MarkingProfile, PlatformAccount
+from app.db.query import condition
 from app.demo_flags import demo_now
 from app.platforms.fake import VirtualClock
 from app.services.screens import ScreensService
@@ -18,9 +19,9 @@ router = APIRouter(prefix="/api/autopilot")
 
 
 class ScreensRepository(WorkerRepository):
-    def rows(self, model, business_id: int | None = None) -> list:
+    def rows(self, model, business_id: int | None = None, **filters) -> list:
         if model not in (MarkingProfile, PlatformAccount):
-            return super().rows(model, business_id)
+            return super().rows(model, business_id, **filters)
         fields = (
             (MarkingProfile.business_id, MarkingProfile.subject_type, MarkingProfile.confirmed_in_platform)
             if model is MarkingProfile
@@ -29,6 +30,8 @@ class ScreensRepository(WorkerRepository):
         statement = select(model).options(load_only(*fields, raiseload=True))
         if business_id is not None:
             statement = statement.where(model.business_id == business_id)
+        for name, value in filters.items():
+            statement = statement.where(condition(getattr(model, name), value))
         return list(self.db.scalars(statement))
 
 

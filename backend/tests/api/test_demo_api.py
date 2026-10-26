@@ -38,10 +38,10 @@ def demo(monkeypatch, tmp_path, request):
     world.plans.art_factory = lambda budget, record: DemoArt(budget)
 
     class Repository(MemoryWorkerRepository):
-        def rows(self, model, business_id=None):
+        def rows(self, model, business_id=None, **filters):
             if model is Business and business_id is None:
                 business_id = world.business.id
-            return super().rows(model, business_id)
+            return super().rows(model, business_id, **filters)
 
         def get_owned(self, change_id, user_id):
             change = self.find(ChangeLog, id=change_id)

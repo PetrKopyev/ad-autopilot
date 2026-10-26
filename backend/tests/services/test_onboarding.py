@@ -43,6 +43,7 @@ from app.services.onboarding import (
     SpendLLM,
     ai_budget,
     detect_niche,
+    launch_time,
     normalize_phone,
     valid_inn,
 )
@@ -138,8 +139,19 @@ class MemoryRepository(LaunchRepository):
     def accounts(self, business_id: int) -> list[PlatformAccount]:
         return self.rows(PlatformAccount, business_id=business_id)
 
-    def ai_spent(self, business_id: int) -> int:
-        return sum(item.cost_kop for model in (LLMCall, ArtCall) for item in self.rows(model, business_id=business_id))
+    def ai_spent(self, business_id: int, since: datetime | None = None) -> int:
+        # В памяти created_at не проставляется сервером: такой вызов считается только что сделанным.
+        return sum(
+            item.cost_kop
+            for model in (LLMCall, ArtCall)
+            for item in self.rows(model, business_id=business_id)
+            if since is None or item.created_at is None or item.created_at >= since
+        )
+
+    def launched_at(self, business_id: int) -> datetime | None:
+        plans = self.rows(Plan, business_id=business_id, status="launched")
+        latest = max(plans, key=lambda item: item.version, default=None)
+        return launch_time(latest.payload["launch"]["launched_at"]) if latest else None
 
     def record_llm(self, business_id: int, purpose: str, result: CompletionResult) -> None:
         self.put(
@@ -328,7 +340,7 @@ def make_world(
         seeds=itertools.count(1).__next__,
     )
     launches = LaunchService(
-        repository, lambda business_id, platform: adapters[platform], tmp_path / "media", limits, font_path=font_path()
+        repository, lambda business_id, platform: adapters[platform], tmp_path / "media", font_path=font_path()
     )
     return World(repository, llm, art_holder, onboarding, plans, launches, adapters, business, tmp_path / "media")
 
@@ -572,7 +584,7 @@ async def test_ai_spend_limit_stops_paid_calls(tmp_path: Path) -> None:
     assert [call.cost_kop for call in world.repository.rows(LLMCall)] == [4000, 4000]
 
 
-def test_weekly_ai_limit_counts_from_snapshot_after_launch(world: World) -> None:
+def spend(world: World, cost_kop: int, created_at: datetime) -> None:
     world.repository.add(
         LLMCall(
             business_id=world.business.id,
@@ -580,24 +592,72 @@ def test_weekly_ai_limit_counts_from_snapshot_after_launch(world: World) -> None
             model="m",
             tokens_in=1,
             tokens_out=1,
-            cost_kop=5000,
+            cost_kop=cost_kop,
             status="DONE",
+            created_at=created_at,
         )
     )
+
+
+@pytest.mark.parametrize(
+    "launched,expected",
+    [
+        (None, 300 + 400),
+        (datetime(2026, 1, 6, 9).isoformat(), 400),
+        (datetime(2026, 1, 6, 9, tzinfo=UTC).isoformat(), 400),
+        (datetime(2025, 12, 30, 9, tzinfo=UTC).isoformat(), 300 + 400),
+    ],
+    ids=["running-without-launched-plan", "naive-this-week", "this-week", "previous-week"],
+)
+def test_weekly_ai_window_starts_at_monday_or_later_launch(world: World, launched: str | None, expected: int) -> None:
+    if launched:
+        world.repository.add(
+            Plan(
+                business_id=world.business.id,
+                version=1,
+                status="launched",
+                payload={"launch": {"launched_at": launched}},
+            )
+        )
+    world.business.status = "running"
+    spend(world, 5000, datetime(2026, 1, 4, 20, 59, tzinfo=UTC))
+    spend(world, 300, datetime(2026, 1, 4, 21, 0, tzinfo=UTC))
+    spend(world, 400, datetime(2026, 1, 6, 9, tzinfo=UTC))
+    assert ai_budget(world.repository, world.business, LIMITS, date(2026, 1, 11)).spent_kop == expected
+
+
+def test_weekly_ai_limit_counts_calls_after_launch_in_current_moscow_week(world: World) -> None:
+    launched = NOW + timedelta(hours=1)
+    world.repository.add(
+        Plan(
+            business_id=world.business.id,
+            version=1,
+            status="launched",
+            payload={"launch": {"launched_at": launched.isoformat()}},
+        )
+    )
+    spend(world, 5000, NOW)
     world.business.status = "running"
     assert ai_budget(world.repository, world.business, LIMITS, TODAY).spent_kop == 0
-    world.repository.add(
-        LLMCall(
-            business_id=world.business.id,
-            purpose="x",
-            model="m",
-            tokens_in=1,
-            tokens_out=1,
-            cost_kop=700,
-            status="DONE",
-        )
-    )
+    spend(world, 700, launched + timedelta(minutes=5))
     budget = ai_budget(world.repository, world.business, LIMITS, TODAY)
     assert (budget.limit_kop, budget.spent_kop) == (2500, 700)
-    next_week = ai_budget(world.repository, world.business, LIMITS, TODAY + timedelta(days=7))
-    assert next_week.spent_kop == 0
+    assert "_ai" not in world.business.settings
+    # Неделя начинается в понедельник 00:00 по Москве, то есть в воскресенье 21:00 UTC.
+    monday = date(2026, 1, 5)
+    spend(world, 300, datetime(2026, 1, 4, 20, 59, tzinfo=UTC))
+    spend(world, 400, datetime(2026, 1, 4, 21, 0, tzinfo=UTC))
+    assert ai_budget(world.repository, world.business, LIMITS, monday).spent_kop == 400
+    assert ai_budget(world.repository, world.business, LIMITS, monday + timedelta(days=7)).spent_kop == 0
+
+
+async def test_demo_ai_is_free_and_never_counts_toward_weekly_limit(world: World) -> None:
+    from app.services.registry import DemoArt, DemoLLM
+
+    world.business.status = "running"
+    budget = ai_budget(world.repository, world.business, LIMITS, TODAY)
+    llm = SpendLLM(DemoLLM(), world.repository, world.business.id, budget, "ad_text")
+    await llm.complete_json("Напиши объявление", json.dumps({"facts": ["Маникюр"]}))
+    await DemoArt(budget).generate("Уютный салон", seed=1, business_id=world.business.id)
+    assert not world.repository.rows(LLMCall) and not world.repository.rows(ArtCall)
+    assert ai_budget(world.repository, world.business, LIMITS, TODAY).spent_kop == 0

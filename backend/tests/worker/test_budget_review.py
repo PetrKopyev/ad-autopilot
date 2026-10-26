@@ -132,7 +132,7 @@ async def test_worker_returns_applied_attempt_even_when_later_attempt_failed(mon
     world = await make_world()
     worker = world.worker()
     key = f"{worker.step_key}:{world.campaign.id}:retry"
-    applied = ChangeLog(business_id=1, status="applied", evidence={"worker_key": key})
+    applied = ChangeLog(business_id=1, status="applied", evidence={"worker_key": key}, idempotency_key=key)
     failed = ChangeLog(business_id=1, status="failed", evidence={"worker_key": key})
     world.repository.save(applied, failed)
     monkeypatch.setattr(worker.changes, "apply_change", AsyncMock(side_effect=AssertionError("Повторная запись")))
@@ -145,6 +145,93 @@ async def test_worker_returns_applied_attempt_even_when_later_attempt_failed(mon
         suffix="retry",
     )
     assert result is applied
+
+
+async def test_worker_retries_failed_attempt_and_moves_key_to_new_change():
+    world = await make_world()
+    worker = world.worker()
+    worker.step_key = "optimize:2026-01-01"
+    key = f"{worker.step_key}:{world.campaign.id}:retry"
+    failed = ChangeLog(business_id=1, status="failed", evidence={"worker_key": key}, idempotency_key=key)
+    world.repository.save(failed)
+    operations = [Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_auto")]
+    change = await worker.apply(
+        world.business,
+        world.campaign,
+        operations,
+        reason_code="CUSTOM",
+        reason_text="Тест.",
+        kind="pause",
+        suffix="retry",
+        actor="system",
+    )
+    assert change is not failed and change.status == "applied"
+    assert (failed.idempotency_key, change.idempotency_key, change.evidence["worker_key"]) == (None, key, key)
+    again = await worker.apply(
+        world.business,
+        world.campaign,
+        operations,
+        reason_code="CUSTOM",
+        reason_text="Тест.",
+        kind="pause",
+        suffix="retry",
+        actor="system",
+    )
+    assert again is change
+
+
+@pytest.mark.parametrize(
+    "status,evidence,dry_run,outcome",
+    [
+        ("pending", {}, False, "conflict"),
+        ("pending", {"_service": {"dry_run": True}}, True, "same"),
+        ("proposed", {}, True, "same"),
+        ("pending", {"_service": {"dry_run": True}}, False, "applied"),
+        ("proposed", {}, False, "applied"),
+        ("applied", {}, False, "same"),
+        ("reverted", {}, False, "same"),
+    ],
+)
+async def test_worker_apply_reuses_slot_change_but_never_trusts_unreconciled_pending(
+    status, evidence, dry_run, outcome
+):
+    world = await make_world()
+    world.business.settings = world.business.settings | {"dry_run": dry_run}
+    worker = world.worker()
+    worker.step_key = "budget_guard:2026-01-01T03:00:00+03:00"
+    key = f"{worker.step_key}:{world.campaign.id}:stop"
+    existing = ChangeLog(business_id=1, status=status, evidence=evidence | {"worker_key": key}, idempotency_key=key)
+    world.repository.save(existing)
+    if outcome != "applied":
+        world.adapter.apply = AsyncMock(side_effect=AssertionError("platform write"))
+    operations = [Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_auto")]
+    options = {"reason_code": "CUSTOM", "reason_text": "Тест.", "kind": "pause", "suffix": "stop", "actor": "system"}
+    if outcome == "conflict":
+        # Неподтверждённая остановка не должна считаться выполненной: страж повторит её после сверки.
+        with pytest.raises(ChangeConflict):
+            await worker.apply(world.business, world.campaign, operations, **options)
+        assert world.changes(idempotency_key=key) == [existing]
+    elif outcome == "same":
+        assert await worker.apply(world.business, world.campaign, operations, **options) is existing
+        assert world.changes(idempotency_key=key) == [existing]
+    else:
+        # Предложение пробного режима не остановило рекламу: после выхода из него действие применяется по-настоящему.
+        change = await worker.apply(world.business, world.campaign, operations, **options)
+        assert change is not existing and change.status == "applied"
+        assert (existing.idempotency_key, world.changes(idempotency_key=key)) == (None, [change])
+        assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+
+
+async def test_stop_all_does_not_mark_budget_stop_on_unreconciled_pending_stop():
+    world = await make_world()
+    worker = world.worker()
+    worker.step_key = "budget_guard:2026-01-01T03:00:00+03:00"
+    key = f"{worker.step_key}:{world.campaign.id}:stop_all"
+    world.repository.save(ChangeLog(business_id=1, status="pending", evidence={}, idempotency_key=key))
+    with pytest.raises(ChangeConflict):
+        await stop_all(world.business, worker=worker, reason_code="BUDGET_STOP", budget_stop=True)
+    assert world.business.status == "running"
+    assert world.business.settings["_worker"]["pending_stop"]["budget_stop"] is True
 
 
 @pytest.mark.parametrize("key", ["", "explicit"])

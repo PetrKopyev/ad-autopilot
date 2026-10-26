@@ -88,7 +88,7 @@ def related_experiments(repository: ChangesRepository, change: ChangeLog) -> lis
     if experiment_id is not None and all(item.id != experiment_id for item in result):
         # change_id после вердикта указывает на вердикт; связь запуска сохраняется в evidence.
         if hasattr(repository, "rows"):
-            result.extend(item for item in repository.rows(Experiment, change.business_id) if item.id == experiment_id)
+            result.extend(repository.rows(Experiment, change.business_id, id=experiment_id))
         else:
             item = repository.db.get(Experiment, experiment_id)
             if item is not None and item.business_id == change.business_id:

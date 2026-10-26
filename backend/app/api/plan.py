@@ -67,7 +67,6 @@ def get_launch_service(request: Request) -> Iterator[LaunchService]:
             LaunchRepository(db),
             request.app.state.platform_adapters.resolve,
             media_root(),
-            AiLimits.from_settings(settings),
             domain=get_domain_settings(settings),
         )
 

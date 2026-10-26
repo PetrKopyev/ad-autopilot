@@ -21,7 +21,6 @@ from app.platforms.base import (
 from app.platforms.fake import FakeAdapter
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
 from app.services.demo import configure_adapter
-from app.services.onboarding import AiLimits, ai_budget
 from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers
 
 TITLES = {"direct": "Яндекс Директ", "vk": "ВКонтакте"}
@@ -64,7 +63,6 @@ class LaunchService:
         repository: LaunchRepository,
         resolve_adapter: AdapterResolver,
         media_root: Path,
-        limits: AiLimits,
         *,
         changes: ChangesService | None = None,
         domain: DomainSettings | None = None,
@@ -73,7 +71,6 @@ class LaunchService:
         self.repository = repository
         self.resolve_adapter = resolve_adapter
         self.media_root = media_root
-        self.limits = limits
         self.changes = changes or ChangesService(repository, dry_run=False)
         if domain is None:
             from app.config import get_domain_settings
@@ -391,8 +388,6 @@ class LaunchService:
             "_worker": business.settings.get("_worker", {}) | {"started_on": today.isoformat()}
         }
         business.status = "running"
-        # Расходы на онбординг учтены; недельный потолок трат на ИИ считается с момента запуска.
-        ai_budget(self.repository, business, self.limits, today)
         self.repository.commit()
 
     def result(self, plan: Plan) -> dict:

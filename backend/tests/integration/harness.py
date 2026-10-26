@@ -18,7 +18,7 @@ from app.platforms.fake import FakeAdapter, VirtualClock, salon_scenario
 from app.services.launch import LaunchService
 from app.services.plan import inputs_hash
 from app.worker.jobs import MemoryWorkerRepository, Worker
-from tests.services.test_onboarding import LIMITS, MemoryRepository
+from tests.services.test_onboarding import MemoryRepository
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 BUDGET_KOP = 10_000_000
@@ -162,7 +162,7 @@ async def make_world(
         },
     )
     launch_repository.put(plan)
-    await LaunchService(launch_repository, lambda *_: adapter, Path("/unused"), LIMITS).launch(
+    await LaunchService(launch_repository, lambda *_: adapter, Path("/unused")).launch(
         business.id, plan.id, True, START, START.date()
     )
     business.settings = business.settings | (business_settings or {})

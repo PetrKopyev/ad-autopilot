@@ -31,7 +31,7 @@ async def experiment_world():
 def control_snapshot(world):
     ad = world.ads["borderline-1"]
     group = next(item for item in world.repository.rows(AdGroup) if item.id == ad.ad_group_id)
-    return AdSnapshot(ad.external_id, group.external_id, "fake", START)
+    return AdSnapshot(ad.external_id, group.external_id, world.campaign.platform, START)
 
 
 def design():
@@ -386,3 +386,24 @@ async def test_restart_during_paid_generation_does_not_pay_again(experiment_worl
     assert await create_experiment(world.worker(), world.business, control_snapshot(world), design()) is None
     assert content.llm.calls == ["ad"]
     assert not world.repository.rows(Experiment)
+
+
+async def test_exhausted_weekly_ai_limit_postpones_hypothesis_to_next_week(experiment_world, tmp_path, monkeypatch):
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    content.plans.limits = AiLimits(6000, 0)
+    first = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert first is None and content.llm.calls == []
+    (proposal,) = world.repository.rows(ChangeLog, reason_code="EXPERIMENT_START")
+    monday = (world.clock.now + timedelta(days=7 - world.clock.now.weekday())).date()
+    assert (proposal.evidence["preparation"], proposal.evidence["retry_on"]) == ("ai_limit", monday.isoformat())
+    content.plans.limits = AiLimits(6000, 2500)
+    world.clock.advance(days=(monday - world.clock.now.date()).days - 1)
+    assert await create_experiment(world.worker(), world.business, control_snapshot(world), design()) is None
+    assert content.llm.calls == []
+    world.clock.advance(days=1)
+    started = await create_experiment(world.worker(), world.business, control_snapshot(world), design())
+    assert started is proposal and started.status == "applied" and content.llm.calls == ["ad"]
+    assert [item.status for item in world.repository.rows(Experiment)] == ["running"]
+    notices = [row.log[0]["reason_code"] for row in world.repository.rows(WorkerRun)]
+    assert notices == ["EXPERIMENT_AI_LIMIT"]

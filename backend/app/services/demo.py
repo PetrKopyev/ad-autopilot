@@ -54,8 +54,8 @@ class DemoRepository(WorkerRepository):
         super().__init__(db)
         self.business_id = business_id
 
-    def rows(self, model, business_id: int | None = None) -> list:
-        return super().rows(model, self.business_id if business_id is None else business_id)
+    def rows(self, model, business_id: int | None = None, **filters) -> list:
+        return super().rows(model, self.business_id if business_id is None else business_id, **filters)
 
 
 class DemoUsers:

@@ -12,8 +12,8 @@ from app.db.models import (
     MarkingProfile,
     PlatformAccount,
     StatsDaily,
-    WorkerRun,
 )
+from app.db.query import Window
 from app.domain.budget import stop_margin
 from app.domain.explain import explain_experiment, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
@@ -36,16 +36,16 @@ class ScreensService:
 
     def budget(self, business: Business) -> dict:
         day = today(self.worker.clock)
+        month = self.repository.rows(StatsDaily, business.id, date=Window(day.replace(day=1), day))
         budget = aggregate_budget(
             business.month_budget_kop,
-            self.repository.rows(StatsDaily, business.id),
-            self.repository.rows(BudgetLedger, business.id),
+            month,
+            self.repository.rows(BudgetLedger, business.id, month=day.replace(day=1)),
             day,
         )
         stats_spend = {}
-        for row in self.repository.rows(StatsDaily, business.id):
-            if day.replace(day=1) <= row.date <= day:
-                stats_spend[row.platform] = stats_spend.get(row.platform, 0) + row.cost_kop
+        for row in month:
+            stats_spend[row.platform] = stats_spend.get(row.platform, 0) + row.cost_kop
         for platform in budget["platforms"]:
             platform["spent_kop"] = max(platform["spent_kop"], stats_spend.get(platform["platform"], 0))
         budget["spent_kop"] = sum(platform["spent_kop"] for platform in budget["platforms"])
@@ -53,12 +53,7 @@ class ScreensService:
         return budget
 
     def status(self, business: Business) -> dict:
-        runs = [
-            row
-            for row in self.repository.rows(WorkerRun)
-            if row.business_id in (None, business.id) and row.kind in {"heartbeat", "budget_guard"}
-        ]
-        last_check = max((row.finished_at for row in runs if row.status == "ok" and row.finished_at), default=None)
+        last_check = self.repository.last_check(business.id)
         budget = self.budget(business)
         status = business.status if business.status in {"running", "paused", "budget_stop"} else "draft"
         if status == "running" and not budget["remaining_kop"]:
@@ -81,11 +76,7 @@ class ScreensService:
                 ),
             }
         ]
-        latest = max(
-            (row for row in runs if row.kind == "budget_guard" and row.business_id == business.id),
-            key=lambda row: row.started_at,
-            default=None,
-        )
+        latest = self.repository.latest_run(business.id, "budget_guard")
         accounts = self.repository.rows(PlatformAccount, business.id)
         if (latest and latest.status == "failed") or any(row.status != "ok" for row in accounts):
             attention.append(
@@ -136,24 +127,11 @@ class ScreensService:
             await rebalance_budget(self.worker, business, force=True)
             stopped = set(meta.get("kill_switch_campaigns", []))
             active = False
-            history = sorted(self.repository.rows(ChangeLog, business.id), key=lambda row: row.id, reverse=True)
             for campaign in self.worker.campaigns(business):
                 if campaign.owner_paused or not campaign.daily_limit_kop:
                     continue
-                last = next(
-                    (
-                        row
-                        for row in history
-                        if row.status == "applied"
-                        and row.platform == campaign.platform
-                        and any(
-                            op["entity_type"] == "campaign"
-                            and op["entity_id"] == campaign.external_id
-                            and op["field"] == "status"
-                            for op in row.operations
-                        )
-                    ),
-                    None,
+                last = self.repository.last_status_change(
+                    business.id, campaign.platform, "campaign", campaign.external_id
                 )
                 state = (
                     await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
@@ -196,26 +174,17 @@ class ScreensService:
     def ads(self, business: Business, start: date, end: date) -> dict:
         campaigns = {row.id: row for row in self.repository.rows(Campaign, business.id)}
         groups = {row.id: row for row in self.repository.rows(AdGroup, business.id)}
-        stats = [row for row in self.repository.rows(StatsDaily, business.id) if start <= row.date <= end]
-        history = sorted(self.repository.rows(ChangeLog, business.id), key=lambda row: row.id, reverse=True)
+        stats = self.repository.rows(StatsDaily, business.id, date=Window(start, end))
         items = []
         for ad in self.repository.rows(Ad, business.id):
             group = groups[ad.ad_group_id]
             campaign = campaigns[group.campaign_id]
             reason = None
             if ad.status in {"paused_owner", "paused_auto"}:
-                change = next(
-                    (
-                        row
-                        for row in history
-                        if row.status == "applied"
-                        and row.platform == campaign.platform
-                        and any(
-                            op["entity_type"] == "ad" and op["entity_id"] == ad.external_id and op["field"] == "status"
-                            for op in row.operations
-                        )
-                    ),
-                    None,
+                change = (
+                    self.repository.last_status_change(business.id, campaign.platform, "ad", ad.external_id)
+                    if ad.external_id
+                    else None
                 )
                 reason = (
                     change.reason_text
@@ -253,12 +222,12 @@ class ScreensService:
     async def ad_status(self, business: Business, ad_id: int, active: bool) -> dict:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
-            ad = next((row for row in self.repository.rows(Ad, business.id) if row.id == ad_id), None)
+            ad = self.repository.find(Ad, business_id=business.id, id=ad_id)
             if ad is None:
                 raise LookupError("Объявление не найдено.")
             if active:
                 await self.check_remaining(business)
-            group = next(row for row in self.repository.rows(AdGroup, business.id) if row.id == ad.ad_group_id)
+            group = self.repository.find(AdGroup, business_id=business.id, id=ad.ad_group_id)
             campaign = next(row for row in self.worker.campaigns(business) if row.id == group.campaign_id)
             status = "active" if active else "paused_owner"
             if ad.status != status:
@@ -278,12 +247,12 @@ class ScreensService:
         return next(row for row in self.ads(business, day - timedelta(days=13), day)["items"] if row["id"] == ad.id)
 
     def experiments(self, business: Business) -> dict:
-        rows = self.repository.rows(StatsDaily, business.id)
         ads = {row.id: row for row in self.repository.rows(Ad, business.id)}
+        experiments = [row for row in self.repository.rows(Experiment, business.id) if row.status != "proposed"]
+        arm_ids = {ad_id for row in experiments for ad_id in (row.control_ad_id, row.variant_ad_id)}
+        rows = self.repository.rows(StatsDaily, business.id, ad_id=arm_ids, is_settled=True)
         items = []
-        for experiment in self.repository.rows(Experiment, business.id):
-            if experiment.status == "proposed":
-                continue
+        for experiment in experiments:
             started = experiment.started_at.astimezone(MOSCOW).date()
             arms = []
             for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):

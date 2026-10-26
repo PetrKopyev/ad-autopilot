@@ -54,9 +54,10 @@ async def test_scheduler_calls_shared_run_due_every_half_hour_and_heartbeat_each
         registry = main.AdapterRegistry(lambda *_: None, mode="fake", http=http)
         scheduler = main.build_scheduler(registry)
         jobs = {job.id: job for job in scheduler.get_jobs()}
-        assert set(jobs) == {"heartbeat", "run_due"}
+        assert set(jobs) == {"heartbeat", "run_due", "prune"}
         assert jobs["heartbeat"].trigger.interval.total_seconds() == 60
         assert jobs["run_due"].trigger.interval.total_seconds() == 1800
+        assert str(jobs["prune"].trigger) == "cron[hour='4', minute='10']"
         db = MagicMock()
         monkeypatch.setattr(main, "SessionLocal", db)
         worker = MagicMock()
@@ -67,8 +68,10 @@ async def test_scheduler_calls_shared_run_due_every_half_hour_and_heartbeat_each
         monkeypatch.setattr(main, "Worker", worker_type)
         await jobs["run_due"].func(*jobs["run_due"].args)
         await jobs["heartbeat"].func(*jobs["heartbeat"].args)
+        await jobs["prune"].func(*jobs["prune"].args)
         worker.run_due.assert_awaited_once_with(skip=main.demo_frozen)
         worker.run.assert_awaited_once_with("heartbeat")
+        worker.prune.assert_called_once_with()
         assert worker_type.call_args.args[1] == registry.resolve
 
 

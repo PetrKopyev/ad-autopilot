@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +13,7 @@ from app.content.ad_text import generate_ad_text, offer_matrix, validate_ad_text
 from app.content.art import ART_COST_KOP, ArtError
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, AdGroup, Asset, Business, ChangeLog, Experiment, Plan, Target
+from app.db.query import Window
 from app.demo_flags import demo_enabled
 from app.domain.experiments import next_hypothesis
 from app.domain.explain import explain
@@ -25,6 +26,7 @@ from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, SpendLLM, ai_budget, description_draft
 from app.services.plan import PlanRepository, PlanService
 from app.services.registry import build_art_factory, build_llm
+from app.services.sync import platform_ads
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -34,9 +36,8 @@ if TYPE_CHECKING:
 def completed_hypotheses(worker: Worker, business: Business, group_id: int) -> tuple[str, ...]:
     return tuple(
         item.hypothesis
-        for item in worker.repository.rows(Experiment, business.id)
-        if item.ad_group_id == group_id
-        and (item.status == "concluded" or (item.stats or {}).get("reverted_by_change_id") is not None)
+        for item in worker.repository.rows(Experiment, business.id, ad_group_id=group_id)
+        if item.status == "concluded" or (item.stats or {}).get("reverted_by_change_id") is not None
     )
 
 
@@ -46,12 +47,12 @@ def group_available(worker: Worker, business: Business, group: AdGroup, *, ignor
     frozen = worker.metadata(business).get("frozen_entities", {}).get(f"group:{group.external_id}")
     if frozen is not None and datetime.fromisoformat(frozen) > now:
         return False
-    ads = [item for item in worker.repository.rows(Ad, business.id) if item.ad_group_id == group.id]
+    ads = worker.repository.rows(Ad, business.id, ad_group_id=group.id)
     if any(item.frozen_until is not None and item.frozen_until > now for item in ads):
         return False
     campaign = next(item for item in worker.campaigns(business) if item.id == group.campaign_id)
     child_ids = {item.external_id for item in ads} | {
-        item.external_id for item in worker.repository.rows(Target, business.id) if item.ad_group_id == group.id
+        item.external_id for item in worker.repository.rows(Target, business.id, ad_group_id=group.id)
     }
     affected = {group.external_id, campaign.external_id, *child_ids}
 
@@ -63,27 +64,23 @@ def group_available(worker: Worker, business: Business, group: AdGroup, *, ignor
             return False
         if change.entity_id in child_ids or change.entity_id == group.external_id:
             return True
-        if change.actor in {"owner", "external"} and (
-            change.entity_id in affected or change.entity_type == "business"
-        ):
+        if change.actor in {"owner", "external"} and (change.entity_id in affected or change.entity_type == "business"):
             return True
         return any(
             op["entity_id"] in child_ids
             or op["entity_id"] in affected
             and (
-                op.get("field") in {"status", "targeting"}
-                or change.actor in {"owner", "external"}
-                or "field" not in op
+                op.get("field") in {"status", "targeting"} or change.actor in {"owner", "external"} or "field" not in op
             )
             for op in change.operations
         )
 
+    cooldown = timedelta(hours=DEFAULT_SETTINGS.cooldown_hours)
     return not any(
-        change.id != ignore_change_id
-        and change.status == "applied"
-        and now - change.created_at < timedelta(hours=DEFAULT_SETTINGS.cooldown_hours)
-        and blocks(change)
-        for change in worker.repository.rows(ChangeLog, business.id)
+        change.id != ignore_change_id and now - change.created_at < cooldown and blocks(change)
+        for change in worker.repository.rows(
+            ChangeLog, business.id, status="applied", created_at=Window(now - cooldown)
+        )
     )
 
 
@@ -125,17 +122,17 @@ async def _create_experiment(
     ):
         return None
     repository = worker.repository
-    control = next((item for item in repository.rows(Ad, business.id) if item.external_id == ad.id), None)
+    control = platform_ads(worker, business, ad.platform).get(ad.id)
     if control is None or control.status != "active":
         return None
-    group = next(item for item in repository.rows(AdGroup, business.id) if item.id == control.ad_group_id)
+    group = repository.find(AdGroup, business_id=business.id, id=control.ad_group_id)
     if group.external_id != ad.group_id:
         return None
-    running = [item for item in repository.rows(Experiment, business.id) if item.status == "running"]
+    running = repository.rows(Experiment, business.id, status="running")
     campaign = next(item for item in worker.campaigns(business) if item.id == group.campaign_id)
     if campaign.status != "active" or campaign.owner_paused or group.status != "active":
         return None
-    siblings = [item for item in repository.rows(AdGroup, business.id) if item.campaign_id == campaign.id]
+    siblings = repository.rows(AdGroup, business.id, campaign_id=campaign.id)
     budget = int(
         worker.metadata(business)
         .get("group_limits", {})
@@ -146,14 +143,7 @@ async def _create_experiment(
         return None
     # Ключ не зависит от расписания: повтор завтра не создаёт новое предложение.
     key = f"experiment:{control.id}:{hypothesis}"
-    existing = next(
-        (
-            item
-            for item in repository.rows(ChangeLog, business.id)
-            if (item.evidence or {}).get("experiment_key") == key
-        ),
-        None,
-    )
+    existing = repository.change_by_key(business.id, key)
     if existing is not None and existing.status == "reverted":
         return None
     if existing is not None and (worker.proposed(business) or existing.status == "applied"):
@@ -198,6 +188,7 @@ async def _create_experiment(
             "_service": {"dry_run": True, "refs": asdict(worker.refs(campaign))},
         },
         status="proposed",
+        idempotency_key=key,
         created_at=worker.clock.now,
     )
     repository.save(proposal)
@@ -206,53 +197,71 @@ async def _create_experiment(
     return await launch_variant(worker, business, campaign, group, control, proposal, design, hypothesis)
 
 
+class AiLimitReached(Blocked):
+    """Недельный лимит ИИ исчерпан: вариант готовится заново на следующей московской неделе."""
+
+
 async def prepare_variant(worker: Worker, business: Business, campaign, group, control: Ad, hypothesis: str) -> dict:
     adapter = worker.resolve_adapter(business.id, campaign.platform)
     source = (await adapter.get_state(worker.refs(campaign)))[control.external_id]
-    creative = source.creative
-    asset_id = control.asset_id
     async with content_service(worker) as service:
         budget = ai_budget(service.repository, business, service.limits, today(worker.clock))
-        if hypothesis == "text":
-            matrix = offer_matrix(business.niche_class or "other")
-            original_angle = matrix[0][0]
-            segment = matrix[0][1]
-            for plan in worker.repository.rows(Plan, business.id):
-                for planned_group in plan.payload.get("groups", []):
-                    for planned_ad in planned_group.get("ads", []):
-                        if (planned_ad["title"], planned_ad["text"]) == (control.title, control.text):
-                            original_angle = planned_ad.get("angle", original_angle)
-                            segment = planned_group["segment"]
-            angle = next(angle for angle, _ in matrix if angle != original_angle)
-            draft = description_draft(business)
-            variant = await generate_ad_text(
-                SpendLLM(service.llm, service.repository, business.id, budget, "experiment_text"),
-                draft,
-                platform=campaign.platform,
-                angle=angle,
-                segment=segment,
-            )
-            if variant.used_fallback or validate_ad_text(variant.ad, draft, platform=campaign.platform):
-                raise Blocked("Не удалось проверить новый текст.")
-            if (variant.ad.title, variant.ad.text) == (source.title, source.text):
-                raise Blocked("Новый текст совпал с исходным.")
-            creative = creative | {"title": variant.ad.title, "text": variant.ad.text}
-        else:
-            if budget.limit_kop - budget.spent_kop < ART_COST_KOP:
-                raise Blocked("Лимит генерации картинок исчерпан.")
-            assets = await service.generate_images(business, budget, 1)
-            if not assets:
-                raise Blocked("Не удалось получить проверенную картинку в пределах лимита ИИ.")
-            asset = assets[0]
-            asset_id = asset.id
-            # Файл и id сохраняем до загрузки на площадку: повтор не вызывает ART заново.
-            return {"creative": creative, "asset_id": asset_id, "image_path": str(service.media_root / asset.file_path)}
+        try:
+            return await generate_variant(worker, business, campaign, control, source, hypothesis, service, budget)
+        except (Blocked, ValueError, ArtError, YandexGPTError) as error:
+            # SpendLLM не пускает вызов при spent >= limit, картинке нужен целый ART_COST_KOP.
+            if budget.limit_kop - budget.spent_kop < (1 if hypothesis == "text" else ART_COST_KOP):
+                raise AiLimitReached("Лимит трат на ИИ на этой неделе исчерпан.") from error
+            raise
+
+
+async def generate_variant(worker, business, campaign, control, source, hypothesis, service, budget) -> dict:
+    creative = source.creative
+    asset_id = control.asset_id
+    if hypothesis == "text":
+        matrix = offer_matrix(business.niche_class or "other")
+        original_angle = matrix[0][0]
+        segment = matrix[0][1]
+        for plan in worker.repository.rows(Plan, business.id):
+            for planned_group in plan.payload.get("groups", []):
+                for planned_ad in planned_group.get("ads", []):
+                    if (planned_ad["title"], planned_ad["text"]) == (control.title, control.text):
+                        original_angle = planned_ad.get("angle", original_angle)
+                        segment = planned_group["segment"]
+        angle = next(angle for angle, _ in matrix if angle != original_angle)
+        draft = description_draft(business)
+        variant = await generate_ad_text(
+            SpendLLM(service.llm, service.repository, business.id, budget, "experiment_text"),
+            draft,
+            platform=campaign.platform,
+            angle=angle,
+            segment=segment,
+        )
+        if variant.used_fallback or validate_ad_text(variant.ad, draft, platform=campaign.platform):
+            raise Blocked("Не удалось проверить новый текст.")
+        if (variant.ad.title, variant.ad.text) == (source.title, source.text):
+            raise Blocked("Новый текст совпал с исходным.")
+        creative = creative | {"title": variant.ad.title, "text": variant.ad.text}
+    else:
+        if budget.limit_kop - budget.spent_kop < ART_COST_KOP:
+            raise Blocked("Лимит генерации картинок исчерпан.")
+        assets = await service.generate_images(business, budget, 1)
+        if not assets:
+            raise Blocked("Не удалось получить проверенную картинку в пределах лимита ИИ.")
+        asset = assets[0]
+        asset_id = asset.id
+        # Файл и id сохраняем до загрузки на площадку: повтор не вызывает ART заново.
+        return {"creative": creative, "asset_id": asset_id, "image_path": str(service.media_root / asset.file_path)}
     return {"creative": creative, "asset_id": asset_id}
 
 
 async def launch_variant(worker, business, campaign, group, control, change, design, hypothesis):
     repository = worker.repository
     stage = change.evidence.get("preparation")
+    if stage == "ai_limit":
+        if today(worker.clock) < date.fromisoformat(change.evidence["retry_on"]):
+            return None
+        stage = None
     if stage in {"generating", "rejected"}:
         worker.notice(
             business,
@@ -267,6 +276,21 @@ async def launch_variant(worker, business, campaign, group, control, change, des
         repository.save(change)
         try:
             prepared = await prepare_variant(worker, business, campaign, group, control, hypothesis)
+        except AiLimitReached:
+            # Гипотеза не отвергнута: в понедельник лимит обновится, и вариант готовится заново.
+            day = today(worker.clock)
+            retry_on = (day + timedelta(days=7 - day.weekday())).isoformat()
+            change.status = "failed"
+            change.evidence = change.evidence | {"preparation": "ai_limit", "retry_on": retry_on}
+            repository.save(change)
+            worker.notice(
+                business,
+                "EXPERIMENT_AI_LIMIT",
+                "Лимит трат на ИИ на этой неделе исчерпан. Вариант для проверки подготовим на следующей неделе.",
+                key=f"{change.evidence['experiment_key']}:ai_limit:{retry_on}",
+                target_id=control.external_id,
+            )
+            return None
         except (Blocked, ValueError, ArtError, YandexGPTError):
             change.status = "failed"
             change.evidence = change.evidence | {"preparation": "rejected"}
@@ -285,7 +309,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
     creative = change.evidence["creative"]
     asset_id = change.evidence["asset_id"]
     if change.evidence.get("image_path"):
-        asset = next(item for item in repository.rows(Asset, business.id) if item.id == asset_id)
+        asset = repository.find(Asset, business_id=business.id, id=asset_id)
         image = (asset.platform_refs or {}).get(campaign.platform)
         if image is None:
             image = await adapter.upload_image(Path(change.evidence["image_path"]))
@@ -309,7 +333,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
     state = states.get(ref)
     if state is None or state.creative != creative:
         raise ChangeConflict("Добавление варианта пока не подтверждено; требуется повторная сверка.")
-    variant = next((item for item in repository.rows(Ad, business.id) if item.external_id == state.entity_id), None)
+    variant = platform_ads(worker, business, campaign.platform).get(state.entity_id)
     if variant is None:
         if demo_enabled() and isinstance(adapter, FakeAdapter):
             truth = adapter._ad_truths[control.external_id]
@@ -327,7 +351,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
         repository.save(variant)
     refs = replace(refs, ads=refs.ads | {str(variant.id): state.entity_id})
     change.evidence = change.evidence | {"_service": {"refs": asdict(refs), "dry_run": False}}
-    experiment = next((item for item in repository.rows(Experiment, business.id) if item.change_id == change.id), None)
+    experiment = repository.find(Experiment, business_id=business.id, change_id=change.id)
     if experiment is None:
         experiment = Experiment(
             business_id=business.id,
