@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from app.db.models import Ad, AdGroup, BudgetLedger, Business, ChangeLog, Experiment, StatsDaily
+from app.domain.budget import allocate, plan_budget, platform_shares, rebalance_platform_shares
+from app.domain.experiments import design_experiment, evaluate_experiment, select_borderline
+from app.domain.explain import explain_decision, explain_experiment
+from app.domain.rules import decide, ref_cpl, settled_days
+from app.domain.types import (
+    Action,
+    AdSnapshot,
+    ClientAnswer,
+    DaySpend,
+    ExperimentDesign,
+    GroupSnapshot,
+    Verdict,
+    total_metrics,
+)
+from app.platforms.base import Operation
+from app.services.budget_guard import read_spend
+from app.worker.clock import today
+
+if TYPE_CHECKING:
+    from app.worker.jobs import Worker
+
+# FakeAdapter(evil=True) может превысить и дневной, и периодный лимит на 25%.
+# Дополнительный запас применяется и в обычном режиме: лимиты переживают простой воркера.
+CAP_MULTIPLIER = Decimal("1.25")
+
+
+async def snapshot(worker: Worker, business: Business) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
+    repository = worker.repository
+    campaigns = worker.campaigns(business)
+    states = {}
+    for campaign in campaigns:
+        states.update(await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))
+    campaign_map = {campaign.id: campaign for campaign in campaigns}
+    groups = repository.rows(AdGroup, business.id)
+    ads = repository.rows(Ad, business.id)
+    group_map = {group.id: group for group in groups}
+    meta = worker.metadata(business)
+    limits = meta.get("group_limits", {})
+    history = [change for change in repository.rows(ChangeLog, business.id) if change.status == "applied"]
+
+    def changed(entity_id: str, actor: str | None = None):
+        return max(
+            (
+                change.created_at
+                for change in history
+                if (actor is None or change.actor == actor)
+                and any(op["entity_id"] == entity_id for op in change.operations)
+            ),
+            default=None,
+        )
+
+    result = []
+    rows = repository.rows(StatsDaily, business.id)
+    goals = {str(goal) for goal in business.lead_goal_ids} or {"lead"}
+    for ad in ads:
+        if ad.external_id not in states:
+            continue
+        group = group_map[ad.ad_group_id]
+        platform = campaign_map[group.campaign_id].platform
+        approved = meta.get("approvals", {}).get(ad.external_id)
+        days = tuple(
+            DaySpend(
+                row.date,
+                row.cost_kop,
+                row.impressions,
+                row.clicks,
+                min(row.clicks, sum(value for goal, value in row.conversions.items() if goal in goals)),
+            )
+            for row in rows
+            if row.ad_id == ad.id and row.is_settled
+        )
+        result.append(
+            AdSnapshot(
+                ad.external_id,
+                group.external_id,
+                platform,
+                datetime.fromisoformat(approved) if approved else None,
+                days,
+                states[ad.external_id].status == "active",
+                changed(ad.external_id),
+                ad.frozen_until,
+                changed(ad.external_id, "owner"),
+                lifetime_impressions=sum(row.impressions for row in rows if row.ad_id == ad.id),
+            )
+        )
+    group_snapshots = []
+    for group in groups:
+        if group.external_id not in states or group.campaign_id not in campaign_map:
+            continue
+        campaign = campaign_map[group.campaign_id]
+        siblings = [item for item in groups if item.campaign_id == campaign.id]
+        equal = campaign.daily_limit_kop // len(siblings)
+        group_snapshots.append(
+            GroupSnapshot(
+                group.external_id,
+                campaign.platform,
+                int(limits.get(group.external_id, equal)),
+                states[group.external_id].status == "active"
+                and states[campaign.external_id].status == "active"
+                and any(item.active and item.group_id == group.external_id for item in result),
+                changed(group.external_id),
+                owner_edited_at=changed(campaign.external_id, "owner"),
+            )
+        )
+    return result, group_snapshots
+
+
+def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int | None:
+    from app.db.models import LeadsSurvey
+
+    answers = [
+        ClientAnswer(row.week_start + timedelta(days=6), row.leads_count, row.clients_count)
+        for row in worker.repository.rows(LeadsSurvey, business.id)
+    ]
+    return ref_cpl(business.avg_check_kop, ads, today(worker.clock), answers)
+
+
+async def optimize(worker: Worker, business: Business) -> None:
+    if business.status != "running" or worker.metadata(business).get("kill_switch"):
+        return
+    ads, groups = await snapshot(worker, business)
+    limits = {group.id: group.daily_limit for group in groups}
+    # Освободившаяся доля остаётся доступной, но не доливается в пограничные объявления.
+    free = sum(group.daily_limit for group in groups if not group.active)
+    decisions = decide(ads, groups, worker.clock.now, reference(worker, business, ads), free_daily_budget=free)
+    campaigns = worker.campaigns(business)
+    local_groups = worker.repository.rows(AdGroup, business.id)
+    ad_map = {ad.id: ad for ad in ads}
+    for decision in decisions:
+        if decision.action == Action.NOTIFY:
+            worker.notice(business, decision.reason_code, explain_decision(decision), target_id=decision.target_id)
+            continue
+        group_id = ad_map[decision.target_id].group_id if decision.action == Action.PAUSE else decision.target_id
+        group = next(item for item in local_groups if item.external_id == group_id)
+        campaign = next(item for item in campaigns if item.id == group.campaign_id)
+        if decision.action == Action.PAUSE:
+            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
+                decision.target_id
+            ]
+            await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "ad", decision.target_id, "status", state.status, "paused")],
+                reason_code=decision.reason_code,
+                reason_params=decision.numbers,
+                kind="pause",
+                suffix=decision.target_id,
+            )
+        elif decision.action == Action.SCALE:
+            increment = decision.new_daily_limit - limits[group_id]
+            # Сначала забираем средства у остановленных групп; сумма лимитов не растёт.
+            for donor in groups:
+                if donor.active or increment <= 0:
+                    continue
+                take = min(increment, limits[donor.id])
+                limits[donor.id] -= take
+                limits[group_id] += take
+                increment -= take
+            worker.notice(business, decision.reason_code, explain_decision(decision), target_id=group_id)
+    if not worker.proposed(business):
+        worker.remember(business, group_limits=limits)
+
+
+async def rebalance_budget(worker: Worker, business: Business) -> None:
+    if business.status != "running" or worker.metadata(business).get("kill_switch"):
+        return
+    day = today(worker.clock)
+    month = day.replace(day=1)
+    meta = worker.metadata(business)
+    spent, lifetime = await read_spend(worker, business)
+    campaigns = worker.campaigns(business)
+    platforms = sorted({campaign.platform for campaign in campaigns})
+    if not platforms:
+        return
+    shares = {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
+    shares = shares if set(shares) == set(platforms) else platform_shares(platforms)
+    ads, groups = await snapshot(worker, business)
+    prices = {}
+    for platform in platforms:
+        metrics = total_metrics(
+            tuple(day_row for ad in ads if ad.platform == platform for day_row in settled_days(ad.days, day))
+        )
+        prices[platform] = metrics.cpl
+    previous = datetime.fromisoformat(meta.get("shares_at", worker.clock.now.isoformat()))
+    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days)
+    plan = plan_budget(
+        business.month_budget_kop,
+        sum(spent.values()),
+        day,
+        platforms,
+        started_on=day.fromisoformat(meta.get("started_on", month.isoformat())),
+        shares=shares,
+    )
+    group_limits = {group.id: group.daily_limit for group in groups}
+    local_groups = worker.repository.rows(AdGroup, business.id)
+    # Неиспользуемый вес остаётся у остановленных групп: его получают только хорошие через decide().
+    for limit in plan.limits:
+        platform_groups = [group for group in groups if group.platform == limit.platform]
+        weights = {group.id: Decimal(group_limits[group.id]) for group in platform_groups}
+        if not any(weights.values()):
+            weights = dict.fromkeys(weights, Decimal(1))
+        daily = allocate(limit.daily_limit, weights)
+        caps = allocate(limit.remaining_cap, weights)
+        for campaign in campaigns:
+            if campaign.platform != limit.platform:
+                continue
+            own = {group.external_id for group in local_groups if group.campaign_id == campaign.id}
+            active = {group.id for group in platform_groups if group.id in own and group.active}
+            desired_daily = sum(daily[group_id] for group_id in active)
+            # Периодный лимит ограничиваем текущей неделей/остатком месяца, включая прежний расход.
+            remaining_days = min(
+                7 - day.weekday(), (day.replace(day=28) + timedelta(days=4)).replace(day=1).__sub__(day).days
+            )
+            additional = min(sum(caps[group_id] for group_id in active), desired_daily * remaining_days)
+            total_cap = int((lifetime.get(campaign.external_id, 0) + additional) / CAP_MULTIPLIER)
+            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+            state = states[campaign.external_id]
+            desired_daily = int(Decimal(desired_daily) / CAP_MULTIPLIER)
+            operations = [
+                Operation("set_budget", "campaign", campaign.external_id, field, before, after)
+                for field, before, after in (
+                    ("period_cap_kop", state.period_cap_kop, total_cap),
+                    ("daily_limit_kop", state.daily_limit_kop, desired_daily),
+                )
+                if before != after
+            ]
+            await worker.apply(
+                business,
+                campaign,
+                operations,
+                reason_code="BUDGET_REBALANCE",
+                kind="budget",
+                actor="system",
+                reason_text="Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
+            )
+            if not worker.proposed(business):
+                # После частично применённой попытки локальные лимиты берём из подтверждённого результата.
+                campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
+                worker.repository.save(campaign)
+        ledger = worker.repository.find(BudgetLedger, business_id=business.id, platform=limit.platform, month=month)
+        ledger = ledger or BudgetLedger(business_id=business.id, platform=limit.platform, month=month, spent_kop=0)
+        ledger.allocated_kop = plan.authorized * int(shares[limit.platform] * 1_000_000) // 1_000_000
+        ledger.period_cap_kop = int(Decimal(limit.remaining_cap) / CAP_MULTIPLIER)
+        ledger.spent_kop = max(ledger.spent_kop, spent.get(limit.platform, 0))
+        ledger.spent_at = worker.clock.now
+        worker.repository.save(ledger)
+    if not worker.proposed(business):
+        worker.remember(
+            business,
+            started_on=meta.get("started_on", day.isoformat()),
+            shares={key: str(value) for key, value in shares.items()},
+            shares_at=worker.clock.now.isoformat()
+            if shares != {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
+            else previous.isoformat(),
+            group_limits=group_limits,
+        )
+
+
+async def experiments_tick(worker: Worker, business: Business) -> None:
+    if business.status != "running":
+        return
+    ads, groups = await snapshot(worker, business)
+    by_id = {ad.id: ad for ad in ads}
+    local_ads = {ad.id: ad for ad in worker.repository.rows(Ad, business.id)}
+    local_groups = {group.id: group for group in worker.repository.rows(AdGroup, business.id)}
+    campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
+    running = [item for item in worker.repository.rows(Experiment, business.id) if item.status == "running"]
+    for experiment in running:
+        control_id, variant_id = (
+            local_ads[ad_id].external_id for ad_id in (experiment.control_ad_id, experiment.variant_ad_id)
+        )
+        if control_id not in by_id or variant_id not in by_id:
+            continue
+        design = ExperimentDesign(experiment.planned_n_per_arm, 14, 1, experiment.hypothesis, True, "EXPERIMENT_START")
+        control, variant = by_id[control_id], by_id[variant_id]
+        result = evaluate_experiment(
+            design,
+            control.days,
+            variant.days,
+            experiment.started_at.date(),
+            today(worker.clock),
+            extended=experiment.stats.get("extended", False),
+        )
+        if result.verdict == Verdict.RUNNING:
+            continue
+        if result.verdict == Verdict.EXTEND:
+            if not worker.proposed(business):
+                experiment.stats = experiment.stats | {"extended": True}
+                experiment.deadline = experiment.started_at + timedelta(days=21)
+                worker.repository.save(experiment)
+            worker.notice(
+                business,
+                result.reason_code,
+                explain_experiment(result, total_metrics(control.days), total_metrics(variant.days)),
+            )
+            continue
+        loser = control_id if result.verdict == Verdict.VARIANT else variant_id
+        campaign = campaigns[local_groups[experiment.ad_group_id].campaign_id]
+        text = explain_experiment(
+            result,
+            total_metrics(settled_days(control.days, today(worker.clock))),
+            total_metrics(settled_days(variant.days, today(worker.clock))),
+        )
+        # Готовый текст содержит все параметры эксперимента и сохраняется единым откатываемым изменением.
+        change = await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "ad", loser, "status", "active", "paused")],
+            kind="experiment_verdict",
+            reason_code="EXPERIMENT_VERDICT",
+            reason_text=text,
+            suffix=f"experiment:{experiment.id}",
+        )
+        if not worker.proposed(business):
+            experiment.status = "concluded"
+            experiment.verdict = (
+                "variant_wins"
+                if result.verdict == Verdict.VARIANT
+                else ("control_wins" if result.verdict == Verdict.CONTROL else "no_difference")
+            )
+            experiment.stats = experiment.stats | {"result": asdict(result)}
+            experiment.change_id = change.id
+            worker.repository.save(experiment)
+    active_groups = [local_groups[item.ad_group_id].external_id for item in running if item.status == "running"]
+    for ad in select_borderline(ads, worker.clock.now, reference(worker, business, ads), active_groups):
+        group = next(item for item in groups if item.id == ad.group_id)
+        days = settled_days(ad.days, today(worker.clock))
+        metrics = total_metrics(days)
+        design = design_experiment(float(metrics.ctr), metrics.impressions // max(1, len(days)), group.daily_limit)
+        if not design.accepted:
+            worker.notice(
+                business,
+                design.reason_code,
+                "Пока недостаточно данных или бюджета для проверки.",
+                target_id=ad.id,
+                days=design.estimated_days,
+            )
+        elif worker.experiment_factory:
+            # Создание нового креатива и его проверка принадлежат контентному сервису, не воркеру.
+            # Фабрика получает фиксированный дизайн и обязана идемпотентно подготовить вариант.
+            await worker.experiment_factory(worker, business, ad, design)
+        else:
+            worker.notice(
+                business,
+                "EXPERIMENT_NEEDS_VARIANT",
+                "Для проверки нужен новый проверенный вариант.",
+                target_id=ad.id,
+                design=asdict(design),
+            )
