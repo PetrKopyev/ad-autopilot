@@ -17,6 +17,7 @@ dependencies = [
     "httpx",
     "cryptography",
     "apscheduler>=3.10,<4",
+    "pillow",
 ]
 
 [project.optional-dependencies]
