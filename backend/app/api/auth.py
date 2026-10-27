@@ -8,7 +8,7 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 from starlette.concurrency import run_in_threadpool
@@ -18,6 +18,7 @@ from app.api.routing import ReleasingRoute, request_session
 from app.auth import yandex
 from app.auth.revoke import revoke_tokens
 from app.auth.sessions import (
+    CSRF_COOKIE,
     OAUTH_COOKIE,
     SESSION_COOKIE,
     STATE_TTL,
@@ -320,8 +321,17 @@ async def delete_me(
     }
 
 
-@router.get("/me")
-def me(user: Annotated[User, Depends(current_user)], repository: Repository, response: Response) -> dict:
+@router.get("/me", response_model=None)
+def me(
+    session: Annotated[Session | None, Depends(optional_session)], repository: Repository, response: Response
+) -> dict | Response:
+    user = repository.get_user(session.user_id) if session else None
+    if user is None:
+        # Сессия истекла или удалена (уборка демо, удаление данных): её cookie стираются, иначе интерфейс спрашивал бы
+        # /api/me со старой cookie при каждой загрузке и каждый раз получал 401. Начатый вход через Яндекс не трогаем.
+        failure = JSONResponse({"detail": "Войдите через Яндекс ID."}, 401, headers={"Cache-Control": "no-store"})
+        clear_cookies(failure, (SESSION_COOKIE, CSRF_COOKIE))
+        return failure
     response.headers["Cache-Control"] = "no-store"
     return {
         "id": user.id,

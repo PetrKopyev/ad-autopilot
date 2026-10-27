@@ -37,7 +37,13 @@ def test_containers_have_memory_limits():
     assert limits == {"db": "512m", "migrate": "512m", "api": "1536m", "worker": "512m", "caddy": "128m"}
 
 
-def test_containers_do_not_take_swap_beyond_memory_limit():
-    for name in ("db", "api", "worker"):
-        service = COMPOSE["services"][name]
-        assert service["memswap_limit"] == service["mem_limit"], name
+def megabytes(size: str) -> int:
+    return int(size.removesuffix("m"))
+
+
+def test_memory_with_swap_fits_vps_with_room_for_system():
+    # VPS из DEPLOY.md: 2 ГБ памяти и 2 ГБ swap; migrate завершается до запуска api и worker.
+    services = {name: COMPOSE["services"][name] for name in ("db", "api", "worker", "caddy")}
+    for name, service in services.items():
+        assert megabytes(service["memswap_limit"]) >= megabytes(service["mem_limit"]), name
+    assert sum(megabytes(service["memswap_limit"]) for service in services.values()) <= 4096 - 512

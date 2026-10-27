@@ -159,6 +159,10 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                         and not any(word in reason for word in ("медицин", "документ", "лиценз"))
                     ):
                         operations = await worker.rewrite_rejected(business, ad, info.reason)
+                        rewritten = sorted(set(rewritten) | {key})
+                        # Исправление стоило вызова ИИ: отметка сохраняется сразу, ни отказ площадки, ни сбой дальше
+                        # по шагу его не повторят.
+                        worker.remember(business, ad, approvals=approvals, rewritten=rewritten)
                         if any(op.kind != "update_ad_text" or op.entity_id != info.entity_id for op in operations):
                             raise ValueError("Исправление модерации может менять только текст этого объявления.")
                         await worker.apply(
@@ -170,11 +174,8 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                             reason_params={"reason": info.reason or ""},
                             suffix=f"rewrite:{ad.id}",
                         )
-                        rewritten = sorted(set(rewritten) | {key})
                         if not worker.proposed(business):
                             ad.status = "moderation"
-                        # Исправление стоило вызова ИИ: отметка сохраняется сразу, сбой дальше по шагу его не повторит.
-                        worker.remember(business, ad, approvals=approvals, rewritten=rewritten)
         finally:
             # Статусы и отметки модерации кампании — одним commit, в том числе когда кампания опрошена не до конца:
             # иначе save(run) после сбоя сохранил бы статус active без даты одобрения.

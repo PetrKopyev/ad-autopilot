@@ -26,7 +26,7 @@ from app.db.models import (
 )
 from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
-from app.platforms.base import AdPlatform, ExternalRefs, Operation, PlatformError
+from app.platforms.base import AdPlatform, ExternalRefs, Operation
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import CLOSED_ACCOUNT, PENDING, ChangeConflict, ChangesRepository, ChangesService
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
@@ -561,8 +561,9 @@ class Worker:
         for campaign in self.campaigns(business):
             try:
                 adapter = self.resolve_adapter(business.id, campaign.platform)
-            except PlatformError:
-                # Кабинет требует входа заново: шаги остальных площадок, включая страж бюджета, всё равно идут.
+            except CLOSED_ACCOUNT:
+                # Кабинет требует входа заново или не расшифровывается: шаги остальных площадок, включая страж
+                # бюджета, всё равно идут.
                 continue
             if isinstance(adapter, FakeAdapter) and campaign.external_id not in adapter._states:
                 self.notice(

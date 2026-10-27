@@ -216,6 +216,27 @@ async def test_upload_waiting_too_long_is_rejected(monkeypatch) -> None:
     assert len(started) == 2
 
 
+async def test_upload_waits_for_thread_decode_slot_only_until_its_deadline(monkeypatch, photo: Image.Image) -> None:
+    monkeypatch.setattr(images, "UPLOAD_WAIT", 0.3)
+    data = encoded(photo)
+    images.DECODE_SLOTS.acquire()
+    images.DECODE_SLOTS.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(images.DecodeBusy):
+            await images.run_upload_decoding(accept_upload, data)
+        assert time.monotonic() - started < 2
+        # Разбор без срока (пересборка роликов в фоне того же запроса) по-прежнему ждёт слот.
+        waiting = asyncio.create_task(images.run_decoding(accept_upload, data))
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+    finally:
+        images.DECODE_SLOTS.release()
+        images.DECODE_SLOTS.release()
+    assert (await waiting).width == photo.width
+    assert images._queue().slots._value == 2
+
+
 async def test_cancelled_upload_keeps_slot_until_its_thread_ends() -> None:
     """Поток отменённого запроса доделывает разбор: слот его до тех пор не отдаёт другому разбору и после не
     теряется."""

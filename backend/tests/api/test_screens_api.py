@@ -422,3 +422,32 @@ def test_budget_cannot_be_lower_than_sum_of_connected_platform_minimums(setup, m
     assert response.status_code == 422
     assert "суммы минимумов" in response.json()["detail"]
     assert world.business.month_budget_kop == 10_000_000
+
+
+def test_autopilot_stop_reason_does_not_repeat_status_label(setup):
+    client, world = setup
+    ad = next(iter(world.ads.values()))
+    world.clock.advance(days=2)
+    worker = world.worker()
+    worker.step_key = "optimize:test"
+    asyncio.run(
+        worker.apply(
+            world.business,
+            world.campaign,
+            [Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto")],
+            reason_code="PAUSE_TOO_EXPENSIVE",
+            kind="pause",
+            reason_params={
+                "period_start": "2026-01-01",
+                "period_end": "2026-01-05",
+                "spend": 21_500,
+                "leads": 0,
+                "ref_cpl": 10_000,
+            },
+        )
+    )
+    row = next(item for item in client.get("/api/ads").json()["items"] if item["id"] == ad.id)
+    history = world.repository.rows(ChangeLog)[-1].reason_text
+    assert row["status"] == "paused_auto"
+    assert history.endswith("слишком дорого при ориентире 100 ₽ за обращение. Остановили объявление.")
+    assert row["reason"] == history.removesuffix(" Остановили объявление.")

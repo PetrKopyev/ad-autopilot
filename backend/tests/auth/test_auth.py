@@ -399,14 +399,29 @@ def test_expired_and_missing_user_sessions_rejected(
     mock_yandex: respx.MockRouter,
 ) -> None:
     login(client, repository)
+    cookies = dict(client.cookies)
     repository.users.clear()
     assert client.get("/api/me").status_code == 401
     repository.users[1] = User(id=1)
-    repository.sessions[hash_token(client.cookies["__Host-session"])].expires_at = datetime.now(UTC) - timedelta(
-        seconds=1
-    )
-    assert client.get("/api/me").status_code == 401
+    for name, value in cookies.items():
+        client.cookies.set(name, value, domain="testserver.local", path="/")
+    repository.sessions[hash_token(cookies["__Host-session"])].expires_at = datetime.now(UTC) - timedelta(seconds=1)
     assert client.post("/api/auth/logout").status_code == 401
+    assert client.get("/api/me").status_code == 401
+
+
+def test_stale_session_cookies_are_cleared_by_me_but_login_in_progress_is_kept(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    login(client, repository)
+    repository.sessions.clear()
+    client.cookies.set("__Host-oauth", "binding", domain="testserver.local", path="/")
+    response = client.get("/api/me")
+    assert response.status_code == 401 and response.json()["detail"] == "Войдите через Яндекс ID."
+    assert response.headers["Cache-Control"] == "no-store"
+    assert set(client.cookies.keys()) == {"__Host-oauth"}
 
 
 def sign_in(client: TestClient, repository: FakeRepository, user_id: int = 1) -> None:

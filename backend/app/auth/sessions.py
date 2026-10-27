@@ -278,6 +278,6 @@ def set_session_cookies(response: Response, session: Session) -> None:
     response.set_cookie(CSRF_COOKIE, session.csrf_secret, httponly=False, **options)
 
 
-def clear_cookies(response: Response) -> None:
-    for name in (SESSION_COOKIE, CSRF_COOKIE, OAUTH_COOKIE):
+def clear_cookies(response: Response, names: tuple[str, ...] = (SESSION_COOKIE, CSRF_COOKIE, OAUTH_COOKIE)) -> None:
+    for name in names:
         response.delete_cookie(name, path="/", secure=True, httponly=name != CSRF_COOKIE, samesite="lax")

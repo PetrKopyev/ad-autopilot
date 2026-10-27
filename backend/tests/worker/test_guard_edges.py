@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import InvalidToken
 from integration.harness import BUDGET_KOP, make_world
 
 from app.db.models import BudgetLedger, Campaign, ChangeLog
@@ -48,7 +49,7 @@ async def with_vk(world) -> tuple[SecondPlatform, Campaign]:
     return vk, campaign
 
 
-def worker_for(world, vk: SecondPlatform, *, vk_connected: list[bool] | None = None):
+def worker_for(world, vk: SecondPlatform, *, vk_connected: list[bool] | None = None, closed: Exception | None = None):
     worker = world.worker()
     connected = vk_connected if vk_connected is not None else [True]
 
@@ -56,7 +57,7 @@ def worker_for(world, vk: SecondPlatform, *, vk_connected: list[bool] | None = N
         if platform == "direct":
             return world.adapter
         if not connected[0]:
-            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+            raise closed or PlatformError("Кабинет площадки не подключён или требует входа заново.")
         return vk
 
     worker.resolve_adapter = resolve
@@ -178,10 +179,11 @@ async def test_guard_books_spend_to_new_month_after_moscow_midnight(monkeypatch)
     assert not world.repository.rows(ChangeLog, 1, reason_code="BUDGET_STOP")
 
 
-async def test_expired_vk_account_does_not_switch_off_direct_budget_guard() -> None:
+@pytest.mark.parametrize("closed", [None, KeyError("vk"), InvalidToken()], ids=["expired", "deleted", "undecryptable"])
+async def test_closed_vk_account_does_not_switch_off_direct_budget_guard(closed) -> None:
     world = await make_world()
     vk, campaign = await with_vk(world)
-    worker = worker_for(world, vk, vk_connected=[False])
+    worker = worker_for(world, vk, vk_connected=[False], closed=closed)
     world.business.month_budget_kop = 0
     with pytest.raises(ChangeConflict):
         await worker.run("budget_guard", 1)

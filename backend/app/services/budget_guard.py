@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.budget import plan_budget
-from app.platforms.base import Operation, PlatformError
-from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
+from app.platforms.base import Operation
+from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ async def read_spend(
             adapter = worker.resolve_adapter(business.id, platform)
             rows = await adapter.get_stats(started_on, day, "campaign")
             reported_today = await adapter.get_spend_today()
-        except PlatformError:
+        except CLOSED_ACCOUNT:
             if not tolerate_errors:
                 raise
             continue
@@ -102,7 +102,8 @@ async def stop_all(
                     reason_text="Остановили рекламу на всех площадках.",
                     suffix="stop_all",
                 )
-            except (PlatformError, ChangeConflict):
+            except (*CLOSED_ACCOUNT, ChangeConflict):
+                # Кабинет, который требует входа заново или не расшифровывается, не мешает остановить остальные.
                 failed = True
         if failed:
             raise ChangeConflict("Не все площадки подтвердили остановку. Повторим в следующем тике.")
@@ -164,7 +165,7 @@ async def stop_platform(
                     force=True,
                 )
                 stopped = stopped and change.status == "applied"
-            except (PlatformError, ChangeConflict, KeyError):
+            except (*CLOSED_ACCOUNT, ChangeConflict):
                 stopped = False
         return stopped
 

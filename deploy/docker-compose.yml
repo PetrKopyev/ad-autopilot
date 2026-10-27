@@ -7,11 +7,14 @@ x-backend: &backend
   environment:
     MEDIA_DIR: /data/media
   restart: unless-stopped
-  # Пределы памяти рассчитаны на VPS 2 ГБ + 2 ГБ swap (DEPLOY.md): утечка или тяжёлый запрос перезапускает свой
-  # контейнер, а не отнимает память у базы и остальных. memswap_limit = mem_limit: swap контейнеру сверх предела не
-  # даётся — иначе api, worker и база вместе могли бы взять ещё столько же и системный OOM убил бы postgres.
+  # Пределы памяти рассчитаны на VPS 2 ГБ + 2 ГБ swap (DEPLOY.md). Сумма mem_limit (2,6 ГБ) больше памяти VPS: все
+  # контейнеры сразу на пике не бывают, а холодные страницы уходят в swap. Поэтому каждому, кроме маленького caddy,
+  # разрешено немного swap: memswap_limit — память вместе со swap, и при memswap_limit = mem_limit страницы контейнера
+  # в swap не уходят вовсе. Сумма memswap_limit (3,4 ГБ) меньше памяти и swap VPS с запасом около 600 МБ на систему и
+  # Docker: утечка или тяжёлый запрос упирается в предел своего контейнера, и OOM срабатывает внутри него, а не на
+  # всём VPS, где он мог бы убить базу.
   mem_limit: 512m
-  memswap_limit: 512m
+  memswap_limit: 640m
 
 services:
   db:
@@ -31,7 +34,7 @@ services:
       start_period: 10s
     restart: unless-stopped
     mem_limit: 512m
-    memswap_limit: 512m
+    memswap_limit: 640m
 
   migrate:
     <<: *backend
@@ -46,7 +49,7 @@ services:
     # Пик: две сборки роликов параллельно (ffmpeg около 270 МБ каждая), два разбора фото (до 213 МБ каждый, WebP 10 млн
     # точек) и до шести ждущих загрузок по 10 МБ вместе с процессом — около 1,2 ГБ. Такой пик короткий.
     mem_limit: 1536m
-    memswap_limit: 1536m
+    memswap_limit: 2048m
     volumes:
       - media:/data/media
     depends_on:
@@ -93,6 +96,7 @@ services:
       - api
     restart: unless-stopped
     mem_limit: 128m
+    memswap_limit: 128m
 
 networks:
   default:

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -24,6 +25,19 @@ from app.config import settings
 from app.db.session import SessionLocal, engine
 from app.services.registry import AdapterRegistry, db_loader
 from app.worker.main import DemoRegistry, start_scheduler
+
+
+class WithoutQuery(logging.Filter):
+    """Строка запроса несёт код входа (callback OAuth) и другие закрытые данные: журнал доступа uvicorn пишет только
+    адрес, метод, путь и код ответа."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        client, method, path, *rest = record.args
+        record.args = (client, method, path.split("?", 1)[0], *rest)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(WithoutQuery())
 
 
 @asynccontextmanager

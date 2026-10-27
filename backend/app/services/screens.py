@@ -1,3 +1,4 @@
+import re
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -31,6 +32,9 @@ SAME_EXCEPT = {
     "image": "Меняем только картинку, текст объявления тот же.",
     "audience": "Меняем только аудиторию, объявление то же.",
 }
+# Ярлык «Остановлено нами» уже говорит, что объявление остановили: причина рядом с ним не повторяет это последней
+# фразой. В истории изменений текст остаётся целиком.
+REPEATS_LABEL = re.compile(r" Остановили (?:объявление|его)\.$")
 
 
 class ScreensService:
@@ -184,11 +188,14 @@ class ScreensService:
                     if ad.external_id
                     else None
                 )
-                if ad.status == "paused_owner" and (change is None or change.reason_code == "OWNER_AD_STATUS"):
-                    # Владелец остановил само объявление: статус «Остановлено вами» уже это говорит.
+                if change is None or (ad.status == "paused_owner" and change.reason_code == "OWNER_AD_STATUS"):
+                    # Владелец остановил само объявление или причины в журнале нет: статус «Остановлено вами» или
+                    # «Остановлено нами» уже говорит, кто остановил.
                     reason = None
+                elif ad.status == "paused_auto":
+                    reason = REPEATS_LABEL.sub("", change.reason_text)
                 else:
-                    reason = change.reason_text if change else "Автопилот остановил объявление."
+                    reason = change.reason_text
             elif ad.status == "rejected":
                 reason = ad.moderation_reason or "Площадка отклонила объявление. Проверьте его содержание."
             items.append(

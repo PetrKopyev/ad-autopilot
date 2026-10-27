@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock
 
 import pytest
@@ -274,6 +275,30 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     rewrite.assert_awaited_once()
     assert world.business.settings["_worker"]["rewritten"] == [f"direct:{ad.external_id}"]
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
+
+
+async def test_paid_rewrite_is_not_repeated_when_platform_did_not_confirm_the_text(monkeypatch):
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    ad = next(iter(world.ads.values()))
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", ad.external_id, "text", ad.text, "Исправлено")])
+    refused = AsyncMock(side_effect=ChangeConflict("Площадка не подтвердила изменение."))
+    for _ in range(2):
+        world.clock.advance(hours=1)
+        worker = world.worker(rewrite_rejected=rewrite)
+        worker.apply = refused
+        with contextlib.suppress(ChangeConflict):
+            await sync_moderation(worker, world.business)
+    rewrite.assert_awaited_once()
+    refused.assert_awaited_once()
+    assert world.business.settings["_worker"]["rewritten"] == [f"direct:{ad.external_id}"]
 
 
 async def test_rewrite_is_saved_at_once_and_not_repeated_after_step_failed_later(monkeypatch):

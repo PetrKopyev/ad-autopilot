@@ -124,6 +124,25 @@ def test_upload_is_rejected_with_busy_text_when_decode_queue_is_full(api, monkey
     assert uploads(context) == 0
 
 
+def test_upload_is_rejected_with_busy_text_when_video_builds_hold_decode_slots(api, monkeypatch) -> None:
+    from app.content import images
+
+    client, context = api
+    monkeypatch.setattr(images, "UPLOAD_WAIT", 0.3)
+    # Слоты разбора в потоках держат сборки роликов: очередь цикла событий свободна, ждать приходится в потоке.
+    images.DECODE_SLOTS.acquire()
+    images.DECODE_SLOTS.acquire()
+    try:
+        response = upload(client)
+    finally:
+        images.DECODE_SLOTS.release()
+        images.DECODE_SLOTS.release()
+    assert response.status_code == 503 and response.headers["Retry-After"] == "60"
+    assert response.json()["detail"] == "Сервер сейчас занят. Попробуйте загрузить фото через минуту."
+    assert uploads(context) == 0
+    assert upload(client).status_code == 200 and uploads(context) == 1
+
+
 def test_upload_streamed_without_content_length_is_accepted(api) -> None:
     client, context = api
     boundary = "upload-boundary"

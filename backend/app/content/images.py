@@ -2,9 +2,12 @@ import asyncio
 import math
 import threading
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from io import BytesIO
+from time import monotonic
 from weakref import WeakKeyDictionary
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, UnidentifiedImageError
@@ -28,6 +31,8 @@ DECODE_SLOTS = threading.BoundedSemaphore(2)
 # хватает и владельцу, который выбрал сразу несколько фото, и нескольким владельцам вместе.
 UPLOAD_QUEUE = 6
 UPLOAD_WAIT = 20
+# Срок (monotonic) загрузки фото: до него поток разбора ждёт слот DECODE_SLOTS. У остальных разборов срока нет.
+_upload_deadline: ContextVar[float | None] = ContextVar("upload_deadline", default=None)
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FORMATS = {
     "direct_1_1": (1080, 1080),
@@ -61,7 +66,8 @@ def _check_size(width: int, height: int) -> None:
 
 
 class DecodeBusy(Exception):
-    """Очередь загрузок к разбору полна или слот не освободился за UPLOAD_WAIT секунд."""
+    """Очередь загрузок к разбору полна или слот (в цикле событий или в потоке) не освободился за UPLOAD_WAIT
+    секунд."""
 
 
 class _Queue:
@@ -90,10 +96,12 @@ async def run_decoding[T](func: Callable[..., T], *args: object, **kwargs: objec
 
 async def run_upload_decoding[T](func: Callable[..., T], *args: object, **kwargs: object) -> T:
     """run_decoding для загрузки фото: очередь загрузок ограничена UPLOAD_QUEUE, ожидание — UPLOAD_WAIT секундами,
-    иначе DecodeBusy. Генерация и нарезка при запуске ограничены своими лимитами и ждут без срока."""
+    иначе DecodeBusy. Срок общий для очереди цикла и слота DECODE_SLOTS в потоке: слоты могут держать сборки роликов.
+    Генерация и нарезка при запуске ограничены своими лимитами и ждут без срока."""
     queue = _queue()
     if queue.uploads >= UPLOAD_QUEUE:
         raise DecodeBusy
+    deadline = monotonic() + UPLOAD_WAIT
     queue.uploads += 1
     try:
         async with asyncio.timeout(UPLOAD_WAIT):
@@ -102,7 +110,13 @@ async def run_upload_decoding[T](func: Callable[..., T], *args: object, **kwargs
         raise DecodeBusy from None
     finally:
         queue.uploads -= 1
-    return await _run(queue, func, *args, **kwargs)
+    # Поток пула получает копию контекста; после загрузки срок снимается, иначе его унаследовала бы пересборка роликов
+    # в фоне того же запроса.
+    token = _upload_deadline.set(deadline)
+    try:
+        return await _run(queue, func, *args, **kwargs)
+    finally:
+        _upload_deadline.reset(token)
 
 
 async def _run[T](queue: _Queue, func: Callable[..., T], *args: object, **kwargs: object) -> T:
@@ -111,6 +125,17 @@ async def _run[T](queue: _Queue, func: Callable[..., T], *args: object, **kwargs
     task = asyncio.ensure_future(run_in_threadpool(func, *args, **kwargs))
     task.add_done_callback(lambda _: queue.slots.release())
     return await asyncio.shield(task)
+
+
+@contextmanager
+def _decode_slot() -> Iterator[None]:
+    deadline = _upload_deadline.get()
+    if not DECODE_SLOTS.acquire(timeout=None if deadline is None else max(0, deadline - monotonic())):
+        raise DecodeBusy
+    try:
+        yield
+    finally:
+        DECODE_SLOTS.release()
 
 
 def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
@@ -129,7 +154,7 @@ def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
                 if source.width * source.height > (MAX_PIXELS_WEBP if source.format == "WEBP" else MAX_PIXELS):
                     raise ImageRejected("Image exceeds the pixel limit")
                 _check_size(source.width, source.height)
-                with DECODE_SLOTS:
+                with _decode_slot():
                     source.thumbnail((MAX_SIDE, MAX_SIDE))
                     ImageOps.exif_transpose(source, in_place=True)
                     if not source.has_transparency_data:
