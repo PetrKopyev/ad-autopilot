@@ -26,13 +26,13 @@ export function LoginPage() {
   async function loginDemo() {
     setBusy(true); setError('');
     try { await demoLogin(); session.reload(); navigate('/setup'); }
-    catch { setError(copy.errors.network); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
   async function login() {
     setBusy(true); setError('');
     try { await connectAccount('login'); if (mockEnabled) { session.reload(); navigate('/setup'); } }
-    catch { setError(copy.errors.network); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
   return <div className="page-stack launch-flow">

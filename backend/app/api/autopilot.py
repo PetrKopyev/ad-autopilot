@@ -1,10 +1,11 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import load_only
 
+from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import MarkingProfile, PlatformAccount
@@ -15,7 +16,7 @@ from app.services.screens import ScreensService
 from app.worker.clock import SystemClock
 from app.worker.jobs import Worker, WorkerRepository
 
-router = APIRouter(prefix="/api/autopilot")
+router = APIRouter(prefix="/api/autopilot", route_class=ReleasingRoute)
 
 
 class ScreensRepository(WorkerRepository):
@@ -35,10 +36,8 @@ class ScreensRepository(WorkerRepository):
         return list(self.db.scalars(statement))
 
 
-def get_screens_service(request: Request, business: CurrentBusiness) -> Iterator[ScreensService]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_screens_service(request: Request, business: CurrentBusiness) -> AsyncIterator[ScreensService]:
+    with request_session() as db:
         yield ScreensService(
             Worker(
                 ScreensRepository(db),

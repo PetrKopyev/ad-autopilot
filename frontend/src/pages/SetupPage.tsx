@@ -77,7 +77,7 @@ export function SetupPage() {
     const controller = new AbortController(); setGoals([]);
     if (draft.counter) getGoals(draft.counter, controller.signal).then((value) => {
       if (!controller.signal.aborted) setGoals(value.items);
-    }).catch(() => { if (!controller.signal.aborted) setError(copy.errors.network); });
+    }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : copy.errors.generic); });
     return () => controller.abort();
   }, [draft.counter, revision]);
   useEffect(() => {

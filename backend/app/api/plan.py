@@ -1,27 +1,26 @@
-import asyncio
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Message
 
 from app.api.business import human_errors
 from app.api.limits import assets_limit, regenerate_limit, upload_limit
+from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.content.images import MAX_BYTES
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
-from app.services.plan import VIDEO_EXECUTOR, PlanRepository, PlanService, build_videos
+from app.services.plan import VIDEO_QUEUE, PlanRepository, PlanService, build_videos
 from app.services.registry import build_art_factory, build_llm
 
-router = APIRouter(prefix="/api/plan")
+router = APIRouter(prefix="/api/plan", route_class=ReleasingRoute)
 MAX_UPLOAD = MAX_BYTES + 64 * 1024
 TOO_LARGE = "Файл слишком большой: не больше 10 МБ."
 
@@ -45,12 +44,11 @@ def media_root() -> Path:
     return settings.media_dir
 
 
-def get_plan_service(request: Request) -> Iterator[PlanService]:
+async def get_plan_service(request: Request) -> AsyncIterator[PlanService]:
     from app.config import get_domain_settings, settings
-    from app.db.session import SessionLocal
 
     http = request.app.state.http
-    with SessionLocal() as db:
+    with request_session() as db:
         yield PlanService(
             PlanRepository(db),
             build_llm(settings, http),
@@ -61,11 +59,10 @@ def get_plan_service(request: Request) -> Iterator[PlanService]:
         )
 
 
-def get_launch_service(request: Request) -> Iterator[LaunchService]:
+async def get_launch_service(request: Request) -> AsyncIterator[LaunchService]:
     from app.config import get_domain_settings, settings
-    from app.db.session import SessionLocal
 
-    with SessionLocal() as db:
+    with request_session() as db:
         yield LaunchService(
             LaunchRepository(db),
             request.app.state.platform_adapters.resolve,
@@ -74,28 +71,28 @@ def get_launch_service(request: Request) -> Iterator[LaunchService]:
         )
 
 
-def get_video_builder() -> Callable[[int], None]:
+def get_video_builder() -> Callable[[int], bool]:
     """Сборка роликов идёт после ответа в своём сеансе БД: сеанс запроса к этому времени уже закрыт."""
 
-    def build(business_id: int) -> None:
+    def build(business_id: int) -> bool:
         from app.db.session import SessionLocal
 
         with SessionLocal() as db:
-            build_videos(PlanRepository(db), media_root(), business_id)
+            return build_videos(PlanRepository(db), media_root(), business_id)
 
     return build
 
 
 Plans = Annotated[PlanService, Depends(get_plan_service)]
 Launches = Annotated[LaunchService, Depends(get_launch_service)]
-VideoBuilder = Annotated[Callable[[int], None], Depends(get_video_builder)]
+VideoBuilder = Annotated[Callable[[int], bool], Depends(get_video_builder)]
 
 
-async def rebuild_videos(build: Callable[[int], None], business_id: int) -> None:
-    await asyncio.get_running_loop().run_in_executor(VIDEO_EXECUTOR, build, business_id)
+async def rebuild_videos(build: Callable[[int], bool], business_id: int) -> None:
+    await VIDEO_QUEUE.request(business_id, build)
 
 
-class LimitedBody(APIRoute):
+class LimitedBody(ReleasingRoute):
     """Тело больше MAX_UPLOAD отклоняется до разбора multipart: по Content-Length и при чтении потока."""
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -183,7 +180,7 @@ async def launch(body: LaunchIn, business: CurrentBusiness, service: Launches, t
 
 @router.get("/assets/{asset_id}/file")
 def asset_file(asset_id: int, business: CurrentBusiness, service: Plans) -> FileResponse:
-    asset = next((item for item in service.repository.assets(business.id) if item.id == asset_id), None)
+    asset = service.repository.asset(business.id, asset_id)
     root = service.media_root.resolve()
     path = (root / asset.file_path).resolve() if asset else None
     if path is None or not path.is_relative_to(root) or not path.is_file():

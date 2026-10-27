@@ -225,6 +225,7 @@ export const copy = {
     replaceImage: 'Заменить картинку',
     experiments: 'Проверяем идеи',
     comparison: 'Что сравниваем',
+    arm: (letter: string) => `Вариант ${letter}`,
     remaining: 'Сколько осталось',
     conclusion: 'Вывод',
   },

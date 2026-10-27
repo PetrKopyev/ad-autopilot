@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import ExitStack
 from math import ceil
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from app.db.models import BudgetLedger, Business
@@ -107,34 +110,62 @@ async def stop_all(
             worker.remember(business, pending_stop=None)
 
 
-async def stop_platform(business: Business, *, worker: Worker, platform: str, reason_text: str) -> bool:
+LOCK_WAIT_SECONDS = 15
+STOPPED = {"paused_auto", "paused_owner", "archived"}
+
+
+async def wait_for_business(stack: ExitStack, worker: Worker, business_id: int, seconds: float) -> None:
+    """Берёт блокировку бизнеса, дожидаясь, пока шаг воркера её отпустит; ждёт без блокировки цикла событий."""
+    deadline = monotonic() + seconds
+    while True:
+        try:
+            stack.enter_context(worker.repository.business_lock(business_id))
+            return
+        except ChangeConflict:
+            if monotonic() >= deadline:
+                raise
+        await asyncio.sleep(0.5)
+
+
+async def stop_platform(
+    business: Business, *, worker: Worker, platform: str, reason_text: str, wait: float = LOCK_WAIT_SECONDS
+) -> bool:
     """Перед отзывом доступа к кабинету: без токена ни автопилот, ни страж бюджета рекламу уже не остановят.
 
+    Защитное действие: выполняется и в пробном режиме. Если бизнес занят шагом воркера, ждём до wait секунд.
     Возвращает, подтвердила ли площадка остановку всех кампаний; остановка записывается в журнал от имени владельца.
+    У бизнеса один кабинет на площадку (platform_accounts: business_id, platform), поэтому кампании площадки
+    бизнеса — это кампании отключаемого кабинета.
     """
-    stopped = True
-    for campaign in worker.campaigns(business):
-        if campaign.platform != platform:
-            continue
+    with ExitStack() as stack:
         try:
-            states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
-            state = states[campaign.external_id]
-            if state.status in {"paused_auto", "paused_owner", "archived"}:
+            await wait_for_business(stack, worker, business.id, wait)
+        except ChangeConflict:
+            return False
+        stopped = True
+        for campaign in worker.campaigns(business):
+            if campaign.platform != platform:
                 continue
-            change = await worker.apply(
-                business,
-                campaign,
-                [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_owner")],
-                actor="owner",
-                kind="pause",
-                reason_code="ACCOUNT_REVOKE",
-                reason_text=reason_text,
-                suffix="revoke",
-            )
-            stopped = stopped and change.status == "applied"
-        except (PlatformError, ChangeConflict, KeyError):
-            stopped = False
-    return stopped
+            try:
+                states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
+                state = states[campaign.external_id]
+                if state.status in STOPPED:
+                    continue
+                change = await worker.apply(
+                    business,
+                    campaign,
+                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_owner")],
+                    actor="owner",
+                    kind="pause",
+                    reason_code="ACCOUNT_REVOKE",
+                    reason_text=reason_text,
+                    suffix="revoke",
+                    force=True,
+                )
+                stopped = stopped and change.status == "applied"
+            except (PlatformError, ChangeConflict, KeyError):
+                stopped = False
+        return stopped
 
 
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:
@@ -201,4 +232,6 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             budget_stop=True,
             reason_params={"spent": result.spent, "budget": business.month_budget_kop, "margin": result.stop_margin},
         )
-        worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
+        worker.notice(
+            business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.", proposal=True
+        )

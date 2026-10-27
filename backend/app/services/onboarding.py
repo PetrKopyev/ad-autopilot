@@ -339,6 +339,8 @@ class OnboardingService:
             return self.check_view(business, cached)
         if on_miss is not None:
             on_miss()
+        # Чтение сайта и ответ ИИ идут десятки секунд: соединение с базой на это время возвращается в пул.
+        self.repository.commit()
         with self.repository.business_lock(business_id):
             site = await self.reader(business.site_url)
             llm = SpendLLM(

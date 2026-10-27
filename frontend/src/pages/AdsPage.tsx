@@ -8,6 +8,8 @@ import type { Ad } from '../api/types';
 import { DemoNotice, NullableMoney, adLabels, platformName } from './StatsShared';
 import './Ads.css';
 
+const armLetters = ['А', 'Б'];
+
 function AdCard({ ad, name, changed }: { ad: Ad; name: string; changed: () => void }) {
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
@@ -82,6 +84,8 @@ export function AdsPage() {
       {experiments.data && (experiments.data.items.length ? experiments.data.items.map((experiment) => <article className="ads-ad page-stack" key={experiment.id}>
         <h3>{experiment.title}</h3><StatusBadge>{copy.screens.experimentStates[experiment.status]}</StatusBadge>
         <p><strong>{copy.ads.comparison}: </strong>{experiment.comparing}</p>
+        <ul>{experiment.arms.map((arm, index) => <li key={armLetters[index]}>
+          <strong>{copy.ads.arm(armLetters[index])}: </strong>«{arm.title}». {arm.text}</li>)}</ul>
         {experiment.status === 'running' && <p>{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
         <p><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
       </article>) : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}

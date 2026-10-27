@@ -9,6 +9,10 @@
 
     @api path /api /api/*
     handle @api {
+        # Самое большое тело — фото до 10 МБ в multipart; остальное API ограничивает само (1 МБ на JSON).
+        request_body {
+            max_size 11MB
+        }
         reverse_proxy api:8000
     }
 

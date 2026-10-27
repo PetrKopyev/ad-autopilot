@@ -416,6 +416,7 @@ def test_delete_me_stops_ads_before_revoking_and_reports_unconfirmed_stop(
     assert response.status_code == 200
     assert response.json()["stopped"] is False
     assert "не все площадки подтвердили остановку" in response.json()["message"]
+    assert "Яндекс Директ: площадка не подтвердила остановку" in response.json()["message"]
     assert repository.stops == [(1, None, None)]
     assert 1 not in repository.users and mock_yandex["revoke"].call_count == 1
 
@@ -543,3 +544,21 @@ def test_demo_login_expires_old_demo_users_and_caps_live_ones(client, repository
     users = len(repository.users)
     response = client.post("/api/auth/demo", headers=DEMO_HEADERS)
     assert response.status_code == 503 and len(repository.users) == users
+
+
+def test_delete_me_waits_for_business_lock_and_reports_busy(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter, monkeypatch
+) -> None:
+    from app.services.changes import ChangeConflict
+
+    sign_in(client, repository)
+    waits = []
+
+    def busy(user_id: int, wait: float = 0) -> list[int]:
+        waits.append(wait)
+        raise ChangeConflict("Этот бизнес уже обрабатывается.")
+
+    monkeypatch.setattr(repository, "delete_user", busy)
+    response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == 409 and "Повторите удаление" in response.json()["detail"]
+    assert waits == [15] and 1 in repository.users

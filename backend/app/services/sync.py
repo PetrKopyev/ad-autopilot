@@ -124,6 +124,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                     else f"Объявление «{ad.title}» не прошло проверку, причину площадка не указала.",
                     # Время ответа площадки меняется при каждом опросе: одно уведомление на объявление и причину.
                     key=f"moderation:{key}:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
+                    target_id=key,
                 )
                 # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
                 reason = (info.reason or "").casefold()

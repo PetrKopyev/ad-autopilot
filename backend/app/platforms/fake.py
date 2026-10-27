@@ -1,3 +1,4 @@
+import asyncio
 from collections import deque
 from collections.abc import Mapping
 from copy import deepcopy
@@ -363,7 +364,7 @@ class FakeAdapter:
 
     async def _upload(self, file: Path, kind: str) -> str:
         self._request()
-        return f"fake-{kind}-{sha256(file.read_bytes()).hexdigest()}"
+        return f"fake-{kind}-{sha256(await asyncio.to_thread(file.read_bytes)).hexdigest()}"
 
     async def upload_image(self, file: Path) -> str:
         return await self._upload(file, "image")

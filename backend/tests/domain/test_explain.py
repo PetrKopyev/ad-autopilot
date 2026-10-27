@@ -36,7 +36,7 @@ def test_ruble_format_whole_rubles_and_kopecks_below_hundred(kopecks, expected):
         ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 3, "ref_cpl": 100}, "получили 3 обращения."),
         ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 1, "ref_cpl": 100}, "получили 1 обращение."),
         ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 11, "ref_cpl": 100}, "получили 11 обращений."),
-        ("EXPERIMENT_START", {"hypothesis": "text", "n_per_arm": 5_371, "days": 1}, "5371 показ каждого"),
+        ("EXPERIMENT_START", {"hypothesis": "text", "n_per_arm": 5_371, "days": 1}, "5 371 показ каждого"),
         ("EXPERIMENT_START", {"hypothesis": "text", "n_per_arm": 5_372, "days": 2}, "примерно 2 дня."),
         ("EXPERIMENT_TOO_LONG", {"days": 21}, "примерно 21 день."),
         ("BUDGET_OPPORTUNITY", {"extra_budget": 10_000, "extra_leads": Decimal("1.5")}, "1,5 обращения в день"),
@@ -78,12 +78,15 @@ def test_experiment_explanation_contains_actual_counts_and_rates():
         clicks=190,
         rate=Decimal("1.7"),
         other_rate=Decimal("1.2"),
-        p_percent=Decimal("0.3"),
+        confidence="Разница почти наверняка не случайна",
     )
-    assert "11400 раз" in text and "190 раз (1,7%)" in text and "1,2%" in text and "0,3%" in text
-    values = {"winner": "Б", "loser": "А", "rate": 1, "other_rate": 1, "p_percent": 1}
+    assert "11 400 раз" in text and "190 раз (1,7%)" in text and "1,2%" in text
+    values = {"winner": "Б", "loser": "А", "rate": 1, "other_rate": 1, "confidence": "Вывод"}
     text = explain("EXPERIMENT_WIN", values, impressions=1_002, clicks=2)
-    assert "показывали 1002 раза, на него нажали 2 раза" in text
+    assert "показывали 1 002 раза, на него нажали 2 раза" in text
+    assert explain("EXPERIMENT_START", hypothesis="text", n_per_arm=5_489, days=12).startswith(
+        "Проверяем другой текст: сравним по 5 489 показов"
+    )
 
 
 def test_unknown_code_or_missing_number_fails_instead_of_inventing_values():
@@ -98,10 +101,11 @@ def test_experiment_copy_is_derived_from_the_winning_arm():
     a, b = Metrics(10_000, 11_400, 137, 10), Metrics(10_000, 11_400, 190, 15)
     text = explain_experiment(result, a, b)
     assert "Объявление Б" in text and "190 раз (1,7%)" in text
-    assert "1,2% у А" in text and "Вероятность, что разница случайна, — меньше 0,1%." in text
-    assert "Оставили Б, А остановили" in text
-    reverse = ExperimentResult(Verdict.CONTROL, "EXPERIMENT_WIN", 0.01)
+    assert "1,2% у А. Разница почти наверняка не случайна." in text
+    assert "Оставили Б, А остановили" in text and "вероятност" not in text.lower()
+    reverse = ExperimentResult(Verdict.CONTROL, "EXPERIMENT_WIN", 0.03)
     assert "Объявление А" in explain_experiment(reverse, b, a)
+    assert "Разница, скорее всего, не случайна" in explain_experiment(reverse, b, a)
 
 
 def test_hypothesis_names_and_extension_are_plain_russian():

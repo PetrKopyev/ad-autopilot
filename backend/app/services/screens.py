@@ -277,16 +277,22 @@ class ScreensService:
             remaining = sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
             days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудиторию"}[experiment.hypothesis]
-            # Заголовки вариантов часто совпадают: называем их буквами, как в итогах проверки.
+            variants = [ads.get(id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)]
+            contents = [{"title": ad.title, "text": ad.text} if ad else {"title": "", "text": ""} for ad in variants]
+            # Варианты называем буквами, как в итогах проверки; при одинаковых заголовках различает начало текста.
+            field = "text" if contents[0]["title"] == contents[1]["title"] else "title"
             arms_text = " и ".join(
-                f"вариант {letter} «{short(ads[id_].title)}»"
-                for letter, id_ in (("А", experiment.control_ad_id), ("Б", experiment.variant_ad_id))
+                f"вариант {letter} «{short(content[field])}»" for letter, content in zip("АБ", contents, strict=True)
             )
+            comparing = f"Сравниваем {arms_text}."
+            if experiment.status == "running":
+                comparing += f" До конца проверки: {plural(days, PLURALS['days'])}."
             items.append(
                 {
                     "id": experiment.id,
                     "title": f"Сравниваем {hypothesis}",
-                    "comparing": f"Сравниваем {arms_text}. До конца проверки: {plural(days, PLURALS['days'])}.",
+                    "comparing": comparing,
+                    "arms": contents,
                     "remaining_impressions": remaining if experiment.status == "running" else 0,
                     "status": experiment.status,
                     "conclusion": conclusion
@@ -329,7 +335,7 @@ class ScreensService:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
             if type(amount) is not int or not 0 < amount <= MAX_BUDGET_KOP:
-                raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {MAX_BUDGET_KOP // 100} ₽.")
+                raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {rubles(MAX_BUDGET_KOP)} ₽.")
             minimum = 0
             platforms = {row.platform for row in self.repository.rows(PlatformAccount, business.id)}
             for platform in sorted(platforms):

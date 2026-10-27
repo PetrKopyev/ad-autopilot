@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Annotated
@@ -6,12 +6,13 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.routing import ReleasingRoute, request_session
 from app.auth.sessions import Repository, current_user
 from app.db.models import Business, User
 from app.demo_flags import demo_now
 from app.services.stats import Level, StatsRepository, StatsService
 
-router = APIRouter(prefix="/api/stats")
+router = APIRouter(prefix="/api/stats", route_class=ReleasingRoute)
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,8 @@ def get_business(
     return repository.get_business(user.id, business_id)
 
 
-def get_stats_service() -> Iterator[StatsService]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_stats_service() -> AsyncIterator[StatsService]:
+    with request_session() as db:
         yield StatsService(StatsRepository(db))
 
 

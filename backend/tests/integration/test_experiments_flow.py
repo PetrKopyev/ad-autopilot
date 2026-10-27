@@ -53,7 +53,7 @@ async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_gro
     assert change.status == "applied" and change.id == experiment.change_id
     assert experiment.verdict == "variant_wins" and experiment.status == "concluded"
     assert "Оставили Б, А остановили" in change.reason_text
-    assert "10000" in change.reason_text and "300" in change.reason_text
+    assert "10 000" in change.reason_text and "300" in change.reason_text
     assert "3,0%" in change.reason_text and "1,0%" in change.reason_text
     after = await world.adapter.get_state(world.refs)
     assert after[control.external_id].status == "paused_auto"
@@ -100,8 +100,8 @@ async def test_live_variant_is_added_wins_from_fake_stats_and_rolls_back(tmp_pat
     assert experiment.verdict == "variant_wins" and experiment.status == "concluded"
     assert change.status == "applied" and change.id == experiment.change_id
     assert "Оставили Б, А остановили" in change.reason_text
-    assert str(change.evidence["variant"]["impressions"]) in change.reason_text
-    assert str(change.evidence["variant"]["clicks"]) in change.reason_text
+    assert f"{change.evidence['variant']['impressions']:,}".replace(",", " ") in change.reason_text
+    assert f"{change.evidence['variant']['clicks']:,}".replace(",", " ") in change.reason_text
     for arm in ("control", "variant"):
         metrics = change.evidence[arm]
         ctr = f"{metrics['clicks'] / metrics['impressions'] * 100:.1f}%".replace(".", ",")

@@ -33,10 +33,10 @@ class FakeRepository:
         self.stops: list[tuple[int, int | None, str | None]] = []
         self.stop_confirmed = True
 
-    async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> bool:
+    async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> list[str]:
         account = self.accounts.get(account_id) if account_id else None
         self.stops.append((user_id, account_id, account.access_token_enc if account else None))
-        return self.stop_confirmed
+        return [] if self.stop_confirmed else ["Яндекс Директ: площадка не подтвердила остановку"]
 
     def get_session(self, token: str) -> Session | None:
         session = self.sessions.get(hash_token(token))
@@ -52,7 +52,7 @@ class FakeRepository:
     def delete_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
 
-    def delete_user(self, user_id: int) -> list[int]:
+    def delete_user(self, user_id: int, wait: float = 0) -> list[int]:
         business_ids = [business.id for business in self.businesses.values() if business.user_id == user_id]
         self.users.pop(user_id, None)
         self.sessions = {key: item for key, item in self.sessions.items() if item.user_id != user_id}

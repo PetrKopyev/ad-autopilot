@@ -247,7 +247,12 @@ def test_video_is_rebuilt_after_response_only_when_selection_changes(api) -> Non
 
     client, context = api
     builds = []
-    client.app.dependency_overrides[plan.get_video_builder] = lambda: builds.append
+
+    def build(business_id: int) -> bool:
+        builds.append(business_id)
+        return True
+
+    client.app.dependency_overrides[plan.get_video_builder] = lambda: build
     business_id = context.world.business.id
     images = context.world.repository.assets(business_id)
     selected = [asset.id for asset in images if asset.selected and asset.kind != "video"]

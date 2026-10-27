@@ -292,7 +292,39 @@ def test_experiments_and_safe_business(setup):
     assert "Убедительной разницы" in items[0]["conclusion"]
     assert items[1]["remaining_impressions"] == 4000
     assert "/ads#" not in items[1]["comparing"]
-    assert items[1]["comparing"].startswith(f"Сравниваем вариант А «{control.title}» и вариант Б «")
+    # Заголовки вариантов в этом мире совпадают: варианты различает начало текста.
+    assert control.title == variant.title
+    assert items[1]["comparing"].startswith(f"Сравниваем вариант А «{control.text}» и вариант Б «")
+    assert "До конца проверки" in items[1]["comparing"] and "До конца проверки" not in items[0]["comparing"]
+    assert items[1]["arms"] == [
+        {"title": control.title, "text": control.text},
+        {"title": variant.title, "text": variant.text},
+    ]
+
+
+def test_experiment_arms_with_same_title_differ_by_text_and_missing_ad_is_empty(setup):
+    client, world = setup
+    control, variant = list(world.ads.values())[:2]
+    variant.title, variant.text = control.title, "Другое начало текста"
+    for id_, status, variant_id in ((1, "cancelled", variant.id), (2, "running", 999_999)):
+        world.repository.save(
+            Experiment(
+                id=id_,
+                business_id=1,
+                ad_group_id=control.ad_group_id,
+                hypothesis="text",
+                control_ad_id=control.id,
+                variant_ad_id=variant_id,
+                planned_n_per_arm=2000,
+                started_at=world.clock.now,
+                deadline=world.clock.now + timedelta(days=14),
+                status=status,
+                stats={},
+            )
+        )
+    running, cancelled = client.get("/api/experiments").json()["items"]
+    assert cancelled["comparing"] == f"Сравниваем вариант А «{control.text}» и вариант Б «Другое начало текста»."
+    assert running["arms"][1] == {"title": "", "text": ""}
     result = client.get("/api/business").json()
     assert result["marking"]["inn"] == result["marking"]["phone"] == ""
     assert result["marking"]["confirmed_in_platform"] == {"direct": True}

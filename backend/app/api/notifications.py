@@ -1,15 +1,16 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import WorkerRun
 from app.worker.jobs import WorkerRepository
 
-router = APIRouter(prefix="/api/notifications")
+router = APIRouter(prefix="/api/notifications", route_class=ReleasingRoute)
 LIMIT = 20
 # Только то, что владельцу стоит знать: служебные отметки шагов (мало данных для проверки и т. п.) не показываем.
 NOTICES = {
@@ -31,25 +32,12 @@ NOTICES = {
 }
 
 
-def get_notifications_repository() -> Iterator[WorkerRepository]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_notifications_repository() -> AsyncIterator[WorkerRepository]:
+    with request_session() as db:
         yield WorkerRepository(db)
 
 
 Repository = Annotated[WorkerRepository, Depends(get_notifications_repository)]
-
-
-def unread(repository: WorkerRepository, business_id: int) -> list[WorkerRun]:
-    """Повтор того же сообщения в следующих шагах показывается один раз — самым новым."""
-    seen, result = set(), []
-    for row in repository.unread_notifications(business_id, NOTICES, LIMIT * 10):
-        key = (row.log[0]["reason_code"], row.log[0]["text"])
-        if key not in seen:
-            seen.add(key)
-            result.append(row)
-    return result
 
 
 @router.get("")
@@ -64,23 +52,15 @@ def notifications(business: CurrentBusiness, repository: Repository, response: R
             "text": row.log[0]["text"],
             "level": NOTICES[row.log[0]["reason_code"]][1],
         }
-        for row in unread(repository, business.id)[:LIMIT]
+        for row in repository.unread_notifications(business.id, NOTICES, LIMIT)
     ]
 
 
 @router.post("/{notification_id}/read", status_code=204, dependencies=[Depends(require_csrf)])
 def read(notification_id: int, business: CurrentBusiness, repository: Repository) -> Response:
-    rows = repository.unread_notifications(business.id, NOTICES, LIMIT * 10)
-    target = next((row for row in rows if row.id == notification_id), None)
-    if target is None:
-        if not repository.rows(WorkerRun, business.id, kind="notification", id=notification_id):
-            raise HTTPException(404, "Уведомление не найдено.")
-        return Response(status_code=204, headers={"Cache-Control": "no-store"})
-    # Вместе с ним прочитаны и его повторы: иначе после «Понятно» всплыл бы более старый такой же.
-    key = (target.log[0]["reason_code"], target.log[0]["text"])
-    repository.mark_read(
-        business.id,
-        [row.id for row in rows if (row.log[0]["reason_code"], row.log[0]["text"]) == key],
-        datetime.now(UTC),
-    )
+    target = repository.find(WorkerRun, business_id=business.id, kind="notification", status="ok", id=notification_id)
+    if target is None or target.log[0].get("reason_code") not in NOTICES:
+        raise HTTPException(404, "Уведомление не найдено.")
+    # Вместе с ним прочитаны и его повторы той же темы: иначе после «Понятно» всплыл бы более старый такой же.
+    repository.mark_read(business.id, repository.same_theme(target), datetime.now(UTC))
     return Response(status_code=204, headers={"Cache-Control": "no-store"})

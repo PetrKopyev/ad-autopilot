@@ -9,12 +9,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.ads import router as ads_router
 from app.api.auth import router as auth_router
 from app.api.autopilot import router as autopilot_router
+from app.api.body import BodyLimit
 from app.api.business import router as business_router
 from app.api.clients import router as clients_router
 from app.api.experiments import router as experiments_router
 from app.api.history import router as history_router
 from app.api.notifications import router as notifications_router
+from app.api.plan import MAX_UPLOAD
 from app.api.plan import router as plan_router
+from app.api.routing import ReleasingRoute
 from app.api.stats import router as stats_router
 from app.api.vk import router as vk_router
 from app.config import settings
@@ -39,7 +42,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Автопилот рекламы", lifespan=lifespan)
-router = APIRouter(prefix="/api")
+app.add_middleware(BodyLimit, paths={"/api/plan/upload-photo": MAX_UPLOAD})
+router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
 
 @router.get("/health")

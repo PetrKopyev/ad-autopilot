@@ -1,6 +1,7 @@
 import hashlib
 import secrets
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -12,7 +13,6 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.auth.revoke import Revocation, revocation, same_vk_access
 from app.db.models import Business, OAuthState, PlatformAccount, Session, User
-from app.db.session import SessionLocal
 
 SESSION_COOKIE = "__Host-session"
 CSRF_COOKIE = "__Host-csrf"
@@ -29,13 +29,23 @@ class AuthRepository:
     def __init__(self, db: DBSession) -> None:
         self.db = db
 
+    def release(self) -> None:
+        """Проверка входа идёт в каждом запросе: после чтения соединение возвращается в пул, а не ждёт конца запроса.
+
+        Иначе запрос держал бы второе соединение, пока его сервис ждёт своего, и пул кончался на десятке картинок."""
+        self.db.commit()
+
     def get_session(self, token: str) -> Session | None:
-        return self.db.scalar(
+        session = self.db.scalar(
             select(Session).where(Session.id == hash_session_id(token), Session.expires_at > datetime.now(UTC))
         )
+        self.release()
+        return session
 
     def get_user(self, user_id: int) -> User | None:
-        return self.db.get(User, user_id)
+        user = self.db.get(User, user_id)
+        self.release()
+        return user
 
     def save_session(self, session: Session, previous_token: str | None = None) -> None:
         if previous_token:
@@ -88,6 +98,7 @@ class AuthRepository:
         if business_id is not None:
             statement = statement.where(Business.id == business_id)
         businesses = list(self.db.scalars(statement.limit(2)))
+        self.release()
         if not businesses:
             raise HTTPException(404, "Сначала заполните сведения о бизнесе.")
         if len(businesses) != 1:
@@ -156,11 +167,19 @@ class AuthRepository:
                 result.append(item)
         return result
 
-    def delete_user(self, user_id: int) -> list[int]:
-        """Удаляет пользователя каскадом; возвращает id его бизнесов, чтобы удалить их каталоги с файлами."""
-        businesses = list(self.db.scalars(select(Business.id).where(Business.user_id == user_id)))
-        self.db.execute(delete(User).where(User.id == user_id))
-        self.db.commit()
+    def delete_user(self, user_id: int, wait: float = 0) -> list[int]:
+        """Удаляет пользователя каскадом; возвращает id его бизнесов, чтобы удалить их каталоги с файлами.
+
+        Удаление идёт под блокировками его бизнесов: файлы пишутся только под блокировкой и после проверки, что бизнес
+        ещё есть, поэтому после удаления фоновая сборка ролика не создаст каталог заново."""
+        from app.worker.locks import business_lock
+
+        businesses = list(self.db.scalars(select(Business.id).where(Business.user_id == user_id).order_by(Business.id)))
+        with ExitStack() as stack:
+            for business_id in businesses:
+                stack.enter_context(business_lock(self.db.get_bind(), business_id, wait))
+            self.db.execute(delete(User).where(User.id == user_id))
+            self.db.commit()
         return businesses
 
     def disconnect_account(self, user_id: int, account_id: int) -> bool:
@@ -182,8 +201,10 @@ class AuthRepository:
         return True
 
 
-def get_repository() -> Iterator[AuthRepository]:
-    with SessionLocal() as db:
+async def get_repository() -> AsyncIterator[AuthRepository]:
+    from app.api.routing import request_session
+
+    with request_session() as db:
         yield AuthRepository(db)
 
 

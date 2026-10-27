@@ -17,7 +17,7 @@ export function displayDateTime(value: string): string { return `${displayDate(v
 
 /**
  * «Только что» — если событие меньше минуты назад по текущему времени бизнеса.
- * now = null, когда точного времени бизнеса нет (демо знает только дату): тогда всегда показываем время.
+ * now = null, пока время бизнеса неизвестно (в демо оно приходит с сервера): тогда всегда показываем время.
  */
 export function justNow(value: string, now: number | null): boolean {
   if (now === null) return false;

@@ -10,7 +10,8 @@ x-backend: &backend
 
 services:
   db:
-    image: postgres:16-alpine
+    # Образы закреплены по digest (индекс для всех архитектур): обновлять осознанно, вместе с проверкой стенда.
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -57,7 +58,7 @@ services:
     command: ["python", "-m", "app.worker.main"]
 
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:504a44d7d74bd2bc28a66afc4774912fc21223ca8a67734af1c54ab2f999b489
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
     # Демо слушает только 127.0.0.1 (BIND_ADDR в .env.demo), сервер — все адреса.

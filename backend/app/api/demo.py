@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, StrictInt
 
 from app.api.auth import require_demo
+from app.api.routing import ReleasingRoute
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.db.models import Business
@@ -22,7 +23,7 @@ from app.worker.clock import SystemClock
 from app.worker.jobs import Worker
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/demo", dependencies=[Depends(require_demo)])
+router = APIRouter(prefix="/demo", dependencies=[Depends(require_demo)], route_class=ReleasingRoute)
 
 type OpenService = Callable[[int], AbstractContextManager[DemoService]]
 

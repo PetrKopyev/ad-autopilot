@@ -18,3 +18,15 @@ def test_ports_bind_to_configurable_address_and_demo_is_local():
     assert COMPOSE["services"]["caddy"]["ports"] == ["${BIND_ADDR:-0.0.0.0}:80:80", "${BIND_ADDR:-0.0.0.0}:443:443"]
     assert all("ports" not in service for name, service in COMPOSE["services"].items() if name != "caddy")
     assert "BIND_ADDR=127.0.0.1" in (ROOT / ".env.demo.example").read_text().splitlines()
+
+
+def test_third_party_images_are_pinned_by_digest():
+    for name in ("db", "caddy"):
+        image = COMPOSE["services"][name]["image"]
+        assert "@sha256:" in image and len(image.split("@sha256:")[1]) == 64, name
+
+
+def test_caddy_limits_api_request_body():
+    caddyfile = (ROOT / "deploy" / "Caddyfile").read_text()
+    api = caddyfile[caddyfile.index("handle @api") :]
+    assert "max_size 11MB" in api[: api.index("reverse_proxy")]

@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 from app.api.autopilot import Screens
 from app.api.demo import router as demo_router
 from app.api.limits import site_check_limit
+from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_session, current_user, require_csrf
 from app.content.site_reader import read_site
@@ -28,7 +29,7 @@ from app.services.onboarding import (
 )
 from app.services.registry import build_llm
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 router.include_router(demo_router)
 
 
@@ -75,11 +76,10 @@ def human_errors() -> Iterator[None]:
         raise HTTPException(502, str(error)) from error
 
 
-def get_onboarding_service(request: Request) -> Iterator[OnboardingService]:
+async def get_onboarding_service(request: Request) -> AsyncIterator[OnboardingService]:
     from app.config import settings
-    from app.db.session import SessionLocal
 
-    with SessionLocal() as db:
+    with request_session() as db:
         yield OnboardingService(
             OnboardingRepository(db),
             build_llm(settings, request.app.state.http),

@@ -21,7 +21,7 @@ TEMPLATES = {
     ),
     "EXPERIMENT_WIN": (
         "Объявление {winner} показывали {impressions}, на него нажали {clicks} ({rate}%) "
-        "против {other_rate}% у {loser}. Вероятность, что разница случайна, — {p_percent}%. "
+        "против {other_rate}% у {loser}. {confidence}. "
         "Оставили {winner}, {loser} остановили."
     ),
     "EXPERIMENT_NO_DIFF": "Убедительной разницы между объявлениями нет. Оставили прежнее, новое остановили.",
@@ -87,13 +87,15 @@ def plural(number: int | Decimal, forms: tuple[str, str, str]) -> str:
     if isinstance(number, Decimal) and number != number.to_integral_value():
         return f"{format(number, '.1f').replace('.', ',')} {forms[1]}"
     value = int(number)
+    # Разряды отделяются пробелом, как в суммах и в интерфейсе: «11 040 раз».
+    shown = f"{value:,}".replace(",", " ")
     if value % 10 == 1 and value % 100 != 11:
         word = forms[0]
     elif 2 <= value % 10 <= 4 and not 12 <= value % 100 <= 14:
         word = forms[1]
     else:
         word = forms[2]
-    return f"{value} {word}"
+    return f"{shown} {word}"
 
 
 def explain(
@@ -136,8 +138,12 @@ def explain_experiment(
         raise ValueError("A winning result must include its p-value")
     winner, loser = ("Б", "А") if result.verdict == Verdict.VARIANT else ("А", "Б")
     metrics, other = (variant, control) if result.verdict == Verdict.VARIANT else (control, variant)
-    percent = Decimal(str(result.p_value)) * 100
-    displayed = format(percent, ".1f").replace(".", ",")
+    # Владельцу — не p-значение, а вывод словами: побеждает только разница с p ниже порога проверки.
+    confidence = (
+        "Разница почти наверняка не случайна"
+        if result.p_value < 0.01
+        else "Разница, скорее всего, не случайна: такой перевес редко бывает случайным"
+    )
     return explain(
         "EXPERIMENT_WIN",
         winner=winner,
@@ -146,5 +152,5 @@ def explain_experiment(
         clicks=metrics.clicks,
         rate=metrics.ctr * 100,
         other_rate=other.ctr * 100,
-        p_percent="меньше 0,1" if displayed == "0,0" else displayed,
+        confidence=confidence,
     )

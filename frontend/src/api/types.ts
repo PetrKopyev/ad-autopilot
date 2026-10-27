@@ -72,6 +72,8 @@ export interface Experiment {
   id: number;
   title: string;
   comparing: string;
+  /** Тексты вариантов А и Б: заголовки часто совпадают, отличие видно по тексту. */
+  arms: { title: string; text: string }[];
   remaining_impressions: number;
   status: 'running' | 'concluded' | 'cancelled';
   conclusion: string | null;

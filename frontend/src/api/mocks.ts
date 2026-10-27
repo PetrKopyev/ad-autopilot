@@ -87,6 +87,7 @@ export function mockStopAll() {
 }
 export function mockExperiments() {
   return { items: [{ id: 1, title: copy.screens.mockExperiment, comparing: copy.screens.mockComparing,
+    arms: [{ title: 'Маникюр рядом с вами', text: 'Запись онлайн, мастер рядом с домом.' }, { title: 'Выберите время для маникюра', text: 'Запись онлайн, мастер рядом с домом.' }],
     remaining_impressions: 4200, status: 'running' as const, conclusion: null }] };
 }
 export function mockHistory() {

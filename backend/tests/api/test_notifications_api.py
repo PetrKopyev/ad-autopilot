@@ -116,3 +116,29 @@ def test_login_required(setup):
     client, _ = setup
     client.cookies.clear()
     assert client.get("/api/notifications").status_code == 401
+
+
+def test_daily_repeats_of_one_theme_show_as_one_actual_notice(setup):
+    client, repository = setup
+    for day in range(15):
+        run = notice(1, "BUDGET_OPPORTUNITY", f"При увеличении на {100 + day} ₽ — ещё обращения.", hours=24 * day)
+        run.log = [run.log[0] | {"target_id": "business"}]
+        repository.save(run)
+    repository.save(notice(1, "ANOMALY", "Несколько дней нет обращений.", hours=1))
+    items = client.get("/api/notifications").json()
+    assert [item["kind"] for item in items] == ["BUDGET_OPPORTUNITY", "ANOMALY"]
+    assert "114 ₽" in items[0]["text"]
+    assert client.post(f"/api/notifications/{items[0]['id']}/read").status_code == 204
+    assert [item["kind"] for item in client.get("/api/notifications").json()] == ["ANOMALY"]
+
+
+def test_read_rejects_service_and_proposed_notices(setup):
+    client, repository = setup
+    repository.save(
+        notice(1, "EXPERIMENT_TOO_LONG", "Служебное.", hours=1),
+        notice(1, "BUDGET_STOP", "Предложение.", hours=2, status="proposed"),
+    )
+    service, proposed = repository.rows(WorkerRun, kind="notification")
+    assert client.post(f"/api/notifications/{service.id}/read").status_code == 404
+    assert client.post(f"/api/notifications/{proposed.id}/read").status_code == 404
+    assert len(service.log) == 1 and len(proposed.log) == 1

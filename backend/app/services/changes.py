@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Connection, and_, func, select, text
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.orm import Session
 
 from app.db.models import AD_STATUSES, ENTITY_STATUSES, Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
@@ -108,8 +109,13 @@ class ChangesRepository:
     @contextmanager
     def business_lock(self, business_id: int) -> Iterator[None]:
         # Сессионная блокировка переживает commit записи pending; соединение закреплено до unlock.
+        from app.db.session import lock_bind
+
         bind = self.db.get_bind()
-        context = nullcontext(bind) if isinstance(bind, Connection) else bind.connect()
+        try:
+            context = nullcontext(bind) if isinstance(bind, Connection) else lock_bind(bind).connect()
+        except PoolTimeout as error:
+            raise ChangeConflict("Изменение этого бизнеса уже выполняется. Попробуйте позже.") from error
         with context as connection:
             acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id})
             if not acquired:
@@ -350,7 +356,9 @@ class ChangesService:
         reverts_id: int | None = None,
         idempotency_key: str | None = None,
         now: datetime | None = None,
+        force: bool = False,
     ) -> ChangeLog:
+        """force — защитное действие, которое выполняется и в пробном режиме (остановка перед отзывом доступа)."""
         if not operations:
             raise ValueError("Нужна хотя бы одна операция.")
         business = self.repository.business(business_id)
@@ -359,7 +367,7 @@ class ChangesService:
             from app.config import settings
 
             dry_run = settings.dry_run
-        dry_run = (dry_run or business.settings.get("dry_run", False)) and actor != "external"
+        dry_run = (dry_run or business.settings.get("dry_run", False)) and actor != "external" and not force
         protective_stop = actor in {"system", "owner"} and all(
             op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )

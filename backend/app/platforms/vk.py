@@ -53,6 +53,11 @@ LEGAL_MARKING = (
 )
 
 
+def image_size(file: Path) -> dict[str, int]:
+    with Image.open(file) as image:
+        return {"width": image.width, "height": image.height}
+
+
 def _rub(kop: int) -> str:
     return f"{kop // 100}.{kop % 100:02d}"
 
@@ -244,7 +249,7 @@ class VkAdapter(VkClient):
 
     async def _upload(self, path: str, file: Path, data: dict | None = None) -> str:
         try:
-            content = file.read_bytes()
+            content = await asyncio.to_thread(file.read_bytes)
         except OSError:
             raise PlatformError("Не удалось прочитать файл для загрузки.") from None
         result = await self._request(
@@ -259,8 +264,7 @@ class VkAdapter(VkClient):
 
     async def upload_image(self, file: Path) -> str:
         try:
-            with Image.open(file) as image:
-                size = {"width": image.width, "height": image.height}
+            size = await asyncio.to_thread(image_size, file)
         except (OSError, UnidentifiedImageError):
             raise PlatformError("Файл не похож на изображение jpg или png.") from None
         return await self._upload("content/static.json", file, size)

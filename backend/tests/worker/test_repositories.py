@@ -456,17 +456,32 @@ async def test_rejection_notice_is_one_per_ad_and_reason_not_per_poll(repository
     ]
 
 
+async def test_rejection_notices_of_same_ad_id_on_two_platforms_are_separate(repository) -> None:
+    world = tree(repository, ("direct", "vk"))
+    platform = RejectingPlatform("Нужна лицензия")
+    await sync_moderation(worker(repository, {"direct": platform, "vk": platform}), world.business)
+    assert len(repository.rows(WorkerRun, world.business.id, kind="notification")) == 2
+    unread = repository.unread_notifications(world.business.id, {"MODERATION_REJECTED"}, 10)
+    assert sorted(row.log[0]["target_id"] for row in unread) == ["direct:a-1", "vk:a-1"]
+
+
 def test_unread_notifications_and_mark_read(repository) -> None:
     world = tree(repository)
     business_id = world.business.id
     rows = {
-        "old": run(business_id, kind="notification", slot_key="n1", started_at=NOW, log=[{"reason_code": "ANOMALY"}]),
+        "old": run(
+            business_id,
+            kind="notification",
+            slot_key="n1",
+            started_at=NOW,
+            log=[{"reason_code": "ANOMALY", "text": "А"}],
+        ),
         "new": run(
             business_id,
             kind="notification",
             slot_key="n2",
             started_at=NOW + timedelta(hours=1),
-            log=[{"reason_code": "ANOMALY"}],
+            log=[{"reason_code": "ANOMALY", "text": "Б"}],
         ),
         "other_code": run(
             business_id, kind="notification", slot_key="n3", log=[{"reason_code": "EXPERIMENT_TOO_LONG"}]
@@ -483,3 +498,46 @@ def test_unread_notifications_and_mark_read(repository) -> None:
     repository.mark_read(business_id, [rows["new"].id, rows["step"].id], NOW)
     assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10)] == ["old"]
     assert repository.find(WorkerRun, id=rows["step"].id).log == [{"reason_code": "ANOMALY"}]
+
+
+def test_unread_notifications_show_one_latest_per_theme(repository) -> None:
+    # Ежедневное «Можно получить больше обращений» с новыми суммами — одна тема (target_id): показываем только
+    # последнее, и сотня повторов не вытесняет другие уведомления из выборки.
+    business_id = tree(repository).business.id
+
+    def notice(slot: str, hours: int, code: str = "BUDGET_OPPORTUNITY", **entry):
+        return run(
+            business_id,
+            kind="notification",
+            slot_key=slot,
+            started_at=NOW + timedelta(hours=hours),
+            log=[{"reason_code": code, **entry}],
+        )
+
+    rows = [notice(f"o{day}", day * 24, text=f"Ещё {day} ₽", target_id="business") for day in range(1, 31)]
+    rows += [
+        notice("ad-1", 1, "NOT_SHOWING", text="Нет показов", target_id=11),
+        notice("ad-2", 2, "NOT_SHOWING", text="Нет показов", target_id=12),
+        notice("mod-1", 3, "MODERATION_REJECTED", text="Объявление «А»: лицензия."),
+        notice("mod-2", 4, "MODERATION_REJECTED", text="Объявление «А»: лицензия."),
+    ]
+    repository.save(*rows)
+    codes = {"BUDGET_OPPORTUNITY", "NOT_SHOWING", "MODERATION_REJECTED"}
+    latest = repository.unread_notifications(business_id, codes, 3)
+    assert [row.slot_key for row in latest] == ["o30", "mod-2", "ad-2"]
+    everything = repository.unread_notifications(business_id, codes, 10)
+    assert [row.slot_key for row in everything] == ["o30", "mod-2", "ad-2", "ad-1"]
+    assert len(repository.same_theme(latest[0])) == 30
+    repository.mark_read(business_id, repository.same_theme(latest[0]), NOW)
+    assert [row.slot_key for row in repository.unread_notifications(business_id, {"BUDGET_OPPORTUNITY"}, 10)] == []
+
+
+def test_facts_are_notified_in_trial_mode_and_only_proposals_wait(repository) -> None:
+    world = tree(repository)
+    world.business.settings = {"dry_run": True}
+    repository.save(world.business)
+    trial = Worker(repository, lambda *_: None, clock=VirtualClock(NOW), dry_run=True)
+    trial.notice(world.business, "MODERATION_REJECTED", "Объявление «Т1»: Нужна лицензия.", key="fact")
+    trial.notice(world.business, "BUDGET_STOP", "Реклама остановлена.", key="action", proposal=True)
+    statuses = {row.slot_key: row.status for row in repository.rows(WorkerRun, world.business.id, kind="notification")}
+    assert statuses == {"fact": "ok", "action": "proposed"}

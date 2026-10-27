@@ -1,8 +1,9 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from app.api.routing import ReleasingRoute, request_session
 from app.auth.sessions import current_user, require_csrf
 from app.db.models import ChangeLog, User
 from app.demo_flags import demo_now
@@ -11,13 +12,11 @@ from app.services.changes import AdapterResolver, ChangeConflict, ChangesReposit
 from app.services.rollback import ConfirmationRequired, RollbackService, can_revert
 from app.worker.clock import SystemClock
 
-router = APIRouter(prefix="/api/history")
+router = APIRouter(prefix="/api/history", route_class=ReleasingRoute)
 
 
-def get_history_repository() -> Iterator[ChangesRepository]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_history_repository() -> AsyncIterator[ChangesRepository]:
+    with request_session() as db:
         yield ChangesRepository(db)
 
 

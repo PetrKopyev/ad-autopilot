@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
       - name: Lock files match pyproject.toml
         run: |
-          python -m pip install uv==0.13.5
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-tools.lock
           check="$RUNNER_TEMP/lock"
           mkdir -p "$check"
           cp pyproject.toml requirements.lock requirements-dev.lock "$check/"

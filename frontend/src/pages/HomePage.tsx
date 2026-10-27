@@ -48,7 +48,7 @@ export function HomePage() {
   const [resumeError, setResumeError] = useState('');
   const now = useBusinessNow();
   const status = autopilot.data;
-  // В демо точного времени бизнеса нет: показываем время проверки, а не «N минут назад», и не судим о давности.
+  // Пока время бизнеса неизвестно, показываем время проверки, а не «N минут назад», и не судим о давности.
   const minutes = status?.last_check_at && now !== null ? Math.max(0, Math.floor((now - Date.parse(status.last_check_at)) / 60000)) : null;
   const stale = status?.status === 'running' && now !== null && (minutes === null || minutes > 15);
   const working = !status?.last_check_at ? copy.screens.heartbeatMissing

@@ -357,7 +357,8 @@ class SiteFetcher:
     async def load(self, url: str) -> Page | None:
         try:
             final_url, _, html = await asyncio.wait_for(self.get(url), TIMEOUT * 2)
-            return parse_html(final_url, html)
+            # Разбор полутора мегабайт HTML на чистом Python — до секунды: в цикле событий он остановил бы всех.
+            return await asyncio.to_thread(parse_html, final_url, html)
         except (FetchError, httpx.HTTPError, TimeoutError, ValueError):
             return None
 

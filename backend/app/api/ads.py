@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.autopilot import Screens
 from app.api.business import human_errors
+from app.api.routing import ReleasingRoute
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 
-router = APIRouter(prefix="/api/ads")
+router = APIRouter(prefix="/api/ads", route_class=ReleasingRoute)
 
 
 @router.get("")

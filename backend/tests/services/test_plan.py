@@ -1,5 +1,7 @@
+import asyncio
 import json
 import shutil
+import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -257,6 +259,43 @@ async def test_video_is_not_saved_when_selection_changed_during_build(world: Wor
     assert not list((world.media / str(world.business.id)).glob("video-*"))
 
 
+async def test_video_built_for_old_selection_is_not_saved_when_selection_changed_to_other_three(
+    world: World, monkeypatch
+) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    group = draft["groups"][0]
+    for seed in (701, 702):
+        world.plans.upload_photo(world.business.id, group["id"], picture(seed), TODAY)
+    plan = world.repository.latest_plan(world.business.id)
+    ids = plan.payload["assets"][plan.payload["groups"][0]["segment"]]
+    if len(ids) < 4:
+        pytest.skip("В сегменте меньше четырёх картинок")
+    world.plans.select_assets(world.business.id, ids[:3])
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    def build_video(images, title, font_path):
+        # Пока ffmpeg собирал ролик из первых трёх, владелец выбрал другие три: старый ролик не сохраняем.
+        world.plans.select_assets(world.business.id, ids[1:4])
+        return SimpleNamespace(data=b"video")
+
+    monkeypatch.setattr(plan_module, "build_video", build_video)
+    assert world.plans.build_videos(world.business.id) is True
+    assert not [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
+    assert not list((world.media / str(world.business.id)).glob("video-*"))
+
+
+async def test_video_build_is_skipped_without_ffmpeg(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    world.plans.select_assets(world.business.id, [asset["id"] for asset in draft["groups"][0]["assets"]])
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(plan_module, "build_video", lambda *args, **kwargs: pytest.fail("ffmpeg не установлен"))
+    assert world.plans.build_videos(world.business.id) is True
+
+
 async def test_video_build_skips_busy_business(world: World, monkeypatch) -> None:
     from contextlib import contextmanager
 
@@ -277,8 +316,92 @@ async def test_video_build_skips_busy_business(world: World, monkeypatch) -> Non
         yield
 
     monkeypatch.setattr(world.repository, "business_lock", busy)
-    world.plans.build_videos(world.business.id)
+    assert world.plans.build_videos(world.business.id) is False
     assert not [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
+    monkeypatch.undo()
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
+    assert world.plans.build_videos(world.business.id) is True
+    assert [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
+
+
+async def test_video_is_built_once_while_selection_stays_the_same(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
+    if len(ids) < 3:
+        pytest.skip("В сегменте меньше трёх картинок")
+    world.plans.select_assets(world.business.id, ids)
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    calls = []
+    monkeypatch.setattr(
+        plan_module, "build_video", lambda images, title, font_path: calls.append(images) or SimpleNamespace(data=b"v")
+    )
+    assert world.plans.build_videos(world.business.id) and world.plans.build_videos(world.business.id)
+    assert len(calls) == 1
+
+
+async def test_video_file_is_removed_when_its_row_is_not_saved(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
+    if len(ids) < 3:
+        pytest.skip("В сегменте меньше трёх картинок")
+    world.plans.select_assets(world.business.id, ids)
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
+    commits = iter([None])
+
+    def commit():
+        # Первый commit завершает чтение, второй падает: бизнес удалили, пока собирался ролик.
+        if next(commits, "fail") == "fail":
+            raise RuntimeError("business deleted")
+
+    monkeypatch.setattr(world.repository, "commit", commit)
+    with pytest.raises(RuntimeError):
+        world.plans.build_videos(world.business.id)
+    assert not list((world.media / str(world.business.id)).glob("video-*"))
+
+
+async def test_video_queue_keeps_one_pending_build_per_business_and_limits_queue() -> None:
+    from app.services.plan import VideoQueue
+
+    queue = VideoQueue(limit=1, retries=0, delay=0)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def build(business_id):
+        calls.append(business_id)
+        started.set()
+        release.wait(5)
+        return True
+
+    running = asyncio.create_task(queue.request(1, build))
+    await asyncio.to_thread(started.wait, 5)
+    # Пока ролики бизнеса собираются, новые выборы дают одну сборку после текущей, а не очередь из трёх.
+    for _ in range(3):
+        await queue.request(1, build)
+    # В очереди уже есть бизнес, предел — один: второй бизнес не встаёт.
+    await queue.request(2, build)
+    release.set()
+    await running
+    assert calls == [1, 1]
+    await queue.request(2, build)
+    assert calls == [1, 1, 2]
+
+
+async def test_video_queue_repeats_build_that_found_business_busy() -> None:
+    from app.services.plan import VideoQueue
+
+    attempts = []
+    await VideoQueue(retries=2, delay=0).request(5, lambda business_id: attempts.append(business_id) or False)
+    assert attempts == [5, 5, 5]
+    results = iter([False, True])
+    attempts.clear()
+    await VideoQueue(retries=5, delay=0).request(5, lambda business_id: attempts.append(business_id) or next(results))
+    assert attempts == [5, 5]
 
 
 async def test_readiness_reflects_blockers(world: World) -> None:

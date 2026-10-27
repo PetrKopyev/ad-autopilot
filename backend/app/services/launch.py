@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from app.content.images import DEFAULT_FONT, ImageRejected, make_formats
 from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
@@ -19,7 +20,7 @@ from app.platforms.base import (
     PlatformError,
     TargetSpec,
 )
-from app.platforms.direct import weekly_limit
+from app.platforms.direct import budget_end, weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
 from app.services.demo import configure_adapter
@@ -44,9 +45,12 @@ def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], 
     if limit.daily_limit < daily or limit.remaining_cap < period or full_week < weekly:
         return f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}»."
     if weekly_limit(limit.daily_limit, limit.remaining_cap, today) < weekly:
+        # Недельный лимит считается до воскресенья или до конца месяца, что раньше: советуем по тому, что обрезало.
+        week_end = today + timedelta(days=6 - today.weekday())
+        period, start = ("месяца", "с 1-го числа") if budget_end(today) < week_end else ("недели", "с понедельника")
         return (
-            f"До конца недели осталось мало дней: «{TITLES[platform]}» не примет недельный бюджет меньше "
-            f"{rubles(weekly)} ₽. Запустите рекламу с понедельника или увеличьте бюджет месяца."
+            f"До конца {period} осталось мало дней: «{TITLES[platform]}» не примет недельный бюджет меньше "
+            f"{rubles(weekly)} ₽. Запустите рекламу {start} или увеличьте бюджет месяца."
         )
     return None
 
@@ -237,18 +241,23 @@ class LaunchService:
     async def upload_one(self, adapter: AdPlatform, platform: str, asset: Asset, group: dict) -> str:
         if platform in asset.platform_refs:
             return asset.platform_refs[platform]
-        path = self.media_root / asset.file_path
-        name = IMAGE_FORMATS[platform]
-        try:
-            data = make_formats(path.read_bytes(), offer=group["ads"][0]["title"], font_path=self.font_path)[name]
-        except ImageRejected:
-            data = make_formats(path.read_bytes(), font_path=self.font_path)[name]
-        target = path.with_name(f"{path.stem}-{name}.jpg")
-        target.write_bytes(data)
+        # Нарезка картинок занимает секунды: в цикле событий она задерживала бы запросы всех пользователей.
+        target = await run_in_threadpool(
+            self.cut_image, self.media_root / asset.file_path, IMAGE_FORMATS[platform], group["ads"][0]["title"]
+        )
         ref = await adapter.upload_image(target)
         asset.platform_refs = asset.platform_refs | {platform: ref}
         self.repository.commit()
         return ref
+
+    def cut_image(self, path: Path, name: str, offer: str) -> Path:
+        try:
+            data = make_formats(path.read_bytes(), offer=offer, font_path=self.font_path)[name]
+        except ImageRejected:
+            data = make_formats(path.read_bytes(), font_path=self.font_path)[name]
+        target = path.with_name(f"{path.stem}-{name}.jpg")
+        target.write_bytes(data)
+        return target
 
     def stage_rows(
         self,

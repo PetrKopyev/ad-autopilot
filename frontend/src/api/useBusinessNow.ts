@@ -1,22 +1,27 @@
 import { useEffect, useState } from 'react';
-import { getDemoDate } from './demo';
+import { getDemoNow } from './demo';
 import { mockEnabled } from './screens';
 
-/** Текущее время бизнеса для «только что» и «N минут назад». В демо сервер отдаёт только дату, поэтому null. */
+/**
+ * Текущее время бизнеса для «только что» и «N минут назад». В демо это демо-время с сервера:
+ * после перемотки оно уходит от настоящего, поэтому сверяемся с сервером при каждом обновлении.
+ */
 export function useBusinessNow(): number | null {
-  const [demo, setDemo] = useState<boolean | undefined>(mockEnabled ? false : undefined);
+  const [offset, setOffset] = useState<number | null>(mockEnabled ? 0 : null);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (mockEnabled) return;
     const controller = new AbortController();
-    // Без ответа о демо считаем время настоящим: предупреждение о давней проверке важнее точной подписи.
-    getDemoDate(controller.signal).then((date) => date !== null, () => false)
-      .then((demo) => { if (!controller.signal.aborted) setDemo(demo); });
-    return () => controller.abort();
+    async function sync() {
+      if (mockEnabled) { setNow(Date.now()); return; }
+      // Без ответа оставляем прежний сдвиг, а если его ещё нет — считаем время настоящим:
+      // предупреждение о давней проверке важнее точной подписи.
+      const shift = await getDemoNow(controller.signal).then((value) => value === null ? 0 : Date.parse(value) - Date.now(), () => null);
+      if (controller.signal.aborted) return;
+      setOffset((previous) => shift ?? previous ?? 0); setNow(Date.now());
+    }
+    void sync();
+    const timer = window.setInterval(() => void sync(), 30_000);
+    return () => { controller.abort(); window.clearInterval(timer); };
   }, []);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  return demo === false ? now : null;
+  return offset === null ? null : now + offset;
 }

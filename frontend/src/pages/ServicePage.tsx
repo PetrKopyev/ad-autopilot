@@ -57,7 +57,7 @@ export function ServicePolicyPage() {
     {error && <ErrorBanner message={error} />}
     {me.data && <Card className="page-stack"><p>{copy.launchFlow.signedIn(me.data.login)}</p><div className="actions"><Button disabled={busy} variant="secondary" onClick={() => {
       setBusy(true); setError('');
-      void logout().then(() => me.reload()).catch(() => setError(copy.errors.network)).finally(() => setBusy(false));
+      void logout().then(() => me.reload()).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : copy.errors.generic)).finally(() => setBusy(false));
     }}>{copy.launchFlow.logout}</Button></div></Card>}
     {me.data === null && <Link to="/login">{copy.login.title}</Link>}
   </div>;
@@ -68,7 +68,7 @@ export function ServiceErrorPage() {
   return <div className="page-stack launch-flow"><h1>{copy.service.errorsTitle}</h1>
     {error && <ErrorBanner message={error} />}
     <Card className="page-stack"><p>{copy.launchFlow.reauth}</p><div className="actions"><Button disabled={busy} onClick={() => {
-      setBusy(true); void connectAccount('direct', businessId()).catch(() => setError(copy.errors.network)).finally(() => setBusy(false));
+      setBusy(true); void connectAccount('direct', businessId()).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : copy.errors.generic)).finally(() => setBusy(false));
     }}>{copy.setup.accounts.connectDirect}</Button><Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link></div></Card>
     <Card className="page-stack"><p>{copy.launchFlow.lowBalance}</p><div className="actions"><a className="button button--secondary" href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.launchFlow.openDirect}</a><a className="button button--secondary" href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.launchFlow.openVk}</a></div></Card>
     <Card><p>{copy.launchFlow.platformUnavailable}</p></Card><Link to="/setup">{copy.common.start}</Link>

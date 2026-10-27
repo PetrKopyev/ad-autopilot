@@ -1,15 +1,19 @@
+import asyncio
 import secrets
 import shutil
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session as DBSession
 from starlette.concurrency import run_in_threadpool
 
 from app.api.limits import demo_login_limit, yandex_start_limit
+from app.api.routing import ReleasingRoute, request_session
 from app.auth import yandex
 from app.auth.revoke import revoke_tokens
 from app.auth.sessions import (
@@ -25,16 +29,20 @@ from app.auth.sessions import (
     require_csrf,
     set_session_cookies,
 )
-from app.db.models import Business, PlatformAccount, Session, User
+from app.db.models import Business, Campaign, PlatformAccount, Session, User
 from app.demo_flags import advance_jobs, demo_enabled, demo_now
+from app.platforms.base import AdPlatform
 from app.platforms.fake import VirtualClock
-from app.services.budget_guard import stop_platform
+from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, stop_platform
+from app.services.changes import ChangeConflict
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
+from app.services.launch import TITLES
 from app.worker.clock import SystemClock
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
-type AdStopper = Callable[[int, int | None, str], Awaitable[bool]]
+type AdStopper = Callable[[int, int | None, str], Awaitable[list[str]]]
+STOP_TIMEOUT = 60
 
 
 def remove_business_media(business_id: int) -> None:
@@ -47,38 +55,51 @@ def remove_business_media(business_id: int) -> None:
         shutil.rmtree(path)
 
 
-def get_ad_stopper(request: Request) -> AdStopper:
-    async def stop(user_id: int, account_id: int | None, reason_text: str) -> bool:
-        from sqlalchemy import select
+async def stop_user_ads(
+    db: DBSession, resolve: Callable[[int, str], AdPlatform], user_id: int, account_id: int | None, reason_text: str
+) -> list[str]:
+    """Останавливает рекламу кабинетов пользователя перед отзывом доступа; возвращает, где остановку не подтвердили.
 
+    Кабинет, который требует входа заново, остановить нечем: если у него есть работающие кампании, это проблема."""
+    from app.worker.jobs import Worker, WorkerRepository
+
+    repository = WorkerRepository(db)
+    statement = (
+        select(PlatformAccount)
+        .join(Business)
+        .where(Business.user_id == user_id, PlatformAccount.status != "revoked")
+        .order_by(PlatformAccount.id)
+    )
+    if account_id is not None:
+        statement = statement.where(PlatformAccount.id == account_id)
+    problems = []
+    for account in db.scalars(statement).all():
+        title = TITLES[account.platform]
+        business = repository.business(account.business_id)
+        if account.status != "ok":
+            campaigns = repository.rows(Campaign, business.id, platform_account_id=account.id)
+            if any(campaign.external_id and campaign.status not in STOPPED for campaign in campaigns):
+                problems.append(f"{title}: кабинет требует входа заново, без него мы не можем остановить кампании")
+            continue
+        worker = Worker(repository, resolve, dry_run=False, clock=VirtualClock(demo_now(business, SystemClock().now)))
+        worker.step_key = f"owner:{uuid4()}"
+        if not await stop_platform(business, worker=worker, platform=account.platform, reason_text=reason_text):
+            problems.append(f"{title}: площадка не подтвердила остановку")
+    return problems
+
+
+def get_ad_stopper(request: Request) -> AdStopper:
+    async def stop(user_id: int, account_id: int | None, reason_text: str) -> list[str]:
         from app.db.session import SessionLocal
-        from app.worker.jobs import Worker, WorkerRepository
 
         with SessionLocal() as db:
-            repository = WorkerRepository(db)
-            statement = (
-                select(PlatformAccount)
-                .join(Business)
-                .where(Business.user_id == user_id, PlatformAccount.status == "ok")
-                .order_by(PlatformAccount.id)
-            )
-            if account_id is not None:
-                statement = statement.where(PlatformAccount.id == account_id)
-            stopped = True
-            for account in db.scalars(statement).all():
-                business = repository.business(account.business_id)
-                worker = Worker(
-                    repository,
-                    request.app.state.platform_adapters.resolve,
-                    dry_run=False,
-                    clock=VirtualClock(demo_now(business, SystemClock().now)),
-                )
-                worker.step_key = f"owner:{uuid4()}"
-                done = await stop_platform(
-                    business, worker=worker, platform=account.platform, reason_text=reason_text
-                )
-                stopped = stopped and done
-            return stopped
+            try:
+                async with asyncio.timeout(STOP_TIMEOUT):
+                    return await stop_user_ads(
+                        db, request.app.state.platform_adapters.resolve, user_id, account_id, reason_text
+                    )
+            except TimeoutError:
+                return ["остановка не закончилась за минуту"]
 
     return stop
 
@@ -110,10 +131,8 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(403, "Не удалось проверить запрос. Обновите страницу и попробуйте снова.")
 
 
-def get_demo_users() -> Iterator[DemoUsers]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_demo_users() -> AsyncIterator[DemoUsers]:
+    with request_session() as db:
         yield DemoUsers(db)
 
 
@@ -243,20 +262,25 @@ async def delete_me(
     response: Response,
 ) -> dict:
     # Остановка до отзыва: потом управлять кампаниями будет нечем. Неудача не мешает удалению, но о ней сообщаем.
-    stopped = await stop_ads(user.id, None, "Остановили рекламу перед удалением ваших данных.")
+    problems = await stop_ads(user.id, None, "Остановили рекламу перед удалением ваших данных.")
     revocations = await run_in_threadpool(repository.revocations, user.id)
-    for business_id in await run_in_threadpool(repository.delete_user, user.id):
-        remove_business_media(business_id)
+    try:
+        businesses = await run_in_threadpool(repository.delete_user, user.id, LOCK_WAIT_SECONDS)
+    except ChangeConflict as error:
+        raise HTTPException(409, "Автопилот сейчас меняет рекламу. Повторите удаление через минуту.") from error
+    for business_id in businesses:
+        await run_in_threadpool(remove_business_media, business_id)
     # Отзыв идёт после ответа: площадка может отвечать по 10 секунд, а данные у нас уже удалены.
     background.add_task(revoke_tokens, request.app.state.http, revocations)
     response.headers["Cache-Control"] = "no-store"
     clear_cookies(response)
     return {
-        "stopped": stopped,
+        "stopped": not problems,
         "message": "Данные удалены. Рекламу перед удалением остановили."
-        if stopped
-        else "Данные удалены, но не все площадки подтвердили остановку рекламы. Проверьте в кабинетах "
-        "Яндекс Директа и VK, что кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
+        if not problems
+        else f"Данные удалены, но не все площадки подтвердили остановку рекламы ({'; '.join(problems)}). "
+        "Проверьте в кабинетах Яндекс Директа и VK, что кампании «Автопилот» остановлены: управлять ими мы больше "
+        "не можем.",
     }
 
 
@@ -291,16 +315,16 @@ async def disconnect_account(
     background: BackgroundTasks,
     response: Response,
 ) -> dict:
-    stopped = await stop_ads(user.id, id, "Остановили рекламу на площадке перед отключением кабинета.")
+    problems = await stop_ads(user.id, id, "Остановили рекламу на площадке перед отключением кабинета.")
     revocations = await run_in_threadpool(repository.revocations, user.id, id)
     if not await run_in_threadpool(repository.disconnect_account, user.id, id):
         raise HTTPException(404, "Кабинет не найден.")
     background.add_task(revoke_tokens, request.app.state.http, revocations)
     response.headers["Cache-Control"] = "no-store"
     return {
-        "stopped": stopped,
+        "stopped": not problems,
         "message": "Кабинет отключён. Рекламу на этой площадке перед отключением остановили."
-        if stopped
-        else "Кабинет отключён, но площадка не подтвердила остановку рекламы. Проверьте в её кабинете, что "
-        "кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
+        if not problems
+        else f"Кабинет отключён, но площадка не подтвердила остановку рекламы ({'; '.join(problems)}). Проверьте в "
+        "её кабинете, что кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
     }

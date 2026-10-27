@@ -1,25 +1,24 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, StrictInt
 
+from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.services.clients import ClientsRepository, ClientsService
 
-router = APIRouter(prefix="/api/clients")
+router = APIRouter(prefix="/api/clients", route_class=ReleasingRoute)
 
 
 class Answer(BaseModel):
     clients_count: StrictInt | Literal["не знаю"] | None
 
 
-def get_clients_service() -> Iterator[ClientsService]:
-    from app.db.session import SessionLocal
-
-    with SessionLocal() as db:
+async def get_clients_service() -> AsyncIterator[ClientsService]:
+    with request_session() as db:
         yield ClientsService(ClientsRepository(db))
 
 

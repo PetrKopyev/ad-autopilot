@@ -1,6 +1,7 @@
+from contextlib import suppress
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from app.content.site_reader import Page, SiteReadResult
 from app.db.models import Business, PlatformAccount, User
@@ -65,12 +66,20 @@ class DemoUsers:
         self.db = db
 
     def expire(self, before: datetime) -> list[int]:
-        """Возвращает id удалённых бизнесов: их каталоги с файлами удаляются целиком."""
-        users = select(User.id).where(User.yandex_uid.startswith(DEMO_UID_PREFIX), User.created_at < before)
-        businesses = list(self.db.scalars(select(Business.id).where(Business.user_id.in_(users))))
-        self.db.execute(delete(User).where(User.id.in_(users)))
-        self.db.commit()
-        return businesses
+        """Возвращает id удалённых бизнесов: их каталоги с файлами удаляются целиком.
+
+        Пользователь удаляется под блокировками своих бизнесов (см. AuthRepository.delete_user); занятый перемоткой
+        или сборкой ролика остаётся до следующего входа в демо."""
+        from app.auth.sessions import AuthRepository
+
+        users = self.db.scalars(
+            select(User.id).where(User.yandex_uid.startswith(DEMO_UID_PREFIX), User.created_at < before)
+        ).all()
+        removed = []
+        for user_id in users:
+            with suppress(ChangeConflict):
+                removed += AuthRepository(self.db).delete_user(user_id)
+        return removed
 
     def count(self) -> int:
         return self.db.scalar(select(func.count(User.id)).where(User.yandex_uid.startswith(DEMO_UID_PREFIX)))

@@ -5,12 +5,13 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, SecretStr
 
 from app.api.limits import vk_key_limit, vk_start_limit
+from app.api.routing import ReleasingRoute
 from app.auth import vk
 from app.auth.sessions import Repository, current_session, current_user, require_csrf
 from app.db.models import Session, User
 from app.platforms.base import AuthExpired, PlatformError
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
 
 def get_vk_accounts(repository: Repository) -> vk.VkAccountRepository:

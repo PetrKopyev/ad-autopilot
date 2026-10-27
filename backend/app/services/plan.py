@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import logging
 import secrets
 import shutil
 from collections.abc import Awaitable, Callable
@@ -8,6 +10,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
@@ -37,6 +40,7 @@ from app.services.onboarding import (
     lines,
 )
 
+logger = logging.getLogger(__name__)
 CAP_MULTIPLIER = Decimal("1.25")
 
 
@@ -69,6 +73,9 @@ class PlanRepository(OnboardingRepository):
 
     def assets(self, business_id: int) -> list[Asset]:
         return list(self.db.scalars(select(Asset).where(Asset.business_id == business_id).order_by(Asset.id)))
+
+    def asset(self, business_id: int, asset_id: int) -> Asset | None:
+        return self.db.scalar(select(Asset).where(Asset.id == asset_id, Asset.business_id == business_id))
 
 
 def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
@@ -149,14 +156,61 @@ def launch_blockers(
 VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="video")
 
 
-def build_videos(repository: PlanRepository, media_root: Path, business_id: int, font_path: str = DEFAULT_FONT) -> None:
+class VideoQueue:
+    """Очередь сборок роликов: у бизнеса не больше одной ожидающей сборки, всего бизнесов в очереди — не больше limit.
+
+    Пока ролики бизнеса собираются, новый выбор картинок только отмечает, что нужна ещё одна сборка: она начнётся после
+    текущей и прочитает выбор заново, поэтому побеждает последний выбор. Сборка, которая не сохранила результат из-за
+    занятого бизнеса, повторяется через delay секунд, не больше retries раз."""
+
+    def __init__(self, limit: int = 20, retries: int = 12, delay: float = 5) -> None:
+        self.limit = limit
+        self.retries = retries
+        self.delay = delay
+        self._guard = Lock()
+        self._active: set[int] = set()
+        self._again: set[int] = set()
+
+    async def request(self, business_id: int, build: Callable[[int], bool]) -> None:
+        with self._guard:
+            if business_id in self._active:
+                self._again.add(business_id)
+                return
+            if len(self._active) >= self.limit:
+                logger.warning("Очередь сборки роликов заполнена, бизнес %s пропущен", business_id)
+                return
+            self._active.add(business_id)
+        try:
+            retries = 0
+            while True:
+                with self._guard:
+                    self._again.discard(business_id)
+                saved = await asyncio.get_running_loop().run_in_executor(VIDEO_EXECUTOR, build, business_id)
+                with self._guard:
+                    if business_id in self._again:
+                        continue
+                if saved or retries >= self.retries:
+                    return
+                retries += 1
+                await asyncio.sleep(self.delay)
+        finally:
+            with self._guard:
+                self._active.discard(business_id)
+                self._again.discard(business_id)
+
+
+VIDEO_QUEUE = VideoQueue()
+
+
+def build_videos(repository: PlanRepository, media_root: Path, business_id: int, font_path: str = DEFAULT_FONT) -> bool:
     """Видео из 3–4 выбранных картинок сегмента; без ffmpeg пропускаем: ролик загружается вручную.
 
     Ролик пересобирается, только если изменился его набор картинок; прежний файл удаляется. ffmpeg работает без
     блокировки бизнеса (до 180 секунд), а результат сохраняется под ней и только если выбор за это время не
-    изменился: иначе новый ролик соберёт задача, запущенная последним выбором. Бизнес занят — тоже пропускаем."""
+    изменился: иначе новый ролик соберёт задача, запущенная последним выбором. False — бизнес был занят и ничего не
+    сохранено: сборку нужно повторить."""
     if shutil.which("ffmpeg") is None:
-        return
+        return True
     built: dict[str, tuple[list[int], bytes]] = {}
     for segment, chosen, video in video_segments(repository, business_id):
         sources = [asset.id for asset in chosen]
@@ -171,7 +225,7 @@ def build_videos(repository: PlanRepository, media_root: Path, business_id: int,
             continue
     # commit завершает чтение: под блокировкой выбор перечитывается заново.
     repository.commit()
-    replaced = []
+    replaced, stored = [], []
     try:
         with repository.business_lock(business_id):
             for segment, chosen, video in video_segments(repository, business_id):
@@ -186,6 +240,7 @@ def build_videos(repository: PlanRepository, media_root: Path, business_id: int,
                 if segment not in built or built[segment][0] != sources:
                     continue
                 path = store(media_root, business_id, f"video-{segment.replace(' ', '-')}", "mp4", built[segment][1])
+                stored.append(path)
                 if video is None:
                     video = Asset(business_id=business_id, kind="video", idea_text=segment, file_path=path)
                     repository.add(video)
@@ -196,9 +251,15 @@ def build_videos(repository: PlanRepository, media_root: Path, business_id: int,
                 video.selected = True
             repository.commit()
     except ChangeConflict:
-        return
+        return False
+    except BaseException:
+        # Строки с новыми файлами не сохранились (например, бизнес удалили): файлы без строк не оставляем.
+        for file_path in stored:
+            remove_media(media_root, file_path)
+        raise
     for file_path in replaced:
         remove_media(media_root, file_path)
+    return True
 
 
 def video_segments(repository: PlanRepository, business_id: int) -> list[tuple[str, list[Asset], Asset | None]]:
@@ -427,7 +488,7 @@ class PlanService:
 
     def upload_photo(self, business_id: int, group_id: int, data: bytes, today: date) -> dict:
         business = self.repository.business(business_id)
-        plan, group = self.draft_group(business_id, group_id)
+        self.draft_group(business_id, group_id)
         assets = self.repository.assets(business_id)
         if len(assets) >= MAX_ASSETS:
             raise Blocked("Загружено слишком много картинок. Уберите ненужные.")
@@ -437,15 +498,18 @@ class PlanService:
             raise OnboardingError(
                 "Фото не подошло: нужен JPG, PNG или WebP от 256 пикселей по короткой стороне, до 10 МБ, без дублей."
             ) from error
-        asset = Asset(
-            business_id=business_id,
-            kind="upload",
-            file_path=self.store(business_id, checked.phash, "jpg", checked.data),
-            phash=checked.phash,
-            selected=True,
-        )
-        self.repository.add(asset)
-        self.attach(plan, group["segment"], [asset])
+        # Файл пишется под блокировкой и после повторной проверки плана: удаление бизнеса не оставит его сиротой.
+        with self.repository.business_lock(business_id):
+            plan, group = self.draft_group(business_id, group_id)
+            asset = Asset(
+                business_id=business_id,
+                kind="upload",
+                file_path=self.store(business_id, checked.phash, "jpg", checked.data),
+                phash=checked.phash,
+                selected=True,
+            )
+            self.repository.add(asset)
+            self.attach(plan, group["segment"], [asset])
         return self.view(business, plan, today)
 
     def select_assets(self, business_id: int, asset_ids: list[int]) -> bool:
@@ -459,8 +523,8 @@ class PlanService:
         self.repository.commit()
         return changed
 
-    def build_videos(self, business_id: int) -> None:
-        build_videos(self.repository, self.media_root, business_id, self.font_path)
+    def build_videos(self, business_id: int) -> bool:
+        return build_videos(self.repository, self.media_root, business_id, self.font_path)
 
     def generations_remaining(self, budget: ArtBudget) -> int:
         return max(0, (budget.limit_kop - budget.spent_kop) // (REGENERATE_COUNT * ART_COST_KOP))

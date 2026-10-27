@@ -104,4 +104,6 @@ h2 { font-size: 1.15rem; line-height: 1.4; }
   .app-footer { grid-column: 1; padding: var(--space-3) var(--space-4); gap: var(--space-3); }
   .card { padding: var(--space-4); }
   .actions > .button { flex: 1 1 120px; }
+  .demo-advance { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .demo-advance > .button { padding-inline: var(--space-2); }
 }

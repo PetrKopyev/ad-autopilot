@@ -191,6 +191,9 @@ class MemoryRepository(LaunchRepository):
     def assets(self, business_id: int) -> list[Asset]:
         return self.rows(Asset, business_id=business_id)
 
+    def asset(self, business_id: int, asset_id: int) -> Asset | None:
+        return next(iter(self.rows(Asset, id=asset_id, business_id=business_id)), None)
+
     def campaign(self, campaign_id: int) -> Campaign | None:
         return next(iter(self.rows(Campaign, id=campaign_id)), None)
 
@@ -438,6 +441,14 @@ async def test_site_check_is_cached_and_does_not_repeat_paid_calls(world: World)
     assert world.llm.calls == ["description"]
     await world.onboarding.site_check(world.business.id, NOW + timedelta(minutes=11), TODAY)
     assert world.llm.calls == ["description", "description"]
+
+
+async def test_site_check_counts_rate_limit_only_for_real_reading(world: World) -> None:
+    misses = []
+    for minutes in (0, 5, 11):
+        now = NOW + timedelta(minutes=minutes)
+        await world.onboarding.site_check(world.business.id, now, TODAY, on_miss=lambda m=minutes: misses.append(m))
+    assert misses == [0, 11]
 
 
 async def test_parallel_site_checks_make_one_paid_call(world: World) -> None:

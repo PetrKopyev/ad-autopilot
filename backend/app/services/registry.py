@@ -9,6 +9,7 @@ import httpx
 from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.content.art import ArtBudget, ArtResult, YandexArt, validate_request
 from app.content.llm import LLMClient
@@ -149,6 +150,10 @@ class DemoArt:
     async def generate(self, prompt: str, *, seed: int, business_id: int) -> ArtResult:
         validate_request(prompt, seed)
         await self.budget.reserve()
+        return ArtResult(await run_in_threadpool(self.draw, seed), seed, f"demo-{seed}")
+
+    @staticmethod
+    def draw(seed: int) -> bytes:
         rng = Random(seed)
         image = Image.new("RGB", (768, 768), tuple(rng.randrange(90, 230) for _ in range(3)))
         draw = ImageDraw.Draw(image)
@@ -160,7 +165,7 @@ class DemoArt:
             )
         output = BytesIO()
         image.save(output, format="JPEG")
-        return ArtResult(output.getvalue(), seed, f"demo-{seed}")
+        return output.getvalue()
 
 
 def build_llm(config: Any, http: httpx.AsyncClient) -> LLMClient:

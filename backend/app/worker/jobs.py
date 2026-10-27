@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, cast, delete, func, literal_column, or_, select, update
-from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.dialects.postgresql import JSONB, distinct_on, insert
+from sqlalchemy.orm import aliased
 
 from app.db.models import (
     Ad,
@@ -46,6 +47,16 @@ def budget_contexts(change: ChangeLog) -> bool:
     """Применённое изменение, из которого воркер восстанавливает контекст бюджета кампании."""
     stored = change.evidence.get("_service", {}).get("refs", {}).get("budget_context")
     return bool(stored) or any(op.get("budget_context") for op in change.operations)
+
+
+def notice_theme(run: WorkerRun) -> str:
+    """Тема уведомления: объект, о котором оно (target_id), а без объекта — текст. Повторы темы показываются одним."""
+    entry = run.log[0]
+    return str(entry["target_id"]) if entry.get("target_id") is not None else entry.get("text", "")
+
+
+def sql_theme():
+    return func.coalesce(WorkerRun.log[0]["target_id"].astext, WorkerRun.log[0]["text"].astext, "")
 
 
 class WorkerRepository(ChangesRepository):
@@ -138,22 +149,28 @@ class WorkerRepository(ChangesRepository):
         self.db.execute(insert(WorkerRun).values(values).on_conflict_do_nothing(index_elements=RUN_SLOT))
         self.db.commit()
 
-    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
-        """Непрочитанные уведомления бизнеса с этими кодами, новые сверху; прочитанное помечено read_at в журнале."""
-        return list(
-            self.db.scalars(
-                select(WorkerRun)
-                .where(
-                    WorkerRun.business_id == business_id,
-                    WorkerRun.kind == "notification",
-                    WorkerRun.status == "ok",
-                    WorkerRun.log[0]["reason_code"].astext.in_(codes),
-                    ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
-                )
-                .order_by(WorkerRun.started_at.desc(), WorkerRun.id.desc())
-                .limit(limit)
-            )
+    def unread_filter(self, business_id: int):
+        return (
+            WorkerRun.business_id == business_id,
+            WorkerRun.kind == "notification",
+            WorkerRun.status == "ok",
+            ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
         )
+
+    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
+        """Непрочитанные уведомления бизнеса с этими кодами, новые сверху; прочитанное помечено read_at в журнале.
+
+        Из уведомлений одной темы (notice_theme) отдаётся только самое новое: повторы не вытесняют остальные."""
+        code, theme = WorkerRun.log[0]["reason_code"].astext, sql_theme()
+        latest = (
+            select(WorkerRun)
+            .where(*self.unread_filter(business_id), code.in_(codes))
+            .ext(distinct_on(code, theme))
+            .order_by(code, theme, WorkerRun.started_at.desc(), WorkerRun.id.desc())
+            .subquery()
+        )
+        row = aliased(WorkerRun, latest)
+        return list(self.db.scalars(select(row).order_by(row.started_at.desc(), row.id.desc()).limit(limit)))
 
     def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
         self.db.execute(
@@ -162,6 +179,18 @@ class WorkerRepository(ChangesRepository):
             .values(log=WorkerRun.log.op("||")(cast([{"read_at": now.isoformat()}], JSONB)))
         )
         self.db.commit()
+
+    def same_theme(self, run: WorkerRun) -> list[int]:
+        """Непрочитанные уведомления той же темы, что и run: «Понятно» убирает их вместе."""
+        return list(
+            self.db.scalars(
+                select(WorkerRun.id).where(
+                    *self.unread_filter(run.business_id),
+                    WorkerRun.log[0]["reason_code"].astext == run.log[0]["reason_code"],
+                    sql_theme() == notice_theme(run),
+                )
+            )
+        )
 
     def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
         """Последнее применённое изменение статуса объекта; поиск по операциям идёт в JSONB, а не в Python."""
@@ -340,13 +369,27 @@ class MemoryWorkerRepository(WorkerRepository):
         if None in keys.values() or self.find(WorkerRun, **keys) is None:
             self.save(run)
 
+    def unread_rows(self, business_id: int) -> list[WorkerRun]:
+        rows = self.rows(WorkerRun, business_id, kind="notification", status="ok")
+        unread = [row for row in rows if not any("read_at" in entry for entry in row.log)]
+        return sorted(unread, key=lambda row: (row.started_at, row.id), reverse=True)
+
     def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
-        rows = [
-            row
-            for row in self.rows(WorkerRun, business_id, kind="notification", status="ok")
-            if row.log[0].get("reason_code") in codes and not any("read_at" in entry for entry in row.log)
+        seen, result = set(), []
+        for row in self.unread_rows(business_id):
+            key = (row.log[0].get("reason_code"), notice_theme(row))
+            if key[0] in codes and key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result[:limit]
+
+    def same_theme(self, run: WorkerRun) -> list[int]:
+        key = (run.log[0].get("reason_code"), notice_theme(run))
+        return [
+            row.id
+            for row in self.unread_rows(run.business_id)
+            if (row.log[0].get("reason_code"), notice_theme(row)) == key
         ]
-        return sorted(rows, key=lambda row: (row.started_at, row.id), reverse=True)[:limit]
 
     def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
         for row in self.rows(WorkerRun, business_id, kind="notification", id=set(ids)):
@@ -520,9 +563,11 @@ class Worker:
         evidence: dict | None = None,
         entity_type: str | None = None,
         entity_id: str | None = None,
+        force: bool = False,
     ):
         if not operations:
             return None
+        proposed = self.proposed(business) and not force
         key = f"{self.step_key}:{campaign.id}:{suffix}"
         existing = self.repository.change_by_key(business.id, key)
         if existing is not None:
@@ -530,7 +575,7 @@ class Worker:
             if existing.status == "pending" and not dry:
                 # Сверка в начале шага не прочитала площадку: исход неизвестен, шаг повторится после сверки.
                 raise ChangeConflict("Площадка не подтвердила изменение. Проверим ещё раз в ближайшие минуты.")
-            if existing.status != "failed" and not (dry and not self.proposed(business)):
+            if existing.status != "failed" and not (dry and not proposed):
                 # Применённое, предложенное или отменённое владельцем действие слота повторно не выполняется:
                 # после отмены объект и так защищён от автопилота на время frozen_until.
                 return existing
@@ -558,13 +603,18 @@ class Worker:
             entity_id=entity_id,
             idempotency_key=key,
             now=self.clock.now,
+            force=force,
         )
-        if change.status != "applied" and not self.proposed(business):
+        if change.status != "applied" and not proposed:
             raise ChangeConflict("Площадка не подтвердила изменение. Проверим ещё раз в ближайшие минуты.")
         self.cache_context(change)
         return change
 
-    def notice(self, business: Business, reason_code: str, text: str, *, key: str = "", **details) -> None:
+    def notice(
+        self, business: Business, reason_code: str, text: str, *, key: str = "", proposal: bool = False, **details
+    ) -> None:
+        """proposal — уведомление о действии, которое в пробном режиме только предложено; о фактах (модерация,
+        продление, расход) владелец узнаёт и в пробном режиме."""
         notice_key = key or f"{self.step_key}:{reason_code}"
         if details.get("target_id") is not None:
             notice_key = f"{notice_key}:{details['target_id']}"
@@ -575,7 +625,7 @@ class Worker:
                 slot_key=notice_key,
                 started_at=self.clock.now,
                 finished_at=self.clock.now,
-                status="proposed" if self.proposed(business) else "ok",
+                status="proposed" if proposal and self.proposed(business) else "ok",
                 units_spent=0,
                 log=[{"key": notice_key, "reason_code": reason_code, "text": text, **details}],
             )

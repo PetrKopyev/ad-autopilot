@@ -2,20 +2,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, EmptyState, ErrorBanner, Money } from '../components';
 import { copy } from '../copy';
 import { getAds, getBreakdown, getDaily, getSummary } from '../api/screens';
-import { getPeriod, type PeriodChoice } from '../api/period';
+import { getBusinessToday, getPeriod, type PeriodChoice } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Daily, StatsLevel } from '../api/types';
 import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, adLabels, platformName } from './StatsShared';
 import { formatMoney } from '../components/Money';
 
-function DailyChart({ daily }: { daily: Daily }) {
+function DailyChart({ daily, today }: { daily: Daily; today: string }) {
   const chart = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(700);
-  // Период кончается сегодняшним днём: он ещё идёт, и его неполные цифры обрушили бы линии.
-  // На графике его нет, в таблице он помечен, как и другие дни, которые площадки ещё уточняют.
-  const currentDay = daily.items.length > 1 && daily.items[daily.items.length - 1].is_incomplete;
-  const points = currentDay ? daily.items.slice(0, -1) : daily.items;
+  // Сегодняшний день ещё идёт, и его неполные цифры обрушили бы линии: на графике его нет, в таблице он помечен.
+  // Прошлые дни, которые площадки ещё уточняют, остаются на графике пустыми точками.
+  const currentDay = daily.items.length > 1 && daily.items.some((point) => point.date === today);
+  const points = currentDay ? daily.items.filter((point) => point.date !== today) : daily.items;
   const hasData = daily.items.some((point) => point.sources.length > 0);
   useEffect(() => {
     if (!chart.current) return;
@@ -32,7 +32,7 @@ function DailyChart({ daily }: { daily: Daily }) {
   if (!hasData) return <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />;
   return <>
     <div className="stats-chart-key"><span>{copy.screens.chartSpend}</span><span>{copy.screens.chartLeads}</span></div>
-    <p className="muted">{[copy.screens.chartExplanation, currentDay && copy.screens.chartToday, copy.screens.chartPending].filter(Boolean).join(' ')}</p>
+    <p className="muted">{[copy.screens.chartExplanation, currentDay && copy.screens.chartToday, points.some((point) => point.is_incomplete) && copy.screens.chartPending].filter(Boolean).join(' ')}</p>
     <svg ref={chart} className="stats-chart" viewBox={`0 0 ${width} 260`} role="img" aria-label={copy.statistics.chart}>
       <title>{copy.statistics.chart}</title>
       {[...new Set([0, Math.ceil(maxLeads / 2), maxLeads])].map((leads) => {
@@ -67,7 +67,10 @@ export function StatsPage() {
   const [choice, setChoice] = useState<PeriodChoice>('month');
   const [level, setLevel] = useState<StatsLevel>('platform');
   const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
-  const daily = useResource(useCallback(async (signal: AbortSignal) => getDaily(await getPeriod(choice, signal), signal), [choice]));
+  const daily = useResource(useCallback(async (signal: AbortSignal) => {
+    const [data, today] = await Promise.all([getPeriod(choice, signal).then((period) => getDaily(period, signal)), getBusinessToday(signal)]);
+    return { data, today };
+  }, [choice]));
   const breakdown = useResource(useCallback(async (signal: AbortSignal) => getBreakdown(await getPeriod(choice, signal), level, signal), [choice, level]));
   // Кампании, группы и объявления называем так же, как в разделе «Реклама», а не номерами.
   const ads = useResource(useCallback((signal: AbortSignal) => getAds(signal), []));
@@ -93,7 +96,7 @@ export function StatsPage() {
     <Card className="page-stack"><h2>{copy.statistics.chart}</h2>
       {daily.loading && <p role="status">{copy.screens.loading}</p>}
       {daily.error && <ErrorBanner message={daily.error} onRetry={daily.reload} />}
-      {daily.data && <DailyChart daily={daily.data} />}
+      {daily.data && <DailyChart daily={daily.data.data} today={daily.data.today} />}
     </Card>
     <Card className="page-stack">
       <label className="stats-select">{copy.screens.level}<select value={level} onChange={(event) => setLevel(event.target.value as StatsLevel)}>

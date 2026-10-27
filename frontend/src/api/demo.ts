@@ -2,7 +2,7 @@ import { api, ApiError } from './client';
 import { copy } from '../copy';
 
 export interface DemoAdvance { state: 'running' | 'done' | 'error'; days: number; done: number; error: string }
-export interface DemoStatus { today: string; total_days: number; advance: DemoAdvance | null }
+export interface DemoStatus { today: string; now: string; total_days: number; advance: DemoAdvance | null }
 export const demoDateKey = 'ad-autopilot-demo-date';
 
 let demoMode: Promise<boolean> | undefined;
@@ -20,13 +20,21 @@ export async function advanceDemo(days: number): Promise<DemoStatus> {
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
+function isDemo(): Promise<boolean> {
+  demoMode ??= api<{ demo: boolean }>('/api/auth/config').then((config) => config?.demo === true)
+    .catch((error: unknown) => { demoMode = undefined; throw error; });
+  return demoMode;
+}
 /** Демо-дата бизнеса; вне демо — null. В демо окно периода строится только после ответа статуса. */
 export async function getDemoDate(signal?: AbortSignal): Promise<string | null> {
   try { const stored = sessionStorage.getItem(demoDateKey); if (stored) return stored; } catch { /* Ask the server. */ }
-  demoMode ??= api<{ demo: boolean }>('/api/auth/config').then((config) => config?.demo === true)
-    .catch((error: unknown) => { demoMode = undefined; throw error; });
-  if (!(await demoMode)) return null;
+  if (!(await isDemo())) return null;
   const status = await getDemoStatus(signal);
   rememberDemoDate(status);
   return status.today;
+}
+/** Точное время демо-бизнеса; вне демо — null. После перемотки оно стоит на месте, поэтому спрашиваем сервер каждый раз. */
+export async function getDemoNow(signal?: AbortSignal): Promise<string | null> {
+  if (!(await isDemo())) return null;
+  return (await getDemoStatus(signal)).now;
 }

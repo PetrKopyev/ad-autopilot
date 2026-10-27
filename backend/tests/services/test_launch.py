@@ -493,3 +493,44 @@ async def test_failed_launch_can_be_retried_at_once(tmp_path: Path) -> None:
         await launch(world, plan)
     adapters["vk"].fail = False
     assert (await launch(world, plan))["status"] == "launched"
+
+
+@pytest.mark.parametrize(
+    "today,advice",
+    [
+        (date(2026, 1, 8), "До конца недели осталось мало дней"),  # четверг: неделю обрезает воскресенье
+        (date(2026, 4, 29), "До конца месяца осталось мало дней"),  # среда, а 30 апреля — конец месяца
+        (date(2026, 5, 31), "До конца недели осталось мало дней"),  # воскресенье и последний день месяца
+    ],
+)
+def test_direct_weekly_minimum_advice_names_what_cuts_the_week(today, advice) -> None:
+    from app.domain.types import PlatformLimit
+    from app.services.launch import below_minimum
+
+    limit = PlatformLimit("direct", 10_000_000, 100_000, 10_000_000)
+    text = below_minimum("direct", limit, {"weekly_limit_kop": 600_000}, today)
+    assert text.startswith(advice)
+    start = "с 1-го числа" if "месяца" in advice else "с понедельника"
+    assert f"Запустите рекламу {start}" in text
+    assert below_minimum("direct", limit, {"weekly_limit_kop": 100_000}, today) is None
+
+
+async def test_second_launch_rereads_plan_under_lock_and_does_not_create_twice(tmp_path: Path, monkeypatch) -> None:
+    """Второй запрос прочитал план до блокировки, пока первый создавал кампании: под блокировкой план перечитывается."""
+    from copy import copy
+
+    world, draft = await ready(tmp_path)
+    stored = world.repository.get_plan(draft["id"], world.business.id)
+    stale = copy(stored)
+    monkeypatch.setattr(world.repository, "get_plan", lambda plan_id, business_id: stale)
+    monkeypatch.setattr(
+        world.repository,
+        "refresh",
+        lambda item: item.__dict__.update(
+            {key: value for key, value in stored.__dict__.items() if not key.startswith("_")}
+        ),
+    )
+    stored.status = "launched"
+    stored.payload = stored.payload | {"launch": {"campaigns": {"direct": 1}, "launched_at": NOW.isoformat()}}
+    result = await launch(world, draft)
+    assert result["status"] == "launched" and not campaigns(world)
