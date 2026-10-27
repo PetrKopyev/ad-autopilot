@@ -13,14 +13,21 @@ from starlette.concurrency import run_in_threadpool
 MAX_BYTES = 10 * 1024 * 1024
 # 16 млн точек — снимок телефона 4032x3024 (12 млн) и камеры 16 Мп проходят. Пик памяти одного разбора в 16 млн точек
 # (замер в образе api): JPEG около 130 МБ, PNG с прозрачностью около 190 МБ. WebP libwebp держит при разборе несколько
-# несжатых копий — 250–315 МБ на 16 млн точек, поэтому ему предел 10 млн (до 190 МБ; кадр 4K 3840x2160 проходит).
+# несжатых копий — 250–315 МБ на 16 млн точек, поэтому ему предел 10 млн (212–213 МБ; кадр 4K 3840x2160 проходит).
 # Одновременно идут не больше DECODE_SLOTS разборов.
 MAX_PIXELS = 16_000_000
 MAX_PIXELS_WEBP = 10_000_000
+# Pillow пробует только эти разборщики: заголовки остальных форматов чужого файла не читаются вовсе.
+DECODE_FORMATS = ("JPEG", "PNG", "WEBP")
 # Самый крупный формат площадок — 1920 точек по длинной стороне (ролик 16:9): больше хранить незачем.
 MAX_SIDE = 2560
 DECODE_SLOTS = threading.BoundedSemaphore(2)
-_queues: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
+# Загрузка фото ждёт слот разбора не дольше UPLOAD_WAIT секунд, и ждут не больше UPLOAD_QUEUE загрузок цикла. Каждая
+# держит тело до 10 МБ: шесть ждущих — 60 МБ рядом с двумя разборами по 213 МБ, и при самых медленных картинках
+# (1,9 с на разбор, два слота) последняя дождётся слота секунд за шесть. Обычно разбор фото короче секунды: шести мест
+# хватает и владельцу, который выбрал сразу несколько фото, и нескольким владельцам вместе.
+UPLOAD_QUEUE = 6
+UPLOAD_WAIT = 20
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FORMATS = {
     "direct_1_1": (1080, 1080),
@@ -53,14 +60,57 @@ def _check_size(width: int, height: int) -> None:
         raise ImageRejected("Image is too small or has unsupported proportions")
 
 
+class DecodeBusy(Exception):
+    """Очередь загрузок к разбору полна или слот не освободился за UPLOAD_WAIT секунд."""
+
+
+class _Queue:
+    def __init__(self) -> None:
+        self.slots = asyncio.Semaphore(2)
+        self.uploads = 0
+
+
+_queues: WeakKeyDictionary[asyncio.AbstractEventLoop, _Queue] = WeakKeyDictionary()
+
+
+def _queue() -> _Queue:
+    loop = asyncio.get_running_loop()
+    return _queues.get(loop) or _queues.setdefault(loop, _Queue())
+
+
 async def run_decoding[T](func: Callable[..., T], *args: object, **kwargs: object) -> T:
     """Запускает в пуле потоков работу с разбором картинки. Очередь к слотам ждут в цикле событий, а не в потоке пула:
     поток и соединение с базой ожиданием не заняты. В потоке слот DECODE_SLOTS ждут не больше двух разборов каждого
     цикла событий — пока слоты держит сборка ролика. Очередь своя у каждого цикла: у каждого и свой пул потоков, а
     перемотка демо и шаги демо-воркера идут в отдельных циклах."""
-    queue = _queues.setdefault(asyncio.get_running_loop(), asyncio.Semaphore(2))
-    async with queue:
-        return await run_in_threadpool(func, *args, **kwargs)
+    queue = _queue()
+    await queue.slots.acquire()
+    return await _run(queue, func, *args, **kwargs)
+
+
+async def run_upload_decoding[T](func: Callable[..., T], *args: object, **kwargs: object) -> T:
+    """run_decoding для загрузки фото: очередь загрузок ограничена UPLOAD_QUEUE, ожидание — UPLOAD_WAIT секундами,
+    иначе DecodeBusy. Генерация и нарезка при запуске ограничены своими лимитами и ждут без срока."""
+    queue = _queue()
+    if queue.uploads >= UPLOAD_QUEUE:
+        raise DecodeBusy
+    queue.uploads += 1
+    try:
+        async with asyncio.timeout(UPLOAD_WAIT):
+            await queue.slots.acquire()
+    except TimeoutError:
+        raise DecodeBusy from None
+    finally:
+        queue.uploads -= 1
+    return await _run(queue, func, *args, **kwargs)
+
+
+async def _run[T](queue: _Queue, func: Callable[..., T], *args: object, **kwargs: object) -> T:
+    """Слот отпускает конец потока, а не запроса: поток отменённого запроса доделывает разбор, и отпусти слот сам
+    запрос — в потоках пула слот DECODE_SLOTS ждали бы больше двух разборов цикла."""
+    task = asyncio.ensure_future(run_in_threadpool(func, *args, **kwargs))
+    task.add_done_callback(lambda _: queue.slots.release())
+    return await asyncio.shield(task)
 
 
 def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
@@ -73,8 +123,8 @@ def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(BytesIO(data)) as source:
-                if source.format not in {"JPEG", "PNG", "WEBP"} or getattr(source, "n_frames", 1) != 1:
+            with Image.open(BytesIO(data), formats=DECODE_FORMATS) as source:
+                if getattr(source, "n_frames", 1) != 1:
                     raise ImageRejected("Only single-frame JPG, PNG and WebP images are supported")
                 if source.width * source.height > (MAX_PIXELS_WEBP if source.format == "WEBP" else MAX_PIXELS):
                     raise ImageRejected("Image exceeds the pixel limit")

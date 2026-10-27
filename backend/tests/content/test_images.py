@@ -178,8 +178,73 @@ async def test_waiting_for_decode_slot_does_not_hold_pool_threads(photo: Image.I
     assert len(started) == 6
 
 
+async def blocked_uploads(count: int, release: threading.Event, started: list) -> list[asyncio.Task]:
+    def work() -> str:
+        started.append(threading.get_ident())
+        release.wait(5)
+        return "decoded"
+
+    tasks = [asyncio.create_task(images.run_upload_decoding(work)) for _ in range(count)]
+    await asyncio.sleep(0.1)
+    return tasks
+
+
+async def test_upload_queue_overflow_is_rejected_at_once() -> None:
+    release, started = threading.Event(), []
+    try:
+        tasks = await blocked_uploads(2 + images.UPLOAD_QUEUE, release, started)
+        assert len(started) == 2
+        with pytest.raises(images.DecodeBusy):
+            await asyncio.wait_for(images.run_upload_decoding(lambda: "late"), 0.5)
+    finally:
+        release.set()
+    assert await asyncio.gather(*tasks) == ["decoded"] * (2 + images.UPLOAD_QUEUE)
+    assert await images.run_upload_decoding(lambda: "after") == "after"
+
+
+async def test_upload_waiting_too_long_is_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(images, "UPLOAD_WAIT", 0.2)
+    release, started = threading.Event(), []
+    try:
+        tasks = await blocked_uploads(2, release, started)
+        with pytest.raises(images.DecodeBusy):
+            await images.run_upload_decoding(lambda: "late")
+        assert images._queue().uploads == 0
+    finally:
+        release.set()
+    await asyncio.gather(*tasks)
+    assert len(started) == 2
+
+
+async def test_cancelled_upload_keeps_slot_until_its_thread_ends() -> None:
+    """Поток отменённого запроса доделывает разбор: слот его до тех пор не отдаёт другому разбору и после не
+    теряется."""
+    release, started = threading.Event(), []
+    try:
+        running = await blocked_uploads(2, release, started)
+        waiting = await blocked_uploads(2, release, started)
+        for task in running + waiting[:1]:
+            task.cancel()
+        await asyncio.sleep(0.2)
+        assert len(started) == 2
+        assert images._queue().uploads == 1
+    finally:
+        release.set()
+    assert await asyncio.gather(waiting[1]) == ["decoded"]
+    assert len(started) == 3
+    assert all(task.cancelled() for task in running + waiting[:1])
+    assert images._queue().uploads == 0
+    again = threading.Event()
+    try:
+        tasks = await blocked_uploads(2, again, started)
+        assert len(started) == 5
+    finally:
+        again.set()
+    await asyncio.gather(*tasks)
+
+
 def test_gif_and_animated_png_rejected(photo: Image.Image) -> None:
-    with pytest.raises(ImageRejected, match="JPG, PNG and WebP"):
+    with pytest.raises(ImageRejected, match="Invalid or unsafe"):
         accept_upload(encoded(photo, "GIF"))
     frames = [photo, Image.new("RGB", photo.size, "red")]
     data = encoded(frames[0], save_all=True, append_images=frames[1:], duration=100)

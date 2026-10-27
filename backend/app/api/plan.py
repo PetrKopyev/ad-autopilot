@@ -13,7 +13,7 @@ from app.api.limits import assets_limit, regenerate_limit, upload_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
-from app.content.images import MAX_BYTES, run_decoding
+from app.content.images import MAX_BYTES, DecodeBusy, run_upload_decoding
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
 from app.services.plan import VIDEO_QUEUE, Built, PlanRepository, PlanService, build_videos
@@ -22,6 +22,7 @@ from app.services.registry import build_art_factory, build_llm
 router = APIRouter(prefix="/api/plan", route_class=ReleasingRoute)
 MAX_UPLOAD = MAX_BYTES + 64 * 1024
 TOO_LARGE = "Файл слишком большой: не больше 10 МБ."
+BUSY = "Сервер сейчас занят. Попробуйте загрузить фото через минуту."
 
 
 class RegenerateIn(BaseModel):
@@ -141,8 +142,11 @@ async def upload_photo(
     data = await file.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise HTTPException(413, TOO_LARGE)
-    with human_errors():
-        result = await run_decoding(service.upload_photo, business.id, group_id, data, today)
+    try:
+        with human_errors():
+            result = await run_upload_decoding(service.upload_photo, business.id, group_id, data, today)
+    except DecodeBusy as error:
+        raise HTTPException(503, BUSY, headers={"Retry-After": "60"}) from error
     background.add_task(rebuild_videos, build, business.id)
     return result
 

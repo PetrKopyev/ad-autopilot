@@ -495,7 +495,7 @@ class ApprovingPlatform(StubPlatform):
         return [ModerationInfo(external_id, "approved", None, NOW) for external_id in refs.ads.values()]
 
 
-async def test_moderation_step_saves_everything_with_one_commit_and_reads_entities_once(
+async def test_moderation_step_saves_each_campaign_with_one_commit_and_reads_entities_once(
     repository, monkeypatch
 ) -> None:
     world = tree(repository, ("direct", "vk"))
@@ -510,7 +510,10 @@ async def test_moderation_step_saves_everything_with_one_commit_and_reads_entiti
     )
     adapters = {"direct": ApprovingPlatform(0, "approved"), "vk": ApprovingPlatform(0, "approved")}
     await sync_moderation(worker(repository, adapters), world.business)
-    assert len(saves) == 1 and set(saves[0]) == {world.business, *world.ads["direct"], *world.ads["vk"]}
+    assert [set(items) for items in saves] == [
+        {world.business, *world.ads["direct"]},
+        {world.business, *world.ads["vk"]},
+    ]
     assert sorted(reads) == ["direct", "vk"]
     assert {ad.status for ad in world.ads["direct"] + world.ads["vk"]} == {"active"}
     assert sorted(world.business.settings["_worker"]["approvals"]) == ["direct:a-1", "direct:a-2", "vk:a-1", "vk:a-2"]

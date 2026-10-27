@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
 from app.db.query import Window
 from app.platforms.fake import FakeAdapter
+from app.services.changes import CLOSED_ACCOUNT
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -111,61 +112,73 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
     }
     ads_by_platform = {platform: ads_of(items) for platform, items in entities.items()}
     shared = shared_in(ads_by_platform)
-    polled = []
+    failure = None
     for campaign in campaigns:
         ads = ads_by_platform[campaign.platform]
-        adapter = worker.resolve_adapter(business.id, campaign.platform)
-        for info in await adapter.get_moderation(worker.refs(campaign, entities[campaign.platform])):
-            ad = ads.get(info.entity_id)
-            if ad is None:
-                continue
-            key = moderation_key(campaign.platform, info.entity_id)
-            ad.moderation_status, ad.moderation_reason = info.status, info.reason
-            if info.status == "approved":
-                approved = approved_at(meta, campaign.platform, info.entity_id, shared)
-                approvals[key] = approved or info.updated_at.isoformat()
-                if ad.status == "moderation":
-                    ad.status = "active"
-            elif info.status == "rejected":
-                ad.status = "rejected"
-                worker.notice(
-                    business,
-                    "MODERATION_REJECTED",
-                    f"Объявление «{ad.title}»: {info.reason.rstrip('. ')}."
-                    if info.reason
-                    else f"Объявление «{ad.title}» не прошло проверку, причину площадка не указала.",
-                    # Время ответа площадки меняется при каждом опросе: одно уведомление на объявление и причину.
-                    # Объявление (target_id) notice добавляет к ключу сам.
-                    key=f"moderation:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
-                    target_id=key,
-                )
-                # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
-                reason = (info.reason or "").casefold()
-                if (
-                    worker.rewrite_rejected
-                    and key not in rewritten
-                    and (info.entity_id in shared or info.entity_id not in rewritten)
-                    and any(word in reason for word in ("текст", "заголов", "опечат"))
-                    and not any(word in reason for word in ("медицин", "документ", "лиценз"))
-                ):
-                    operations = await worker.rewrite_rejected(business, ad, info.reason)
-                    if any(op.kind != "update_ad_text" or op.entity_id != info.entity_id for op in operations):
-                        raise ValueError("Исправление модерации может менять только текст этого объявления.")
-                    await worker.apply(
+        try:
+            adapter = worker.resolve_adapter(business.id, campaign.platform)
+            infos = await adapter.get_moderation(worker.refs(campaign, entities[campaign.platform]))
+        except CLOSED_ACCOUNT as error:
+            # Кабинет одной площадки требует входа заново или площадка не ответила: остальные всё равно опрашиваются.
+            failure = failure or error
+            continue
+        polled = []
+        try:
+            for info in infos:
+                ad = ads.get(info.entity_id)
+                if ad is None:
+                    continue
+                polled.append(ad)
+                key = moderation_key(campaign.platform, info.entity_id)
+                ad.moderation_status, ad.moderation_reason = info.status, info.reason
+                if info.status == "approved":
+                    approved = approved_at(meta, campaign.platform, info.entity_id, shared)
+                    approvals[key] = approved or info.updated_at.isoformat()
+                    if ad.status == "moderation":
+                        ad.status = "active"
+                elif info.status == "rejected":
+                    ad.status = "rejected"
+                    worker.notice(
                         business,
-                        campaign,
-                        operations,
-                        reason_code="REJECTED_REWRITE",
-                        kind="text",
-                        reason_params={"reason": info.reason or ""},
-                        suffix=f"rewrite:{ad.id}",
+                        "MODERATION_REJECTED",
+                        f"Объявление «{ad.title}»: {info.reason.rstrip('. ')}."
+                        if info.reason
+                        else f"Объявление «{ad.title}» не прошло проверку, причину площадка не указала.",
+                        # Время ответа площадки меняется при каждом опросе: одно уведомление на объявление и причину.
+                        # Объявление (target_id) notice добавляет к ключу сам.
+                        key=f"moderation:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
+                        target_id=key,
                     )
-                    rewritten = sorted(set(rewritten) | {key})
-                    if not worker.proposed(business):
-                        ad.status = "moderation"
-                    # Исправление стоило вызова ИИ: отметка сохраняется сразу, и сбой дальше по шагу его не повторит.
-                    worker.remember(business, ad, approvals=approvals, rewritten=rewritten)
-            polled.append(ad)
-    # Статусы и отметки модерации — одним commit на шаг; при сбое посреди шага следующий опрос получит их заново.
-    if polled:
-        worker.remember(business, *polled, approvals=approvals, rewritten=rewritten)
+                    # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
+                    reason = (info.reason or "").casefold()
+                    if (
+                        worker.rewrite_rejected
+                        and key not in rewritten
+                        and (info.entity_id in shared or info.entity_id not in rewritten)
+                        and any(word in reason for word in ("текст", "заголов", "опечат"))
+                        and not any(word in reason for word in ("медицин", "документ", "лиценз"))
+                    ):
+                        operations = await worker.rewrite_rejected(business, ad, info.reason)
+                        if any(op.kind != "update_ad_text" or op.entity_id != info.entity_id for op in operations):
+                            raise ValueError("Исправление модерации может менять только текст этого объявления.")
+                        await worker.apply(
+                            business,
+                            campaign,
+                            operations,
+                            reason_code="REJECTED_REWRITE",
+                            kind="text",
+                            reason_params={"reason": info.reason or ""},
+                            suffix=f"rewrite:{ad.id}",
+                        )
+                        rewritten = sorted(set(rewritten) | {key})
+                        if not worker.proposed(business):
+                            ad.status = "moderation"
+                        # Исправление стоило вызова ИИ: отметка сохраняется сразу, сбой дальше по шагу его не повторит.
+                        worker.remember(business, ad, approvals=approvals, rewritten=rewritten)
+        finally:
+            # Статусы и отметки модерации кампании — одним commit, в том числе когда кампания опрошена не до конца:
+            # иначе save(run) после сбоя сохранил бы статус active без даты одобрения.
+            if polled:
+                worker.remember(business, *polled, approvals=approvals, rewritten=rewritten)
+    if failure is not None:
+        raise failure

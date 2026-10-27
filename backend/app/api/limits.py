@@ -1,5 +1,6 @@
 from collections import deque
 from html import escape
+from ipaddress import ip_address, ip_network
 from threading import Lock
 from time import monotonic
 from typing import Annotated
@@ -11,6 +12,20 @@ from app.auth.sessions import optional_session
 from app.db.models import Session
 
 MAX_KEYS = 10_000
+
+
+def client_key(host: str) -> str:
+    """Провайдер выдаёт клиенту IPv6 сетью /64: лимит по отдельному адресу обходился бы сменой адреса в своей сети."""
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return host
+    if address.version == 4:
+        return str(address)
+    # IPv4 в виде ::ffff:a.b.c.d — отдельный клиент: в /64 все такие адреса слились бы в один ключ.
+    if address.ipv4_mapped:
+        return str(address.ipv4_mapped)
+    return str(ip_network(f"{address}/64", strict=False))
 
 
 class RateLimit:
@@ -28,7 +43,7 @@ class RateLimit:
         RateLimit.limits.append(self)
 
     def __call__(self, request: Request, session: Annotated[Session | None, Depends(optional_session)]) -> None:
-        keys = [(f"ip:{request.client.host if request.client else ''}", self.per_ip)]
+        keys = [(f"ip:{client_key(request.client.host if request.client else '')}", self.per_ip)]
         if session is not None and self.per_user is not None:
             keys.append((f"user:{session.user_id}", self.per_user))
         now = monotonic()

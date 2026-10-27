@@ -28,7 +28,7 @@ from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
 from app.platforms.base import AdPlatform, ExternalRefs, Operation, PlatformError
 from app.platforms.fake import FakeAdapter, VirtualClock
-from app.services.changes import PENDING, ChangeConflict, ChangesRepository, ChangesService
+from app.services.changes import CLOSED_ACCOUNT, PENDING, ChangeConflict, ChangesRepository, ChangesService
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
 from app.worker.locks import business_lock
 
@@ -547,14 +547,14 @@ class Worker:
         return [change for change in changes if reachable[change.platform]]
 
     def reachable(self, business_id: int, platform: str) -> bool:
-        """Кабинет, который не открывается по любой причине (вход истёк, кабинет удалили), сверить нечем."""
+        """Кабинет, который требует входа заново (CLOSED_ACCOUNT), сверить нечем. Временный сбой загрузчика кабинета
+        (например, базы) изменение из сверки не выкидывает: шаги ждут его, как и при недоступной площадке."""
         try:
             self.resolve_adapter(business_id, platform)
-        except PlatformError:
+        except CLOSED_ACCOUNT:
             return False
         except Exception:
             logger.warning("Кабинет %s бизнеса %s не открылся", platform, business_id)
-            return False
         return True
 
     def demo_available(self, business: Business) -> bool:

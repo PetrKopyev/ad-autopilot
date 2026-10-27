@@ -312,6 +312,74 @@ async def test_rewrite_is_saved_at_once_and_not_repeated_after_step_failed_later
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 2
 
 
+@pytest.mark.parametrize("vk_first", [True, False])
+async def test_direct_approvals_are_saved_when_vk_needs_reauth(monkeypatch, vk_first):
+    from app.db.models import Campaign
+    from app.platforms.base import ModerationInfo, PlatformError
+    from app.worker.jobs import Worker
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    vk = Campaign(
+        id=99,
+        business_id=1,
+        platform_account_id=2,
+        platform="vk",
+        external_id="vk-c",
+        type="vk_plan",
+        name="VK",
+        status="active",
+        daily_limit_kop=0,
+        period_cap_kop=0,
+    )
+    campaigns = world.repository.tables[Campaign]
+    campaigns.insert(0 if vk_first else len(campaigns), vk)
+
+    # Директ, как настоящий, отдаёт временем одобрения время опроса.
+    async def approved(refs):
+        return [ModerationInfo(ad.external_id, "approved", None, world.clock.now) for ad in world.ads.values()]
+
+    def resolve(business_id: int, platform: str):
+        if platform == "vk":
+            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+        return world.adapter
+
+    monkeypatch.setattr(world.adapter, "get_moderation", approved)
+    first_poll = world.clock.now
+    for _ in range(2):
+        with pytest.raises(PlatformError):
+            await Worker(world.repository, resolve, clock=world.clock, dry_run=False).run("sync_moderation", 1)
+        world.clock.advance(hours=1)
+    assert world.business.settings["_worker"]["approvals"] == {
+        f"direct:{ad.external_id}": first_poll.isoformat() for ad in world.ads.values()
+    }
+    assert {ad.status for ad in world.ads.values()} == {"active"}
+    assert [run.status for run in world.repository.rows(WorkerRun, 1, kind="sync_moderation")] == ["failed"] * 2
+
+
+async def test_approvals_are_saved_with_statuses_when_campaign_poll_fails_midway(monkeypatch):
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    first, second = list(world.ads.values())[:2]
+
+    async def moderation(refs):
+        return [
+            ModerationInfo(first.external_id, "approved", None, world.clock.now),
+            ModerationInfo(second.external_id, "rejected", "Опечатка в тексте", world.clock.now),
+        ]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", moderation)
+    rewrite = AsyncMock(side_effect=RuntimeError("ИИ не ответил"))
+    with pytest.raises(RuntimeError):
+        await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    assert first.status == "active"
+    assert world.business.settings["_worker"]["approvals"] == {
+        f"direct:{first.external_id}": world.clock.now.isoformat()
+    }
+
+
 async def test_stop_platform_before_revoke_pauses_campaign_and_writes_history():
     from app.services.budget_guard import stop_platform
 

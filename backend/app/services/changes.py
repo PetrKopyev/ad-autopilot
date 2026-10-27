@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 
+from cryptography.fernet import InvalidToken
 from sqlalchemy import Connection, and_, func, select, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.orm import Session
@@ -16,6 +17,9 @@ from app.domain.explain import TEMPLATES, explain
 from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
 
 type AdapterResolver = Callable[[int, str], AdPlatform]
+
+# Кабинет не откроется, пока владелец не войдёт заново: вход истёк, кабинет удалили, токен не расшифровать.
+CLOSED_ACCOUNT = (PlatformError, LookupError, InvalidToken)
 
 
 # Тексты конфликтов доходят до владельца (409): без слов «сверка» и «применение».
@@ -492,6 +496,8 @@ class ChangesService:
     async def recover_pending(
         self, resolve_adapter: AdapterResolver, *, business_id: int | None = None, now: datetime | None = None
     ) -> list[ChangeLog]:
+        """Кабинет, который не открылся по любой причине, здесь пропускается: изменение остаётся pending, а ждут ли его
+        шаги, решает Worker.pending."""
         result = []
         for item in self.repository.pending(business_id):
             try:
@@ -499,7 +505,10 @@ class ChangesService:
                     change = self.repository.get(item.id, item.business_id)
                     if change is None or change.status != "pending":
                         continue
-                    adapter = resolve_adapter(change.business_id, change.platform)
+                    try:
+                        adapter = resolve_adapter(change.business_id, change.platform)
+                    except Exception:
+                        continue
                     await self._reconcile(change, adapter, now=now)
                     result.append(change)
             except (ChangeConflict, PlatformError):

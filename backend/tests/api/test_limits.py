@@ -69,3 +69,16 @@ def test_key_count_is_capped_by_evicting_least_recent(clock, monkeypatch) -> Non
     assert list(limit.hits) == ["ip:c", "ip:a", "ip:d"]
     with pytest.raises(HTTPException):
         limit(request("a"), None)
+
+
+def test_ipv6_clients_are_limited_by_64_network_and_ipv4_by_address(clock) -> None:
+    limit = rate_limit("Подождите.", per_ip=1)
+    limit(request("2001:db8:1:2::1"), None)
+    with pytest.raises(HTTPException):
+        limit(request("2001:db8:1:2:ffff::9"), None)
+    limit(request("2001:db8:1:3::1"), None)
+    limit(request("198.51.100.1"), None)
+    limit(request("198.51.100.2"), None)
+    with pytest.raises(HTTPException):
+        limit(request("::ffff:198.51.100.1"), None)
+    assert list(limit.hits) == ["ip:2001:db8:1:2::/64", "ip:2001:db8:1:3::/64", "ip:198.51.100.2", "ip:198.51.100.1"]

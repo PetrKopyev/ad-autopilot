@@ -2,6 +2,7 @@ import os
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from cryptography.fernet import InvalidToken
 from integration.harness import BUDGET_KOP, Crash, CrashingAdapter, FlakyReadAdapter, make_world
 from sqlalchemy import create_engine
 
@@ -213,6 +214,70 @@ async def test_pending_checks_account_access_once_per_platform() -> None:
     pending = Worker(world.repository, resolve, clock=world.clock).pending(1)
     assert sorted(resolved) == ["direct", "vk"]
     assert [change.entity_id for change in pending] == ["direct-3", "direct-4"]
+
+
+def stuck_vk_change(world):
+    from app.db.models import ChangeLog
+
+    stuck = ChangeLog(
+        business_id=1,
+        actor="autopilot",
+        kind="pause",
+        platform="vk",
+        entity_type="ad",
+        entity_id="vk-1",
+        operations=[],
+        reason_code="CUSTOM",
+        reason_params={},
+        reason_text="Тест.",
+        evidence={"_service": {"refs": {"campaign_id": "vk-c", "groups": {}, "ads": {}, "targets": {}}}},
+        status="pending",
+    )
+    world.repository.save(stuck)
+    world.clock.advance(hours=7)
+    return stuck
+
+
+@pytest.mark.parametrize("error", [KeyError("vk"), InvalidToken()])
+async def test_pending_change_of_deleted_or_undecryptable_account_does_not_stop_steps(error) -> None:
+    from app.worker.jobs import Worker
+
+    world = await make_world()
+    stuck = stuck_vk_change(world)
+
+    def resolve(business_id: int, platform: str):
+        if platform == "vk":
+            raise error
+        return world.adapter
+
+    worker = Worker(world.repository, resolve, clock=world.clock, dry_run=False)
+    await worker.startup()
+    await worker.run("optimize", 1)
+    assert world.repository.rows(WorkerRun, 1, kind="optimize")[0].status == "ok"
+    assert stuck.status == "pending"
+
+
+async def test_temporary_account_loader_failure_keeps_pending_change_waiting() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    from app.worker.jobs import Worker
+
+    world = await make_world()
+    stuck = stuck_vk_change(world)
+
+    def resolve(business_id: int, platform: str):
+        if platform == "vk":
+            raise OperationalError("SELECT", {}, Exception("connection reset"))
+        return world.adapter
+
+    worker = Worker(world.repository, resolve, clock=world.clock, dry_run=False)
+    await worker.startup()
+    with pytest.raises(ChangeConflict):
+        await worker.run("optimize", 1)
+    # Страж бюджета несверенных изменений не ждёт и при сбое загрузчика всё равно идёт.
+    await worker.run("budget_guard", 1)
+    assert world.repository.rows(WorkerRun, 1, kind="budget_guard")[-1].status == "ok"
+    assert stuck.status == "pending"
 
 
 async def test_dry_run_proposes_without_touching_platform() -> None:
