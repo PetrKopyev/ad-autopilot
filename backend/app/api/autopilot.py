@@ -3,12 +3,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
+from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm import load_only
 
 from app.api.routing import ReleasingRoute, request_session
-from app.api.stats import CurrentBusiness
+from app.api.stats import CurrentBusiness, OptionalBusiness
 from app.auth.sessions import require_csrf
-from app.db.models import MarkingProfile, PlatformAccount
+from app.db.models import Business, MarkingProfile, PlatformAccount
 from app.db.query import condition
 from app.demo_flags import demo_now
 from app.platforms.fake import VirtualClock
@@ -24,7 +25,15 @@ class ScreensRepository(WorkerRepository):
         if model not in (MarkingProfile, PlatformAccount):
             return super().rows(model, business_id, **filters)
         fields = (
-            (MarkingProfile.business_id, MarkingProfile.subject_type, MarkingProfile.confirmed_in_platform)
+            (
+                MarkingProfile.business_id,
+                MarkingProfile.subject_type,
+                MarkingProfile.confirmed_in_platform,
+                # Название, ИНН и телефон — для «данные сохранены» в настройках: наружу уходит только маска.
+                MarkingProfile.name,
+                MarkingProfile.inn_enc,
+                MarkingProfile.phone_enc,
+            )
             if model is MarkingProfile
             else (PlatformAccount.id, PlatformAccount.business_id, PlatformAccount.platform, PlatformAccount.status)
         )
@@ -36,24 +45,41 @@ class ScreensRepository(WorkerRepository):
         return list(self.db.scalars(statement))
 
 
+# Пользователь ещё не прошёл мастер: бизнеса нет, показывать нечего.
+NO_BUSINESS = {"status": "no_business", "last_check_at": None, "auto_continue": False, "needs_attention": []}
+
+
+def screens_service(request: Request, db: DBSession, business: Business) -> ScreensService:
+    return ScreensService(
+        Worker(
+            ScreensRepository(db),
+            request.app.state.platform_adapters.resolve,
+            dry_run=False,
+            clock=VirtualClock(demo_now(business, SystemClock().now)),
+        )
+    )
+
+
 async def get_screens_service(request: Request, business: CurrentBusiness) -> AsyncIterator[ScreensService]:
     with request_session() as db:
-        yield ScreensService(
-            Worker(
-                ScreensRepository(db),
-                request.app.state.platform_adapters.resolve,
-                dry_run=False,
-                clock=VirtualClock(demo_now(business, SystemClock().now)),
-            )
-        )
+        yield screens_service(request, db, business)
+
+
+async def get_optional_screens(request: Request, business: OptionalBusiness) -> AsyncIterator[ScreensService | None]:
+    if business is None:
+        yield None
+        return
+    with request_session() as db:
+        yield screens_service(request, db, business)
 
 
 Screens = Annotated[ScreensService, Depends(get_screens_service)]
+OptionalScreens = Annotated[ScreensService | None, Depends(get_optional_screens)]
 
 
 @router.get("/status")
-def status(business: CurrentBusiness, service: Screens) -> dict:
-    return service.status(business)
+def status(business: OptionalBusiness, service: OptionalScreens) -> dict:
+    return NO_BUSINESS if business is None else service.status(business)
 
 
 @router.post("/pause", dependencies=[Depends(require_csrf)])

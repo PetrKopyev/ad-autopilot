@@ -1,8 +1,10 @@
 import { api, ApiError } from './client';
 import { copy } from '../copy';
 
+/** days — сколько дней запрошено, done — сколько уже полностью пройдено. */
 export interface DemoAdvance { state: 'running' | 'done' | 'error'; days: number; done: number; error: string }
-export interface DemoStatus { today: string; now: string; total_days: number; advance: DemoAdvance | null }
+/** total_days — сколько дней уже перемотано из 120, вместе с пройденными днями идущей перемотки. */
+export interface DemoStatus { today: string; now: string; total_days: number; advance: DemoAdvance | null; has_business: boolean }
 export const demoDateKey = 'ad-autopilot-demo-date';
 
 let demoMode: Promise<boolean> | undefined;

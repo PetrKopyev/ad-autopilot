@@ -1,9 +1,10 @@
 import { createContext, useContext, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { Navigate, Outlet } from 'react-router';
+import { ErrorBanner } from '../components/ErrorBanner';
 import { copy } from '../copy';
 import { ApiError, hasSessionCookie } from './client';
-import { mockEnabled } from './screens';
+import { getAutopilotStatus, mockEnabled } from './screens';
 import { getMe } from './setup';
 import type { Me } from './setup';
 import { useResource } from './useResource';
@@ -38,4 +39,12 @@ export function RequireSession() {
   if (session.data) signedIn.current = true;
   if (signedIn.current) return <Outlet />;
   return session.loading ? <p role="status">{copy.screens.loading}</p> : null;
+}
+
+/** Разделы с данными бизнеса: пока мастер не пройден, сразу ведём в него, и страница не шлёт своих запросов. */
+export function RequireBusiness() {
+  const status = useResource(getAutopilotStatus);
+  if (status.data?.status === 'no_business') return <Navigate to="/setup" replace />;
+  if (status.data) return <Outlet />;
+  return status.error ? <ErrorBanner message={status.error} onRetry={status.reload} /> : <p role="status">{copy.screens.loading}</p>;
 }

@@ -115,6 +115,7 @@ def demo(monkeypatch, tmp_path, request):
     app.dependency_overrides[history.get_history_repository] = lambda: repository
     app.dependency_overrides[history.get_adapter_resolver] = lambda: worker.resolve_adapter
     app.dependency_overrides[autopilot.get_screens_service] = lambda: ScreensService(worker)
+    app.dependency_overrides[autopilot.get_optional_screens] = lambda: ScreensService(worker)
     app.dependency_overrides[get_today] = lambda: world.adapters["direct"].clock.now.date()
     advance_jobs._items.clear()
     with TestClient(app, base_url="https://testserver") as client:
@@ -500,6 +501,37 @@ def test_advance_reports_progress_by_day(demo, monkeypatch):
     assert client.post("/api/demo/advance", json={"days": 3}).status_code == 202
     assert done == [0] * 48 + [1] * 48 + [2] * 48
     assert advance_jobs.get(world.business.id).done == 3
+
+
+ADVANCE_FAILED = "Перемотка прервалась. Попробуйте ещё раз."
+
+
+def test_interrupted_advance_spends_only_passed_days_and_retry_adds_the_rest(demo, monkeypatch):
+    client, world, worker = demo
+    launch(client)
+    calls = []
+    totals = []
+    run_business_due = Worker.run_business_due
+
+    async def broken(self, business_id):
+        calls.append(business_id)
+        totals.append(client.get("/api/demo/status").json()["total_days"])
+        if len(calls) == 48 * 2 + 10:
+            raise RuntimeError("connection lost")
+        await run_business_due(self, business_id)
+
+    monkeypatch.setattr(Worker, "run_business_due", broken)
+    assert client.post("/api/demo/advance", json={"days": 7}).status_code == 202
+    status = client.get("/api/demo/status").json()
+    assert status["advance"] == {"state": "error", "days": 7, "done": 2, "error": ADVANCE_FAILED}
+    assert status["total_days"] == 2
+    assert totals[0] == 0 and totals[48] == 1 and totals[96] == 2
+    monkeypatch.setattr(Worker, "run_business_due", run_business_due)
+    retry = status["advance"]["days"] - status["advance"]["done"]
+    assert client.post("/api/demo/advance", json={"days": retry}).status_code == 202
+    status = client.get("/api/demo/status").json()
+    assert status["advance"] == {"state": "done", "days": 5, "done": 5, "error": ""}
+    assert status["total_days"] == 7
 
 
 def test_status_date_uses_configured_timezone(demo, monkeypatch):

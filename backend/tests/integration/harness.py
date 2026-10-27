@@ -137,7 +137,16 @@ async def make_world(
     )
     launch_repository.put(business)
     launch_repository.put(PlatformAccount(business_id=1, platform="direct", status="ok"))
-    launch_repository.put(MarkingProfile(business_id=1, confirmed_in_platform={"direct": True}))
+    launch_repository.put(
+        MarkingProfile(
+            business_id=1,
+            subject_type="ip",
+            inn_enc="526317984689",
+            name="ИП Иванов",
+            phone_enc="+79001231122",
+            confirmed_in_platform={"direct": True},
+        )
+    )
     asset = Asset(business_id=1, kind="upload", selected=True, platform_refs={"direct": "fake-image"})
     launch_repository.put(asset)
     plan = Plan(

@@ -49,7 +49,8 @@ export interface Daily extends StatsPeriod {
 }
 // Proposed contracts for endpoints that are not available yet.
 export interface AutopilotStatus {
-  status: 'running' | 'paused' | 'budget_stop' | 'draft';
+  /** no_business — мастер ещё не пройден, бизнеса нет. */
+  status: 'running' | 'paused' | 'budget_stop' | 'draft' | 'no_business';
   last_check_at: string | null;
   auto_continue: boolean;
   needs_attention: { id: string; title: string; description: string; destination: 'clients' | 'ads' | 'settings' }[];

@@ -125,13 +125,15 @@ class DemoService:
             self.worker.clock = clock
             for adapter in adapters:
                 adapter.clock = clock
-            # Резервируем лимит до запуска: прерванная перемотка не даёт обойти 120 дней.
-            self.remember(
-                business, days=business.settings.get("_demo", {}).get("days", 0) + progress.days, now=start.isoformat()
-            )
+            before = business.settings.get("_demo", {}).get("days", 0)
+            self.remember(business, now=start.isoformat())
             for day in range(1, progress.days + 1):
                 for _ in range(48):
                     clock.advance(hours=0.5)
                     self.remember(business, now=clock.now.isoformat())
                     await self.worker.run_business_due(business_id)
+                # Лимит 120 дней тратят только пройденные дни: оборванная перемотка (и упавший сервер) не списывает
+                # остаток, и «Повторить» досчитывает его, не тратя лимит дважды. Запас на весь запрос проверен в
+                # check под этой же блокировкой, а две перемотки одного бизнеса не идут.
+                self.remember(business, days=before + day)
                 progress.done = day

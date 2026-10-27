@@ -179,6 +179,42 @@ async def test_pending_change_of_account_needing_reauth_does_not_stop_other_plat
     assert stuck.status == "pending"
 
 
+async def test_pending_checks_account_access_once_per_platform() -> None:
+    from app.db.models import ChangeLog
+    from app.platforms.base import PlatformError
+    from app.worker.jobs import Worker
+
+    world = await make_world()
+    resolved = []
+
+    def resolve(business_id: int, platform: str):
+        resolved.append(platform)
+        if platform == "vk":
+            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+        return world.adapter
+
+    for number, platform in enumerate(["vk", "vk", "vk", "direct", "direct"]):
+        world.repository.save(
+            ChangeLog(
+                business_id=1,
+                actor="autopilot",
+                kind="pause",
+                platform=platform,
+                entity_type="ad",
+                entity_id=f"{platform}-{number}",
+                operations=[],
+                reason_code="CUSTOM",
+                reason_params={},
+                reason_text="Тест.",
+                evidence={},
+                status="pending",
+            )
+        )
+    pending = Worker(world.repository, resolve, clock=world.clock).pending(1)
+    assert sorted(resolved) == ["direct", "vk"]
+    assert [change.entity_id for change in pending] == ["direct-3", "direct-4"]
+
+
 async def test_dry_run_proposes_without_touching_platform() -> None:
     world = await make_world()
     before = world.adapter._states[world.refs.campaign_id]

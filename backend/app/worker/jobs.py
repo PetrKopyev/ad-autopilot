@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 RUN_SLOT = ("business_id", "kind", "slot_key")
-HEARTBEAT_KEEP = timedelta(days=2)
+HEARTBEAT_KEEP = timedelta(days=1)
 RUNS_KEEP = timedelta(days=90)
 # Прогон старше этого считается брошенным (процесс воркера умер), и слот можно занять снова.
 RUN_STALE = timedelta(minutes=30)
@@ -253,11 +253,15 @@ class WorkerRepository(ChangesRepository):
         )
 
     def prune_runs(self, now: datetime) -> None:
-        """Пульс хранится HEARTBEAT_KEEP, прогоны шагов — RUNS_KEEP; уведомления не удаляются (см. notify)."""
+        """Пульс хранится HEARTBEAT_KEEP, прогоны шагов — RUNS_KEEP; уведомления не удаляются (см. notify). Пульс
+        «из будущего» записали перемотки демо до того, как перестали его писать: он только раздувал таблицу."""
         self.db.execute(
             delete(WorkerRun).where(
                 or_(
-                    and_(WorkerRun.kind == "heartbeat", WorkerRun.started_at < now - HEARTBEAT_KEEP),
+                    and_(
+                        WorkerRun.kind == "heartbeat",
+                        or_(WorkerRun.started_at < now - HEARTBEAT_KEEP, WorkerRun.started_at > now),
+                    ),
                     and_(WorkerRun.kind != "notification", WorkerRun.started_at < now - RUNS_KEEP),
                 )
             )
@@ -446,7 +450,8 @@ class MemoryWorkerRepository(WorkerRepository):
             row
             for row in self.tables.get(WorkerRun, [])
             if row.kind == "notification"
-            or row.started_at >= now - (HEARTBEAT_KEEP if row.kind == "heartbeat" else RUNS_KEEP)
+            or (row.kind == "heartbeat" and now - HEARTBEAT_KEEP <= row.started_at <= now)
+            or (row.kind != "heartbeat" and row.started_at >= now - RUNS_KEEP)
         ]
 
     def prune_auth(self, now: datetime) -> None:
@@ -532,7 +537,10 @@ class Worker:
         """Несверенные изменения площадок с рабочим доступом. Изменение кабинета, который требует входа заново, до
         нового входа сверить нечем: оно не должно останавливать шаги остальных площадок."""
         changes = self.repository.pending(business_id)
-        return [change for change in changes if self.reachable(business_id, change.platform)]
+        # Доступ проверяется раз на площадку: на каждое изменение загрузчик кабинета открывал бы свою сессию БД.
+        platforms = {change.platform for change in changes}
+        reachable = {platform: self.reachable(business_id, platform) for platform in platforms}
+        return [change for change in changes if reachable[change.platform]]
 
     def reachable(self, business_id: int, platform: str) -> bool:
         try:
@@ -720,7 +728,7 @@ class Worker:
                 self.repository.save(run)
 
     def prune(self) -> None:
-        """Раз в сутки: пульс хранится двое суток, прогоны шагов — 90 дней, уведомления не удаляются;
+        """Раз в сутки: пульс хранится сутки, прогоны шагов — 90 дней, уведомления не удаляются;
         просроченные сессии и запросы входа удаляются."""
         self.repository.prune_runs(self.clock.now)
         self.repository.prune_auth(self.clock.now)

@@ -1,13 +1,18 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
+from app.content import images
 from app.content.images import (
     DEFAULT_FONT,
     FORMATS,
     MAX_BYTES,
+    MAX_SIDE,
     ImageRejected,
     accept_upload,
     check_image,
@@ -79,6 +84,56 @@ def test_pixel_bomb_rejected() -> None:
     data = encoded(Image.new("1", (5100, 5000)))
     with pytest.raises(ImageRejected, match="pixel limit"):
         accept_upload(data)
+
+
+@pytest.mark.parametrize("size", [(4100, 4000), (5000, 256)])
+def test_size_rejected_before_decoding(size: tuple[int, int], monkeypatch: pytest.MonkeyPatch) -> None:
+    data = encoded(Image.new("RGB", size))
+
+    def decode(self: Image.Image) -> None:
+        raise AssertionError("Image must be rejected by its header")
+
+    monkeypatch.setattr(Image.Image, "load", decode)
+    with pytest.raises(ImageRejected, match="pixel limit|proportions"):
+        accept_upload(data)
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG"])
+def test_large_photo_is_stored_reduced(photo: Image.Image, fmt: str) -> None:
+    result = accept_upload(encoded(photo.resize((4032, 3024)), fmt))
+    assert (result.width, result.height) == (MAX_SIDE, MAX_SIDE * 3 // 4)
+
+
+def test_transparency_is_composited_on_white(photo: Image.Image) -> None:
+    image = photo.convert("RGBA")
+    image.putalpha(Image.new("L", photo.size, 255))
+    image.paste((0, 0, 0, 0), (0, 0, 400, 400))
+    result = accept_upload(encoded(image))
+    with Image.open(BytesIO(result.data)) as decoded:
+        assert all(channel > 245 for channel in decoded.getpixel((10, 10)))
+
+
+def test_decoding_is_limited_to_two_at_once(photo: Image.Image, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = encoded(photo)
+    active, peak = 0, 0
+    guard = threading.Lock()
+    transpose = images.ImageOps.exif_transpose
+
+    def slow_transpose(image: Image.Image, **kwargs: object) -> None:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return transpose(image, **kwargs)
+
+    monkeypatch.setattr(images.ImageOps, "exif_transpose", slow_transpose)
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(lambda _: accept_upload(data), range(6)))
+    assert len(results) == 6
+    assert peak == 2
 
 
 def test_gif_and_animated_png_rejected(photo: Image.Image) -> None:

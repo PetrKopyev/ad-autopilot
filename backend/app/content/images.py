@@ -1,4 +1,5 @@
 import math
+import threading
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -7,7 +8,12 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, UnidentifiedImageError
 
 MAX_BYTES = 10 * 1024 * 1024
-MAX_PIXELS = 25_000_000
+# 16 млн точек — снимок телефона 4032x3024 (12 млн) и камеры 16 Мп проходят. Пик памяти одного разбора — около 55 МБ,
+# у PNG с прозрачностью около 130 МБ (замер); одновременно идут не больше DECODE_SLOTS разборов.
+MAX_PIXELS = 16_000_000
+# Самый крупный формат площадок — 1920 точек по длинной стороне (ролик 16:9): больше хранить незачем.
+MAX_SIDE = 2560
+DECODE_SLOTS = threading.BoundedSemaphore(2)
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FORMATS = {
     "direct_1_1": (1080, 1080),
@@ -35,7 +41,15 @@ class CheckedImage:
     selected: bool = False
 
 
+def _check_size(width: int, height: int) -> None:
+    if min(width, height) < 256 or not 1 / 4 <= width / height <= 4:
+        raise ImageRejected("Image is too small or has unsupported proportions")
+
+
 def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
+    """Размеры проверяются по заголовку до декодирования. Декодирование занимает слот DECODE_SLOTS: загрузка фото,
+    генерация, нарезка при запуске и сборка ролика вместе держат в памяти не больше двух несжатых картинок. Сразу
+    после декодирования картинка уменьшается до MAX_SIDE, поворот и перевод в RGB идут уже с ней."""
     if not data or len(data) > max_bytes:
         raise ImageRejected("Image is empty or exceeds the byte limit")
     try:
@@ -46,13 +60,18 @@ def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
                     raise ImageRejected("Only single-frame JPG, PNG and WebP images are supported")
                 if source.width * source.height > MAX_PIXELS:
                     raise ImageRejected("Image exceeds the pixel limit")
-                source.load()
-                oriented = ImageOps.exif_transpose(source).convert("RGBA")
-                background = Image.new("RGBA", oriented.size, "white")
-                background.alpha_composite(oriented)
-                clean = background.convert("RGB")
-                clean.info.clear()
-                return clean
+                _check_size(source.width, source.height)
+                with DECODE_SLOTS:
+                    source.thumbnail((MAX_SIDE, MAX_SIDE))
+                    ImageOps.exif_transpose(source, in_place=True)
+                    if not source.has_transparency_data:
+                        clean = source.convert("RGB")
+                        clean.info.clear()
+                        return clean
+                    rgba = source.convert("RGBA")
+                    clean = Image.new("RGB", rgba.size, "white")
+                    clean.paste(rgba, mask=rgba)
+                    return clean
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ImageRejected("Invalid or unsafe image") from exc
 
@@ -77,9 +96,7 @@ def is_duplicate(phash: str, existing: Iterable[str], *, max_distance: int = 6) 
 
 
 def _validate(image: Image.Image) -> None:
-    width, height = image.size
-    if min(width, height) < 256 or not 1 / 4 <= width / height <= 4:
-        raise ImageRejected("Image is too small or has unsupported proportions")
+    _check_size(*image.size)
     sample = image.resize((128, 128), Image.Resampling.LANCZOS)
     if max(ImageStat.Stat(sample).stddev) < 3:
         raise ImageRejected("Image is blank or nearly uniform")

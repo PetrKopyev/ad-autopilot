@@ -168,6 +168,10 @@ def test_latest_run_breaks_ties_by_id_and_last_check_ignores_other_businesses(re
         run(world.business.id, kind="budget_guard", status="failed", finished_at=NOW + timedelta(minutes=2))
     )
     assert repository.last_check(world.business.id) == NOW + timedelta(minutes=1)
+    repository.save(run(world.business.id, kind="budget_guard", finished_at=NOW + timedelta(minutes=3), slot_key="g"))
+    assert repository.last_check(world.business.id) == NOW + timedelta(minutes=3)
+    repository.save(run(None, kind="heartbeat", finished_at=NOW + timedelta(minutes=4)))
+    assert repository.last_check(world.business.id) == NOW + timedelta(minutes=4)
 
 
 def test_notifications_with_null_key_parts_are_never_merged(repository) -> None:
@@ -229,6 +233,9 @@ def test_prune_keeps_notifications_and_runs_on_the_boundary(repository) -> None:
     rows = {
         "heartbeat_edge": run(None, kind="heartbeat", started_at=NOW - HEARTBEAT_KEEP),
         "heartbeat_old": run(None, kind="heartbeat", started_at=NOW - HEARTBEAT_KEEP - timedelta(seconds=1)),
+        "heartbeat_now": run(None, kind="heartbeat", started_at=NOW),
+        # Пульс по часам демо от старой перемотки.
+        "heartbeat_future": run(None, kind="heartbeat", started_at=NOW + timedelta(seconds=1)),
         "run_edge": run(business_id, started_at=NOW - RUNS_KEEP, slot_key="a"),
         "run_old": run(business_id, started_at=NOW - RUNS_KEEP - timedelta(seconds=1), slot_key="b"),
         "notice_old": run(business_id, kind="notification", started_at=NOW - 2 * RUNS_KEEP, slot_key="experiment:1"),
@@ -237,8 +244,10 @@ def test_prune_keeps_notifications_and_runs_on_the_boundary(repository) -> None:
     repository.save(*rows.values())
     repository.prune_runs(NOW)
     left = {row.id for row in repository.rows(WorkerRun)}
+    assert HEARTBEAT_KEEP == timedelta(days=1)
     assert {name for name, row in rows.items() if row.id in left} == {
         "heartbeat_edge",
+        "heartbeat_now",
         "run_edge",
         "notice_old",
         "notice_null",

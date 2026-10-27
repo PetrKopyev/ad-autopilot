@@ -8,8 +8,8 @@ import { getAutopilotStatus } from '../api/screens';
 import { connectAccount, disconnectAccount, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
-import { deleteMyData, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
-import type { BusinessSettings } from '../api/settings';
+import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
+import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { useResource } from '../api/useResource';
 import { StopNotice } from './SetupShared';
 import './Setup.css';
@@ -17,6 +17,9 @@ import './Setup.css';
 const labels = copy.settingsScreen;
 const descriptionKeys: DescriptionKey[] = ['services', 'prices', 'address', 'difference'];
 const emptyMarking: Marking = { subject_type: 'ip', inn: '', name: '', phone: '', confirmed_in_platform: { direct: false, vk: false } };
+const markingForm = (stored: StoredMarking | null): Marking => stored
+  ? { subject_type: stored.subject_type, inn: '', name: stored.name, phone: '', confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...stored.confirmed_in_platform } }
+  : emptyMarking;
 const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(kopecks / 100).replace('.', ',');
 
 // One section with its own save status, so a failed save never hides the others.
@@ -30,7 +33,7 @@ function useSection() {
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
-  return { busy, error, done, run, clear: () => setError(undefined) };
+  return { busy, error, done, run, clear: () => { setError(undefined); setDone(undefined); } };
 }
 type Section = ReturnType<typeof useSection>;
 function Status({ section }: { section: Section }) {
@@ -122,25 +125,30 @@ function AccountsBlock() {
 
 function MarkingBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
-  const [marking, setMarking] = useState<Marking>(() => business.marking
-    ? { ...business.marking, confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...business.marking.confirmed_in_platform } }
-    : emptyMarking);
+  const [stored, setStored] = useState<StoredMarking | null>(business.marking);
+  // Сохранённые ИНН и телефон сервер целиком не отдаёт: форма открывается по «Изменить», и их вводят заново.
+  const [editing, setEditing] = useState(!business.marking);
+  const [marking, setMarking] = useState<Marking>(() => markingForm(stored));
   const [innTouched, setInnTouched] = useState(false);
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
   const showInnError = (innTouched || !!marking.inn) && !innOk;
   const innError = validInn(marking.inn) ? copy.launchFlow.innTypeError : copy.launchFlow.innError;
+  const confirmed = stored ? (['direct', 'vk'] as const).filter((platform) => stored.confirmed_in_platform[platform]) : [];
+  function edit() {
+    section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setEditing(true);
+  }
   function submit() {
     setInnTouched(true);
     if (!innOk) { void section.run(() => Promise.reject(new Error(innError))); return; }
     if (!marking.name.trim() || marking.phone.replace(/\D/g, '').length < 10) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
-    void section.run(() => saveMarking(marking), labels.markingSaved);
+    void section.run(async () => { await saveMarking(marking); setStored(maskMarking(marking)); setEditing(false); }, labels.markingSaved);
   }
   return <Block title={copy.settings.marking}>
     <p className="muted">{labels.markingHint}</p>
-    <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    {editing ? <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
         {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError}
@@ -152,8 +160,18 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
       {(['direct', 'vk'] as const).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
         onChange={(event) => set({ confirmed_in_platform: { ...marking.confirmed_in_platform, [platform]: event.target.checked } })} />
         {platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
-      <Status section={section} /><SaveButton section={section} />
-    </form>
+      <Status section={section} />
+      <div className="actions">
+        <Button type="submit" disabled={section.busy}>{section.busy ? labels.saving : labels.save}</Button>
+        {stored && <Button variant="secondary" disabled={section.busy} onClick={() => { section.clear(); setEditing(false); }}>{labels.markingCancel}</Button>}
+      </div>
+    </form> : stored && <>
+      <p>{labels.markingAdvertiser(copy.launchFlow.subjectTypes[stored.subject_type], stored.name)}</p>
+      <p>{labels.markingStored(stored.inn_masked, stored.phone_masked)}</p>
+      <p className="muted">{confirmed.length ? labels.markingConfirmed(confirmed.map((platform) => copy.setup.accounts[platform]).join(', ')) : labels.markingNotConfirmed}</p>
+      <Status section={section} />
+      <div className="actions"><Button variant="secondary" onClick={edit}>{labels.markingEdit}</Button></div>
+    </>}
   </Block>;
 }
 

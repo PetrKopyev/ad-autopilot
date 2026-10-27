@@ -9,13 +9,16 @@ from datetime import UTC, datetime
 from app.api.auth import MAX_DEMO_USERS, remove_business_media
 from app.demo_flags import demo_enabled
 from app.services.demo import DemoUsers
+from app.worker.jobs import WorkerRepository
 
 
 def reset(db, now: datetime) -> int:
-    """Возвращает число свободных мест; занятые перемоткой или сборкой ролика пользователи остаются."""
+    """Возвращает число свободных мест; занятые перемоткой или сборкой ролика пользователи остаются. Заодно убирает
+    пульс воркера «из будущего» и устаревшие прогоны — как ежедневная уборка воркера."""
     users = DemoUsers(db)
     for business_id in users.expire(now):
         remove_business_media(business_id)
+    WorkerRepository(db).prune_runs(now)
     return MAX_DEMO_USERS - users.count()
 
 

@@ -30,12 +30,28 @@ def get_period(date_from: Annotated[date, Query(alias="from")], date_to: Annotat
     return Period(date_from, date_to)
 
 
-def get_business(
+def find_business(
     user: Annotated[User, Depends(current_user)],
     repository: Repository,
     business_id: Annotated[int | None, Query(gt=0)] = None,
-) -> Business:
-    return repository.get_business(user.id, business_id)
+) -> Business | None:
+    """Бизнес запроса. У пользователя без бизнеса — None: уведомления и статусы приложение запрашивает и до мастера.
+    Чужой или несуществующий business_id — 404."""
+    try:
+        return repository.get_business(user.id, business_id)
+    except HTTPException as error:
+        if error.status_code != 404 or business_id is not None:
+            raise
+        return None
+
+
+OptionalBusiness = Annotated[Business | None, Depends(find_business)]
+
+
+def get_business(business: OptionalBusiness) -> Business:
+    if business is None:
+        raise HTTPException(404, "Сначала заполните сведения о бизнесе.")
+    return business
 
 
 async def get_stats_service() -> AsyncIterator[StatsService]:
@@ -43,11 +59,16 @@ async def get_stats_service() -> AsyncIterator[StatsService]:
         yield StatsService(StatsRepository(db))
 
 
-def get_today(business: Annotated[Business, Depends(get_business)]) -> date:
+def business_today(business: Business | None) -> date:
     from app.config import settings
 
     zone = ZoneInfo(settings.tz_default)
-    return demo_now(business, datetime.now(zone)).astimezone(zone).date()
+    now = datetime.now(zone)
+    return (demo_now(business, now) if business else now).astimezone(zone).date()
+
+
+def get_today(business: OptionalBusiness) -> date:
+    return business_today(business)
 
 
 CurrentBusiness = Annotated[Business, Depends(get_business)]

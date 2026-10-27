@@ -74,3 +74,10 @@ it('демо-сервер не назвал дату — объявления з
   expect(screen.getByText('Цифры за последние 14 дней. В причине остановки — цифры на момент решения.')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+it('остановленное вами объявление подписано только «Остановлено вами», без повтора причины', async () => {
+  await show('text', [{ title: 'Маникюр', text, image: null }, { title: 'Маникюр', text, image: null }], [{ ...ad, status: 'paused_owner', reason: null }]);
+  expect(screen.getByText(copy.screens.adStates.paused_owner).textContent).toBe('Остановлено вами');
+  expect(screen.queryByText(/Остановлено вами:/)).toBeNull();
+  expect(screen.getByText(copy.screens.adPeriod(copy.screens.dates('21.10.2026', '03.11.2026')))).toBeTruthy();
+});

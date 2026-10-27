@@ -96,8 +96,11 @@ async def stop_user_ads(
                 business, worker=worker, platform=account.platform, reason_text=reason_text, deadline=deadline
             )
         except TimeoutError:
-            # Срок вышел до этого кабинета, но кампаний его площадки нет: останавливать было нечего.
-            if any(campaign.platform == account.platform for campaign in worker.campaigns(business)):
+            # Срок вышел до этого кабинета, но работающих кампаний его площадки нет: останавливать было нечего.
+            if any(
+                campaign.platform == account.platform and campaign.status not in STOPPED
+                for campaign in worker.campaigns(business)
+            ):
                 problems.append(f"{title}: остановка не закончилась за минуту")
             continue
         if not stopped:

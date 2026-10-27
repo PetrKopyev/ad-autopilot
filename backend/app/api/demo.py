@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from app.api.auth import require_demo
 from app.api.routing import ReleasingRoute
-from app.api.stats import CurrentBusiness, Today
+from app.api.stats import CurrentBusiness, OptionalBusiness, Today
 from app.auth.sessions import require_csrf
 from app.db.models import Business
 from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs, demo_now
@@ -60,11 +60,21 @@ def demo_status(business: Business, today: date) -> dict:
         "advance": None
         if progress is None
         else {"state": progress.state, "days": progress.days, "done": progress.done, "error": progress.error},
+        "has_business": True,
     }
 
 
 @router.get("/status")
-def status(business: CurrentBusiness, today: Today) -> dict:
+def status(business: OptionalBusiness, today: Today) -> dict:
+    if business is None:
+        # До мастера бизнеса нет: перематывать нечего, дата и время настоящие.
+        return {
+            "today": today,
+            "now": SystemClock().now.isoformat(),
+            "total_days": 0,
+            "advance": None,
+            "has_business": False,
+        }
     return demo_status(business, today)
 
 

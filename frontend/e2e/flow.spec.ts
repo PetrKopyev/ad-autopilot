@@ -79,6 +79,7 @@ for (const width of [390, 1280]) {
     const budgetField = page.getByLabel(copy.settingsScreen.budgetLabel);
     await expect(budgetField).toHaveValue('30000');
     await expect(page.getByRole('textbox', { name: new RegExp(`^${copy.settingsScreen.description.services}`) })).not.toHaveValue('');
+    await expect(page.getByText(copy.settingsScreen.markingStored('•••4689', '+7•••4567'))).toBeVisible();
     await budgetField.fill('35000');
     const saved = page.waitForResponse((response) => response.url().endsWith('/api/business/budget') && response.request().method() === 'PUT');
     await page.getByRole('button', { name: copy.settingsScreen.save, exact: true }).first().click();

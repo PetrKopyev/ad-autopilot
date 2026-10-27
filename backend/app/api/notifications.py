@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.routing import ReleasingRoute, request_session
-from app.api.stats import CurrentBusiness
+from app.api.stats import CurrentBusiness, OptionalBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import WorkerRun
 from app.demo_flags import demo_now
@@ -42,8 +42,10 @@ Repository = Annotated[WorkerRepository, Depends(get_notifications_repository)]
 
 
 @router.get("")
-def notifications(business: CurrentBusiness, repository: Repository, response: Response) -> list[dict]:
+def notifications(business: OptionalBusiness, repository: Repository, response: Response) -> list[dict]:
     response.headers["Cache-Control"] = "no-store"
+    if business is None:
+        return []
     return [
         {
             "id": row.id,

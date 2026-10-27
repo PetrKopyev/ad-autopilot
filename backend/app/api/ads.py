@@ -21,7 +21,10 @@ def ads(
     date_to: Annotated[date | None, Query(alias="to")] = None,
 ) -> dict:
     end = date_to or today
-    start = date_from or end - timedelta(days=13)
+    try:
+        start = date_from or end - timedelta(days=13)
+    except OverflowError:
+        raise HTTPException(422, "Укажите период в пределах календаря.") from None
     if start > end:
         raise HTTPException(422, "Начало периода должно быть не позже окончания.")
     return service.ads(business, start, end)

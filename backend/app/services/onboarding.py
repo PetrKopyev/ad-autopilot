@@ -1,5 +1,7 @@
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -16,7 +18,7 @@ from app.content.yandexgpt import CompletionResult, YandexGPTError
 from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
-from app.services.changes import ChangeConflict, ChangesRepository
+from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, ChangesRepository, wait_for_lock
 from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
@@ -38,6 +40,10 @@ NICHES = (
     ("fitness", ("фитнес", "тренаж", "спортзал", "тренер")),
     ("beauty", ("салон красоты", "парикмахер", "косметолог", "эпиляц", "визаж", "бров", "ресниц")),
 )
+# Проверки сайта, которые сейчас идут в процессе API (он один). Проверка того же бизнеса, пришедшая параллельно
+# (повторный вход на шаг мастера), дожидается идущей и берёт её результат из кэша: сайт второй раз не читается и лимит
+# частоты не тратится.
+SITE_CHECKS: dict[int, asyncio.Event] = {}
 
 
 class OnboardingError(ValueError):
@@ -164,6 +170,12 @@ class OnboardingRepository(ChangesRepository):
 
     def marking(self, business_id: int) -> MarkingProfile | None:
         return self.db.get(MarkingProfile, business_id)
+
+    def fresh_business(self, business_id: int) -> Business | None:
+        """Строка из базы, а не из сессии: под блокировкой видны удаление и правки, сделанные, пока её ждали."""
+        return self.db.scalar(
+            select(Business).where(Business.id == business_id).execution_options(populate_existing=True)
+        )
 
     def accounts(self, business_id: int) -> list[PlatformAccount]:
         return list(self.db.scalars(select(PlatformAccount).where(PlatformAccount.business_id == business_id)))
@@ -312,18 +324,45 @@ class OnboardingService:
                 raise Blocked("Реклама уже запущена. Сведения о бизнесе меняются в настройках.")
             business = Business(user_id=user_id, site_url=checked, city=city, month_budget_kop=month_budget_kop)
         elif business.site_url != checked:
-            business.description = {}
-            business.description_approved_at = None
-            business.metrica_counter_id = None
-            business.lead_goal_ids = []
-            business.medical_level = "none"
-            business.niche_class = business.niche_text = None
-        business.site_url = checked
+            # Под блокировкой: проверка сайта пишет ответ ИИ под ней же и не запишет описание старого сайта поверх
+            # сброшенного. Пока она идёт — 409, владелец повторит через несколько секунд.
+            with self.repository.business_lock(business.id):
+                business = self.current(business.id)
+                self.reset_description(business)
+                self.update(business, checked, city, month_budget_kop, avg_check_kop)
+            return business_view(business)
+        self.update(business, checked, city, month_budget_kop, avg_check_kop)
+        return business_view(business)
+
+    def reset_description(self, business: Business) -> None:
+        business.description = {}
+        business.description_approved_at = None
+        business.metrica_counter_id = None
+        business.lead_goal_ids = []
+        business.medical_level = "none"
+        business.niche_class = business.niche_text = None
+
+    def update(
+        self, business: Business, site_url: str, city: str, month_budget_kop: int, avg_check_kop: int | None
+    ) -> None:
+        business.site_url = site_url
         business.city = city
         business.month_budget_kop = month_budget_kop
         business.avg_check_kop = avg_check_kop
         self.repository.add(business)
-        return business_view(business)
+
+    def current(self, business_id: int) -> Business:
+        business = self.repository.fresh_business(business_id)
+        if business is None:
+            raise NotFound("Бизнес не найден.")
+        return business
+
+    def checked_business(self, business_id: int, url: str) -> Business:
+        """Под блокировкой: пока читался сайт или отвечал ИИ, бизнес могли удалить или сменить ему сайт."""
+        business = self.current(business_id)
+        if business.site_url != url:
+            raise ChangeConflict("Адрес сайта изменился во время проверки. Проверьте сайт ещё раз.")
+        return business
 
     async def site_check(
         self,
@@ -334,21 +373,35 @@ class OnboardingService:
         owner_text: str | None = None,
         on_miss: Callable[[], None] | None = None,
     ) -> dict:
-        """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша."""
-        business = self.repository.business(business_id)
+        """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша, в том числе на
+        ответ, который принесла шедшая параллельно проверка того же бизнеса."""
+        business = self.current(business_id)
+        running = SITE_CHECKS.get(business_id)
+        if running is not None and owner_text is None:
+            self.repository.commit()
+            await running.wait()
+            business = self.current(business_id)
         if cached := self.cached_check(business, now, owner_text):
             return self.check_view(business, cached)
         if on_miss is not None:
             on_miss()
-        url = business.site_url
+        done = SITE_CHECKS[business_id] = asyncio.Event()
+        try:
+            return await self.read_site(business_id, business.site_url, now, today, owner_text)
+        finally:
+            done.set()
+            if SITE_CHECKS.get(business_id) is done:
+                del SITE_CHECKS[business_id]
+
+    async def read_site(self, business_id: int, url: str, now: datetime, today: date, owner_text: str | None) -> dict:
         # Чтение сайта идёт до минуты: без блокировки бизнеса, соединение с базой на это время возвращается в пул.
         self.repository.commit()
         site = await self.reader(url)
-        # Под блокировкой только трата на ИИ и запись: параллельная проверка могла уже сохранить результат.
-        with self.repository.business_lock(business_id):
-            self.repository.refresh(business)
-            if business.site_url != url:
-                raise ChangeConflict("Адрес сайта изменился во время проверки. Проверьте сайт ещё раз.")
+        # Под блокировкой только трата на ИИ и запись. Её может держать шаг воркера или смена сведений о бизнесе:
+        # ждём, не отвечая владельцу 409.
+        with ExitStack() as stack:
+            await wait_for_lock(stack, self.repository, business_id, LOCK_WAIT_SECONDS)
+            business = self.checked_business(business_id, url)
             if cached := self.cached_check(business, now, owner_text):
                 return self.check_view(business, cached)
             llm = SpendLLM(
@@ -359,7 +412,8 @@ class OnboardingService:
                 draft = await extract_description(site, llm, owner_text=owner_text)
             except YandexGPTError:
                 draft = DescriptionDraft(questions=[OwnerQuestion("description", QUESTIONS["services"])])
-            self.repository.refresh(business)
+            # Ответ ИИ по старому сайту или удалённому бизнесу не записывается: потраченное на ИИ уже учтено.
+            business = self.checked_business(business_id, url)
             fields = description_fields(draft)
             check = {
                 "site_url": url,

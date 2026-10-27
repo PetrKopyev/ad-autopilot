@@ -33,6 +33,8 @@ def world(tmp_path: Path) -> World:
 
 
 async def build(world: World) -> dict:
+    """Картинки плана одни и те же при каждом запуске: зерно — счётчик, picture(seed) рисует по Random(seed); в первом
+    сегменте их четыре и больше."""
     await onboard(world)
     return await world.plans.get_plan(world.business.id, NOW, TODAY)
 
@@ -228,8 +230,7 @@ async def test_select_assets_updates_flags_and_rejects_foreign_ids(world: World)
 async def test_video_is_built_from_three_selected_images_and_rebuilt_only_on_change(world: World) -> None:
     plan = await build(world)
     segment_assets = plan["groups"][0]["assets"]
-    if len(segment_assets) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(segment_assets) >= 3
     ids = [asset["id"] for asset in segment_assets]
     assert world.plans.select_assets(world.business.id, ids)
     world.plans.build_videos(world.business.id)
@@ -257,8 +258,7 @@ async def test_video_is_not_saved_when_selection_changed_during_build(world: Wor
 
     draft = await build(world)
     ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
-    if len(ids) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(ids) >= 3
     world.plans.select_assets(world.business.id, ids)
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
 
@@ -283,8 +283,7 @@ async def test_video_built_for_old_selection_is_not_saved_when_selection_changed
         world.plans.upload_photo(world.business.id, group["id"], picture(seed), TODAY)
     plan = world.repository.latest_plan(world.business.id)
     ids = plan.payload["assets"][plan.payload["groups"][0]["segment"]]
-    if len(ids) < 4:
-        pytest.skip("В сегменте меньше четырёх картинок")
+    assert len(ids) >= 4
     world.plans.select_assets(world.business.id, ids[:3])
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
 
@@ -317,8 +316,7 @@ async def test_video_build_skips_busy_business(world: World, monkeypatch) -> Non
 
     draft = await build(world)
     ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
-    if len(ids) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(ids) >= 3
     world.plans.select_assets(world.business.id, ids)
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
@@ -343,8 +341,7 @@ async def test_video_is_built_once_while_selection_stays_the_same(world: World, 
 
     draft = await build(world)
     ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
-    if len(ids) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(ids) >= 3
     world.plans.select_assets(world.business.id, ids)
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     calls = []
@@ -360,8 +357,7 @@ async def test_video_file_is_removed_when_its_row_is_not_saved(world: World, mon
 
     draft = await build(world)
     ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
-    if len(ids) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(ids) >= 3
     world.plans.select_assets(world.business.id, ids)
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
@@ -431,8 +427,7 @@ async def test_video_queue_lets_go_of_built_videos_once_business_is_deleted(worl
 
     draft = await build(world)
     ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
-    if len(ids) < 3:
-        pytest.skip("В сегменте меньше трёх картинок")
+    assert len(ids) >= 3
     world.plans.select_assets(world.business.id, ids)
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))

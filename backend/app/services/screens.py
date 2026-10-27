@@ -184,15 +184,11 @@ class ScreensService:
                     if ad.external_id
                     else None
                 )
-                reason = (
-                    change.reason_text
-                    if change
-                    else (
-                        "Вы остановили объявление."
-                        if ad.status == "paused_owner"
-                        else "Автопилот остановил объявление."
-                    )
-                )
+                if ad.status == "paused_owner" and (change is None or change.reason_code == "OWNER_AD_STATUS"):
+                    # Владелец остановил само объявление: статус «Остановлено вами» уже это говорит.
+                    reason = None
+                else:
+                    reason = change.reason_text if change else "Автопилот остановил объявление."
             elif ad.status == "rejected":
                 reason = ad.moderation_reason or "Площадка отклонила объявление. Проверьте его содержание."
             items.append(
@@ -238,7 +234,7 @@ class ScreensService:
                     actor="owner",
                     kind="resume" if active else "pause",
                     reason_code="OWNER_AD_STATUS",
-                    reason_text="Вы включили объявление." if active else "Вы остановили объявление.",
+                    reason_text=f"Вы {'включили' if active else 'остановили'} объявление «{ad.title}».",
                     suffix=str(ad.id),
                 )
         day = today(self.worker.clock)
@@ -305,16 +301,20 @@ class ScreensService:
 
     def business(self, business: Business) -> dict:
         marking = next(iter(self.repository.rows(MarkingProfile, business.id)), None)
-        # Закрытые реквизиты не читаем и не возвращаем. Для формы оставляем пустые значения.
+        # ИНН и телефон целиком не возвращаем: только последние цифры, чтобы владелец видел, что данные сохранены.
+        # Поля формы inn и phone пустые — чтобы изменить реквизиты, их вводят заново.
         safe_marking = (
             None
             if marking is None
             else {
                 "subject_type": marking.subject_type,
                 "inn": "",
-                "name": "",
+                "name": marking.name,
                 "phone": "",
                 "confirmed_in_platform": marking.confirmed_in_platform,
+                "saved": True,
+                "inn_masked": f"•••{marking.inn_enc[-4:]}",
+                "phone_masked": f"+7•••{marking.phone_enc[-4:]}" if marking.phone_enc else None,
             }
         )
         return {

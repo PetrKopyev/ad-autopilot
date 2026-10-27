@@ -5,10 +5,17 @@ import type { Business, Description, Marking, StopResult } from './setup';
 
 // Описание сервер хранит вместе со служебными данными проверки сайта; форме нужны только поля.
 export interface StoredDescription { fields: Description }
-// Закрытые реквизиты маркировки сервер не возвращает: ИНН, название и телефон приходят пустыми.
+// ИНН и телефон сервер целиком не возвращает: inn и phone пустые, а последние цифры — в inn_masked и phone_masked.
+export interface StoredMarking extends Omit<Marking, 'confirmed_in_platform'> {
+  confirmed_in_platform: Partial<Marking['confirmed_in_platform']>; saved: true; inn_masked: string; phone_masked: string | null;
+}
 export interface BusinessSettings extends Business {
-  description: StoredDescription | null; auto_continue: boolean;
-  marking: (Omit<Marking, 'confirmed_in_platform'> & { confirmed_in_platform: Partial<Marking['confirmed_in_platform']> }) | null;
+  description: StoredDescription | null; auto_continue: boolean; marking: StoredMarking | null;
+}
+/** Сохранённые реквизиты так, как их показывает сервер: от ИНН и телефона — только последние цифры. */
+export function maskMarking(marking: Marking): StoredMarking {
+  const phone = marking.phone.replace(/\D/g, '');
+  return { ...marking, inn: '', phone: '', saved: true, inn_masked: `•••${marking.inn.slice(-4)}`, phone_masked: phone ? `+7•••${phone.slice(-4)}` : null };
 }
 export async function getBusiness(signal?: AbortSignal): Promise<BusinessSettings> {
   if (mockEnabled) return (await import('./mocks')).mockBusinessSettings();

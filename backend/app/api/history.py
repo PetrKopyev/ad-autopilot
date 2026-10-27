@@ -69,7 +69,7 @@ def history(
     platform: Literal["direct", "vk", "fake"] | None = None,
     actor: Literal["autopilot", "owner", "system", "external"] | None = None,
     business_id: Annotated[int | None, Query(gt=0)] = None,
-    page: Annotated[int, Query(ge=1)] = 1,
+    page: Annotated[int, Query(ge=1, le=100_000)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> dict:
     items, total = repository.history(

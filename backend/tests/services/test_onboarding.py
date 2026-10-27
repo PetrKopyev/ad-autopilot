@@ -36,8 +36,10 @@ from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
+    SITE_CHECKS,
     AiLimits,
     Blocked,
+    NotFound,
     OnboardingError,
     OnboardingService,
     SpendLLM,
@@ -457,37 +459,65 @@ async def test_site_check_counts_rate_limit_only_for_real_reading(world: World) 
     assert misses == [0, 11]
 
 
-async def test_parallel_site_checks_read_site_outside_lock_and_pay_once(world: World) -> None:
-    held = False
+class SlowLLM(ScriptedLLM):
+    """Отдаёт управление циклу событий, как настоящий ИИ, пока готовит ответ."""
+
+    def __init__(self, during: Callable[[], None] = lambda: None) -> None:
+        super().__init__()
+        self.during = during
+
+    async def complete_json(self, system: str, user: str) -> str:
+        await asyncio.sleep(0.01)
+        self.during()
+        await asyncio.sleep(0.01)
+        return await super().complete_json(system, user)
+
+
+async def test_parallel_site_check_waits_for_running_one_and_takes_its_result(world: World) -> None:
+    reads, misses = [], []
+    original = world.onboarding.reader
+
+    async def slow_reader(url: str) -> SiteReadResult:
+        reads.append(url)
+        await asyncio.sleep(0.01)
+        return await original(url)
+
+    world.onboarding.llm = world.llm = SlowLLM()
+    world.onboarding.reader = slow_reader
+    first, second = await asyncio.gather(
+        world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first")),
+        world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("second")),
+    )
+    assert first == second and first["services_found"] == 1
+    assert reads == [SITE] and world.llm.calls == ["description"] and misses == ["first"]
+    assert SITE_CHECKS == {}
+
+
+async def test_site_check_reads_site_outside_lock_and_waits_for_it(world: World) -> None:
+    held = True
     seen = []
 
     @contextmanager
     def lock(business_id: int):
-        nonlocal held
         if held:
             raise ChangeConflict("Этот бизнес уже обрабатывается.")
-        held = True
-        try:
-            yield
-        finally:
-            held = False
+        yield
+
+    async def release() -> None:
+        nonlocal held
+        await asyncio.sleep(0.6)
+        held = False
 
     original = world.onboarding.reader
 
-    async def slow_reader(url: str) -> SiteReadResult:
+    async def reader(url: str) -> SiteReadResult:
         seen.append(held)
-        await asyncio.sleep(0.01)
         return await original(url)
 
     world.repository.business_lock = lock
-    world.onboarding.reader = slow_reader
-    first, second = await asyncio.gather(
-        world.onboarding.site_check(world.business.id, NOW, TODAY),
-        world.onboarding.site_check(world.business.id, NOW, TODAY),
-    )
-    assert seen == [False, False]
-    assert world.llm.calls == ["description"]
-    assert first == second
+    world.onboarding.reader = reader
+    result, _ = await asyncio.gather(world.onboarding.site_check(world.business.id, NOW, TODAY), release())
+    assert seen == [True] and result["status"] == "ready" and world.llm.calls == ["description"]
 
 
 async def test_site_changed_during_read_is_not_paid_or_saved(world: World) -> None:
@@ -501,6 +531,45 @@ async def test_site_changed_during_read_is_not_paid_or_saved(world: World) -> No
     with pytest.raises(ChangeConflict, match="Адрес сайта изменился"):
         await world.onboarding.site_check(world.business.id, NOW, TODAY)
     assert world.llm.calls == [] and "check" not in world.business.description
+
+
+async def test_site_changed_while_ai_answers_is_not_saved(world: World) -> None:
+    def change_site() -> None:
+        world.business.site_url = "https://other.example/"
+        world.business.description = {}
+
+    world.onboarding.llm = world.llm = SlowLLM(change_site)
+    with pytest.raises(ChangeConflict, match="Адрес сайта изменился"):
+        await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    assert world.llm.calls == ["description"]
+    assert world.business.description == {} and world.business.medical_level == "none"
+    assert world.business.niche_class is None and world.business.niche_text is None
+    assert SITE_CHECKS == {}
+
+
+async def test_business_deleted_during_site_check_is_not_found(world: World) -> None:
+    original = world.onboarding.reader
+
+    async def reader(url: str) -> SiteReadResult:
+        world.repository.tables[Business].remove(world.business)
+        return await original(url)
+
+    world.onboarding.reader = reader
+    with pytest.raises(NotFound):
+        await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    assert world.llm.calls == []
+
+
+def test_site_is_not_changed_while_business_is_locked(world: World) -> None:
+    world.repository.locked = True
+    with pytest.raises(ChangeConflict):
+        world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
+    assert world.business.site_url == SITE
+    same_site = world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    assert same_site["month_budget_kop"] == 2 * BUDGET_KOP
+    world.repository.locked = False
+    world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
+    assert world.business.site_url == "https://other.example/"
 
 
 async def test_no_counter_means_stop_with_reason(tmp_path: Path) -> None:

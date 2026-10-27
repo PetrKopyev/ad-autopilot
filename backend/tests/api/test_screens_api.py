@@ -56,6 +56,7 @@ def setup(monkeypatch):
 
     app.dependency_overrides[get_repository] = Auth
     app.dependency_overrides[autopilot.get_screens_service] = lambda: ScreensService(world.worker())
+    app.dependency_overrides[autopilot.get_optional_screens] = lambda: ScreensService(world.worker())
     app.dependency_overrides[get_today] = lambda: world.clock.now.date()
     with TestClient(app, base_url="https://testserver") as client:
         client.cookies.set(SESSION_COOKIE, "test-session")
@@ -153,9 +154,11 @@ def test_owner_can_change_frozen_ad_and_autopilot_waits(setup):
     client, world = setup
     ad = next(iter(world.ads.values()))
     ad.frozen_until = world.clock.now + timedelta(days=7)
-    assert client.post(f"/api/ads/{ad.id}/pause").json()["status"] == "paused_owner"
+    paused = client.post(f"/api/ads/{ad.id}/pause").json()
+    assert paused["status"] == "paused_owner" and paused["reason"] is None
     change = world.repository.rows(ChangeLog)[-1]
     assert change.actor == "owner"
+    assert change.reason_text == f"Вы остановили объявление «{ad.title}»."
     asyncio.run(
         RollbackService(world.repository, dry_run=False).revert(
             change.id,
@@ -167,6 +170,7 @@ def test_owner_can_change_frozen_ad_and_autopilot_waits(setup):
     assert ad.status == "active"
     assert client.post(f"/api/ads/{ad.id}/pause").status_code == 200
     assert client.post(f"/api/ads/{ad.id}/resume").json()["status"] == "active"
+    assert world.repository.rows(ChangeLog)[-1].reason_text == f"Вы включили объявление «{ad.title}»."
     ad.frozen_until = None
     with pytest.raises(ChangeConflict, match="24 часа"):
         world.repository.check_autopilot(
@@ -259,6 +263,8 @@ def test_ads_period_metrics_and_contract(setup):
     response = client.get("/api/ads?from=2025-12-01&to=2025-12-31")
     assert response.json()["items"][0]["metrics"]["cost_kop"] == 2000
     assert client.get("/api/ads?from=2026-02-01&to=2026-01-01").status_code == 422
+    assert client.get("/api/ads?to=0001-01-03").status_code == 422
+    assert client.get("/api/ads?from=0001-01-01&to=0001-01-03").status_code == 200
 
 
 def test_experiments_and_safe_business(setup):
@@ -332,8 +338,18 @@ def test_experiment_arms_carry_own_text_and_missing_ad_is_empty(setup):
     }
     assert running["arms"][1] == {"title": "", "text": "", "image": None}
     result = client.get("/api/business").json()
-    assert result["marking"]["inn"] == result["marking"]["phone"] == ""
-    assert result["marking"]["confirmed_in_platform"] == {"direct": True}
+    assert result["marking"] == {
+        "subject_type": "ip",
+        "inn": "",
+        "name": "ИП Иванов",
+        "phone": "",
+        "confirmed_in_platform": {"direct": True},
+        "saved": True,
+        "inn_masked": "•••4689",
+        "phone_masked": "+7•••1122",
+    }
+    assert "526317984689" not in client.get("/api/business").text
+    assert "9001231122" not in client.get("/api/business").text
 
 
 def test_budget_history_and_next_day(setup):

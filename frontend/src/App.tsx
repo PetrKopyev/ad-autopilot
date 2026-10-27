@@ -11,7 +11,7 @@ import { StatsPage } from './pages/StatsPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { ClientsPage } from './pages/ClientsPage';
 import { SettingsPage } from './pages/SettingsPage';
-import { RequireSession, SessionProvider } from './api/session';
+import { RequireBusiness, RequireSession, SessionProvider } from './api/session';
 
 export function App() {
   return (
@@ -20,15 +20,17 @@ export function App() {
         <Route path="login" element={<LoginPage />} />
         <Route path="policy" element={<ServicePolicyPage />} />
         <Route element={<RequireSession />}>
-          <Route index element={<HomePage />} />
           <Route path="setup" element={<SetupPage />} />
           <Route path="setup/:step" element={<SetupPage />} />
-          <Route path="plan" element={<PlanPage />} />
-          <Route path="ads" element={<AdsPage />} />
-          <Route path="statistics" element={<StatsPage />} />
-          <Route path="history" element={<HistoryPage />} />
-          <Route path="clients" element={<ClientsPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route element={<RequireBusiness />}>
+            <Route index element={<HomePage />} />
+            <Route path="plan" element={<PlanPage />} />
+            <Route path="ads" element={<AdsPage />} />
+            <Route path="statistics" element={<StatsPage />} />
+            <Route path="history" element={<HistoryPage />} />
+            <Route path="clients" element={<ClientsPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+          </Route>
           <Route path="connect/vk" element={<ServiceVkPage />} />
           <Route path="platform-error" element={<ServiceErrorPage />} />
         </Route>

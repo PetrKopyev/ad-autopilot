@@ -10,17 +10,17 @@ const fetchMock = vi.fn<typeof fetch>();
 function reply(status: number, body: unknown) {
   fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
 }
-const idle = { today: '2026-10-27', now: '2026-10-27T09:00:00+03:00', total_days: 0, advance: null };
+const idle = { today: '2026-10-27', now: '2026-10-27T09:00:00+03:00', total_days: 0, advance: null, has_business: true };
 const calls = () => fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${new URL(String(url)).pathname}`);
 
 beforeEach(() => { sessionStorage.clear(); vi.stubGlobal('fetch', fetchMock); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); fetchMock.mockReset(); });
 
-async function panel() {
+async function panel(status = idle) {
   reply(200, { demo: true });
-  reply(200, idle);
+  reply(200, status);
   render(<DemoPanel changed={() => {}} />);
-  expect(await screen.findByText('Демо-дата: 27.10.2026. Перемотано 0 из 120 дней.')).toBeTruthy();
+  expect(await screen.findByText(`Демо-дата: 27.10.2026. Перемотано ${status.total_days} из 120 дней.`)).toBeTruthy();
 }
 
 it.each([
@@ -44,7 +44,7 @@ it('если перемотка уже идёт (брошенная в друг�
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   await panel();
   reply(409, { detail: 'Идёт перемотка времени. Дождитесь окончания.' });
-  reply(200, { ...idle, advance: { state: 'running', days: 30, done: 12, error: '' } });
+  reply(200, { ...idle, total_days: 12, advance: { state: 'running', days: 30, done: 12, error: '' } });
   fireEvent.click(screen.getByRole('button', { name: '+1 день' }));
   expect(await screen.findByText('Автопилот обрабатывает прошедшие дни: 12 из 30…')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
@@ -54,17 +54,27 @@ it('если перемотка уже идёт (брошенная в друг�
   expect(calls()).toEqual(['GET /api/auth/config', 'GET /api/demo/status', 'POST /api/demo/advance', 'GET /api/demo/status', 'GET /api/demo/status']);
 });
 
-it('прерванная перемотка предлагает досчитать оставшиеся дни', async () => {
+it('прерванная перемотка досчитывает только оставшиеся дни, и лимит 120 дней не тратится дважды', async () => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-  await panel();
-  reply(202, { ...idle, advance: { state: 'running', days: 30, done: 0, error: '' } });
+  // Уже перемотано 90 дней: запрос на 30 укладывается в лимит ровно.
+  const before = { ...idle, total_days: 90 };
+  await panel(before);
+  reply(202, { ...before, advance: { state: 'running', days: 30, done: 0, error: '' } });
   fireEvent.click(screen.getByRole('button', { name: '+30 дней' }));
   await screen.findByText('Автопилот обрабатывает прошедшие дни: 0 из 30…');
-  reply(200, { ...idle, total_days: 12, advance: { state: 'error', days: 30, done: 12, error: 'Перемотка прервалась. Попробуйте ещё раз.' } });
+  // Оборвалась на 12-м дне: в лимит засчитаны только пройденные 12 дней.
+  reply(200, { ...before, today: '2026-11-08', total_days: 102, advance: { state: 'error', days: 30, done: 12, error: 'Перемотка прервалась. Попробуйте ещё раз.' } });
   await act(async () => { vi.advanceTimersByTime(1000); });
   expect((await screen.findByRole('alert')).textContent).toContain('Перемотка прервалась. Попробуйте ещё раз.');
-  reply(202, { ...idle, total_days: 12, advance: { state: 'running', days: 18, done: 0, error: '' } });
+  expect(screen.getByText('Демо-дата: 08.11.2026. Перемотано 102 из 120 дней.')).toBeTruthy();
+  expect((screen.getByRole('button', { name: '+30 дней' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: '+7 дней' }) as HTMLButtonElement).disabled).toBe(false);
+  reply(202, { ...before, today: '2026-11-08', total_days: 102, advance: { state: 'running', days: 18, done: 0, error: '' } });
   fireEvent.click(screen.getByRole('button', { name: copy.common.retry }));
   await screen.findByText('Автопилот обрабатывает прошедшие дни: 0 из 18…');
   expect(fetchMock.mock.lastCall![1]!.body).toBe('{"days":18}');
+  reply(200, { ...before, today: '2026-11-26', total_days: 120, advance: { state: 'done', days: 18, done: 18, error: '' } });
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  expect(await screen.findByText('Готово. Демо-дата: 26.11.2026. Перемотано 120 из 120 дней.')).toBeTruthy();
+  expect(screen.getAllByRole('button').every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
 });

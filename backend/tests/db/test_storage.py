@@ -616,3 +616,28 @@ async def test_site_check_reads_site_before_lock_and_saves_under_it_on_postgres(
     business = db_session.get(Business, business_id)
     db_session.expire(business)
     assert business.description["check"]["site_url"] == SITE
+
+
+async def test_site_check_of_business_deleted_while_reading_is_not_found_on_postgres(db_session):
+    from app.content.site_reader import SiteReadResult
+    from app.platforms.metrica import FakeMetrica
+    from app.services.onboarding import NotFound, OnboardingService
+    from tests.services.test_onboarding import LIMITS, NOW, SITE, TODAY, ScriptedLLM, page_text
+
+    user = User(yandex_uid="gone-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    llm = ScriptedLLM()
+
+    async def reader(url: str) -> SiteReadResult:
+        db_session.execute(delete(Business).where(Business.id == business_id))
+        db_session.commit()
+        return SiteReadResult(page_text())
+
+    service = OnboardingService(
+        OnboardingRepository(db_session), llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader
+    )
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    with pytest.raises(NotFound):
+        await service.site_check(business_id, NOW, TODAY)
+    assert llm.calls == []

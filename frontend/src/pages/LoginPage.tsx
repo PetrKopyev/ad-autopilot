@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, Navigate, useLocation, useNavigate } from 'react-router';
+import { Link, Navigate, useLocation } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { connectAccount, demoLogin, getAuthConfig } from '../api/setup';
 import type { StopResult } from '../api/setup';
@@ -10,12 +10,13 @@ import { StopNotice } from './SetupShared';
 import './Setup.css';
 
 export function LoginPage() {
-  const navigate = useNavigate();
   const session = useSession();
   const stopResult = (useLocation().state as { stopResult?: StopResult } | null)?.stopResult;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [demo, setDemo] = useState(false);
+  // Куда вести после входа. Переходим, только когда сессия перечитана: иначе раздел ещё видит гостя и вернёт на вход.
+  const [next, setNext] = useState('/');
   useEffect(() => {
     const controller = new AbortController();
     void getAuthConfig(controller.signal).then((config) => {
@@ -25,17 +26,17 @@ export function LoginPage() {
   }, []);
   async function loginDemo() {
     setBusy(true); setError('');
-    try { await demoLogin(); session.reload(); navigate('/setup'); }
+    try { await demoLogin(); setNext('/setup'); session.reload(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
   async function login() {
     setBusy(true); setError('');
-    try { await connectAccount('login'); if (mockEnabled) { session.reload(); navigate('/setup'); } }
+    try { await connectAccount('login'); if (mockEnabled) { setNext('/setup'); session.reload(); } }
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
-  if (session.data) return <Navigate to="/" replace />;
+  if (session.data) return <Navigate to={next} replace />;
   return <div className="page-stack launch-flow">
     <h1>{copy.login.title}</h1>
     {stopResult && <StopNotice result={stopResult} />}

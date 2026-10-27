@@ -352,7 +352,9 @@ def test_history_filters_and_pagination_are_scoped_to_current_user(client, repos
     repository.history.assert_called_once_with(7, business_id=1, platform="fake", actor="owner", page=2, page_size=5)
 
 
-@pytest.mark.parametrize("query", ["page=0", "page_size=101", "actor=admin", "platform=unknown"])
+@pytest.mark.parametrize(
+    "query", ["page=0", "page=100001", "page=9223372036854775807", "page_size=101", "actor=admin", "platform=unknown"]
+)
 def test_history_rejects_invalid_filters(client, query):
     http, _, _ = client
     assert http.get("/api/history?" + query).status_code == 422

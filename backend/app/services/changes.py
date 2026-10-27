@@ -1,8 +1,10 @@
+import asyncio
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 
 from sqlalchemy import Connection, and_, func, select, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
@@ -107,6 +109,23 @@ def affected_entities(
         elif isinstance(item, Ad | Target) and item.ad_group_id in groups:
             result.add(key)
     return result
+
+
+LOCK_WAIT_SECONDS = 15
+
+
+async def wait_for_lock(stack: ExitStack, repository: "ChangesRepository", business_id: int, seconds: float) -> None:
+    """Берёт блокировку бизнеса, дожидаясь, пока её отпустят (шаг воркера, другая запись); ждёт без блокировки цикла
+    событий. Не дождались за seconds — ChangeConflict."""
+    deadline = monotonic() + seconds
+    while True:
+        try:
+            stack.enter_context(repository.business_lock(business_id))
+            return
+        except ChangeConflict:
+            if monotonic() >= deadline:
+                raise
+        await asyncio.sleep(0.5)
 
 
 class ChangesRepository:

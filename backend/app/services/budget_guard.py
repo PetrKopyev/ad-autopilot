@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import ExitStack
 from math import ceil
 from time import monotonic
@@ -10,7 +9,7 @@ from app.db.models import BudgetLedger, Business
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.budget import plan_budget
 from app.platforms.base import Operation, PlatformError
-from app.services.changes import ChangeConflict
+from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -110,21 +109,7 @@ async def stop_all(
             worker.remember(business, pending_stop=None)
 
 
-LOCK_WAIT_SECONDS = 15
 STOPPED = {"paused_auto", "paused_owner", "archived"}
-
-
-async def wait_for_business(stack: ExitStack, worker: Worker, business_id: int, seconds: float) -> None:
-    """Берёт блокировку бизнеса, дожидаясь, пока шаг воркера её отпустит; ждёт без блокировки цикла событий."""
-    deadline = monotonic() + seconds
-    while True:
-        try:
-            stack.enter_context(worker.repository.business_lock(business_id))
-            return
-        except ChangeConflict:
-            if monotonic() >= deadline:
-                raise
-        await asyncio.sleep(0.5)
 
 
 async def stop_platform(
@@ -149,7 +134,7 @@ async def stop_platform(
         if monotonic() >= deadline:
             raise TimeoutError
         try:
-            await wait_for_business(stack, worker, business.id, min(wait, deadline - monotonic()))
+            await wait_for_lock(stack, worker.repository, business.id, min(wait, deadline - monotonic()))
         except ChangeConflict:
             if monotonic() < deadline:
                 raise

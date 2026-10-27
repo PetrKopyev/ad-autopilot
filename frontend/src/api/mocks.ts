@@ -105,6 +105,7 @@ import type { Business, BusinessInput, Description, Marking, Me, SiteCheck, Stop
 import type { Plan, PlanAsset } from './plan';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
 import type { ClientQuestion, ClientQuestions } from './clients';
+import { maskMarking } from './settings';
 import type { BusinessSettings } from './settings';
 import type { AppNotification } from './notifications';
 interface SetupMockState {
@@ -163,6 +164,7 @@ export function mockSetupMetrica(counter: number, goals: number[]) { setupMock.c
 export function mockSetupMarking(body: Marking) {
   // Never keep the INN, phone or manual account key in browser storage.
   setupMock.marking = body.confirmed_in_platform; setupMock.plan = undefined; persistSetupMock();
+  businessSettings.marking = maskMarking(body);
 }
 function mockAsset(id: number, selected = false): PlanAsset {
   const color = id % 2 ? '#e7c2bb' : '#b8cfc3';

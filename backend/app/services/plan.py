@@ -77,12 +77,6 @@ class PlanRepository(OnboardingRepository):
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return self.db.scalar(select(Asset).where(Asset.id == asset_id, Asset.business_id == business_id))
 
-    def fresh_business(self, business_id: int) -> Business | None:
-        """Строка из базы, а не из сессии: под блокировкой видны удаление и правки, сделанные, пока её ждали."""
-        return self.db.scalar(
-            select(Business).where(Business.id == business_id).execution_options(populate_existing=True)
-        )
-
 
 def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
     ready = {account.platform for account in accounts if account.status == "ok"}

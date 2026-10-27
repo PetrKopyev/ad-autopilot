@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import Business, User
+from app.db.models import Business, User, WorkerRun
 
 
 @pytest.mark.db
@@ -144,11 +144,19 @@ def test_demo_reset_frees_demo_places_now(monkeypatch: pytest.MonkeyPatch, tmp_p
                     media = tmp_path / str(business.id)
                     media.mkdir()
                     (media / "a.jpg").write_bytes(b"jpg")
-                    demo_id, owner_id = demo.id, owner.id
+                    # Старая перемотка писала пульс по часам демо: строки «из будущего».
+                    pulse, future = (
+                        WorkerRun(kind="heartbeat", started_at=at, finished_at=at, status="ok", units_spent=0, log=[])
+                        for at in (now, now + timedelta(days=20))
+                    )
+                    db.add_all([pulse, future])
+                    db.flush()
+                    demo_id, owner_id, pulse_id, future_id = demo.id, owner.id, pulse.id, future.id
                     assert reset(db, now + timedelta(seconds=1)) == 50
                     db.expire_all()
                     assert db.get(User, demo_id) is None and db.get(User, owner_id)
                     assert not media.exists()
+                    assert db.get(WorkerRun, pulse_id) and db.get(WorkerRun, future_id) is None
             finally:
                 transaction.rollback()
     finally:

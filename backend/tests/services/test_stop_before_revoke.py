@@ -310,6 +310,19 @@ async def test_stop_user_ads_after_deadline_does_not_blame_account_without_campa
     assert adapter.statuses == {"c-1": "active"}
 
 
+@pytest.mark.db
+async def test_stop_user_ads_after_deadline_does_not_blame_account_with_stopped_campaigns(owner):
+    from app.api.auth import stop_user_ads
+
+    db, user, business = owner
+    business("direct", "ok", "c-1")
+    business("vk", "ok", "c-2", campaign_status="paused_owner")
+    business("vk", "ok", "c-3", campaign_status="archived")
+    adapter = StubAdapter({"c-1": "active", "c-2": "paused_owner", "c-3": "archived"})
+    problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", monotonic() - 1)
+    assert problems == ["Яндекс Директ: остановка не закончилась за минуту"]
+
+
 async def test_ad_stopper_gives_the_whole_stop_one_minute(monkeypatch):
     from app.api import auth
 
