@@ -214,6 +214,20 @@ async def test_upload_photo_is_checked_and_selected(world: World) -> None:
         world.plans.upload_photo(world.business.id, group["id"], tiny.getvalue(), TODAY)
 
 
+async def test_upload_photo_returns_connection_before_decoding(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    plan = await build(world)
+    events = []
+    monkeypatch.setattr(world.repository, "commit", lambda: events.append("commit"))
+    accept = plan_module.accept_upload
+    monkeypatch.setattr(
+        plan_module, "accept_upload", lambda *args, **kwargs: events.append("decode") or accept(*args, **kwargs)
+    )
+    world.plans.upload_photo(world.business.id, plan["groups"][0]["id"], picture(777), TODAY)
+    assert events[:2] == ["commit", "decode"]
+
+
 async def test_select_assets_updates_flags_and_rejects_foreign_ids(world: World) -> None:
     plan = await build(world)
     ids = [asset["id"] for asset in plan["groups"][0]["assets"]][:1]
@@ -350,6 +364,23 @@ async def test_video_is_built_once_while_selection_stays_the_same(world: World, 
     )
     assert world.plans.build_videos(world.business.id) and world.plans.build_videos(world.business.id)
     assert len(calls) == 1
+
+
+async def test_video_build_returns_connection_before_ffmpeg(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    world.plans.select_assets(world.business.id, [asset["id"] for asset in draft["groups"][0]["assets"]])
+    events = []
+    monkeypatch.setattr(world.repository, "commit", lambda: events.append("commit"))
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        plan_module,
+        "build_video",
+        lambda images, title, font_path: events.append("ffmpeg") or SimpleNamespace(data=b"v"),
+    )
+    assert world.plans.build_videos(world.business.id)
+    assert events[:2] == ["commit", "ffmpeg"]
 
 
 async def test_video_file_is_removed_when_its_row_is_not_saved(world: World, monkeypatch) -> None:

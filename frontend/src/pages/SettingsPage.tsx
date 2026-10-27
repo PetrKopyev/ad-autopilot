@@ -192,7 +192,6 @@ function AutopilotBlock() {
 
 function DeleteBlock() {
   const section = useSection();
-  const session = useSession();
   const navigate = useNavigate();
   const [word, setWord] = useState('');
   const confirmed = word.trim().toLowerCase() === labels.deleteWord;
@@ -200,8 +199,9 @@ function DeleteBlock() {
     <p>{labels.deleteHint}</p>
     <form className="page-stack" onSubmit={(event) => {
       event.preventDefault();
-      // Итог остановки рекламы показываем на странице входа: после удаления владелец попадает туда.
-      if (confirmed) void section.run(async () => { const stopResult = await deleteMyData(); session.reload(); navigate('/login', { state: { stopResult } }); });
+      // Итог остановки рекламы показываем на странице входа: после удаления владелец попадает туда, а сессию она
+      // перечитывает сама.
+      if (confirmed) void section.run(async () => { navigate('/login', { state: { stopResult: await deleteMyData() } }); });
     }}>
       <label className="field">{labels.deleteLabel}<input autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></label>
       <Status section={section} />

@@ -9,7 +9,7 @@ from sqlalchemy.orm import load_only
 from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, OptionalBusiness
 from app.auth.sessions import require_csrf
-from app.db.models import Business, MarkingProfile, PlatformAccount
+from app.db.models import Business, PlatformAccount
 from app.db.query import condition
 from app.demo_flags import demo_now
 from app.platforms.fake import VirtualClock
@@ -22,26 +22,15 @@ router = APIRouter(prefix="/api/autopilot", route_class=ReleasingRoute)
 
 class ScreensRepository(WorkerRepository):
     def rows(self, model, business_id: int | None = None, **filters) -> list:
-        if model not in (MarkingProfile, PlatformAccount):
+        if model is not PlatformAccount:
             return super().rows(model, business_id, **filters)
-        fields = (
-            (
-                MarkingProfile.business_id,
-                MarkingProfile.subject_type,
-                MarkingProfile.confirmed_in_platform,
-                # Название, ИНН и телефон — для «данные сохранены» в настройках: наружу уходит только маска.
-                MarkingProfile.name,
-                MarkingProfile.inn_enc,
-                MarkingProfile.phone_enc,
-            )
-            if model is MarkingProfile
-            else (PlatformAccount.id, PlatformAccount.business_id, PlatformAccount.platform, PlatformAccount.status)
-        )
-        statement = select(model).options(load_only(*fields, raiseload=True))
+        # Экранам токены кабинетов не нужны: читается только состояние подключения.
+        fields = (PlatformAccount.id, PlatformAccount.business_id, PlatformAccount.platform, PlatformAccount.status)
+        statement = select(PlatformAccount).options(load_only(*fields, raiseload=True))
         if business_id is not None:
-            statement = statement.where(model.business_id == business_id)
+            statement = statement.where(PlatformAccount.business_id == business_id)
         for name, value in filters.items():
-            statement = statement.where(condition(getattr(model, name), value))
+            statement = statement.where(condition(getattr(PlatformAccount, name), value))
         return list(self.db.scalars(statement))
 
 

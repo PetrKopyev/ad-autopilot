@@ -121,26 +121,70 @@ async def test_stop_platform_gives_up_when_business_stays_busy():
     assert world.campaign.status == "active"
 
 
-async def test_stop_platform_waits_for_business_only_until_deadline():
+@pytest.fixture
+def virtual_time(monkeypatch):
+    """Часы срока остановки и ожидания блокировки: время идёт только в asyncio.sleep, скорость машины не влияет."""
+    now = [1000.0]
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr("app.services.budget_guard.monotonic", lambda: now[0])
+    monkeypatch.setattr("app.services.changes.monotonic", lambda: now[0])
+    monkeypatch.setattr("app.services.changes.asyncio.sleep", sleep)
+    return now
+
+
+async def test_stop_platform_waits_for_business_only_until_deadline(virtual_time):
     from app.services.budget_guard import stop_platform
 
     world = await make_world()
     worker = world.worker()
     worker.step_key = "owner:revoke"
     attempts = busy_lock(world.repository, times=1000)
-    started = monotonic()
+    started = virtual_time[0]
     with pytest.raises(TimeoutError):
         await stop_platform(
             world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=started + 0.6, wait=15
         )
-    # Не ждали все 15 секунд; запас — на нагруженную машину.
-    assert monotonic() - started < 5
+    # Ждали до срока, а не все 15 секунд.
+    assert virtual_time[0] - started <= 1 and len(attempts) <= 3
+    attempts.clear()
     with pytest.raises(TimeoutError):
         await stop_platform(
-            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=monotonic(), wait=15
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=virtual_time[0], wait=15
         )
-    assert len(attempts) <= 3
+    assert attempts == []
     assert world.campaign.status == "active"
+
+
+async def test_stop_platform_does_not_start_next_campaign_after_deadline(virtual_time):
+    from app.services.budget_guard import stop_platform
+
+    world = await make_world()
+    second = Campaign(
+        **{column: getattr(world.campaign, column) for column in ("business_id", "platform_account_id", "platform",
+                                                                  "type", "name", "status", "daily_limit_kop",
+                                                                  "period_cap_kop", "owner_paused")},
+        external_id="c-second",
+    )
+    world.repository.save(second)
+    worker = world.worker()
+    worker.step_key = "owner:revoke"
+    stopped = []
+
+    async def slow_apply(business, campaign, operations, **kwargs):
+        # Площадка отвечала дольше, чем осталось до срока.
+        stopped.append(campaign.external_id)
+        virtual_time[0] += 10
+        return ChangeLog(status="applied")
+
+    worker.apply = slow_apply
+    with pytest.raises(TimeoutError):
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=virtual_time[0] + 5
+        )
+    assert stopped == [world.campaign.external_id]
 
 
 async def test_stop_platform_waits_out_busy_server_then_answers_server_busy():

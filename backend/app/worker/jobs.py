@@ -480,6 +480,7 @@ class Worker:
         self.step_key = ""
         self._context_at = None
         self._contexts: dict[int, dict[tuple[str, str], dict]] = {}
+        self._rewound: set[tuple[int, str]] | None = None
 
     def proposed(self, business: Business) -> bool:
         return self.dry_run or business.settings.get("dry_run", False)
@@ -487,12 +488,15 @@ class Worker:
     def metadata(self, business: Business) -> dict:
         return deepcopy(business.settings.get("_worker", {}))
 
-    def remember(self, business: Business, **values) -> None:
+    def remember(self, business: Business, *items, **values) -> None:
+        """items — строки, которые сохраняются тем же commit."""
         business.settings = business.settings | {"_worker": self.metadata(business) | values}
-        self.repository.save(business)
+        self.repository.save(business, *items)
 
-    def refs(self, campaign: Campaign) -> ExternalRefs:
-        entities = self.repository.local_entities(campaign.business_id, campaign.platform)
+    def refs(self, campaign: Campaign, entities: dict | None = None) -> ExternalRefs:
+        """entities — local_entities площадки кампании, если шаг их уже прочитал."""
+        if entities is None:
+            entities = self.repository.local_entities(campaign.business_id, campaign.platform)
         groups = {
             item.id: item for item in entities.values() if isinstance(item, AdGroup) and item.campaign_id == campaign.id
         }
@@ -543,9 +547,13 @@ class Worker:
         return [change for change in changes if reachable[change.platform]]
 
     def reachable(self, business_id: int, platform: str) -> bool:
+        """Кабинет, который не открывается по любой причине (вход истёк, кабинет удалили), сверить нечем."""
         try:
             self.resolve_adapter(business_id, platform)
         except PlatformError:
+            return False
+        except Exception:
+            logger.warning("Кабинет %s бизнеса %s не открылся", platform, business_id)
             return False
         return True
 
@@ -565,6 +573,16 @@ class Worker:
                 )
                 return False
         return True
+
+    @contextmanager
+    def rewinding(self) -> Iterator[None]:
+        """Перемотка демо: доступность демо-данных проверена под той же блокировкой (DemoService.check) и за перемотку
+        не меняется, а пройденные и занятые слоты запоминаются в памяти — каждые полчаса их не спрашивают у базы."""
+        self._rewound = set()
+        try:
+            yield
+        finally:
+            self._rewound = None
 
     @contextmanager
     def business_clock(self, business: Business) -> Iterator[None]:
@@ -702,22 +720,32 @@ class Worker:
         if business.status not in {"running", "budget_stop", "paused"}:
             return
         with self.repository.business_lock(business.id), self.business_clock(business):
-            if not self.demo_available(business):
+            slot = (business.id, key or schedule_key(kind, self.clock.now))
+            if self._rewound is not None:
+                if slot in self._rewound:
+                    return
+            elif not self.demo_available(business):
                 return
-            self.step_key = key or schedule_key(kind, self.clock.now)
+            self.step_key = slot[1]
             run = self.repository.start_run(business.id, kind, self.step_key, self.clock.now)
             if run is None:
+                if self._rewound is not None:
+                    self._rewound.add(slot)
                 return
             try:
-                recovered = await self.changes.recover_pending(
-                    self.resolve_adapter, business_id=business.id, now=self.clock.now
-                )
-                for change in recovered:
-                    self.cache_context(change)
-                if kind != "budget_guard" and self.pending(business.id):
-                    raise ChangeConflict(PENDING)
+                # Обычно несверенных изменений нет: тогда хватает одного запроса.
+                if self.repository.pending(business.id):
+                    recovered = await self.changes.recover_pending(
+                        self.resolve_adapter, business_id=business.id, now=self.clock.now
+                    )
+                    for change in recovered:
+                        self.cache_context(change)
+                    if kind != "budget_guard" and self.pending(business.id):
+                        raise ChangeConflict(PENDING)
                 await handlers()[kind](self, business)
                 run.status = "ok"
+                if self._rewound is not None:
+                    self._rewound.add(slot)
             except Exception:
                 run.status = "failed"
                 # Ответы площадок могут содержать закрытые данные: сохраняем только безопасный код.

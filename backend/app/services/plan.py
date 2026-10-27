@@ -12,13 +12,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
-from starlette.concurrency import run_in_threadpool
 
 from app.content.ad_text import ANGLES, SEGMENTS, generate_ad_text
 from app.content.art import ART_COST_KOP, ArtBudget, ArtBudgetExceeded, ArtClient, ArtError
 from app.content.art import ArtCall as ArtRecord
 from app.content.ideas import generate_ideas
-from app.content.images import DEFAULT_FONT, ImageRejected, accept_upload, check_image
+from app.content.images import DEFAULT_FONT, ImageRejected, accept_upload, check_image, run_decoding
 from app.content.llm import LLMClient
 from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
@@ -220,7 +219,11 @@ def build_videos(
     if shutil.which("ffmpeg") is None:
         return True
     built = {} if built is None else built
-    for segment, chosen, video in video_segments(repository, business_id):
+    segments = video_segments(repository, business_id)
+    plan = repository.latest_plan(business_id)
+    # commit завершает чтение: ffmpeg работает без соединения с базой, а под блокировкой выбор перечитывается заново.
+    repository.commit()
+    for segment, chosen, video in segments:
         sources = [asset.id for asset in chosen]
         if (
             len(chosen) < 3
@@ -228,15 +231,12 @@ def build_videos(
             or (segment in built and built[segment][0] == sources)
         ):
             continue
-        plan = repository.latest_plan(business_id)
         group = next(item for item in plan.payload["groups"] if item["segment"] == segment)
         try:
             images = [media_root / asset.file_path for asset in chosen]
             built[segment] = (sources, build_video(images, group["ads"][0]["title"], font_path=font_path).data)
         except (VideoError, ValueError):
             continue
-    # commit завершает чтение: под блокировкой выбор перечитывается заново.
-    repository.commit()
     replaced, stored = [], []
     try:
         with repository.business_lock(business_id):
@@ -459,7 +459,7 @@ class PlanService:
             except ArtError:
                 continue
             try:
-                checked = await run_in_threadpool(
+                checked = await run_decoding(
                     check_image, result.image, existing_hashes=hashes, cost_kop=result.cost_kop
                 )
             except ImageRejected:
@@ -524,6 +524,8 @@ class PlanService:
         assets = self.repository.assets(business_id)
         if len(assets) >= MAX_ASSETS:
             raise Blocked("Загружено слишком много картинок. Уберите ненужные.")
+        # Разбор может ждать слот, пока картинки разбирает сборка ролика: соединение на это время возвращается в пул.
+        self.repository.commit()
         try:
             checked = accept_upload(data, existing_hashes=[asset.phash for asset in assets if asset.phash])
         except ImageRejected as error:

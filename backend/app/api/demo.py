@@ -60,7 +60,6 @@ def demo_status(business: Business, today: date) -> dict:
         "advance": None
         if progress is None
         else {"state": progress.state, "days": progress.days, "done": progress.done, "error": progress.error},
-        "has_business": True,
     }
 
 
@@ -73,7 +72,6 @@ def status(business: OptionalBusiness, today: Today) -> dict:
             "now": SystemClock().now.isoformat(),
             "total_days": 0,
             "advance": None,
-            "has_business": False,
         }
     return demo_status(business, today)
 

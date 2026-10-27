@@ -80,6 +80,9 @@ def demo(monkeypatch, tmp_path, request):
                 raise HTTPException(404, "Бизнес не найден.")
             return world.business
 
+        def has_business(self, user_id):
+            return True
+
         def list_accounts(self, user_id):
             return world.repository.accounts(world.business.id)
 

@@ -327,6 +327,8 @@ def me(user: Annotated[User, Depends(current_user)], repository: Repository, res
         "id": user.id,
         "login": user.login,
         "email": user.email,
+        # Разделы с данными бизнеса открываются по этому признаку, пока мастер не пройден — ведут в него.
+        "has_business": repository.has_business(user.id),
         "accounts": [
             {
                 "id": account.id,

@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
+import { demoDateKey } from '../api/demo';
 import { DemoPanel } from './DemoPanel';
 
 vi.mock('../api/session', () => ({ useSession: () => ({ data: { id: 1, login: 'demo', email: null, accounts: [] } }) }));
@@ -10,7 +11,7 @@ const fetchMock = vi.fn<typeof fetch>();
 function reply(status: number, body: unknown) {
   fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
 }
-const idle = { today: '2026-10-27', now: '2026-10-27T09:00:00+03:00', total_days: 0, advance: null, has_business: true };
+const idle = { today: '2026-10-27', now: '2026-10-27T09:00:00+03:00', total_days: 0, advance: null };
 const calls = () => fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${new URL(String(url)).pathname}`);
 
 beforeEach(() => { sessionStorage.clear(); vi.stubGlobal('fetch', fetchMock); });
@@ -77,4 +78,38 @@ it('прерванная перемотка досчитывает только 
   await act(async () => { vi.advanceTimersByTime(1000); });
   expect(await screen.findByText('Готово. Демо-дата: 26.11.2026. Перемотано 120 из 120 дней.')).toBeTruthy();
   expect(screen.getAllByRole('button').every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+});
+
+it('после отказа перемотки обновляет разделы и демо-дату, только если дата сменилась', async () => {
+  const changed = vi.fn();
+  reply(200, { demo: true });
+  reply(200, idle);
+  render(<DemoPanel changed={changed} />);
+  await screen.findByText('Демо-дата: 27.10.2026. Перемотано 0 из 120 дней.');
+  expect(changed).toHaveBeenCalledTimes(1);
+  // Другая вкладка успела перемотать день: запрос отклонён, но дата уже новая.
+  reply(409, { detail: 'Изменение этого бизнеса уже выполняется. Попробуйте позже.' });
+  reply(200, { ...idle, today: '2026-10-28', total_days: 1 });
+  fireEvent.click(screen.getByRole('button', { name: '+1 день' }));
+  expect(await screen.findByText('Демо-дата: 28.10.2026. Перемотано 1 из 120 дней.')).toBeTruthy();
+  expect(changed).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(demoDateKey)).toBe('2026-10-28');
+  sessionStorage.setItem(demoDateKey, 'прежняя');
+  reply(409, { detail: 'Изменение этого бизнеса уже выполняется. Попробуйте позже.' });
+  reply(200, { ...idle, today: '2026-10-28', total_days: 1 });
+  fireEvent.click(screen.getByRole('button', { name: '+1 день' }));
+  await act(async () => {});
+  expect(screen.getByRole('alert')).toBeTruthy();
+  expect(changed).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(demoDateKey)).toBe('прежняя');
+});
+
+it('после отказа не предлагает повтор, который уже не укладывается в 120 дней', async () => {
+  await panel({ ...idle, total_days: 110 });
+  reply(503, { detail: 'Сервер сейчас занят. Повторите через минуту.' });
+  reply(200, { ...idle, total_days: 115 });
+  fireEvent.click(screen.getByRole('button', { name: '+7 дней' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('Сервер сейчас занят.');
+  await screen.findByText('Демо-дата: 27.10.2026. Перемотано 115 из 120 дней.');
+  expect(screen.queryByRole('button', { name: copy.common.retry })).toBeNull();
 });

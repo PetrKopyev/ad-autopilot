@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
+from starlette.concurrency import run_in_threadpool
 
 from app.content import images
 from app.content.images import (
@@ -98,6 +100,22 @@ def test_size_rejected_before_decoding(size: tuple[int, int], monkeypatch: pytes
         accept_upload(data)
 
 
+def test_webp_has_lower_pixel_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WebP при разборе держит несколько несжатых копий: ему предел 10 млн точек, кадр 4K проходит."""
+    with pytest.raises(ImageRejected, match="uniform"):
+        accept_upload(encoded(Image.new("RGB", (3840, 2160)), "WEBP"))
+    with pytest.raises(ImageRejected, match="uniform"):
+        accept_upload(encoded(Image.new("RGB", (3200, 3200))))
+    webp = encoded(Image.new("RGB", (3200, 3200)), "WEBP")
+
+    def decode(self: Image.Image) -> None:
+        raise AssertionError("Image must be rejected by its header")
+
+    monkeypatch.setattr(Image.Image, "load", decode)
+    with pytest.raises(ImageRejected, match="pixel limit"):
+        accept_upload(webp)
+
+
 @pytest.mark.parametrize("fmt", ["JPEG", "PNG"])
 def test_large_photo_is_stored_reduced(photo: Image.Image, fmt: str) -> None:
     result = accept_upload(encoded(photo.resize((4032, 3024)), fmt))
@@ -134,6 +152,30 @@ def test_decoding_is_limited_to_two_at_once(photo: Image.Image, monkeypatch: pyt
         results = list(pool.map(lambda _: accept_upload(data), range(6)))
     assert len(results) == 6
     assert peak == 2
+
+
+async def test_waiting_for_decode_slot_does_not_hold_pool_threads(photo: Image.Image) -> None:
+    """Пока слоты держит сборка ролика, в потоках пула слот ждут не больше двух разборов: остальные ждут в цикле
+    событий, и пул обслуживает другие запросы."""
+    data = encoded(photo)
+    started = []
+
+    def upload() -> object:
+        started.append(threading.get_ident())
+        return accept_upload(data)
+
+    images.DECODE_SLOTS.acquire()
+    images.DECODE_SLOTS.acquire()
+    try:
+        uploads = [asyncio.create_task(images.run_decoding(upload)) for _ in range(6)]
+        await asyncio.sleep(0.2)
+        assert len(started) == 2
+        assert await asyncio.wait_for(run_in_threadpool(lambda: "other request"), 1) == "other request"
+    finally:
+        images.DECODE_SLOTS.release()
+        images.DECODE_SLOTS.release()
+    assert len(await asyncio.gather(*uploads)) == 6
+    assert len(started) == 6
 
 
 def test_gif_and_animated_png_rejected(photo: Image.Image) -> None:

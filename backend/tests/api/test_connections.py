@@ -377,3 +377,62 @@ def test_launch_returns_connection_while_platform_uploads_and_creates(small_pool
     assert held and set(held) == {0}
     assert images and None not in images
     assert engine.pool.checkedout() == 0
+
+
+@pytest.mark.db
+def test_site_check_rereads_business_and_returns_connection_while_ai_answers(small_pool, monkeypatch) -> None:
+    # Сайт читается и ИИ отвечает без соединения запроса, а под блокировкой бизнес перечитывается из базы: проверку,
+    # которую за это время закончил другой запрос, второй раз не оплачиваем, а правка описания, сделанная, пока ИИ
+    # отвечал, не теряется.
+    from app.content.site_reader import SiteReadResult
+    from app.db import session as db_session
+    from app.services.onboarding import OnboardingRepository, OnboardingService
+    from tests.services.test_onboarding import LIMITS, NOW, TODAY, SlowLLM, page_text
+
+    _, engine, _, asset_id = small_pool
+    locks = create_engine(engine.url, pool_size=2, max_overflow=0, isolation_level="AUTOCOMMIT")
+    monkeypatch.setitem(db_session.LOCK_ENGINES, engine, locks)
+    with db_session.SessionLocal() as db:
+        business_id = db.get(Asset, asset_id).business_id
+    held = []
+
+    def elsewhere(description: dict, record: bool = True) -> None:
+        if record:
+            held.append(engine.pool.checkedout())
+        with db_session.SessionLocal() as db:
+            db.get(Business, business_id).description = description
+            db.commit()
+
+    def check(url: str) -> dict:
+        return {
+            "site_url": url, "checked_at": NOW.isoformat(), "pages_read": 1, "services_found": 1, "counter_ids": [],
+            "block_reason": None, "fresh": {},
+        }
+
+    async def finished_elsewhere(url: str) -> SiteReadResult:
+        elsewhere({"check": check(url)})
+        return SiteReadResult(page_text())
+
+    async def reader(url: str) -> SiteReadResult:
+        return SiteReadResult(page_text())
+
+    edited = {"services": {"value": "Правка владельца", "quote": None, "verified": False, "question": ""}}
+    try:
+        for read, during, calls in (
+            (finished_elsewhere, lambda: None, []),
+            (reader, lambda: elsewhere({"fields": edited}), ["description"]),
+        ):
+            elsewhere({}, record=False)
+            llm = SlowLLM(during)
+            with db_session.SessionLocal() as db:
+                repository = OnboardingRepository(db)
+                service = OnboardingService(repository, llm, lambda business_id: None, LIMITS, reader=read)
+                asyncio.run(service.site_check(business_id, NOW, TODAY))
+            assert llm.calls == calls
+        with db_session.SessionLocal() as db:
+            description = db.get(Business, business_id).description
+        assert description["fields"] == edited and description["check"]["services_found"] == 1
+        assert held == [0, 0]
+    finally:
+        locks.dispose()
+    assert engine.pool.checkedout() == 0

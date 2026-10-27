@@ -1,19 +1,26 @@
+import asyncio
 import math
 import threading
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from io import BytesIO
+from weakref import WeakKeyDictionary
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, UnidentifiedImageError
+from starlette.concurrency import run_in_threadpool
 
 MAX_BYTES = 10 * 1024 * 1024
-# 16 млн точек — снимок телефона 4032x3024 (12 млн) и камеры 16 Мп проходят. Пик памяти одного разбора — около 55 МБ,
-# у PNG с прозрачностью около 130 МБ (замер); одновременно идут не больше DECODE_SLOTS разборов.
+# 16 млн точек — снимок телефона 4032x3024 (12 млн) и камеры 16 Мп проходят. Пик памяти одного разбора в 16 млн точек
+# (замер в образе api): JPEG около 130 МБ, PNG с прозрачностью около 190 МБ. WebP libwebp держит при разборе несколько
+# несжатых копий — 250–315 МБ на 16 млн точек, поэтому ему предел 10 млн (до 190 МБ; кадр 4K 3840x2160 проходит).
+# Одновременно идут не больше DECODE_SLOTS разборов.
 MAX_PIXELS = 16_000_000
+MAX_PIXELS_WEBP = 10_000_000
 # Самый крупный формат площадок — 1920 точек по длинной стороне (ролик 16:9): больше хранить незачем.
 MAX_SIDE = 2560
 DECODE_SLOTS = threading.BoundedSemaphore(2)
+_queues: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FORMATS = {
     "direct_1_1": (1080, 1080),
@@ -46,10 +53,21 @@ def _check_size(width: int, height: int) -> None:
         raise ImageRejected("Image is too small or has unsupported proportions")
 
 
+async def run_decoding[T](func: Callable[..., T], *args: object, **kwargs: object) -> T:
+    """Запускает в пуле потоков работу с разбором картинки. Очередь к слотам ждут в цикле событий, а не в потоке пула:
+    поток и соединение с базой ожиданием не заняты. В потоке слот DECODE_SLOTS ждут не больше двух разборов каждого
+    цикла событий — пока слоты держит сборка ролика. Очередь своя у каждого цикла: у каждого и свой пул потоков, а
+    перемотка демо и шаги демо-воркера идут в отдельных циклах."""
+    queue = _queues.setdefault(asyncio.get_running_loop(), asyncio.Semaphore(2))
+    async with queue:
+        return await run_in_threadpool(func, *args, **kwargs)
+
+
 def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
-    """Размеры проверяются по заголовку до декодирования. Декодирование занимает слот DECODE_SLOTS: загрузка фото,
-    генерация, нарезка при запуске и сборка ролика вместе держат в памяти не больше двух несжатых картинок. Сразу
-    после декодирования картинка уменьшается до MAX_SIDE, поворот и перевод в RGB идут уже с ней."""
+    """Размеры проверяются по заголовку до декодирования. Сразу после декодирования картинка уменьшается до MAX_SIDE,
+    поворот и перевод в RGB идут уже с ней. Всё это занимает слот DECODE_SLOTS: загрузка фото, генерация, нарезка при
+    запуске и сборка ролика вместе разбирают не больше двух картинок сразу. Уменьшенный результат (проверка, хэш,
+    нарезка, кадры ролика) слот уже не держит."""
     if not data or len(data) > max_bytes:
         raise ImageRejected("Image is empty or exceeds the byte limit")
     try:
@@ -58,7 +76,7 @@ def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
             with Image.open(BytesIO(data)) as source:
                 if source.format not in {"JPEG", "PNG", "WEBP"} or getattr(source, "n_frames", 1) != 1:
                     raise ImageRejected("Only single-frame JPG, PNG and WebP images are supported")
-                if source.width * source.height > MAX_PIXELS:
+                if source.width * source.height > (MAX_PIXELS_WEBP if source.format == "WEBP" else MAX_PIXELS):
                     raise ImageRejected("Image exceeds the pixel limit")
                 _check_size(source.width, source.height)
                 with DECODE_SLOTS:

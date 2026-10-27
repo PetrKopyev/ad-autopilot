@@ -1,6 +1,7 @@
 """Один и тот же сценарий на MemoryWorkerRepository и на WorkerRepository с PostgreSQL: память ведёт себя как SQL."""
 
 import hashlib
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -227,6 +228,72 @@ def test_start_run_keeps_fresh_running_slot_and_history_of_attempts(repository) 
     assert repository.start_run(business_id, "optimize", "optimize:2026-03-11", NOW + RUNS_KEEP) is None
 
 
+async def test_rewind_asks_database_once_per_done_or_busy_slot(repository, monkeypatch) -> None:
+    from app.worker import jobs
+
+    world = tree(repository)
+    rewinding = worker(repository)
+    calls, starts = [], []
+
+    async def step(worker: Worker, business: Business) -> None:
+        calls.append(worker.step_key)
+        if len(calls) == 1:
+            raise RuntimeError("Площадка не ответила")
+
+    async def no_recovery(*args, **kwargs):
+        raise AssertionError("Несверенных изменений нет: восстанавливать нечего")
+
+    busy = jobs.schedule_key("sync_stats", NOW)
+    repository.save(run(world.business.id, kind="sync_stats", status="running", slot_key=busy))
+    start_run = repository.start_run
+    monkeypatch.setattr(repository, "start_run", lambda *args: starts.append(args[2]) or start_run(*args))
+    monkeypatch.setattr(jobs, "handlers", lambda: {"optimize": step, "sync_stats": step})
+    monkeypatch.setattr(rewinding, "demo_available", lambda business: pytest.fail("Проверено перед перемоткой"))
+    monkeypatch.setattr(rewinding.changes, "recover_pending", no_recovery)
+    with rewinding.rewinding():
+        for _ in range(3):
+            for kind in ("optimize", "sync_stats"):
+                try:
+                    await rewinding.run(kind, world.business.id)
+                except RuntimeError:
+                    pass
+    optimize = jobs.schedule_key("optimize", NOW)
+    # Упавший шаг повторяется, успешный и занятый другим прогоном больше не спрашиваются.
+    assert calls == [optimize, optimize]
+    assert starts == [optimize, busy, optimize]
+    monkeypatch.undo()
+    checks = []
+    monkeypatch.setattr(rewinding, "demo_available", lambda business: checks.append(business) or True)
+    await rewinding.run("optimize", world.business.id)
+    assert len(checks) == 1
+
+
+async def test_pending_change_of_cabinet_that_fails_to_open_does_not_stop_step(repository, monkeypatch) -> None:
+    from app.worker import jobs
+
+    world = tree(repository, ("direct", "vk"))
+    repository.save(change(world.business, platform="vk", status="pending"))
+    calls = []
+
+    async def step(worker: Worker, business: Business) -> None:
+        calls.append(business.id)
+
+    async def no_recovery(*args, **kwargs):
+        return []
+
+    def resolve(business_id: int, platform: str):
+        # Кабинет удалили: загрузчик падает не ошибкой площадки.
+        raise KeyError(platform)
+
+    stepper = Worker(repository, resolve, clock=VirtualClock(NOW), dry_run=False)
+    monkeypatch.setattr(jobs, "handlers", lambda: {"optimize": step})
+    monkeypatch.setattr(stepper, "demo_available", lambda business: True)
+    monkeypatch.setattr(stepper.changes, "recover_pending", no_recovery)
+    assert stepper.pending(world.business.id) == []
+    await stepper.run("optimize", world.business.id)
+    assert calls == [world.business.id]
+
+
 def test_prune_keeps_notifications_and_runs_on_the_boundary(repository) -> None:
     world = tree(repository)
     business_id = world.business.id
@@ -287,6 +354,27 @@ def test_refs_take_budget_context_only_from_applied_changes(repository) -> None:
     repository.save(change(world.business, evidence={"_service": {"refs": {"budget_context": None}}}))
     assert len(repository.applied_budget_contexts(world.business.id)) == 2
     assert worker(repository).refs(campaign).budget_context["strategy"] == "operation"
+
+
+async def test_step_rereads_budget_context_saved_by_another_process_in_same_slot(repository, monkeypatch) -> None:
+    from app.worker import jobs
+
+    world = tree(repository)
+    campaign = world.campaigns["direct"]
+    stepper = worker(repository)
+    assert "strategy" not in stepper.refs(campaign).budget_context
+    # Тот же получасовой слот: стратегию поменял запрос владельца в процессе API.
+    operation = {"entity_type": "campaign", "entity_id": "c-1", "budget_context": {"strategy": "owner"}}
+    repository.save(change(world.business, operations=[operation]))
+    seen = []
+
+    async def step(worker: Worker, business: Business) -> None:
+        seen.append(worker.refs(campaign).budget_context.get("strategy"))
+
+    monkeypatch.setattr(jobs, "handlers", lambda: defaultdict(lambda: step))
+    monkeypatch.setattr(stepper, "demo_available", lambda business: True)
+    await stepper.run_business_due(world.business.id)
+    assert seen and set(seen) == {"owner"}
 
 
 def test_sync_local_keeps_status_that_platform_reports_without_local_equivalent(repository) -> None:
@@ -400,6 +488,32 @@ async def test_moderation_reads_old_bare_keys_and_moves_them_under_platform(repo
     assert approved_at(world.business.settings["_worker"], "direct", "a-1") == old
     await sync_moderation(worker(repository, {"direct": StubPlatform(100, "approved")}), world.business)
     assert world.business.settings["_worker"]["approvals"]["direct:a-1"] == old
+
+
+class ApprovingPlatform(StubPlatform):
+    async def get_moderation(self, refs) -> list[ModerationInfo]:
+        return [ModerationInfo(external_id, "approved", None, NOW) for external_id in refs.ads.values()]
+
+
+async def test_moderation_step_saves_everything_with_one_commit_and_reads_entities_once(
+    repository, monkeypatch
+) -> None:
+    world = tree(repository, ("direct", "vk"))
+    for ad in world.ads["direct"] + world.ads["vk"]:
+        ad.status = "moderation"
+    repository.save(*world.ads["direct"], *world.ads["vk"])
+    saves, reads = [], []
+    save, local_entities = repository.save, repository.local_entities
+    monkeypatch.setattr(repository, "save", lambda *items: saves.append(items) or save(*items))
+    monkeypatch.setattr(
+        repository, "local_entities", lambda *args: reads.append(args[1]) or local_entities(*args)
+    )
+    adapters = {"direct": ApprovingPlatform(0, "approved"), "vk": ApprovingPlatform(0, "approved")}
+    await sync_moderation(worker(repository, adapters), world.business)
+    assert len(saves) == 1 and set(saves[0]) == {world.business, *world.ads["direct"], *world.ads["vk"]}
+    assert sorted(reads) == ["direct", "vk"]
+    assert {ad.status for ad in world.ads["direct"] + world.ads["vk"]} == {"active"}
+    assert sorted(world.business.settings["_worker"]["approvals"]) == ["direct:a-1", "direct:a-2", "vk:a-1", "vk:a-2"]
 
 
 def test_prune_removes_expired_sessions_and_oauth_states(repository) -> None:

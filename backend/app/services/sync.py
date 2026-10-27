@@ -22,11 +22,12 @@ def moderation_key(platform: str, external_id: str) -> str:
 
 def shared_ids(worker: Worker, business: Business) -> set[str]:
     """Внешние id объявлений, которые есть на нескольких площадках: старый голый ключ к ним не относится однозначно."""
-    counts = Counter(
-        external_id
-        for platform in {campaign.platform for campaign in worker.campaigns(business)}
-        for external_id in platform_ads(worker, business, platform)
-    )
+    platforms = {campaign.platform for campaign in worker.campaigns(business)}
+    return shared_in({platform: platform_ads(worker, business, platform) for platform in platforms})
+
+
+def shared_in(ads: dict[str, dict[str, Ad]]) -> set[str]:
+    counts = Counter(external_id for items in ads.values() for external_id in items)
     return {external_id for external_id, count in counts.items() if count > 1}
 
 
@@ -38,7 +39,10 @@ def approved_at(meta: dict, platform: str, external_id: str, shared: Collection[
 
 def platform_ads(worker: Worker, business: Business, platform: str) -> dict[str, Ad]:
     """Внешние id уникальны только внутри площадки: объявления ищутся по паре (площадка, внешний id)."""
-    entities = worker.repository.local_entities(business.id, platform)
+    return ads_of(worker.repository.local_entities(business.id, platform))
+
+
+def ads_of(entities: dict) -> dict[str, Ad]:
     return {external_id: item for (kind, external_id), item in entities.items() if kind == "ad"}
 
 
@@ -99,11 +103,19 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
     meta = worker.metadata(business)
     approvals = meta.get("approvals", {})
     rewritten = meta.get("rewritten", [])
-    shared = shared_ids(worker, business)
-    for campaign in worker.campaigns(business):
-        ads = platform_ads(worker, business, campaign.platform)
+    campaigns = worker.campaigns(business)
+    # Сущности площадки читаются один раз на шаг: и для поиска объявлений, и для ссылок опроса каждой кампании.
+    entities = {
+        platform: worker.repository.local_entities(business.id, platform)
+        for platform in {campaign.platform for campaign in campaigns}
+    }
+    ads_by_platform = {platform: ads_of(items) for platform, items in entities.items()}
+    shared = shared_in(ads_by_platform)
+    polled = []
+    for campaign in campaigns:
+        ads = ads_by_platform[campaign.platform]
         adapter = worker.resolve_adapter(business.id, campaign.platform)
-        for info in await adapter.get_moderation(worker.refs(campaign)):
+        for info in await adapter.get_moderation(worker.refs(campaign, entities[campaign.platform])):
             ad = ads.get(info.entity_id)
             if ad is None:
                 continue
@@ -151,5 +163,9 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                     rewritten = sorted(set(rewritten) | {key})
                     if not worker.proposed(business):
                         ad.status = "moderation"
-            worker.repository.save(ad)
-            worker.remember(business, approvals=approvals, rewritten=rewritten)
+                    # Исправление стоило вызова ИИ: отметка сохраняется сразу, и сбой дальше по шагу его не повторит.
+                    worker.remember(business, ad, approvals=approvals, rewritten=rewritten)
+            polled.append(ad)
+    # Статусы и отметки модерации — одним commit на шаг; при сбое посреди шага следующий опрос получит их заново.
+    if polled:
+        worker.remember(business, *polled, approvals=approvals, rewritten=rewritten)

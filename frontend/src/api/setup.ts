@@ -7,7 +7,8 @@ export interface Account {
   id: number; business_id: number; platform: 'direct' | 'vk'; external_login: string;
   status: 'ok' | 'needs_reauth' | 'revoked'; scopes: string[];
 }
-export interface Me { id: number; login: string; email: string | null; accounts: Account[] }
+/** has_business — мастер создал бизнес: без него разделы с данными ведут в мастер. */
+export interface Me { id: number; login: string; email: string | null; has_business: boolean; accounts: Account[] }
 export interface BusinessInput { site_url: string; city: string; month_budget_kop: number; avg_check_kop: number | null }
 export interface Business extends BusinessInput { id: number }
 export type DescriptionKey = 'services' | 'prices' | 'address' | 'difference';

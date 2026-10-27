@@ -25,6 +25,8 @@ DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
 SUBJECT_TYPES = ("ip", "ooo", "selfemployed", "person")
 MEDICAL_ORDER = ("none", "maybe", "required")
 MAX_BUDGET_KOP = 1_000_000_000
+DRAFT_STATUSES = ("draft", "plan_ready")
+LAUNCHED = "Реклама уже запущена. Сведения о бизнесе меняются в настройках."
 CHECK_TTL = timedelta(minutes=10)
 MAX_FIELD = 2000
 QUESTIONS = {
@@ -317,17 +319,20 @@ class OnboardingService:
         if avg_check_kop is not None and (type(avg_check_kop) is not int or not 0 < avg_check_kop <= MAX_BUDGET_KOP):
             raise OnboardingError("Средний чек должен быть положительной суммой.")
         business = next(
-            (item for item in self.repository.user_businesses(user_id) if item.status in ("draft", "plan_ready")), None
+            (item for item in self.repository.user_businesses(user_id) if item.status in DRAFT_STATUSES), None
         )
         if business is None:
             if self.repository.user_businesses(user_id):
-                raise Blocked("Реклама уже запущена. Сведения о бизнесе меняются в настройках.")
+                raise Blocked(LAUNCHED)
             business = Business(user_id=user_id, site_url=checked, city=city, month_budget_kop=month_budget_kop)
         elif business.site_url != checked:
             # Под блокировкой: проверка сайта пишет ответ ИИ под ней же и не запишет описание старого сайта поверх
-            # сброшенного. Пока она идёт — 409, владелец повторит через несколько секунд.
+            # сброшенного. Пока она идёт — 409, владелец повторит через несколько секунд. Запуск, завершившийся до
+            # блокировки, сведения уже не меняет.
             with self.repository.business_lock(business.id):
                 business = self.current(business.id)
+                if business.status not in DRAFT_STATUSES:
+                    raise Blocked(LAUNCHED)
                 self.reset_description(business)
                 self.update(business, checked, city, month_budget_kop, avg_check_kop)
             return business_view(business)
@@ -374,10 +379,10 @@ class OnboardingService:
         on_miss: Callable[[], None] | None = None,
     ) -> dict:
         """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша, в том числе на
-        ответ, который принесла шедшая параллельно проверка того же бизнеса."""
+        ответ, который принесла шедшая параллельно проверка того же бизнеса. Если та проверка сорвалась, сайт читает
+        первая из ждавших, остальные снова ждут её: чтение и лимит — по одному разу."""
         business = self.current(business_id)
-        running = SITE_CHECKS.get(business_id)
-        if running is not None and owner_text is None:
+        while (running := SITE_CHECKS.get(business_id)) is not None and owner_text is None:
             self.repository.commit()
             await running.wait()
             business = self.current(business_id)

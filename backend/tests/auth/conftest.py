@@ -128,6 +128,9 @@ class FakeRepository:
 
         return AuthRepository(FakeDB(self)).save_account(business_id, login, tokens)
 
+    def has_business(self, user_id: int) -> bool:
+        return any(business.user_id == user_id for business in self.businesses.values())
+
     def list_accounts(self, user_id: int) -> list[PlatformAccount]:
         return [
             account for account in self.accounts.values() if self.businesses[account.business_id].user_id == user_id

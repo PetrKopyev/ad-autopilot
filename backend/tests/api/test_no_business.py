@@ -51,7 +51,7 @@ def test_requests_sent_before_setup_answer_without_business(client) -> None:
         "needs_attention": [],
     }
     demo = client.get("/api/demo/status").json()
-    assert demo["has_business"] is False and demo["total_days"] == 0 and demo["advance"] is None
+    assert demo["total_days"] == 0 and demo["advance"] is None
     assert date.fromisoformat(demo["today"])
 
 

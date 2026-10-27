@@ -54,3 +54,15 @@ def test_account_expiry_status_preserves_revocation_and_ownership_filter(client)
     assert "JOIN businesses" in str(statement)
     assert "businesses.user_id" in str(statement)
     assert 7 in statement.params.values()
+
+
+@pytest.mark.parametrize("found", [None, 3])
+def test_has_business_looks_only_at_users_businesses(client, found: int | None) -> None:
+    from app.auth.sessions import AuthRepository
+
+    db = MagicMock(spec=DBSession)
+    db.scalar.return_value = found
+    assert AuthRepository(db).has_business(7) is (found is not None)
+    statement = db.scalar.call_args.args[0].compile(dialect=dialect())
+    assert "businesses.user_id" in str(statement)
+    assert 7 in statement.params.values()

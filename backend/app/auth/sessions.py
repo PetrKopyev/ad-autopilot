@@ -134,6 +134,9 @@ class AuthRepository:
         self.db.commit()
         return account
 
+    def has_business(self, user_id: int) -> bool:
+        return self.db.scalar(select(Business.id).where(Business.user_id == user_id).limit(1)) is not None
+
     def list_accounts(self, user_id: int) -> list[PlatformAccount]:
         accounts = list(self.db.scalars(select(PlatformAccount).join(Business).where(Business.user_id == user_id)))
         for account in accounts:

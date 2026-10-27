@@ -34,4 +34,4 @@ def test_caddy_limits_api_request_body():
 
 def test_containers_have_memory_limits():
     limits = {name: service.get("mem_limit") for name, service in COMPOSE["services"].items()}
-    assert limits == {"db": "512m", "migrate": "512m", "api": "1g", "worker": "512m", "caddy": "128m"}
+    assert limits == {"db": "512m", "migrate": "512m", "api": "1536m", "worker": "512m", "caddy": "128m"}

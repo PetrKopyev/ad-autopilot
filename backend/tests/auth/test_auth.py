@@ -182,6 +182,15 @@ def test_direct_uses_separate_account_and_encrypted_fields(
     assert "csrf_secret" not in me.text
 
 
+def test_me_tells_whether_setup_created_business(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    login(client, repository)
+    assert client.get("/api/me").json()["has_business"] is True
+    repository.businesses.clear()
+    assert client.get("/api/me").json()["has_business"] is False
+
+
 @pytest.mark.parametrize("change", ["other_user", "same_user_other_session", "expired_session", "purpose", "business"])
 def test_direct_state_bound_to_session_purpose_and_business(
     client: TestClient,

@@ -2,9 +2,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
-from starlette.concurrency import run_in_threadpool
 
-from app.content.images import DEFAULT_FONT, ImageRejected, make_formats
+from app.content.images import DEFAULT_FONT, ImageRejected, make_formats, run_decoding
 from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
 from app.demo_flags import demo_enabled
 from app.domain.explain import rubles
@@ -248,7 +247,7 @@ class LaunchService:
         if platform in asset.platform_refs:
             return asset.platform_refs[platform]
         # Нарезка картинок занимает секунды: в цикле событий она задерживала бы запросы всех пользователей.
-        target = await run_in_threadpool(
+        target = await run_decoding(
             self.cut_image, self.media_root / asset.file_path, IMAGE_FORMATS[platform], group["ads"][0]["title"]
         )
         ref = await adapter.upload_image(target)

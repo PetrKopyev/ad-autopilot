@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
 import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -21,7 +21,7 @@ let cookie = '';
 let answers: Record<string, unknown> = {};
 beforeEach(() => {
   cookie = '';
-  answers = { '/api/auth/config': { demo: true }, '/api/me': { id: 1, login: 'demo', email: null, accounts: [] } };
+  answers = { '/api/auth/config': { demo: true }, '/api/me': { id: 1, login: 'demo', email: null, has_business: false, accounts: [] } };
   vi.spyOn(document, 'cookie', 'get').mockImplementation(() => cookie);
   vi.stubGlobal('fetch', fetchMock);
   fetchMock.mockImplementation(async (url, init) => {
@@ -37,54 +37,90 @@ function app(path: string) {
   render(<MemoryRouter initialEntries={[path]}><App /><Location /></MemoryRouter>);
 }
 const calls = () => fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${new URL(String(url)).pathname}`);
-const noBusiness = { status: 'no_business', last_check_at: null, auto_continue: false, needs_attention: [] };
+const withBusiness = () => { answers['/api/me'] = { ...(answers['/api/me'] as object), has_business: true }; };
 
 it('после «Войти в демо» ведёт в мастер, а не на главную', async () => {
-  answers['/api/autopilot/status'] = noBusiness;
   app('/login');
   fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
   expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
   expect(screen.getByTestId('path').textContent).toBe('/setup');
-  expect(opened.mock.calls).toEqual([['мастер']]);
+  await waitFor(() => expect(opened.mock.calls).toEqual([['мастер']]));
   expect(calls()).toEqual(['GET /api/auth/config', 'POST /api/auth/demo', 'GET /api/me']);
 });
 
 it.each(['/', '/ads'])('без бизнеса %s сразу ведёт в мастер, и раздел не открывается', async (path) => {
   cookie = '__Host-csrf=token';
-  answers['/api/autopilot/status'] = noBusiness;
   app(path);
   expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
   expect(screen.getByTestId('path').textContent).toBe('/setup');
-  expect(opened.mock.calls).toEqual([['мастер']]);
-  expect(calls()).toEqual(['GET /api/me', 'GET /api/autopilot/status']);
+  await waitFor(() => expect(opened.mock.calls).toEqual([['мастер']]));
+  expect(calls()).toEqual(['GET /api/me']);
 });
 
 it('вошедший без бизнеса со страницы входа попадает в мастер', async () => {
   cookie = '__Host-csrf=token';
-  answers['/api/autopilot/status'] = noBusiness;
   app('/login');
   expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
   expect(screen.getByTestId('path').textContent).toBe('/setup');
 });
 
-it('с бизнесом открывает главную', async () => {
+it.each([['/', 'главная'], ['/ads', 'реклама']])('с бизнесом %s открывается без запроса статуса автопилота', async (path, name) => {
   cookie = '__Host-csrf=token';
-  answers['/api/autopilot/status'] = { ...noBusiness, status: 'running' };
-  app('/');
-  expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
-  expect(screen.getByTestId('path').textContent).toBe('/');
+  withBusiness();
+  app(path);
+  expect(await screen.findByRole('heading', { name })).toBeTruthy();
+  expect(screen.getByTestId('path').textContent).toBe(path);
+  expect(calls()).toEqual(['GET /api/me']);
 });
 
-it('сбой при проверке бизнеса показывает ошибку с повтором и не открывает раздел', async () => {
+it('сбой при вопросе о сессии показывает ошибку с повтором и не открывает раздел', async () => {
   cookie = '__Host-csrf=token';
-  fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify(answers['/api/me']), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  withBusiness();
   fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify({ detail: 'Сервис временно недоступен.' }), { status: 503, headers: { 'Content-Type': 'application/json' } }));
-  answers['/api/autopilot/status'] = { ...noBusiness, status: 'running' };
   app('/');
   expect((await screen.findByRole('alert')).textContent).toContain('Сервис временно недоступен.');
   expect(opened).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: copy.common.retry }));
   expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
+});
+
+it('после удаления данных вход показывает итог остановки рекламы, а не уводит на главную', async () => {
+  cookie = '__Host-csrf=token';
+  withBusiness();
+  answers['/api/autopilot/status'] = { status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] };
+  answers['/api/business'] = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
+    auto_continue: true, description: null, marking: null };
+  const message = 'Данные удалены, но не все площадки подтвердили остановку рекламы.';
+  const answer = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (url, init) => {
+    if (init?.method !== 'DELETE') return answer(url, init);
+    cookie = '';
+    return new Response(JSON.stringify({ stopped: false, message }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+  app('/settings');
+  fireEvent.change(await screen.findByRole('textbox', { name: copy.settingsScreen.deleteLabel }), { target: { value: copy.settingsScreen.deleteWord } });
+  fireEvent.click(screen.getByRole('button', { name: copy.settingsScreen.deleteButton }));
+  expect((await screen.findByRole('alert')).textContent).toBe(message);
+  expect(screen.getByTestId('path').textContent).toBe('/login');
+  expect(screen.getByRole('heading', { name: copy.login.title })).toBeTruthy();
+});
+
+it('гостя из раздела сразу уводит на вход, и раздел не шлёт запросов', async () => {
+  app('/ads');
+  expect(await screen.findByRole('heading', { name: copy.login.title })).toBeTruthy();
+  expect(screen.getByTestId('path').textContent).toBe('/login');
+  expect(opened).not.toHaveBeenCalled();
+  expect(calls()).toEqual(['GET /api/auth/config']);
+});
+
+it('политика открывается гостю, а меню и служебные ссылки — только вошедшему', async () => {
+  app('/policy');
+  expect(screen.getByRole('heading', { name: copy.service.policyTitle })).toBeTruthy();
+  expect(screen.getByTestId('path').textContent).toBe('/policy');
+  expect(screen.queryByRole('navigation')).toBeNull();
+  expect(screen.queryByRole('link', { name: copy.service.errorsTitle })).toBeNull();
+  expect(screen.queryByRole('link', { name: copy.setup.accounts.vk })).toBeNull();
+  expect(calls()).toEqual([]);
 });
 
 it('несуществующий адрес показывает «Страница не найдена» со ссылкой на главную', async () => {

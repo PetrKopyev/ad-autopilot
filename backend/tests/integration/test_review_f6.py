@@ -276,6 +276,42 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
 
 
+async def test_rewrite_is_saved_at_once_and_not_repeated_after_step_failed_later(monkeypatch):
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    first, second = list(world.ads.values())[:2]
+
+    async def rejected(refs):
+        return [
+            ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now) for ad in (first, second)
+        ]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    saved = []
+    save = world.repository.save
+    monkeypatch.setattr(
+        world.repository,
+        "save",
+        lambda *items: saved.extend(
+            list(world.business.settings["_worker"].get("rewritten", ())) for item in items if item is world.business
+        )
+        or save(*items),
+    )
+    fixed = [Operation("update_ad_text", "ad", first.external_id, "text", first.text, "Исправлено")]
+    rewrite = AsyncMock(side_effect=[fixed, RuntimeError("ИИ не ответил")])
+    world.clock.advance(hours=1)
+    with pytest.raises(RuntimeError):
+        await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    assert saved[-1] == [f"direct:{first.external_id}"]
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", second.external_id, "text", second.text, "Ок")])
+    world.clock.advance(hours=1)
+    await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    assert [call.args[1] for call in rewrite.await_args_list] == [second]
+    assert len(world.changes(reason_code="REJECTED_REWRITE")) == 2
+
+
 async def test_stop_platform_before_revoke_pauses_campaign_and_writes_history():
     from app.services.budget_guard import stop_platform
 

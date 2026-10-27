@@ -493,6 +493,31 @@ async def test_parallel_site_check_waits_for_running_one_and_takes_its_result(wo
     assert SITE_CHECKS == {}
 
 
+async def test_after_failed_site_check_one_waiting_check_reads_site_and_others_wait_for_it(world: World) -> None:
+    reads, misses = [], []
+    original = world.onboarding.reader
+
+    async def failing_once(url: str) -> SiteReadResult:
+        reads.append(url)
+        await asyncio.sleep(0.01)
+        if len(reads) == 1:
+            raise RuntimeError("Проверка сорвалась")
+        return await original(url)
+
+    world.onboarding.reader = failing_once
+    results = await asyncio.gather(
+        *(
+            world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda name=name: misses.append(name))
+            for name in ("first", "second", "third", "fourth")
+        ),
+        return_exceptions=True,
+    )
+    assert isinstance(results[0], RuntimeError)
+    assert results[1] == results[2] == results[3] and results[1]["services_found"] == 1
+    assert reads == [SITE, SITE] and misses == ["first", "second"] and world.llm.calls == ["description"]
+    assert SITE_CHECKS == {}
+
+
 async def test_site_check_reads_site_outside_lock_and_waits_for_it(world: World) -> None:
     held = True
     seen = []
@@ -572,6 +597,21 @@ def test_site_is_not_changed_while_business_is_locked(world: World) -> None:
     assert world.business.site_url == "https://other.example/"
 
 
+def test_site_is_not_changed_when_launch_finished_before_lock(world: World, monkeypatch) -> None:
+    lock = world.repository.business_lock
+
+    @contextmanager
+    def launched_meanwhile(business_id: int):
+        world.business.status = "running"
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", launched_meanwhile)
+    with pytest.raises(Blocked, match="уже запущена"):
+        world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
+    assert world.business.site_url == SITE
+
+
 async def test_no_counter_means_stop_with_reason(tmp_path: Path) -> None:
     pages = [Page(SITE, "Салон красоты. Маникюр классический — 1 500 ₽. Работаем ежедневно с 09:00 до 21:00. " * 2)]
     world = make_world(tmp_path, pages=pages)
@@ -620,6 +660,22 @@ async def test_description_requires_services_and_resets_approval_on_edit(world: 
     fields = world.business.description["fields"]
     assert not fields["services"]["verified"] and fields["services"]["quote"] is None
     assert world.business.description_approved_at is None
+
+
+async def test_owner_text_is_sent_to_ai_even_with_fresh_site_check(world: World) -> None:
+    reads = []
+    original = world.onboarding.reader
+
+    async def reader(url: str) -> SiteReadResult:
+        reads.append(url)
+        return await original(url)
+
+    world.onboarding.reader = reader
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    assert world.llm.calls == ["description"] and reads == [SITE]
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, owner_text="Маникюр и педикюр")
+    assert world.llm.calls == ["description", "description"] and reads == [SITE, SITE]
 
 
 async def test_owner_text_raises_medical_level(world: World) -> None:

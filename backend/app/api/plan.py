@@ -6,7 +6,6 @@ from typing import Annotated, Any
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StrictBool, StrictInt
-from starlette.concurrency import run_in_threadpool
 from starlette.types import Message
 
 from app.api.business import human_errors
@@ -14,7 +13,7 @@ from app.api.limits import assets_limit, regenerate_limit, upload_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
-from app.content.images import MAX_BYTES
+from app.content.images import MAX_BYTES, run_decoding
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
 from app.services.plan import VIDEO_QUEUE, Built, PlanRepository, PlanService, build_videos
@@ -143,7 +142,7 @@ async def upload_photo(
     if len(data) > MAX_BYTES:
         raise HTTPException(413, TOO_LARGE)
     with human_errors():
-        result = await run_in_threadpool(service.upload_photo, business.id, group_id, data, today)
+        result = await run_decoding(service.upload_photo, business.id, group_id, data, today)
     background.add_task(rebuild_videos, build, business.id)
     return result
 

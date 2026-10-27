@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useLocation } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { connectAccount, demoLogin, getAuthConfig } from '../api/setup';
@@ -17,6 +17,11 @@ export function LoginPage() {
   const [demo, setDemo] = useState(false);
   // Куда вести после входа. Переходим, только когда сессия перечитана: иначе раздел ещё видит гостя и вернёт на вход.
   const [next, setNext] = useState('/');
+  // После удаления данных сюда приходят ещё со старой сессией и перечитывают её уже здесь: перечитанная раньше, она
+  // увела бы из раздела на вход без итога остановки. На главную уводим, только если вход случился здесь, после гостя.
+  const guest = useRef(false);
+  if (session.data === null) guest.current = true;
+  useEffect(() => { if (stopResult) session.reload(); }, [stopResult]);
   useEffect(() => {
     const controller = new AbortController();
     void getAuthConfig(controller.signal).then((config) => {
@@ -36,7 +41,7 @@ export function LoginPage() {
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
-  if (session.data) return <Navigate to={next} replace />;
+  if (session.data && (!stopResult || guest.current)) return <Navigate to={next} replace />;
   return <div className="page-stack launch-flow">
     <h1>{copy.login.title}</h1>
     {stopResult && <StopNotice result={stopResult} />}

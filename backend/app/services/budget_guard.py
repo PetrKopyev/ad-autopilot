@@ -5,7 +5,7 @@ from math import ceil
 from time import monotonic
 from typing import TYPE_CHECKING
 
-from app.db.models import BudgetLedger, Business
+from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.budget import plan_budget
 from app.platforms.base import Operation, PlatformError
@@ -17,13 +17,15 @@ if TYPE_CHECKING:
 
 
 async def read_spend(
-    worker: Worker, business: Business, *, tolerate_errors: bool = False
+    worker: Worker, business: Business, *, tolerate_errors: bool = False, campaigns: list[Campaign] | None = None
 ) -> tuple[dict[str, int], dict[str, int]]:
-    """Расход по дате клика до сейчас, включая два неустоявшихся дня."""
+    """Расход по дате клика до сейчас, включая два неустоявшихся дня. campaigns — кампании бизнеса, если шаг их уже
+    прочитал."""
     day = today(worker.clock)
     month = day.replace(day=1)
     spent, lifetime = {}, {}
-    platforms = {campaign.platform for campaign in worker.campaigns(business)}
+    campaigns = worker.campaigns(business) if campaigns is None else campaigns
+    platforms = {campaign.platform for campaign in campaigns}
     meta = worker.metadata(business)
     started_on = min(month, day.fromisoformat(meta.get("started_on", month.isoformat())))
     for platform in sorted(platforms):
@@ -35,7 +37,7 @@ async def read_spend(
             if not tolerate_errors:
                 raise
             continue
-        known = {campaign.external_id for campaign in worker.campaigns(business) if campaign.platform == platform}
+        known = {campaign.external_id for campaign in campaigns if campaign.platform == platform}
         for row in rows:
             if row.campaign_id not in known:
                 continue
@@ -175,11 +177,13 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
     if pending_stop:
         await stop_all(business, worker=worker, **pending_stop)
     month = today(worker.clock).replace(day=1)
-    spent, _ = await read_spend(worker, business, tolerate_errors=True)
+    # Кампании читаются раз на шаг: остановка выше меняет их статус, а не состав и не дневные лимиты.
+    campaigns = worker.campaigns(business)
+    spent, _ = await read_spend(worker, business, tolerate_errors=True, campaigns=campaigns)
     ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id, month=month)}
     reported = sum(max(spent.get(platform, 0), row.spent_kop) for platform, row in ledgers.items())
     reported += sum(value for platform, value in spent.items() if platform not in ledgers)
-    daily = sum(campaign.daily_limit_kop for campaign in worker.campaigns(business))
+    daily = sum(campaign.daily_limit_kop for campaign in campaigns)
     # При внешнем повышении кэпа фактический темп может превышать сохранённый лимит.
     # Увеличиваем защитный запас по приросту ledger, без запроса состояния кампаний.
     observed_daily = 0

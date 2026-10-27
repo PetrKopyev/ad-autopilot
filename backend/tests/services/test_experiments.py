@@ -91,6 +91,41 @@ async def test_factory_notifies_once_when_generation_refused_without_platform_wr
     assert notices[0].log[0]["reason_code"] == "EXPERIMENT_GENERATION_FAILED"
 
 
+@pytest.mark.parametrize("platform,blocked", [("vk", False), ("direct", True)])
+async def test_pending_change_blocks_test_only_when_its_cabinet_can_be_reconciled(
+    experiment_world, monkeypatch, platform, blocked
+):
+    from app.platforms.base import PlatformError
+    from app.services.changes import ChangeConflict
+
+    world = experiment_world
+    world.repository.save(
+        ChangeLog(
+            business_id=world.business.id, actor="autopilot", kind="pause", platform=platform, entity_type="ad",
+            entity_id="x", operations=[], reason_code="CUSTOM", reason_params={}, reason_text="Т.", evidence={},
+            status="pending", created_at=world.clock.now,
+        )
+    )
+    prepare = AsyncMock(side_effect=Blocked("Генерация отклонена"))
+    monkeypatch.setattr("app.services.experiments.prepare_variant", prepare)
+
+    def resolve(business_id, name):
+        # Кабинет VK требует входа заново: его изменение сверить нечем.
+        if name == "vk":
+            raise PlatformError("Нужен вход заново.")
+        return world.adapter
+
+    worker = world.worker()
+    worker.resolve_adapter = resolve
+    if blocked:
+        with pytest.raises(ChangeConflict):
+            await create_experiment(worker, world.business, control_snapshot(world), design())
+        prepare.assert_not_awaited()
+    else:
+        assert await create_experiment(worker, world.business, control_snapshot(world), design()) is None
+        prepare.assert_awaited_once()
+
+
 @pytest.mark.parametrize("global_dry,business_dry", [(True, False), (False, True), (True, True)])
 async def test_dry_run_proposal_is_idempotent_and_does_not_touch_platform(
     experiment_world, monkeypatch, global_dry, business_dry

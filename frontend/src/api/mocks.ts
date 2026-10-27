@@ -109,7 +109,7 @@ import { maskMarking } from './settings';
 import type { BusinessSettings } from './settings';
 import type { AppNotification } from './notifications';
 interface SetupMockState {
-  me: Me; business?: Business; description?: Description; counter?: number; goals?: number[];
+  me: Omit<Me, 'has_business'>; business?: Business; description?: Description; counter?: number; goals?: number[];
   marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean;
 }
 const setupMockKey = 'ad-autopilot-setup-mock';
@@ -124,7 +124,8 @@ function persistSetupMock() {
 }
 export function mockSetupMe(): Me {
   if (setupMock.signedOut) throw new ApiError(copy.errors.unauthorized, 401);
-  return structuredClone(setupMock.me);
+  // Разделы макета показывают готовый бизнес и до мастера.
+  return { ...structuredClone(setupMock.me), has_business: true };
 }
 export function mockSetupConnect(platform: 'login' | 'direct' | 'vk') {
   setupMock.signedOut = false;
