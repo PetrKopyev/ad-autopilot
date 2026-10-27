@@ -11,6 +11,7 @@ export function DemoPanel({ changed }: { changed: () => void }) {
   const [status, setStatus] = useState<DemoStatus>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [retryDays, setRetryDays] = useState<number>();
   const lock = useRef(false);
   const onChanged = useRef(changed);
   onChanged.current = changed;
@@ -35,20 +36,29 @@ export function DemoPanel({ changed }: { changed: () => void }) {
         setStatus(value);
         if (value.advance?.state === 'running') return;
         rememberDemoDate(value); onChanged.current();
-        if (value.advance?.state === 'error') setError(value.advance.error);
+        if (value.advance?.state === 'error') { setError(value.advance.error); setRetryDays(value.advance.days - value.advance.done); }
       }).catch(() => {});
     }, 1000);
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [running]);
   async function advance(days: number) {
     if (lock.current) return;
-    lock.current = true; setBusy(true); setError('');
+    lock.current = true; setBusy(true); setError(''); setRetryDays(undefined);
     try { setStatus(await advanceDemo(days)); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    catch (reason) {
+      setError(reason instanceof Error ? reason.message : copy.errors.generic); setRetryDays(days);
+      // Перемотка могла уже идти — из другой вкладки или брошенной: показываем её ход, а не прежнее «Перемотано».
+      const value = await getDemoStatus().catch(() => undefined);
+      if (!value) return;
+      setStatus(value);
+      if (value.advance?.state === 'running') setError('');
+      else if (value.today !== status?.today) { rememberDemoDate(value); onChanged.current(); }
+    }
     finally { lock.current = false; setBusy(false); }
   }
   if (!status) return null;
   const progress = status.advance;
+  const retry = retryDays && status.total_days + retryDays <= 120 ? retryDays : undefined;
   return <Card className="page-stack">
     <h2>Демо: перемотать время</h2>
     <p className="muted">В демо площадки ненастоящие: сервис ускоряет время, чтобы показать, как работает автопилот. После первой перемотки время в демо идёт только по этим кнопкам.</p>
@@ -56,6 +66,6 @@ export function DemoPanel({ changed }: { changed: () => void }) {
       disabled={busy || running || status.total_days + days > 120} onClick={() => void advance(days)}>+{days} {plural(days, 'день', 'дня', 'дней')}</Button>)}</div>
     <p role="status">{running && progress ? `Автопилот обрабатывает прошедшие дни: ${progress.done} из ${progress.days}…`
       : `${progress?.state === 'done' ? 'Готово. ' : ''}Демо-дата: ${displayDate(status.today)}. Перемотано ${status.total_days} из 120 дней.`}</p>
-    {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+    {error && <ErrorBanner message={error} onRetry={retry ? () => void advance(retry) : undefined} onDismiss={() => setError('')} />}
   </Card>;
 }

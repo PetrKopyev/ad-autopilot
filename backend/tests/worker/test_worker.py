@@ -135,6 +135,50 @@ async def test_unreadable_platform_leaves_pending_until_next_run() -> None:
     assert world.changes(status="applied")
 
 
+async def test_pending_change_of_account_needing_reauth_does_not_stop_other_platform() -> None:
+    from app.db.models import ChangeLog
+    from app.platforms.base import PlatformError
+    from app.worker.jobs import Worker
+
+    world = await make_world()
+    vk = FlakyReadAdapter(clock=world.clock)
+    vk._armed = True
+    accounts = {"vk": "needs_reauth"}
+
+    def resolve(business_id: int, platform: str):
+        if platform == "direct":
+            return world.adapter
+        if accounts[platform] != "ok":
+            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+        return vk
+
+    stuck = ChangeLog(
+        business_id=1,
+        actor="autopilot",
+        kind="pause",
+        platform="vk",
+        entity_type="ad",
+        entity_id="vk-1",
+        operations=[],
+        reason_code="CUSTOM",
+        reason_params={},
+        reason_text="Тест.",
+        evidence={"_service": {"refs": {"campaign_id": "vk-c", "groups": {}, "ads": {}, "targets": {}}}},
+        status="pending",
+    )
+    world.repository.save(stuck)
+    world.clock.advance(hours=7)
+    worker = Worker(world.repository, resolve, clock=world.clock, dry_run=False)
+    await worker.run("optimize", 1)
+    assert world.repository.rows(WorkerRun, 1, kind="optimize")[0].status == "ok"
+    assert stuck.status == "pending"
+    # После нового входа изменение снова сверяется, и пока площадка не ответила, шаги ждут.
+    accounts["vk"] = "ok"
+    with pytest.raises(ChangeConflict):
+        await worker.run("rebalance_budget", 1)
+    assert stuck.status == "pending"
+
+
 async def test_dry_run_proposes_without_touching_platform() -> None:
     world = await make_world()
     before = world.adapter._states[world.refs.campaign_id]

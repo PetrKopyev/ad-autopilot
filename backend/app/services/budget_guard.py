@@ -140,13 +140,20 @@ async def stop_platform(
 
     Защитное действие: выполняется и в пробном режиме. Если бизнес занят шагом воркера, ждём до wait секунд, затем
     ChangeConflict. Остановка кампании не прерывается посреди (иначе изменение осталось бы pending без ответа): после
-    deadline (monotonic) следующая кампания не начинается, TimeoutError.
+    deadline (monotonic) следующая кампания не начинается, TimeoutError; блокировку после deadline тоже не ждём.
     Возвращает, подтвердила ли площадка остановку всех кампаний; остановка записывается в журнал от имени владельца.
     У бизнеса один кабинет на площадку (platform_accounts: business_id, platform), поэтому кампании площадки
     бизнеса — это кампании отключаемого кабинета.
     """
     with ExitStack() as stack:
-        await wait_for_business(stack, worker, business.id, wait)
+        if monotonic() >= deadline:
+            raise TimeoutError
+        try:
+            await wait_for_business(stack, worker, business.id, min(wait, deadline - monotonic()))
+        except ChangeConflict:
+            if monotonic() < deadline:
+                raise
+            raise TimeoutError from None
         stopped = True
         for campaign in worker.campaigns(business):
             if campaign.platform != platform:

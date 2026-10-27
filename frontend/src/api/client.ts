@@ -17,6 +17,8 @@ export type ApiRequestOptions = Omit<RequestInit, 'body' | 'credentials'> & {
   body?: unknown;
 };
 
+const csrfCookie = '__Host-csrf';
+
 function readCookie(name: string): string | undefined {
   const prefix = `${encodeURIComponent(name)}=`;
   const cookie = document.cookie.split(';').map((part) => part.trim())
@@ -53,8 +55,13 @@ async function serverMessage(response: Response): Promise<string | undefined> {
   }
 }
 
+/** Сервер ставит и стирает CSRF-cookie вместе с cookie сессии: без неё сессии точно нет. */
+export function hasSessionCookie(): boolean {
+  return readCookie(csrfCookie) !== undefined;
+}
+
 export function createApiClient({
-  csrfCookieName = '__Host-csrf',
+  csrfCookieName = csrfCookie,
   csrfHeaderName = 'X-CSRF-Token',
 }: ApiClientOptions = {}) {
   return async function request<T = unknown>(

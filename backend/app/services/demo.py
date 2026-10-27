@@ -133,5 +133,5 @@ class DemoService:
                 for _ in range(48):
                     clock.advance(hours=0.5)
                     self.remember(business, now=clock.now.isoformat())
-                    await self.worker.run_due()
+                    await self.worker.run_business_due(business_id)
                 progress.done = day

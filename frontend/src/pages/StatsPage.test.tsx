@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
+import { ApiError } from '../api/client';
 import { getDaily } from '../api/screens';
 import { getBusinessToday } from '../api/period';
 import type { Daily } from '../api/types';
@@ -72,4 +73,12 @@ it('период из одного сегодняшнего дня не обре
   const result = await chart('2026-10-27', [day('2026-10-27', true)]);
   expect(result.points).toBe(1);
   expect(result.note).not.toContain(copy.screens.chartToday);
+});
+
+it('отказ сервера по периоду показывает его текст', async () => {
+  const detail = 'Период не может быть длиннее 400 дней.';
+  vi.mocked(getBusinessToday).mockResolvedValue('2026-10-27');
+  vi.mocked(getDaily).mockRejectedValue(new ApiError(detail, 422, detail));
+  render(<StatsPage />);
+  expect((await screen.findByRole('alert')).textContent).toContain(detail);
 });

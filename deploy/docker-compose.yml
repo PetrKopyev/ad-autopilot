@@ -7,6 +7,9 @@ x-backend: &backend
   environment:
     MEDIA_DIR: /data/media
   restart: unless-stopped
+  # Пределы памяти рассчитаны на VPS 2 ГБ + 2 ГБ swap (DEPLOY.md): утечка или тяжёлый запрос перезапускает свой
+  # контейнер, а не отнимает память у базы и остальных.
+  mem_limit: 512m
 
 services:
   db:
@@ -25,6 +28,7 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    mem_limit: 512m
 
   migrate:
     <<: *backend
@@ -36,6 +40,8 @@ services:
 
   api:
     <<: *backend
+    # Две сборки роликов ffmpeg параллельно, картинки Pillow и демо-симуляторы в памяти процесса.
+    mem_limit: 1g
     volumes:
       - media:/data/media
     depends_on:
@@ -81,6 +87,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    mem_limit: 128m
 
 networks:
   default:

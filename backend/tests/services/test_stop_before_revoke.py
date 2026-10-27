@@ -121,6 +121,27 @@ async def test_stop_platform_gives_up_when_business_stays_busy():
     assert world.campaign.status == "active"
 
 
+async def test_stop_platform_waits_for_business_only_until_deadline():
+    from app.services.budget_guard import stop_platform
+
+    world = await make_world()
+    worker = world.worker()
+    worker.step_key = "owner:revoke"
+    attempts = busy_lock(world.repository, times=1000)
+    started = monotonic()
+    with pytest.raises(TimeoutError):
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=started + 0.6, wait=15
+        )
+    assert monotonic() - started < 2
+    with pytest.raises(TimeoutError):
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=monotonic(), wait=15
+        )
+    assert len(attempts) <= 3
+    assert world.campaign.status == "active"
+
+
 class StubAdapter:
     """Площадка, которая помнит статусы кампаний и останавливает их по set_status."""
 
@@ -220,6 +241,31 @@ async def test_stop_user_ads_after_deadline_reports_timeout_and_leaves_campaigns
         "ВКонтакте: остановка не закончилась за минуту",
     ]
     assert adapter.statuses == {"c-1": "active", "c-2": "active"}
+
+
+@pytest.mark.db
+async def test_stop_user_ads_does_not_wait_for_busy_business_after_deadline(owner):
+    from sqlalchemy import text
+
+    from app.api.auth import stop_user_ads
+
+    class SlowAdapter(StubAdapter):
+        async def get_state(self, refs):
+            await asyncio.sleep(0.5)
+            return await super().get_state(refs)
+
+    db, user, business = owner
+    business("direct", "ok", "c-1")
+    busy = business("vk", "ok", "c-2")
+    adapter = SlowAdapter({"c-1": "active", "c-2": "active"})
+    with db.get_bind().engine.connect() as step:
+        step.execute(text("SELECT pg_advisory_lock(:id)"), {"id": busy.business_id})
+        started = monotonic()
+        problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", started + 0.3)
+        step.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": busy.business_id})
+    assert monotonic() - started < 3
+    assert problems == ["ВКонтакте: остановка не закончилась за минуту"]
+    assert adapter.statuses == {"c-1": "paused_owner", "c-2": "active"}
 
 
 async def test_ad_stopper_gives_the_whole_stop_one_minute(monkeypatch):

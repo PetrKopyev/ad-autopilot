@@ -351,6 +351,18 @@ def test_routes_validate_period(client: TestClient, path: str, query: dict) -> N
     assert client.get(f"/api/stats/{path}", params={"level": "ad", **query}).status_code == 422
 
 
+@pytest.mark.parametrize("path", ["summary", "breakdown", "daily"])
+def test_routes_limit_period_length(client: TestClient, path: str) -> None:
+    def get(start: str, end: str):
+        return client.get(f"/api/stats/{path}", params={"level": "ad", "from": start, "to": end})
+
+    assert get("2025-09-22", "2026-10-26").status_code == 200
+    assert get("2025-09-21", "2026-10-26").status_code == 422
+    response = get("0001-01-01", "9999-12-31")
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Период не может быть длиннее 400 дней."
+
+
 @pytest.mark.parametrize("level", [None, "unknown"])
 def test_breakdown_requires_valid_level(client: TestClient, level: str | None) -> None:
     query = params() if level is None else params(level=level)

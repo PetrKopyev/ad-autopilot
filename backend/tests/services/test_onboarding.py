@@ -457,8 +457,9 @@ async def test_site_check_counts_rate_limit_only_for_real_reading(world: World) 
     assert misses == [0, 11]
 
 
-async def test_parallel_site_checks_make_one_paid_call(world: World) -> None:
+async def test_parallel_site_checks_read_site_outside_lock_and_pay_once(world: World) -> None:
     held = False
+    seen = []
 
     @contextmanager
     def lock(business_id: int):
@@ -474,18 +475,32 @@ async def test_parallel_site_checks_make_one_paid_call(world: World) -> None:
     original = world.onboarding.reader
 
     async def slow_reader(url: str) -> SiteReadResult:
+        seen.append(held)
         await asyncio.sleep(0.01)
         return await original(url)
 
     world.repository.business_lock = lock
     world.onboarding.reader = slow_reader
-    results = await asyncio.gather(
+    first, second = await asyncio.gather(
         world.onboarding.site_check(world.business.id, NOW, TODAY),
         world.onboarding.site_check(world.business.id, NOW, TODAY),
-        return_exceptions=True,
     )
+    assert seen == [False, False]
     assert world.llm.calls == ["description"]
-    assert sum(isinstance(item, ChangeConflict) for item in results) == 1
+    assert first == second
+
+
+async def test_site_changed_during_read_is_not_paid_or_saved(world: World) -> None:
+    original = world.onboarding.reader
+
+    async def reader(url: str) -> SiteReadResult:
+        world.business.site_url = "https://other.example/"
+        return await original(url)
+
+    world.onboarding.reader = reader
+    with pytest.raises(ChangeConflict, match="Адрес сайта изменился"):
+        await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    assert world.llm.calls == [] and "check" not in world.business.description
 
 
 async def test_no_counter_means_stop_with_reason(tmp_path: Path) -> None:

@@ -84,9 +84,6 @@ class LaunchRepository(PlanRepository):
     def save_ledger(self, ledger: BudgetLedger) -> None:
         self.db.merge(ledger)
 
-    def refresh(self, item: object) -> None:
-        self.db.refresh(item)
-
 
 class LaunchService:
     def __init__(

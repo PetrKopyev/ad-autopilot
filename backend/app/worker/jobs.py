@@ -528,6 +528,19 @@ class Worker:
             if op.get("budget_context"):
                 contexts[(change.platform, op["entity_id"])] = op["budget_context"]
 
+    def pending(self, business_id: int) -> list[ChangeLog]:
+        """Несверенные изменения площадок с рабочим доступом. Изменение кабинета, который требует входа заново, до
+        нового входа сверить нечем: оно не должно останавливать шаги остальных площадок."""
+        changes = self.repository.pending(business_id)
+        return [change for change in changes if self.reachable(business_id, change.platform)]
+
+    def reachable(self, business_id: int, platform: str) -> bool:
+        try:
+            self.resolve_adapter(business_id, platform)
+        except PlatformError:
+            return False
+        return True
+
     def demo_available(self, business: Business) -> bool:
         for campaign in self.campaigns(business):
             try:
@@ -693,7 +706,7 @@ class Worker:
                 )
                 for change in recovered:
                     self.cache_context(change)
-                if kind != "budget_guard" and self.repository.pending(business.id):
+                if kind != "budget_guard" and self.pending(business.id):
                     raise ChangeConflict(PENDING)
                 await handlers()[kind](self, business)
                 run.status = "ok"
@@ -714,28 +727,32 @@ class Worker:
 
     async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
-        self._contexts.clear()
         await self.run("heartbeat")
-        now = self.clock.now.astimezone(MOSCOW)
         for business in self.repository.rows(Business):
-            if skip and skip(business):
-                continue
-            kinds = ["budget_guard"]
-            if now.minute < 30:
-                kinds.append("sync_moderation")
-                if now.hour % 3 == 0:
-                    kinds.append("sync_stats")
-            if now.hour >= 6:
-                kinds.extend(("optimize", "experiments_tick", "rebalance_budget"))
-            if now.weekday() == 0 and now.hour >= 10:
-                kinds.append("clients_survey")
-            # Ежедневная проверка догоняет первый день после простоя и напоминает за три дня.
-            kinds.insert(0, "month_rollover")
-            for kind in kinds:
-                try:
-                    await self.run(kind, business.id)
-                except Exception:
-                    logger.error("Worker job %s failed for business %s", kind, business.id)
+            if not (skip and skip(business)):
+                await self.run_business_due(business.id)
+
+    async def run_business_due(self, business_id: int) -> None:
+        """Шаги одного бизнеса в текущем слоте. Перемотка демо зовёт только их: пульс по её часам показал бы
+        остальным бизнесам проверку из будущего."""
+        self._contexts.clear()
+        now = self.clock.now.astimezone(MOSCOW)
+        kinds = ["budget_guard"]
+        if now.minute < 30:
+            kinds.append("sync_moderation")
+            if now.hour % 3 == 0:
+                kinds.append("sync_stats")
+        if now.hour >= 6:
+            kinds.extend(("optimize", "experiments_tick", "rebalance_budget"))
+        if now.weekday() == 0 and now.hour >= 10:
+            kinds.append("clients_survey")
+        # Ежедневная проверка догоняет первый день после простоя и напоминает за три дня.
+        kinds.insert(0, "month_rollover")
+        for kind in kinds:
+            try:
+                await self.run(kind, business_id)
+            except Exception:
+                logger.error("Worker job %s failed for business %s", kind, business_id)
 
 
 def schedule_key(kind: str, now: datetime) -> str:

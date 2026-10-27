@@ -16,7 +16,7 @@ from app.content.yandexgpt import CompletionResult, YandexGPTError
 from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
-from app.services.changes import ChangesRepository
+from app.services.changes import ChangeConflict, ChangesRepository
 from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
@@ -151,6 +151,9 @@ class SpendLLM:
 class OnboardingRepository(ChangesRepository):
     def commit(self) -> None:
         self.db.commit()
+
+    def refresh(self, item: object) -> None:
+        self.db.refresh(item)
 
     def add(self, item: object) -> None:
         self.db.add(item)
@@ -333,6 +336,51 @@ class OnboardingService:
     ) -> dict:
         """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша."""
         business = self.repository.business(business_id)
+        if cached := self.cached_check(business, now, owner_text):
+            return self.check_view(business, cached)
+        if on_miss is not None:
+            on_miss()
+        url = business.site_url
+        # Чтение сайта идёт до минуты: без блокировки бизнеса, соединение с базой на это время возвращается в пул.
+        self.repository.commit()
+        site = await self.reader(url)
+        # Под блокировкой только трата на ИИ и запись: параллельная проверка могла уже сохранить результат.
+        with self.repository.business_lock(business_id):
+            self.repository.refresh(business)
+            if business.site_url != url:
+                raise ChangeConflict("Адрес сайта изменился во время проверки. Проверьте сайт ещё раз.")
+            if cached := self.cached_check(business, now, owner_text):
+                return self.check_view(business, cached)
+            llm = SpendLLM(
+                self.llm, self.repository, business.id, ai_budget(self.repository, business, self.limits, today), "site"
+            )
+            self.repository.commit()
+            try:
+                draft = await extract_description(site, llm, owner_text=owner_text)
+            except YandexGPTError:
+                draft = DescriptionDraft(questions=[OwnerQuestion("description", QUESTIONS["services"])])
+            self.repository.refresh(business)
+            fields = description_fields(draft)
+            check = {
+                "site_url": url,
+                "checked_at": now.isoformat(),
+                "pages_read": len(site.pages),
+                "services_found": len(draft.services),
+                "counter_ids": site.counter_ids,
+                "block_reason": site.launch_block_reason,
+                "fresh": fields,
+            }
+            description = dict(business.description)
+            description["check"] = check
+            description.setdefault("fields", fields)
+            description["site_medical"] = draft.medical.level
+            business.description = description
+            business.medical_level = worst_medical(draft.medical.level, business.medical_level)
+            self.apply_niche(business)
+            self.repository.commit()
+        return self.check_view(business, check)
+
+    def cached_check(self, business: Business, now: datetime, owner_text: str | None) -> dict | None:
         cached = business.description.get("check")
         if (
             cached
@@ -340,39 +388,8 @@ class OnboardingService:
             and cached["site_url"] == business.site_url
             and now - datetime.fromisoformat(cached["checked_at"]) < CHECK_TTL
         ):
-            return self.check_view(business, cached)
-        if on_miss is not None:
-            on_miss()
-        # Чтение сайта и ответ ИИ идут десятки секунд: соединение с базой на это время возвращается в пул.
-        self.repository.commit()
-        with self.repository.business_lock(business_id):
-            site = await self.reader(business.site_url)
-            llm = SpendLLM(
-                self.llm, self.repository, business.id, ai_budget(self.repository, business, self.limits, today), "site"
-            )
-            try:
-                draft = await extract_description(site, llm, owner_text=owner_text)
-            except YandexGPTError:
-                draft = DescriptionDraft(questions=[OwnerQuestion("description", QUESTIONS["services"])])
-        fields = description_fields(draft)
-        check = {
-            "site_url": business.site_url,
-            "checked_at": now.isoformat(),
-            "pages_read": len(site.pages),
-            "services_found": len(draft.services),
-            "counter_ids": site.counter_ids,
-            "block_reason": site.launch_block_reason,
-            "fresh": fields,
-        }
-        description = dict(business.description)
-        description["check"] = check
-        description.setdefault("fields", fields)
-        description["site_medical"] = draft.medical.level
-        business.description = description
-        business.medical_level = worst_medical(draft.medical.level, business.medical_level)
-        self.apply_niche(business)
-        self.repository.commit()
-        return self.check_view(business, check)
+            return cached
+        return None
 
     def check_view(self, business: Business, check: dict) -> dict:
         ids = check["counter_ids"]

@@ -215,6 +215,68 @@ def test_concurrent_advance_rejected_per_business(demo):
     assert client.get("/api/demo/status").json()["advance"] == {"state": "done", "days": 1, "done": 1, "error": ""}
 
 
+def test_advance_left_by_closed_browser_finishes_and_does_not_block_next(demo):
+    import asyncio
+    import json
+
+    from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE
+
+    client, world, _ = demo
+    launch(client)
+    body = json.dumps({"days": 1}).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/demo/advance",
+        "raw_path": b"/api/demo/advance",
+        "query_string": b"",
+        "root_path": "",
+        "server": ("testserver", 443),
+        "client": ("127.0.0.1", 5000),
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"x-csrf-token", b"test-csrf"),
+            (b"cookie", f"{SESSION_COOKIE}=test-session; {CSRF_COOKIE}=test-csrf".encode()),
+        ],
+    }
+    messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive():
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    async def closed(message):
+        # Так uvicorn отвечает в закрытое соединение: молча, без ошибки.
+        pass
+
+    asyncio.run(client.app(scope, receive, closed))
+    assert advance_jobs.get(world.business.id).state == "done"
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
+    assert client.get("/api/demo/status").json()["total_days"] == 2
+
+
+def test_advance_refusals_explain_why(demo):
+    from app.demo_flags import MAX_ADVANCES
+
+    client, world, _ = demo
+    launch(client)
+    abandoned = []
+    for business_id in range(world.business.id + 1, world.business.id + 1 + MAX_ADVANCES):
+        abandoned.append(advance_jobs.start(business_id, 1))
+        advance_jobs.forget(business_id)
+    response = client.post("/api/demo/advance", json={"days": 1})
+    assert (response.status_code, response.json()["detail"]) == (503, "Сервер сейчас занят. Повторите через минуту.")
+    for progress in abandoned:
+        progress.state = "done"
+    advance_jobs.start(world.business.id, 1)
+    response = client.post("/api/demo/advance", json={"days": 1})
+    assert (response.status_code, response.json()["detail"]) == (409, ADVANCING)
+
+
 @pytest.mark.parametrize("demo", [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 10, 26, tzinfo=UTC)], indirect=True)
 def test_thirty_days_real_plan_budget_and_autopilot(demo, monkeypatch):
     client, world, worker = demo
@@ -428,13 +490,13 @@ def test_advance_reports_progress_by_day(demo, monkeypatch):
     client, world, worker = demo
     launch(client)
     done = []
-    run_due = Worker.run_due
+    run_business_due = Worker.run_business_due
 
-    async def watch(self, skip=None):
+    async def watch(self, business_id):
         done.append(advance_jobs.get(world.business.id).done)
-        await run_due(self, skip)
+        await run_business_due(self, business_id)
 
-    monkeypatch.setattr(Worker, "run_due", watch)
+    monkeypatch.setattr(Worker, "run_business_due", watch)
     assert client.post("/api/demo/advance", json={"days": 3}).status_code == 202
     assert done == [0] * 48 + [1] * 48 + [2] * 48
     assert advance_jobs.get(world.business.id).done == 3
@@ -549,3 +611,58 @@ def test_business_screen_gets_only_description_fields(demo):
     assert set(description) == {"fields"}
     assert set(description["fields"]) == {"services", "prices", "address", "difference"}
     assert all("value" in item for item in description["fields"].values())
+
+
+@pytest.mark.db
+async def test_advance_runs_only_its_business_and_writes_no_shared_heartbeat(db_session, monkeypatch):
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from app.demo_flags import AdvanceProgress
+    from app.platforms.fake import FakeAdapter
+    from app.services.demo import DemoRepository
+    from app.worker.jobs import WorkerRepository
+
+    enable_demo(monkeypatch)
+    start = datetime(2026, 1, 5, 7, tzinfo=UTC)
+    businesses = []
+    for _ in range(2):
+        user = User(yandex_uid="demo-" + uuid4().hex, login="demo", consent_at=start)
+        db_session.add(user)
+        db_session.flush()
+        business = Business(
+            user_id=user.id,
+            site_url="https://salon.example",
+            city="Москва",
+            month_budget_kop=3_000_000,
+            status="running",
+            settings={},
+            lead_goal_ids=[1],
+        )
+        db_session.add(business)
+        db_session.commit()
+        businesses.append(business)
+    first, second = businesses
+    adapters = {
+        (business.id, platform): FakeAdapter(clock=VirtualClock(start))
+        for business in businesses
+        for platform in ("direct", "vk")
+    }
+    worker = Worker(
+        DemoRepository(db_session, first.id),
+        lambda business_id, platform: adapters[business_id, platform],
+        dry_run=False,
+    )
+    await DemoService(worker).advance(first.id, AdvanceProgress(1))
+
+    def runs(*conditions):
+        return db_session.scalars(select(WorkerRun).where(*conditions)).all()
+
+    assert runs(WorkerRun.business_id == first.id)
+    assert not runs(WorkerRun.business_id == second.id)
+    assert not runs(WorkerRun.kind == "heartbeat")
+    db_session.refresh(second)
+    assert second.settings == {}
+    assert all(adapters[second.id, platform].clock.now == start for platform in ("direct", "vk"))
+    assert WorkerRepository(db_session).last_check(second.id) is None

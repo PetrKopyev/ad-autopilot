@@ -52,8 +52,10 @@ export function Layout() {
       </main>
       <footer className="app-footer">
         <Link to="/policy">{copy.service.policyTitle}</Link>
-        <Link to="/connect/vk">{copy.setup.accounts.vk}</Link>
-        <Link to="/platform-error">{copy.service.errorsTitle}</Link>
+        {session.data && <>
+          <Link to="/connect/vk">{copy.setup.accounts.vk}</Link>
+          <Link to="/platform-error">{copy.service.errorsTitle}</Link>
+        </>}
       </footer>
     </div>
   );

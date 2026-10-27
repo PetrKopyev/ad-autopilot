@@ -170,7 +170,7 @@ async def _create_experiment(
             target_id=ad.id,
         )
         return None
-    if not worker.proposed(business) and any(item is not existing for item in repository.pending(business.id)):
+    if not worker.proposed(business) and any(item is not existing for item in worker.pending(business.id)):
         raise ChangeConflict(PENDING)
     params = {"hypothesis": hypothesis, "n_per_arm": design.n_per_arm, "days": design.estimated_days}
     proposal = existing or ChangeLog(

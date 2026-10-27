@@ -13,6 +13,7 @@ from app.demo_flags import demo_now
 from app.services.stats import Level, StatsRepository, StatsService
 
 router = APIRouter(prefix="/api/stats", route_class=ReleasingRoute)
+MAX_PERIOD_DAYS = 400
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,8 @@ class Period:
 def get_period(date_from: Annotated[date, Query(alias="from")], date_to: Annotated[date, Query(alias="to")]) -> Period:
     if date_from > date_to:
         raise HTTPException(422, "Начало периода должно быть не позже окончания.")
+    if (date_to - date_from).days >= MAX_PERIOD_DAYS:
+        raise HTTPException(422, f"Период не может быть длиннее {MAX_PERIOD_DAYS} дней.")
     return Period(date_from, date_to)
 
 

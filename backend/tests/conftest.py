@@ -27,11 +27,13 @@ def settings_environment(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def process_memory():
-    """Лимиты частоты и справочники регионов живут в памяти процесса: каждый тест начинает с чистых."""
+    """Лимиты частоты, справочники регионов и перемотки демо живут в памяти процесса: каждый тест начинает с чистых."""
     yield
     if limits := sys.modules.get("app.api.limits"):
         for limit in limits.RateLimit.limits:
             limit.reset()
+    if demo_flags := sys.modules.get("app.demo_flags"):
+        demo_flags.advance_jobs.__init__()
     for name, cache in (("app.platforms.direct", "GEO_REGIONS"), ("app.platforms.vk", "REGIONS")):
         if module := sys.modules.get(name):
             getattr(module, cache).clear()

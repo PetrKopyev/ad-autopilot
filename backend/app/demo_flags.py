@@ -36,6 +36,8 @@ class AdvanceJobs:
     def __init__(self) -> None:
         self._guard = Lock()
         self._items: dict[int, AdvanceProgress] = {}
+        # forget убирает перемотку удалённого бизнеса из _items, но её поток ещё идёт и держит соединение блокировки.
+        self._live: list[AdvanceProgress] = []
 
     def start(self, business_id: int, days: int) -> AdvanceProgress | None:
         """None — у бизнеса перемотка уже идёт; ServerBusy — идёт MAX_ADVANCES перемоток других бизнесов."""
@@ -44,9 +46,11 @@ class AdvanceJobs:
         with self._guard:
             if self.running(business_id):
                 return None
-            if sum(progress.state == "running" for progress in self._items.values()) >= MAX_ADVANCES:
+            self._live = [progress for progress in self._live if progress.state == "running"]
+            if len(self._live) >= MAX_ADVANCES:
                 raise ServerBusy
             self._items[business_id] = progress = AdvanceProgress(days)
+            self._live.append(progress)
             return progress
 
     def get(self, business_id: int) -> AdvanceProgress | None:

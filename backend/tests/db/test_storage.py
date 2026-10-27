@@ -586,3 +586,33 @@ def test_revocations_skip_vk_account_connected_in_another_business(db_session):
     revocations = sorted(repository.revocations(mine.user.id), key=lambda item: item.platform)
     assert [(item.platform, item.user_id) for item in revocations] == [("direct", None), ("vk", "777")]
     assert repository.revocations(theirs.user.id, theirs.account.id)[0].access_token == "t"
+
+
+async def test_site_check_reads_site_before_lock_and_saves_under_it_on_postgres(db_session):
+    from app.content.site_reader import SiteReadResult
+    from app.platforms.metrica import FakeMetrica
+    from app.services.onboarding import OnboardingService
+    from tests.services.test_onboarding import LIMITS, NOW, SITE, TODAY, ScriptedLLM, page_text
+
+    user = User(yandex_uid="site-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    llm = ScriptedLLM()
+    free = []
+
+    async def reader(url: str) -> SiteReadResult:
+        # Пока сайт читается, блокировку бизнеса свободно берёт другой процесс.
+        with db_session.get_bind().engine.connect() as other:
+            free.append(other.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id}))
+            other.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": business_id})
+        return SiteReadResult(page_text())
+
+    repository = OnboardingRepository(db_session)
+    service = OnboardingService(repository, llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader)
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    result = await service.site_check(business_id, NOW, TODAY)
+    assert result["status"] == "ready" and free == [True] and llm.calls == ["description"]
+    assert (await service.site_check(business_id, NOW, TODAY)) == result and llm.calls == ["description"]
+    business = db_session.get(Business, business_id)
+    db_session.expire(business)
+    assert business.description["check"]["site_url"] == SITE

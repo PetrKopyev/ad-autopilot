@@ -11,25 +11,27 @@ import { StatsPage } from './pages/StatsPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { ClientsPage } from './pages/ClientsPage';
 import { SettingsPage } from './pages/SettingsPage';
-import { SessionProvider } from './api/session';
+import { RequireSession, SessionProvider } from './api/session';
 
 export function App() {
   return (
     <SessionProvider><Routes>
       <Route element={<Layout />}>
-        <Route index element={<HomePage />} />
         <Route path="login" element={<LoginPage />} />
-        <Route path="setup" element={<SetupPage />} />
-        <Route path="setup/:step" element={<SetupPage />} />
-        <Route path="plan" element={<PlanPage />} />
-        <Route path="ads" element={<AdsPage />} />
-        <Route path="statistics" element={<StatsPage />} />
-        <Route path="history" element={<HistoryPage />} />
-        <Route path="clients" element={<ClientsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="connect/vk" element={<ServiceVkPage />} />
-        <Route path="platform-error" element={<ServiceErrorPage />} />
         <Route path="policy" element={<ServicePolicyPage />} />
+        <Route element={<RequireSession />}>
+          <Route index element={<HomePage />} />
+          <Route path="setup" element={<SetupPage />} />
+          <Route path="setup/:step" element={<SetupPage />} />
+          <Route path="plan" element={<PlanPage />} />
+          <Route path="ads" element={<AdsPage />} />
+          <Route path="statistics" element={<StatsPage />} />
+          <Route path="history" element={<HistoryPage />} />
+          <Route path="clients" element={<ClientsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="connect/vk" element={<ServiceVkPage />} />
+          <Route path="platform-error" element={<ServiceErrorPage />} />
+        </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes></SessionProvider>

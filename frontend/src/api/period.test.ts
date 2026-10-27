@@ -78,3 +78,13 @@ it('lastDays берёт дни по сегодняшний включитель�
   expect(lastDays(14, '2026-11-03')).toEqual({ from: '2026-10-21', to: '2026-11-03' });
   expect(lastDays(1, '2026-11-03')).toEqual({ from: '2026-11-03', to: '2026-11-03' });
 });
+
+// Сервер отвечает 422 на период длиннее 400 дней; сами мы строим не больше месяца.
+it('периоды экранов не длиннее 31 дня в любой день года', async () => {
+  const { periodFor, lastDays, isoDate } = await import('./period');
+  const length = ({ from, to }: { from: string; to: string }) => (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
+  for (let day = new Date(2026, 0, 1); day.getFullYear() < 2028; day.setDate(day.getDate() + 1)) {
+    for (const choice of ['week', 'month', '30days'] as const) expect(length(periodFor(choice, day))).toBeLessThanOrEqual(31);
+    expect(length(lastDays(14, isoDate(day)))).toBe(14);
+  }
+});

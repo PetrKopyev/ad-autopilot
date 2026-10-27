@@ -322,6 +322,20 @@ def test_demo_advances_are_limited_by_lock_pool() -> None:
     assert jobs.businesses() == set(range(MAX_ADVANCES + 1))
 
 
+def test_forgotten_advance_still_counts_until_its_thread_ends() -> None:
+    from app.demo_flags import MAX_ADVANCES, AdvanceJobs
+
+    jobs = AdvanceJobs()
+    started = [jobs.start(business_id, 1) for business_id in range(MAX_ADVANCES)]
+    for business_id in range(MAX_ADVANCES):
+        jobs.forget(business_id)
+    assert not jobs.businesses()
+    with pytest.raises(ServerBusy):
+        jobs.start(MAX_ADVANCES, 1)
+    started[0].state = "error"
+    assert jobs.start(MAX_ADVANCES, 1) is not None
+
+
 async def test_video_queue_keeps_built_videos_between_retries() -> None:
     # Бизнес занят: сохранить нельзя, но собранное ffmpeg не теряется — повтор берёт его, а не собирает заново.
     from app.services.plan import VideoQueue
