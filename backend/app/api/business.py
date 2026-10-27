@@ -17,12 +17,13 @@ from app.db.models import Session, User
 from app.demo_flags import demo_enabled
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, ServerBusy
 from app.services.demo import prepare_business, read_demo_site
 from app.services.onboarding import (
     MAX_BUDGET_KOP,
     AiLimits,
     Blocked,
+    NotFound,
     OnboardingError,
     OnboardingRepository,
     OnboardingService,
@@ -68,9 +69,11 @@ def human_errors() -> Iterator[None]:
         yield
     except OnboardingError as error:
         raise HTTPException(422, str(error)) from error
+    except ServerBusy as error:
+        raise HTTPException(503, str(error)) from error
     except (Blocked, ChangeConflict) as error:
         raise HTTPException(409, str(error)) from error
-    except LookupError as error:
+    except NotFound as error:
         raise HTTPException(404, str(error)) from error
     except (PlatformError, MetricaError) as error:
         raise HTTPException(502, str(error)) from error

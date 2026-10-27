@@ -81,6 +81,10 @@ class DemoUsers:
                 removed += AuthRepository(self.db).delete_user(user_id)
         return removed
 
+    def missing(self, business_ids: set[int]) -> set[int]:
+        """Какие из этих бизнесов уже удалены."""
+        return business_ids - set(self.db.scalars(select(Business.id).where(Business.id.in_(business_ids))))
+
     def count(self) -> int:
         return self.db.scalar(select(func.count(User.id)).where(User.yandex_uid.startswith(DEMO_UID_PREFIX)))
 

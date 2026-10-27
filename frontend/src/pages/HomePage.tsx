@@ -10,6 +10,7 @@ import { getNotifications, readNotification, type AppNotification } from '../api
 import { displayDate, displayDateTime, justNow } from '../format';
 import { ClientsSummary, DemoNotice, PeriodPicker, Sources, SummaryFigures } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
+import { formatMoney } from '../components/Money';
 import { resumeAutopilot } from '../api/settings';
 import './Home.css';
 
@@ -85,6 +86,7 @@ export function HomePage() {
       {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
       {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
       {summary.data && <BudgetRing spentKopecks={summary.data.budget.spent_kop} budgetKopecks={summary.data.budget.budget_kop} daysRemaining={summary.data.budget.days_remaining} />}
+      {summary.data && summary.data.budget.spent_kop > summary.data.budget.reported_kop && <p className="muted">{copy.budget.fresher(formatMoney(summary.data.budget.reported_kop))}</p>}
     </Card>
     <PeriodPicker value={choice} onChange={setChoice} />
     {summary.loading && <p role="status">{copy.screens.loading}</p>}

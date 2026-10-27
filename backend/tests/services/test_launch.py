@@ -12,7 +12,7 @@ from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchBlocked, LaunchFailed
-from app.services.onboarding import ai_budget
+from app.services.onboarding import NotFound, ai_budget
 from app.services.plan import budget_limits
 from app.services.registry import AccountInfo, AdapterRegistry
 from tests.services.test_onboarding import (
@@ -258,9 +258,9 @@ async def test_budget_below_platform_minimum_is_blocked_before_creation(tmp_path
 
 async def test_unknown_plan_and_foreign_business(tmp_path: Path) -> None:
     world, plan = await ready(tmp_path)
-    with pytest.raises(LookupError):
+    with pytest.raises(NotFound):
         await world.launches.launch(world.business.id, 999, False, NOW, TODAY)
-    with pytest.raises(LookupError):
+    with pytest.raises(ValueError, match="Бизнес не найден"):
         await world.launches.launch(world.business.id + 1, plan["id"], False, NOW, TODAY)
 
 

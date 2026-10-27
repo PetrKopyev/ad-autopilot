@@ -45,7 +45,7 @@ export function LoginPage() {
         <Button disabled={busy} onClick={() => void login()}>{copy.login.action}</Button>
         {demo && <Button disabled={busy} onClick={() => void loginDemo()}>Войти в демо</Button>}
       </div>
-      <p className="muted">{copy.login.consent} <Link to="/policy">{copy.login.policy}</Link></p>
+      <p className="muted">{copy.login.consent} <Link className="tap-link" to="/policy">{copy.login.policy}</Link></p>
     </Card>
   </div>;
 }

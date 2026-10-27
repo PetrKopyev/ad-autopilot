@@ -58,9 +58,9 @@ export function mockSummary(period: Period): Summary {
   const window = clientResults({ from: isoDate(start), to: isoDate(end) });
   return { business_id: 1, ...period, ...totals(period), clients: clients.clients, cost_per_client_kop: clients.cost_per_client_kop,
     clients_window: { from: isoDate(start), to: isoDate(end), ...window, unknown_weeks: 4 - window.answered_weeks },
-    budget: { month: month.from, budget_kop: budget, spent_kop: spent, remaining_kop: Math.max(0, budget - spent),
+    budget: { month: month.from, budget_kop: budget, spent_kop: spent + 15100, reported_kop: spent, remaining_kop: Math.max(0, budget - spent - 15100),
       days_remaining: new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate() - today.getDate() + 1,
-      platforms: [{ platform: 'direct', spent_kop: spent, source: 'stats_daily', spent_at: null }] },
+      platforms: [{ platform: 'direct', spent_kop: spent + 15100, source: 'budget_ledger', spent_at: timestamp }] },
   };
 }
 export function mockBreakdown(period: Period, level: StatsLevel): Breakdown {
@@ -86,9 +86,15 @@ export function mockStopAll() {
   record(copy.screens.stopped);
 }
 export function mockExperiments() {
-  return { items: [{ id: 1, title: copy.screens.mockExperiment, comparing: copy.screens.mockComparing,
-    arms: [{ title: 'Маникюр рядом с вами', text: 'Запись онлайн, мастер рядом с домом.' }, { title: 'Выберите время для маникюра', text: 'Запись онлайн, мастер рядом с домом.' }],
-    remaining_impressions: 4200, status: 'running' as const, conclusion: null }] };
+  const text = 'Запись онлайн, мастер рядом с домом.';
+  return { items: [
+    { id: 2, title: copy.screens.mockImageExperiment, hypothesis: 'image' as const, comparing: copy.screens.mockImageComparing,
+      arms: [1, 2].map((id) => ({ title: copy.screens.mockAdTitle, text, image: mockAsset(id).url })),
+      remaining_impressions: 3100, status: 'running' as const, conclusion: null },
+    { id: 1, title: copy.screens.mockExperiment, hypothesis: 'text' as const, comparing: copy.screens.mockComparing,
+      arms: [{ title: copy.screens.mockAdTitle, text, image: null }, { title: copy.screens.mockSecondAdTitle, text, image: null }],
+      remaining_impressions: 4200, status: 'running' as const, conclusion: null },
+  ] };
 }
 export function mockHistory() {
   return { items: history.slice(0, 3).map((item) => ({ ...item })), total: history.length, page: 1, page_size: 3 };

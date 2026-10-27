@@ -81,3 +81,29 @@ async def test_site_check_returns_connection_before_reading_site(tmp_path: Path)
     world.onboarding.reader = read
     await world.onboarding.site_check(world.business.id, NOW, TODAY)
     assert events[:2] == ["commit", "read"]
+
+
+async def test_reading_image_for_vk_upload_does_not_stop_other_requests(tmp_path: Path, monkeypatch) -> None:
+    import respx
+    from PIL import Image
+
+    from app.platforms import vk
+    from tests.platforms.test_vk import API, configuration
+
+    file = tmp_path / "pic.png"
+    Image.new("RGB", (600, 600)).save(file)
+    monkeypatch.setattr(vk, "image_size", slow(vk.image_size))
+    monkeypatch.setattr(Path, "read_bytes", slow(Path.read_bytes))
+    with respx.mock() as api:
+        api.post(f"{API}/content/static.json").respond(json={"id": 501})
+        async with vk.VkAdapter("tok", config=configuration(), href="https://shop.example/") as adapter:
+            assert await longest_pause(adapter.upload_image(file)) < SLOW / 2
+
+
+async def test_reading_file_for_simulated_upload_does_not_stop_other_requests(tmp_path: Path, monkeypatch) -> None:
+    from app.platforms.fake import FakeAdapter
+
+    file = tmp_path / "asset.bin"
+    file.write_bytes(b"test-asset")
+    monkeypatch.setattr(Path, "read_bytes", slow(Path.read_bytes))
+    assert await longest_pause(FakeAdapter().upload_image(file)) < SLOW / 2

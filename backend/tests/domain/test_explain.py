@@ -6,6 +6,8 @@ import pytest
 from app.domain.explain import MONEY_FIELDS, TEMPLATES, explain, explain_decision, explain_experiment, rubles
 from app.domain.types import Action, Decision, ExperimentResult, Metrics, Verdict
 
+PERIOD = {"period_start": "2026-11-01", "period_end": "2026-11-14"}
+
 
 @pytest.mark.parametrize(
     "kopecks,expected",
@@ -29,13 +31,13 @@ def test_ruble_format_whole_rubles_and_kopecks_below_hundred(kopecks, expected):
 @pytest.mark.parametrize(
     "code,values,expected",
     [
-        ("PAUSE_NO_LEADS", {"clicks": 1}, "нажали 1 раз,"),
-        ("PAUSE_NO_LEADS", {"clicks": 3}, "нажали 3 раза,"),
-        ("PAUSE_NO_LEADS", {"clicks": 12}, "нажали 12 раз,"),
-        ("PAUSE_NO_LEADS", {"clicks": 22}, "нажали 22 раза,"),
-        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 3, "ref_cpl": 100}, "получили 3 обращения."),
-        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 1, "ref_cpl": 100}, "получили 1 обращение."),
-        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 11, "ref_cpl": 100}, "получили 11 обращений."),
+        ("PAUSE_NO_LEADS", {"clicks": 1, **PERIOD}, "нажали 1 раз,"),
+        ("PAUSE_NO_LEADS", {"clicks": 3, **PERIOD}, "нажали 3 раза,"),
+        ("PAUSE_NO_LEADS", {"clicks": 12, **PERIOD}, "нажали 12 раз,"),
+        ("PAUSE_NO_LEADS", {"clicks": 22, **PERIOD}, "нажали 22 раза,"),
+        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 3, "ref_cpl": 100, **PERIOD}, "получили 3 обращения."),
+        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 1, "ref_cpl": 100, **PERIOD}, "получили 1 обращение."),
+        ("PAUSE_TOO_EXPENSIVE", {"spend": 100, "leads": 11, "ref_cpl": 100, **PERIOD}, "получили 11 обращений."),
         ("EXPERIMENT_START", {"hypothesis": "text", "n_per_arm": 5_371, "days": 1}, "5 371 показ каждого"),
         ("EXPERIMENT_START", {"hypothesis": "text", "n_per_arm": 5_372, "days": 2}, "примерно 2 дня."),
         ("EXPERIMENT_TOO_LONG", {"days": 21}, "примерно 21 день."),
@@ -62,10 +64,10 @@ def test_every_reason_has_a_complete_template(code):
 
 
 def test_decision_reason_is_deterministic_and_does_not_mutate_numbers():
-    numbers = {"clicks": 80}
+    numbers = {"clicks": 80, **PERIOD}
     decision = Decision("ad", Action.PAUSE, "PAUSE_NO_LEADS", numbers=numbers)
     assert "80 раз" in explain_decision(decision)
-    assert numbers == {"clicks": 80}
+    assert numbers == {"clicks": 80, **PERIOD}
     assert explain_decision(decision) == explain_decision(decision)
 
 
@@ -112,3 +114,18 @@ def test_hypothesis_names_and_extension_are_plain_russian():
     text = explain("EXPERIMENT_START", hypothesis="image", n_per_arm=1_000, days=10)
     assert "Проверяем другую картинку" in text
     assert "50%" in explain_experiment(ExperimentResult(Verdict.EXTEND, "EXPERIMENT_EXTEND"), Metrics(), Metrics())
+
+
+@pytest.mark.parametrize(
+    "start,end,expected",
+    [
+        ("2026-11-05", "2026-11-05", "5 ноября"),
+        ("2026-11-01", "2026-11-14", "С 1 по 14 ноября"),
+        ("2026-10-25", "2026-11-07", "С 25 октября по 7 ноября"),
+        ("2026-12-25", "2027-01-07", "С 25 декабря 2026 по 7 января 2027"),
+    ],
+)
+def test_pause_reason_names_the_days_it_was_decided_on(start, end, expected):
+    # На экране объявления расход считается за свой период: без дат «Потратили 211 ₽» спорит с «Расход 0 ₽».
+    text = explain("PAUSE_TOO_EXPENSIVE", spend=21_100, leads=3, ref_cpl=5_000, period_start=start, period_end=end)
+    assert text.startswith(f"{expected} потратили 211 ₽, получили 3 обращения.")

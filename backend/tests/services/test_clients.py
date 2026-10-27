@@ -6,6 +6,7 @@ import pytest
 
 from app.db.models import Business, LeadsSurvey
 from app.services.clients import ClientsService
+from app.services.onboarding import NotFound
 from app.services.stats import StatsRow
 
 TODAY = date(2026, 10, 26)
@@ -87,7 +88,7 @@ def test_unknown_and_zero_have_no_client_price(setup, answer):
 def test_other_business_question_is_not_found(setup):
     service, repository, business, _ = setup
     repository.questions.return_value = []
-    with pytest.raises(KeyError):
+    with pytest.raises(NotFound):
         service.answer(business, WEEK, 1, TODAY)
     repository.save.assert_not_called()
 

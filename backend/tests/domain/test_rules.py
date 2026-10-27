@@ -296,3 +296,14 @@ def test_every_emitted_decision_can_be_explained(make_ad, now):
     groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(4)]
     ads = [make_ad(id=str(i), group_id=str(i), spend=1_000_000) for i in range(4)]
     assert all(explain_decision(item) for item in decide(ads, groups, now, 10_000))
+
+
+def test_pause_names_the_settled_days_it_was_decided_on(make_ad, now):
+    # Пояснение «Потратили 211 ₽» без периода было непонятно: за какие дни. Вчерашний день ещё не устоялся и в расчёт
+    # и период не входит.
+    days = tuple(DaySpend(now.date() - timedelta(days=offset), 200_000, 1_000, 30, 0) for offset in (1, 3, 5, 9))
+    groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(3)]
+    ads = [make_ad(id="0", group_id="0", days=days)] + [make_ad(id=str(i), group_id=str(i)) for i in (1, 2)]
+    (pause,) = [item for item in decide(ads, groups, now, 10_000) if item.action == Action.PAUSE]
+    assert pause.numbers["period_start"] == (now.date() - timedelta(days=9)).isoformat()
+    assert pause.numbers["period_end"] == (now.date() - timedelta(days=3)).isoformat()

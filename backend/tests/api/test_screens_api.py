@@ -292,17 +292,19 @@ def test_experiments_and_safe_business(setup):
     assert "Убедительной разницы" in items[0]["conclusion"]
     assert items[1]["remaining_impressions"] == 4000
     assert "/ads#" not in items[1]["comparing"]
-    # Заголовки вариантов в этом мире совпадают: варианты различает начало текста.
-    assert control.title == variant.title
-    assert items[1]["comparing"].startswith(f"Сравниваем вариант А «{control.text}» и вариант Б «")
-    assert "До конца проверки" in items[1]["comparing"] and "До конца проверки" not in items[0]["comparing"]
+    # Варианты экран показывает из arms; comparing их не повторяет, а говорит, что между ними меняется.
+    assert items[1]["comparing"] == "Меняем только текст объявления, картинка та же. До конца проверки: 14 дней."
+    assert items[0]["comparing"] == "Меняем только текст объявления, картинка та же."
+    assert items[1]["hypothesis"] == "text"
+    # Картинку объявлению выбирает запуск; экран отдаёт ссылку на неё у каждого варианта.
+    assert control.asset_id and variant.asset_id
     assert items[1]["arms"] == [
-        {"title": control.title, "text": control.text},
-        {"title": variant.title, "text": variant.text},
+        {"title": control.title, "text": control.text, "image": f"/api/plan/assets/{control.asset_id}/file"},
+        {"title": variant.title, "text": variant.text, "image": f"/api/plan/assets/{variant.asset_id}/file"},
     ]
 
 
-def test_experiment_arms_with_same_title_differ_by_text_and_missing_ad_is_empty(setup):
+def test_experiment_arms_carry_own_text_and_missing_ad_is_empty(setup):
     client, world = setup
     control, variant = list(world.ads.values())[:2]
     variant.title, variant.text = control.title, "Другое начало текста"
@@ -323,8 +325,12 @@ def test_experiment_arms_with_same_title_differ_by_text_and_missing_ad_is_empty(
             )
         )
     running, cancelled = client.get("/api/experiments").json()["items"]
-    assert cancelled["comparing"] == f"Сравниваем вариант А «{control.text}» и вариант Б «Другое начало текста»."
-    assert running["arms"][1] == {"title": "", "text": ""}
+    assert cancelled["arms"][1] == {
+        "title": control.title,
+        "text": "Другое начало текста",
+        "image": f"/api/plan/assets/{variant.asset_id}/file",
+    }
+    assert running["arms"][1] == {"title": "", "text": "", "image": None}
     result = client.get("/api/business").json()
     assert result["marking"]["inn"] == result["marking"]["phone"] == ""
     assert result["marking"]["confirmed_in_platform"] == {"direct": True}

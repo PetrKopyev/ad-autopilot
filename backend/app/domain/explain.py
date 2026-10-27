@@ -1,17 +1,22 @@
 from collections.abc import Mapping
+from datetime import date
 from decimal import Decimal
 
 from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.types import Decision, ExperimentResult, Metrics, Verdict, nonnegative_int
 
 TEMPLATES = {
-    "PAUSE_NO_LEADS": "На объявление нажали {clicks}, но обращений не было. Остановили его, чтобы сберечь бюджет.",
+    # {period} — дни, по которым принято решение (period_start, period_end): расход на экране объявления считается
+    # за другой период, и без дат цифры пояснения с ним не сходятся.
+    "PAUSE_NO_LEADS": (
+        "{period} на объявление нажали {clicks}, но обращений не было. Остановили его, чтобы сберечь бюджет."
+    ),
     "PAUSE_TOO_EXPENSIVE": (
-        "Потратили {spend} ₽, получили {leads}. Даже с учётом погрешности это слишком дорого "
+        "{period} потратили {spend} ₽, получили {leads}. Даже с учётом погрешности это слишком дорого "
         "при ориентире {ref_cpl} ₽ за обращение. Остановили объявление."
     ),
     "PAUSE_LOW_CTR": (
-        "Объявление показали {impressions}, нажали {clicks}. На соседние нажимают чаще. Остановили его."
+        "{period} объявление показали {impressions}, нажали {clicks}. На соседние нажимают чаще. Остановили его."
     ),
     "SCALE_UP": (
         "Объявления приносят обращения по подходящей цене. Повысили дневной лимит с {old_limit} до {new_limit} ₽."
@@ -74,6 +79,33 @@ PLURALS = {
 }
 
 
+MONTHS = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
+
+def period(start: date, end: date) -> str:
+    """«5 ноября», «С 1 по 14 ноября», «С 25 октября по 7 ноября»; год — только если он разный."""
+    if start == end:
+        return f"{start.day} {MONTHS[start.month - 1]}"
+    if start.year != end.year:
+        return f"С {start.day} {MONTHS[start.month - 1]} {start.year} по {end.day} {MONTHS[end.month - 1]} {end.year}"
+    if start.month != end.month:
+        return f"С {start.day} {MONTHS[start.month - 1]} по {end.day} {MONTHS[end.month - 1]}"
+    return f"С {start.day} по {end.day} {MONTHS[end.month - 1]}"
+
+
 def rubles(kopecks: int) -> str:
     """Как в интерфейсе: целые рубли, а суммы меньше 100 ₽ — с копейками («20 149», «1,57»)."""
     nonnegative_int(kopecks, "kopecks")
@@ -108,6 +140,8 @@ def explain(
             "image": "другую картинку",
             "audience": "другую аудиторию",
         }.get(data["hypothesis"], data["hypothesis"])
+    if "period_start" in data:
+        data["period"] = period(date.fromisoformat(data["period_start"]), date.fromisoformat(data["period_end"]))
     if "change" in data:
         # Текст отменённого изменения сам заканчивается точкой, а шаблон ставит свою.
         data["change"] = str(data["change"]).rstrip(" .")
@@ -140,9 +174,7 @@ def explain_experiment(
     metrics, other = (variant, control) if result.verdict == Verdict.VARIANT else (control, variant)
     # Владельцу — не p-значение, а вывод словами: побеждает только разница с p ниже порога проверки.
     confidence = (
-        "Разница почти наверняка не случайна"
-        if result.p_value < 0.01
-        else "Разница, скорее всего, не случайна: такой перевес редко бывает случайным"
+        "Разница почти наверняка не случайна" if result.p_value < 0.01 else "Разница, скорее всего, не случайна"
     )
     return explain(
         "EXPERIMENT_WIN",

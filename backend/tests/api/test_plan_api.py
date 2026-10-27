@@ -248,7 +248,7 @@ def test_video_is_rebuilt_after_response_only_when_selection_changes(api) -> Non
     client, context = api
     builds = []
 
-    def build(business_id: int) -> bool:
+    def build(business_id: int, built: dict) -> bool:
         builds.append(business_id)
         return True
 

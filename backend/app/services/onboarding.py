@@ -48,6 +48,10 @@ class Blocked(Exception):
     """Шаг нельзя выполнить из-за состояния бизнеса; текст показывается владельцу."""
 
 
+class NotFound(Exception):
+    """Объекта нет у этого бизнеса; текст показывается владельцу (404)."""
+
+
 @dataclass(frozen=True)
 class AiLimits:
     onboarding_kop: int

@@ -7,5 +7,8 @@
 .ads-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 16px; margin: 0; }
 .ads-metrics dt { color: var(--color-muted); font-size: .875rem; }
 .ads-metrics dd { margin: 4px 0 0; font-weight: 650; }
+.ads-arms { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 16px; list-style: none; margin: 0; padding: 0; }
+.ads-arm { display: grid; align-content: start; gap: 8px; }
+.ads-arm img { width: 100%; max-width: 260px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; }
 .ads-ad .ads-actions > .button { flex: 0 0 auto; white-space: nowrap; }
 @media (max-width: 720px) { .ads-group { margin-left: 0; } .ads-ad { padding: 16px; } }

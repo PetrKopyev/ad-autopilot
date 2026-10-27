@@ -10,6 +10,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from app.db.models import Business, PlatformAccount, User
+from app.services.changes import ChangeConflict, ServerBusy
 
 from .conftest import FakeRepository, hash_token
 
@@ -268,6 +269,55 @@ def test_disconnect_requires_csrf_and_ownership(
     assert repository.accounts[1].access_token_enc == ""
     assert repository.accounts[1].refresh_token_enc is None
     assert client.delete("/api/accounts/999", headers=csrf).status_code == 404
+
+
+def test_disconnect_reports_unconfirmed_stop_and_still_revokes(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    login(client, repository)
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.stop_confirmed = False
+    response = client.delete("/api/accounts/1", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == 200 and response.json()["stopped"] is False
+    assert "Яндекс Директ: площадка не подтвердила остановку" in response.json()["message"]
+    assert repository.accounts[1].status == "revoked"
+
+
+@pytest.mark.parametrize(
+    "error,status,text",
+    [
+        (ChangeConflict("Этот бизнес уже обрабатывается."), 409, "Повторите отключение через минуту"),
+        (ServerBusy(), 503, "Сервер сейчас занят"),
+    ],
+)
+def test_disconnect_of_busy_business_keeps_access_and_asks_to_retry(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter, error, status, text
+) -> None:
+    # Реклама не остановлена: отозвать токен сейчас значит оставить её крутиться без присмотра автопилота.
+    login(client, repository)
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.stop_error = error
+    response = client.delete("/api/accounts/1", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == status and text in response.json()["detail"]
+    assert repository.accounts[1].status == "ok" and repository.accounts[1].access_token_enc == "test-access"
+    assert mock_yandex["revoke"].call_count == 0
+
+
+@pytest.mark.parametrize(
+    "error,status,text",
+    [
+        (ChangeConflict("Этот бизнес уже обрабатывается."), 409, "Повторите удаление через минуту"),
+        (ServerBusy(), 503, "Сервер сейчас занят"),
+    ],
+)
+def test_delete_me_of_busy_business_keeps_account(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter, error, status, text
+) -> None:
+    sign_in(client, repository)
+    repository.stop_error = error
+    response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == status and text in response.json()["detail"]
+    assert 1 in repository.users and mock_yandex["revoke"].call_count == 0
 
 
 def test_provider_denial_consumes_state_without_exposing_error(
@@ -537,7 +587,12 @@ def test_demo_login_expires_old_demo_users_and_caps_live_ones(client, repository
     assert set(repository.businesses) == {8, 9}
     assert not (tmp_path / "7").exists()
     assert set(fakes) == {(8, "direct")} and advance_jobs.get(7) is None
-    for index in range(47):
+    # Бизнес удалён не через истечение демо (владелец удалил аккаунт сам): его площадки и перемотка тоже забываются.
+    del repository.businesses[8]
+    advance_jobs.start(8, 1)
+    assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+    assert not fakes and advance_jobs.get(8) is None
+    for index in range(46):
         repository.save_user(f"demo-{index}", "demo", None)
     assert len([user for user in repository.users.values() if user.yandex_uid.startswith("demo-")]) == 49
     assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204

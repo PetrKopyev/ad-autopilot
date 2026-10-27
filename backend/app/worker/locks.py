@@ -7,7 +7,7 @@ from sqlalchemy import Connection, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from app.demo_flags import ADVANCING, advance_jobs
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, ServerBusy
 
 _held: ContextVar[frozenset[tuple[int, int]]] = ContextVar("worker_business_locks", default=frozenset())
 
@@ -45,7 +45,7 @@ def acquire(bind, business_id: int) -> Iterator[None]:
     try:
         lock = lock_bind(engine).connect()
     except PoolTimeout as error:
-        raise busy(business_id) from error
+        raise ServerBusy from error
     with lock as connection:
         if not connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id}):
             raise busy(business_id)

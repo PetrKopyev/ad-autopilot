@@ -1,6 +1,8 @@
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
+from time import monotonic
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -12,13 +14,20 @@ from app.services.changes import ChangeConflict
 from tests.integration.harness import make_world
 
 
+def later() -> float:
+    return monotonic() + 60
+
+
 async def test_stop_platform_leaves_campaigns_of_other_platform_running():
     from app.services.budget_guard import stop_platform
 
     world = await make_world()
     worker = world.worker()
     worker.step_key = "owner:revoke"
-    assert await stop_platform(world.business, worker=worker, platform="vk", reason_text="Отключили VK.") is True
+    assert (
+        await stop_platform(world.business, worker=worker, platform="vk", reason_text="Отключили VK.", deadline=later())
+        is True
+    )
     assert world.campaign.status == "active"
     assert not world.changes(reason_code="ACCOUNT_REVOKE")
 
@@ -30,7 +39,12 @@ async def test_stop_platform_reports_change_that_was_not_applied(monkeypatch):
     worker = world.worker()
     worker.step_key = "owner:revoke"
     monkeypatch.setattr(worker, "apply", AsyncMock(return_value=ChangeLog(status="pending")))
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is False
+    assert (
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=later()
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize("trial", ["worker", "business"])
@@ -42,7 +56,12 @@ async def test_stop_before_revoke_is_applied_in_trial_mode(trial):
     world = await make_world(business_settings={"dry_run": True} if trial == "business" else None)
     worker = world.worker(dry_run=trial == "worker")
     worker.step_key = "owner:revoke"
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is True
+    assert (
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=later()
+        )
+        is True
+    )
     (change,) = world.changes(reason_code="ACCOUNT_REVOKE")
     assert change.status == "applied" and not change.evidence["_service"]["dry_run"]
     assert world.campaign.status == "paused_owner"
@@ -78,7 +97,8 @@ async def test_stop_platform_waits_for_worker_step_without_blocking_event_loop()
             await asyncio.sleep(0.1)
 
     stopped, _ = await asyncio.gather(
-        stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили."), ticker()
+        stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=later()),
+        ticker(),
     )
     assert stopped is True and len(attempts) >= 3
     assert len(ticks) == 5
@@ -86,13 +106,18 @@ async def test_stop_platform_waits_for_worker_step_without_blocking_event_loop()
 
 
 async def test_stop_platform_gives_up_when_business_stays_busy():
+    # Занятый бизнес — не «площадка не подтвердила»: отзывать доступ, не попытавшись остановить рекламу, нельзя,
+    # и владелец получает «повторите через минуту».
     from app.services.budget_guard import stop_platform
 
     world = await make_world()
     worker = world.worker()
     worker.step_key = "owner:revoke"
     busy_lock(world.repository, times=1000)
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Стоп.", wait=0.6) is False
+    with pytest.raises(ChangeConflict):
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=later(), wait=0.6
+        )
     assert world.campaign.status == "active"
 
 
@@ -150,11 +175,11 @@ async def test_stop_user_ads_reports_account_that_needs_reauth_with_live_campaig
     from app.api.auth import stop_user_ads
 
     db, user, business = owner
-    assert await stop_user_ads(db, None, user.id, None, "Стоп.") == []
+    assert await stop_user_ads(db, None, user.id, None, "Стоп.", later()) == []
     business("direct", "needs_reauth", "c-1")
     business("vk", "needs_reauth", "c-2", campaign_status="paused_owner")
     business("vk", "needs_reauth", None)
-    problems = await stop_user_ads(db, None, user.id, None, "Стоп.")
+    problems = await stop_user_ads(db, None, user.id, None, "Стоп.", later())
     assert problems == ["Яндекс Директ: кабинет требует входа заново, без него мы не можем остановить кампании"]
 
 
@@ -166,10 +191,10 @@ async def test_stop_user_ads_stops_only_the_disconnected_account(owner):
     first = business("direct", "ok", "c-1")
     business("direct", "ok", "c-2")
     adapter = StubAdapter({"c-1": "active", "c-2": "active"})
-    assert await stop_user_ads(db, lambda *_: adapter, user.id, first.id, "Стоп.") == []
+    assert await stop_user_ads(db, lambda *_: adapter, user.id, first.id, "Стоп.", later()) == []
     assert adapter.statuses == {"c-1": "paused_owner", "c-2": "active"}
     adapter.statuses["c-1"] = "active"
-    assert await stop_user_ads(db, lambda *_: replace_unconfirmed(adapter), user.id, first.id, "Стоп.") == [
+    assert await stop_user_ads(db, lambda *_: replace_unconfirmed(adapter), user.id, first.id, "Стоп.", later()) == [
         "Яндекс Директ: площадка не подтвердила остановку"
     ]
 
@@ -179,3 +204,38 @@ def replace_unconfirmed(adapter: StubAdapter) -> StubAdapter:
     stub = StubAdapter(adapter.statuses)
     stub.apply = AsyncMock()
     return stub
+
+
+@pytest.mark.db
+async def test_stop_user_ads_after_deadline_reports_timeout_and_leaves_campaigns(owner):
+    from app.api.auth import stop_user_ads
+
+    db, user, business = owner
+    business("direct", "ok", "c-1")
+    business("vk", "ok", "c-2")
+    adapter = StubAdapter({"c-1": "active", "c-2": "active"})
+    problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", monotonic() - 1)
+    assert problems == [
+        "Яндекс Директ: остановка не закончилась за минуту",
+        "ВКонтакте: остановка не закончилась за минуту",
+    ]
+    assert adapter.statuses == {"c-1": "active", "c-2": "active"}
+
+
+async def test_ad_stopper_gives_the_whole_stop_one_minute(monkeypatch):
+    from app.api import auth
+
+    calls = []
+
+    async def stop_user_ads(db, resolve, user_id, account_id, reason_text, deadline):
+        calls.append(deadline - monotonic())
+        return []
+
+    monkeypatch.setattr(auth, "stop_user_ads", stop_user_ads)
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: nullcontext())
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(platform_adapters=SimpleNamespace(resolve=None)))
+    )
+    assert await auth.get_ad_stopper(request)(1, None, "Стоп.") == []
+    (left,) = calls
+    assert auth.STOP_TIMEOUT == 60 and 59 < left <= 60

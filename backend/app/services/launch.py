@@ -24,6 +24,7 @@ from app.platforms.direct import budget_end, weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
 from app.services.demo import configure_adapter
+from app.services.onboarding import NotFound
 from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers
 
 # Запуск, начатый раньше, считается брошенным (процесс API умер), и его можно повторить.
@@ -115,7 +116,7 @@ class LaunchService:
         business = self.repository.business(business_id)
         plan = self.repository.get_plan(plan_id, business_id)
         if plan is None:
-            raise LookupError("План не найден.")
+            raise NotFound("План не найден.")
         if plan.status == "launched":
             return self.result(plan)
         reasons = launch_blockers(
@@ -157,7 +158,10 @@ class LaunchService:
     async def check_platforms(
         self, business: Business, platforms: list[str], limits: dict[str, PlatformLimit], today: date
     ) -> tuple[dict[str, AdPlatform], dict[str, dict]]:
-        """До создания кампаний: кабинет доступен, бюджет не ниже минимумов площадки, город найден в её регионах."""
+        """До создания кампаний: кабинет доступен, бюджет не ниже минимумов площадки, город найден в её регионах.
+
+        Площадки отвечают секундами: соединение с базой на это время возвращается в пул."""
+        self.repository.commit()
         adapters, geo = {}, {}
         for platform in platforms:
             # Нулевой дневной остаток ниже любого минимума: объясняем настоящую причину, а не «не хватает бюджета».
@@ -208,6 +212,7 @@ class LaunchService:
         for platform in platforms:
             adapter = adapters[platform]
             groups = [group for group in plan.payload["groups"] if group["platform"] == platform]
+            self.repository.commit()
             images = await self.upload_images(adapter, platform, groups, plan, assets)
             campaign = self.repository.campaign(known[platform]) if platform in known else None
             if campaign is None:
@@ -216,6 +221,8 @@ class LaunchService:
                     plan, campaigns=plan.payload.get("launch", {}).get("campaigns", {}) | {platform: campaign.id}
                 )
             spec = self.spec(business, campaign, groups, images, geo[platform])
+            # Картинка объявления сохраняется в строке: по ней экраны показывают миниатюру.
+            self.repository.commit()
             if demo_enabled() and isinstance(adapter, FakeAdapter):
                 configure_adapter(adapter, spec)
             refs = await adapter.create_campaign_tree(spec)
@@ -226,17 +233,19 @@ class LaunchService:
 
     async def upload_images(
         self, adapter: AdPlatform, platform: str, groups: list[dict], plan: Plan, assets: dict[int, Asset]
-    ) -> dict[str, list[str]]:
-        """Картинки с оффером нарезаются под площадку и загружаются до создания кампании; ссылка кэшируется."""
-        refs: dict[str, list[str]] = {}
+    ) -> dict[str, list[Asset]]:
+        """Картинки с оффером нарезаются под площадку и загружаются до создания кампании; ссылка кэшируется в
+        asset.platform_refs. Возвращает выбранные картинки каждой группы."""
+        chosen: dict[str, list[Asset]] = {}
         for group in groups:
-            chosen = [
+            chosen[str(group["id"])] = [
                 assets[id_]
                 for id_ in plan.payload["assets"].get(group["segment"], ())
                 if id_ in assets and assets[id_].selected and assets[id_].kind in IMAGE_KINDS
             ]
-            refs[str(group["id"])] = [await self.upload_one(adapter, platform, asset, group) for asset in chosen]
-        return refs
+            for asset in chosen[str(group["id"])]:
+                await self.upload_one(adapter, platform, asset, group)
+        return chosen
 
     async def upload_one(self, adapter: AdPlatform, platform: str, asset: Asset, group: dict) -> str:
         if platform in asset.platform_refs:
@@ -308,12 +317,20 @@ class LaunchService:
         business: Business,
         campaign: Campaign,
         plan_groups: list[dict],
-        images: dict[str, list[str]],
+        images: dict[str, list[Asset]],
         geo: dict,
     ) -> CampaignTreeSpec:
-        """Внутренние id в дереве — id строк БД: по ним воркер собирает ExternalRefs."""
+        """Внутренние id в дереве — id строк БД: по ним воркер собирает ExternalRefs. Объявления получают картинки
+        группы по кругу; картинка запоминается в Ad.asset_id."""
         groups, ads, targets = self.repository.tree_rows(campaign.id)
         by_name = {group["name"]: group for group in plan_groups}
+        for group in groups:
+            chosen = images[str(by_name[group.theme]["id"])]
+            for position, ad in enumerate(item for item in ads if item.ad_group_id == group.id):
+                ad.asset_id = chosen[position % len(chosen)].id if chosen else None
+        image_refs = {
+            asset.id: asset.platform_refs[campaign.platform] for chosen in images.values() for asset in chosen
+        }
         return CampaignTreeSpec(
             str(campaign.id),
             campaign.name,
@@ -328,10 +345,11 @@ class LaunchService:
                             str(ad.id),
                             ad.title,
                             ad.text,
-                            self.pick(images[str(by_name[group.theme]["id"])], position),
+                            image_refs[ad.asset_id] if ad.asset_id else None,
                             medical=business.medical_level != "none",
                         )
-                        for position, ad in enumerate(item for item in ads if item.ad_group_id == group.id)
+                        for ad in ads
+                        if ad.ad_group_id == group.id
                     ),
                     tuple(
                         TargetSpec(str(target.id), "phrase", target.value)
@@ -344,10 +362,6 @@ class LaunchService:
             ),
             "paused_auto",
         )
-
-    @staticmethod
-    def pick(refs: list[str], position: int) -> str | None:
-        return refs[position % len(refs)] if refs else None
 
     def bind(self, campaign: Campaign, refs: ExternalRefs) -> None:
         groups, ads, targets = self.repository.tree_rows(campaign.id)

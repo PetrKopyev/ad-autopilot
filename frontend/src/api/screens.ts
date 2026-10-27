@@ -26,9 +26,9 @@ export async function getAutopilotStatus(signal?: AbortSignal): Promise<Autopilo
   if (mockEnabled) return (await import('./mocks')).mockStatus();
   return get('/api/autopilot/status', signal);
 }
-export async function getAds(signal?: AbortSignal): Promise<AdsResponse> {
+export async function getAds(signal?: AbortSignal, period?: Period): Promise<AdsResponse> {
   if (mockEnabled) return (await import('./mocks')).mockAds();
-  return get('/api/ads', signal);
+  return get(period ? `/api/ads?${query(period)}` : '/api/ads', signal);
 }
 export async function setAdStatus(id: number, action: 'pause' | 'resume'): Promise<void> {
   if (mockEnabled) { (await import('./mocks')).mockAdAction(id, action); return; }

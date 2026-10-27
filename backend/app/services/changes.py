@@ -24,6 +24,13 @@ class ChangeConflict(ValueError):
     pass
 
 
+class ServerBusy(ChangeConflict):
+    """Все соединения для блокировок заняты: дело не в этом бизнесе, а в нагрузке на сервер."""
+
+    def __init__(self) -> None:
+        super().__init__("Сервер сейчас занят. Повторите через минуту.")
+
+
 def load_operations(change: ChangeLog) -> list[Operation]:
     return [Operation(**item) for item in change.operations]
 
@@ -115,7 +122,7 @@ class ChangesRepository:
         try:
             context = nullcontext(bind) if isinstance(bind, Connection) else lock_bind(bind).connect()
         except PoolTimeout as error:
-            raise ChangeConflict("Изменение этого бизнеса уже выполняется. Попробуйте позже.") from error
+            raise ServerBusy from error
         with context as connection:
             acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id})
             if not acquired:

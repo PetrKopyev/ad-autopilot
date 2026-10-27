@@ -31,6 +31,8 @@ export interface Budget {
   month: string;
   budget_kop: number;
   spent_kop: number;
+  /** Расход по отчётам площадок, как в статистике; spent_kop может быть больше — в нём свежий расход за сегодня. */
+  reported_kop: number;
   remaining_kop: number;
   days_remaining: number;
   platforms: { platform: string; spent_kop: number; source: 'budget_ledger' | 'stats_daily'; spent_at: string | null }[];
@@ -71,9 +73,11 @@ export interface AdsResponse { items: Ad[] }
 export interface Experiment {
   id: number;
   title: string;
+  /** Что меняется между вариантами; список вариантов — в arms. */
+  hypothesis: 'text' | 'image' | 'audience';
   comparing: string;
-  /** Тексты вариантов А и Б: заголовки часто совпадают, отличие видно по тексту. */
-  arms: { title: string; text: string }[];
+  /** Варианты А и Б; image — ссылка на картинку варианта. */
+  arms: { title: string; text: string; image: string | null }[];
   remaining_impressions: number;
   status: 'running' | 'concluded' | 'cancelled';
   conclusion: string | null;

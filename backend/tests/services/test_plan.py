@@ -12,7 +12,7 @@ from PIL import Image
 from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
 from app.content.art import ART_COST_KOP
 from app.db.models import ArtCall, Asset, LLMCall
-from app.services.onboarding import AiLimits, Blocked, OnboardingError
+from app.services.onboarding import AiLimits, Blocked, NotFound, OnboardingError
 from app.services.plan import launch_blockers
 from tests.services.test_onboarding import (
     BUDGET_KOP,
@@ -178,7 +178,7 @@ async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> Non
 
 async def test_regenerate_unknown_group(world: World) -> None:
     await build(world)
-    with pytest.raises(LookupError):
+    with pytest.raises(NotFound):
         await world.plans.regenerate_images(world.business.id, 999, NOW, TODAY)
 
 
@@ -204,10 +204,10 @@ async def test_select_assets_updates_flags_and_rejects_foreign_ids(world: World)
     ids = [asset["id"] for asset in plan["groups"][0]["assets"]][:1]
     world.plans.select_assets(world.business.id, ids)
     assert [asset.id for asset in world.repository.assets(world.business.id) if asset.selected] == ids
-    with pytest.raises(LookupError):
+    with pytest.raises(NotFound):
         world.plans.select_assets(world.business.id, [9999])
     world.repository.add(Asset(business_id=99, kind="image", file_path="x.jpg"))
-    with pytest.raises(LookupError):
+    with pytest.raises(NotFound):
         world.plans.select_assets(world.business.id, [world.repository.assets(99)[0].id])
 
 
@@ -372,7 +372,7 @@ async def test_video_queue_keeps_one_pending_build_per_business_and_limits_queue
     started, release = threading.Event(), threading.Event()
     calls = []
 
-    def build(business_id):
+    def build(business_id, built):
         calls.append(business_id)
         started.set()
         release.wait(5)
@@ -396,11 +396,13 @@ async def test_video_queue_repeats_build_that_found_business_busy() -> None:
     from app.services.plan import VideoQueue
 
     attempts = []
-    await VideoQueue(retries=2, delay=0).request(5, lambda business_id: attempts.append(business_id) or False)
+    await VideoQueue(retries=2, delay=0).request(5, lambda business_id, built: attempts.append(business_id) or False)
     assert attempts == [5, 5, 5]
     results = iter([False, True])
     attempts.clear()
-    await VideoQueue(retries=5, delay=0).request(5, lambda business_id: attempts.append(business_id) or next(results))
+    await VideoQueue(retries=5, delay=0).request(
+        5, lambda business_id, built: attempts.append(business_id) or next(results)
+    )
     assert attempts == [5, 5]
 
 

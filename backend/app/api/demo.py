@@ -16,7 +16,7 @@ from app.auth.sessions import require_csrf
 from app.db.models import Business
 from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs, demo_now
 from app.platforms.base import AdPlatform
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, ServerBusy
 from app.services.demo import DemoRepository, DemoService
 from app.services.experiments import create_experiment
 from app.worker.clock import SystemClock
@@ -91,7 +91,10 @@ def advance(
             service.check(business, body.days)
     except ChangeConflict as error:
         raise HTTPException(409, str(error)) from error
-    progress = advance_jobs.start(business.id, body.days)
+    try:
+        progress = advance_jobs.start(business.id, body.days)
+    except ServerBusy as error:
+        raise HTTPException(503, str(error)) from error
     if progress is None:
         raise HTTPException(409, ADVANCING)
     background.add_task(run_advance, open_service, business.id, progress)

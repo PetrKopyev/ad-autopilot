@@ -6,6 +6,8 @@ from typing import Literal
 from app.db.models import Business
 
 ADVANCING = "Идёт перемотка времени. Дождитесь окончания."
+# Перемотка держит соединение пула блокировок минутами: больше этого числа сразу пул кончится для остальных.
+MAX_ADVANCES = 10
 
 
 def demo_enabled() -> bool:
@@ -36,9 +38,14 @@ class AdvanceJobs:
         self._items: dict[int, AdvanceProgress] = {}
 
     def start(self, business_id: int, days: int) -> AdvanceProgress | None:
+        """None — у бизнеса перемотка уже идёт; ServerBusy — идёт MAX_ADVANCES перемоток других бизнесов."""
+        from app.services.changes import ServerBusy
+
         with self._guard:
             if self.running(business_id):
                 return None
+            if sum(progress.state == "running" for progress in self._items.values()) >= MAX_ADVANCES:
+                raise ServerBusy
             self._items[business_id] = progress = AdvanceProgress(days)
             return progress
 
@@ -55,6 +62,9 @@ class AdvanceJobs:
 
     def forget(self, business_id: int) -> None:
         self._items.pop(business_id, None)
+
+    def businesses(self) -> set[int]:
+        return set(self._items)
 
 
 advance_jobs = AdvanceJobs()

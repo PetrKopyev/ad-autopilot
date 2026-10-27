@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Business, LeadsSurvey
 from app.domain.rules import client_cac, client_conversion, ref_cpl
 from app.domain.types import ClientAnswer
+from app.services.onboarding import NotFound
 from app.services.stats import StatsRepository, aggregate, client_window
 
 
@@ -71,7 +72,7 @@ class ClientsService:
         questions = self.repository.questions(business.id)
         question = next((item for item in questions if item.week_start == question_id), None)
         if question is None:
-            raise KeyError("Вопрос не найден.")
+            raise NotFound("Вопрос не найден.")
         if clients == "не знаю":
             clients = None
         if clients is not None and (type(clients) is not int or not 0 <= clients <= question.leads_count):

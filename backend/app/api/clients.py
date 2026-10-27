@@ -9,6 +9,7 @@ from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.services.clients import ClientsRepository, ClientsService
+from app.services.onboarding import NotFound
 
 router = APIRouter(prefix="/api/clients", route_class=ReleasingRoute)
 
@@ -34,7 +35,7 @@ def questions(business: CurrentBusiness, service: Service, today: Today) -> dict
 def answer(id: date, body: Answer, business: CurrentBusiness, service: Service, today: Today) -> dict:
     try:
         return service.answer(business, id, body.clients_count, today)
-    except KeyError as error:
-        raise HTTPException(404, "Вопрос не найден.") from error
+    except NotFound as error:
+        raise HTTPException(404, str(error)) from error
     except ValueError as error:
         raise HTTPException(422, str(error)) from error

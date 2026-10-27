@@ -123,7 +123,8 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                     if info.reason
                     else f"Объявление «{ad.title}» не прошло проверку, причину площадка не указала.",
                     # Время ответа площадки меняется при каждом опросе: одно уведомление на объявление и причину.
-                    key=f"moderation:{key}:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
+                    # Объявление (target_id) notice добавляет к ключу сам.
+                    key=f"moderation:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
                     target_id=key,
                 )
                 # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.

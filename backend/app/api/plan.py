@@ -17,7 +17,7 @@ from app.auth.sessions import require_csrf
 from app.content.images import MAX_BYTES
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
-from app.services.plan import VIDEO_QUEUE, PlanRepository, PlanService, build_videos
+from app.services.plan import VIDEO_QUEUE, Built, PlanRepository, PlanService, build_videos
 from app.services.registry import build_art_factory, build_llm
 
 router = APIRouter(prefix="/api/plan", route_class=ReleasingRoute)
@@ -71,24 +71,24 @@ async def get_launch_service(request: Request) -> AsyncIterator[LaunchService]:
         )
 
 
-def get_video_builder() -> Callable[[int], bool]:
+def get_video_builder() -> Callable[[int, Built], bool]:
     """Сборка роликов идёт после ответа в своём сеансе БД: сеанс запроса к этому времени уже закрыт."""
 
-    def build(business_id: int) -> bool:
+    def build(business_id: int, built: Built) -> bool:
         from app.db.session import SessionLocal
 
         with SessionLocal() as db:
-            return build_videos(PlanRepository(db), media_root(), business_id)
+            return build_videos(PlanRepository(db), media_root(), business_id, built=built)
 
     return build
 
 
 Plans = Annotated[PlanService, Depends(get_plan_service)]
 Launches = Annotated[LaunchService, Depends(get_launch_service)]
-VideoBuilder = Annotated[Callable[[int], bool], Depends(get_video_builder)]
+VideoBuilder = Annotated[Callable[[int, Built], bool], Depends(get_video_builder)]
 
 
-async def rebuild_videos(build: Callable[[int], bool], business_id: int) -> None:
+async def rebuild_videos(build: Callable[[int, Built], bool], business_id: int) -> None:
     await VIDEO_QUEUE.request(business_id, build)
 
 

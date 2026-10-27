@@ -12,13 +12,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
 from app.auth.revoke import Revocation, revocation, same_vk_access
-from app.db.models import Business, OAuthState, PlatformAccount, Session, User
+from app.db.models import Business, ChangeLog, OAuthState, PlatformAccount, Session, User
 
 SESSION_COOKIE = "__Host-session"
 CSRF_COOKIE = "__Host-csrf"
 OAUTH_COOKIE = "__Host-oauth"
 SESSION_TTL = timedelta(days=30)
 STATE_TTL = timedelta(minutes=10)
+DISCONNECTED_PENDING = (
+    "Кабинет отключили до ответа площадки: применилось ли изменение, неизвестно. Проверьте в кабинете площадки."
+)
 
 
 def hash_session_id(token: str) -> str:
@@ -191,6 +194,20 @@ class AuthRepository:
         )
         if account is None:
             return False
+        # Без доступа к кабинету изменение, которое площадка ещё не подтвердила, уже не сверить: pending остался бы
+        # навсегда и останавливал бы шаги воркера по всем площадкам бизнеса.
+        for change in self.db.scalars(
+            select(ChangeLog).where(
+                ChangeLog.business_id == account.business_id,
+                ChangeLog.platform == account.platform,
+                ChangeLog.status == "pending",
+                ChangeLog.evidence["_service"]["dry_run"].as_boolean().is_not(True),
+            )
+        ):
+            change.status = "failed"
+            change.evidence = change.evidence | {
+                "_service": change.evidence["_service"] | {"error": DISCONNECTED_PENDING}
+            }
         account.status = "revoked"
         account.access_token_enc = ""
         account.refresh_token_enc = None

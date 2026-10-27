@@ -1,16 +1,28 @@
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, EmptyState, ErrorBanner, Money, StatusBadge } from '../components';
 import { copy } from '../copy';
 import { getAds, getExperiments, setAdStatus } from '../api/screens';
+import { getBusinessToday, lastDays } from '../api/period';
+import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
-import type { Ad } from '../api/types';
+import type { Ad, Experiment } from '../api/types';
 import { DemoNotice, NullableMoney, adLabels, platformName } from './StatsShared';
 import './Ads.css';
 
 const armLetters = ['А', 'Б'];
+const adsDays = 14;
 
-function AdCard({ ad, name, changed }: { ad: Ad; name: string; changed: () => void }) {
+function Arms({ experiment }: { experiment: Experiment }) {
+  return <ul className="ads-arms">{experiment.arms.map((arm, index) => <li className="ads-arm" key={armLetters[index]}>
+    <strong>{copy.ads.arm(armLetters[index])}</strong>
+    {arm.image ? <img src={arm.image} alt={copy.ads.armImage(armLetters[index])} loading="lazy" />
+      : experiment.hypothesis === 'image' && <span className="muted">{copy.ads.armNoImage}</span>}
+    <span>«{arm.title}». {arm.text}</span>
+  </li>)}</ul>;
+}
+
+function AdCard({ ad, name, dates, changed }: { ad: Ad; name: string; dates: string; changed: () => void }) {
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const [error, setError] = useState<string>();
@@ -30,6 +42,8 @@ function AdCard({ ad, name, changed }: { ad: Ad; name: string; changed: () => vo
       {ad.reason ? copy.screens.because(label, ad.reason) : label}</StatusBadge></div>
     {ad.image_url && <img className="ads-image" src={ad.image_url} alt={ad.title} loading="lazy" />}
     <p>{ad.text}</p>
+    {/* Причина остановки — о цифрах на момент решения, а ниже цифры за последние дни: подписываем период. */}
+    <p className="muted">{(ad.status === 'paused_auto' && ad.reason ? copy.screens.adPeriodStopped : copy.screens.adPeriod)(dates)}</p>
     <dl className="ads-metrics">
       <div><dt>{copy.home.spent}</dt><dd><Money kopecks={ad.metrics.cost_kop} /></dd></div>
       <div><dt>{copy.ads.impressions}</dt><dd>{ad.metrics.impressions.toLocaleString('ru-RU')}</dd></div>
@@ -48,11 +62,15 @@ function AdCard({ ad, name, changed }: { ad: Ad; name: string; changed: () => vo
 }
 
 export function AdsPage() {
-  const ads = useResource(getAds);
+  const ads = useResource(useCallback(async (signal: AbortSignal) => {
+    const period = lastDays(adsDays, await getBusinessToday(signal));
+    return { ...await getAds(signal, period), period };
+  }, []));
   const experiments = useResource(getExperiments);
   const items = ads.data?.items ?? [];
   const platforms = [...new Set(items.map((item) => item.platform))];
   const names = adLabels(items);
+  const dates = ads.data ? copy.screens.dates(displayDate(ads.data.period.from), displayDate(ads.data.period.to)) : '';
   return <div className="page-stack">
     <div className="page-heading"><h1>{copy.ads.title}</h1><p className="muted">{copy.screens.adIntro}</p></div>
     <DemoNotice />
@@ -71,7 +89,7 @@ export function AdsPage() {
             {groups.map((groupId) => {
               const groupAds = campaignAds.filter((ad) => ad.group_id === groupId);
               return <details className="ads-branch ads-group" key={groupId} open><summary>{groupAds[0].group_name}</summary>
-                <div className="page-stack">{groupAds.map((ad) => <AdCard key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} changed={ads.reload} />)}</div>
+                <div className="page-stack">{groupAds.map((ad) => <AdCard key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} dates={dates} changed={ads.reload} />)}</div>
               </details>;
             })}
           </details>;
@@ -84,8 +102,7 @@ export function AdsPage() {
       {experiments.data && (experiments.data.items.length ? experiments.data.items.map((experiment) => <article className="ads-ad page-stack" key={experiment.id}>
         <h3>{experiment.title}</h3><StatusBadge>{copy.screens.experimentStates[experiment.status]}</StatusBadge>
         <p><strong>{copy.ads.comparison}: </strong>{experiment.comparing}</p>
-        <ul>{experiment.arms.map((arm, index) => <li key={armLetters[index]}>
-          <strong>{copy.ads.arm(armLetters[index])}: </strong>«{arm.title}». {arm.text}</li>)}</ul>
+        <Arms experiment={experiment} />
         {experiment.status === 'running' && <p>{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
         <p><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
       </article>) : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}

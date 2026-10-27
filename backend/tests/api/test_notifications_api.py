@@ -29,7 +29,7 @@ def setup():
     from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE, get_repository
 
     repository = MemoryWorkerRepository()
-    own, other = Business(id=1, user_id=1), Business(id=2, user_id=2)
+    own, other = Business(id=1, user_id=1, settings={}), Business(id=2, user_id=2, settings={})
     repository.save(own, other)
 
     class Auth:

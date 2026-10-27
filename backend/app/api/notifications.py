@@ -8,6 +8,7 @@ from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness
 from app.auth.sessions import require_csrf
 from app.db.models import WorkerRun
+from app.demo_flags import demo_now
 from app.worker.jobs import WorkerRepository
 
 router = APIRouter(prefix="/api/notifications", route_class=ReleasingRoute)
@@ -52,7 +53,7 @@ def notifications(business: CurrentBusiness, repository: Repository, response: R
             "text": row.log[0]["text"],
             "level": NOTICES[row.log[0]["reason_code"]][1],
         }
-        for row in repository.unread_notifications(business.id, NOTICES, LIMIT)
+        for row in repository.unread_notifications(business.id, NOTICES, LIMIT, demo_now(business, datetime.now(UTC)))
     ]
 
 

@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, cast, delete, func, literal_column, or_, select, update
+from sqlalchemy import DateTime, and_, cast, delete, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, distinct_on, insert
 from sqlalchemy.orm import aliased
 
@@ -157,14 +157,22 @@ class WorkerRepository(ChangesRepository):
             ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
         )
 
-    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
+    def unread_notifications(
+        self, business_id: int, codes: Collection[str], limit: int, now: datetime
+    ) -> list[WorkerRun]:
         """Непрочитанные уведомления бизнеса с этими кодами, новые сверху; прочитанное помечено read_at в журнале.
 
-        Из уведомлений одной темы (notice_theme) отдаётся только самое новое: повторы не вытесняют остальные."""
+        Из уведомлений одной темы (notice_theme) отдаётся только самое новое: повторы не вытесняют остальные.
+        Уведомление о сроке (expires_at в журнале) после него не показывается: оно уже неправда."""
         code, theme = WorkerRun.log[0]["reason_code"].astext, sql_theme()
+        expires_at = WorkerRun.log[0]["expires_at"].astext
         latest = (
             select(WorkerRun)
-            .where(*self.unread_filter(business_id), code.in_(codes))
+            .where(
+                *self.unread_filter(business_id),
+                code.in_(codes),
+                or_(expires_at.is_(None), cast(expires_at, DateTime(timezone=True)) > now),
+            )
             .ext(distinct_on(code, theme))
             .order_by(code, theme, WorkerRun.started_at.desc(), WorkerRun.id.desc())
             .subquery()
@@ -374,10 +382,15 @@ class MemoryWorkerRepository(WorkerRepository):
         unread = [row for row in rows if not any("read_at" in entry for entry in row.log)]
         return sorted(unread, key=lambda row: (row.started_at, row.id), reverse=True)
 
-    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
+    def unread_notifications(
+        self, business_id: int, codes: Collection[str], limit: int, now: datetime
+    ) -> list[WorkerRun]:
         seen, result = set(), []
         for row in self.unread_rows(business_id):
             key = (row.log[0].get("reason_code"), notice_theme(row))
+            expires_at = row.log[0].get("expires_at")
+            if expires_at is not None and datetime.fromisoformat(expires_at) <= now:
+                continue
             if key[0] in codes and key not in seen:
                 seen.add(key)
                 result.append(row)

@@ -128,24 +128,31 @@ async def wait_for_business(stack: ExitStack, worker: Worker, business_id: int, 
 
 
 async def stop_platform(
-    business: Business, *, worker: Worker, platform: str, reason_text: str, wait: float = LOCK_WAIT_SECONDS
+    business: Business,
+    *,
+    worker: Worker,
+    platform: str,
+    reason_text: str,
+    deadline: float,
+    wait: float = LOCK_WAIT_SECONDS,
 ) -> bool:
     """Перед отзывом доступа к кабинету: без токена ни автопилот, ни страж бюджета рекламу уже не остановят.
 
-    Защитное действие: выполняется и в пробном режиме. Если бизнес занят шагом воркера, ждём до wait секунд.
+    Защитное действие: выполняется и в пробном режиме. Если бизнес занят шагом воркера, ждём до wait секунд, затем
+    ChangeConflict. Остановка кампании не прерывается посреди (иначе изменение осталось бы pending без ответа): после
+    deadline (monotonic) следующая кампания не начинается, TimeoutError.
     Возвращает, подтвердила ли площадка остановку всех кампаний; остановка записывается в журнал от имени владельца.
     У бизнеса один кабинет на площадку (platform_accounts: business_id, platform), поэтому кампании площадки
     бизнеса — это кампании отключаемого кабинета.
     """
     with ExitStack() as stack:
-        try:
-            await wait_for_business(stack, worker, business.id, wait)
-        except ChangeConflict:
-            return False
+        await wait_for_business(stack, worker, business.id, wait)
         stopped = True
         for campaign in worker.campaigns(business):
             if campaign.platform != platform:
                 continue
+            if monotonic() >= deadline:
+                raise TimeoutError
             try:
                 states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
                 state = states[campaign.external_id]

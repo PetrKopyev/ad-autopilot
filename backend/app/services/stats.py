@@ -138,21 +138,27 @@ def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], 
 def aggregate_budget(
     month_budget_kop: int, rows: Iterable[StatsRow], ledger: Iterable[BudgetLedger], today: date
 ) -> dict:
+    """Расход месяца для бюджета. Отчёты (stats_daily) обновляются раз в три часа, а снимок стража бюджета
+    (budget_ledger) — раз в полчаса и вместе со свежим расходом площадки за сегодня, поэтому обычно он больше.
+    Бюджет считается по большему из двух на каждой площадке; reported_kop — расход по отчётам, тот же, что в
+    статистике за месяц: разница — ещё не попавший в отчёты расход."""
     month = today.replace(day=1)
     next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-    spent: dict[str, int] = defaultdict(int)
+    reported: dict[str, int] = defaultdict(int)
     for row in rows:
         if month <= row.date <= today:
-            spent[row.platform] += row.cost_kop
+            reported[row.platform] += row.cost_kop
     snapshots = {item.platform: item for item in ledger if item.month == month}
     # Снимок включает расход площадки целиком; прибавлять к нему stats_daily нельзя.
+    spent = dict(reported)
     for platform, snapshot in snapshots.items():
-        spent[platform] = snapshot.spent_kop
+        spent[platform] = max(snapshot.spent_kop, reported.get(platform, 0))
     spent_kop = sum(spent.values())
     return {
         "month": month,
         "budget_kop": month_budget_kop,
         "spent_kop": spent_kop,
+        "reported_kop": sum(reported.values()),
         "remaining_kop": max(0, month_budget_kop - spent_kop),
         "days_remaining": (next_month - today).days,
         "platforms": [

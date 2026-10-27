@@ -44,3 +44,4 @@ select = ["E", "F", "I", "UP"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+markers = ["db: requires an explicit TEST_DATABASE_URL and PostgreSQL"]

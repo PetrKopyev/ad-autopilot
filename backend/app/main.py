@@ -15,7 +15,7 @@ from app.api.clients import router as clients_router
 from app.api.experiments import router as experiments_router
 from app.api.history import router as history_router
 from app.api.notifications import router as notifications_router
-from app.api.plan import MAX_UPLOAD
+from app.api.plan import MAX_UPLOAD, TOO_LARGE
 from app.api.plan import router as plan_router
 from app.api.routing import ReleasingRoute
 from app.api.stats import router as stats_router
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Автопилот рекламы", lifespan=lifespan)
-app.add_middleware(BodyLimit, paths={"/api/plan/upload-photo": MAX_UPLOAD})
+app.add_middleware(BodyLimit, paths={"/api/plan/upload-photo": (MAX_UPLOAD, TOO_LARGE)})
 router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
 

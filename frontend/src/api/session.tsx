@@ -1,5 +1,6 @@
-import { createContext, useContext } from 'react';
+import { createContext, useCallback, useContext } from 'react';
 import type { ReactNode } from 'react';
+import { useLocation } from 'react-router';
 import { ApiError } from './client';
 import { getMe } from './setup';
 import type { Me } from './setup';
@@ -15,7 +16,9 @@ async function loadSession(signal: AbortSignal): Promise<Me | null> {
 const SessionContext = createContext<ReturnType<typeof useResource<Me | null>> | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const session = useResource(loadSession);
+  // На странице входа сессии нет: не спрашиваем сервер, иначе в консоли браузера каждый раз ошибка 401.
+  const guest = useLocation().pathname === '/login';
+  const session = useResource(useCallback((signal: AbortSignal) => guest ? Promise.resolve(null) : loadSession(signal), [guest]));
   return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
 }
 

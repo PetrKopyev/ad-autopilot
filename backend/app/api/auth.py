@@ -1,8 +1,9 @@
-import asyncio
 import secrets
 import shutil
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Annotated
 from uuid import uuid4
 
@@ -34,7 +35,7 @@ from app.demo_flags import advance_jobs, demo_enabled, demo_now
 from app.platforms.base import AdPlatform
 from app.platforms.fake import VirtualClock
 from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, stop_platform
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, ServerBusy
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
 from app.services.launch import TITLES
 from app.worker.clock import SystemClock
@@ -56,11 +57,18 @@ def remove_business_media(business_id: int) -> None:
 
 
 async def stop_user_ads(
-    db: DBSession, resolve: Callable[[int, str], AdPlatform], user_id: int, account_id: int | None, reason_text: str
+    db: DBSession,
+    resolve: Callable[[int, str], AdPlatform],
+    user_id: int,
+    account_id: int | None,
+    reason_text: str,
+    deadline: float,
 ) -> list[str]:
     """Останавливает рекламу кабинетов пользователя перед отзывом доступа; возвращает, где остановку не подтвердили.
 
-    Кабинет, который требует входа заново, остановить нечем: если у него есть работающие кампании, это проблема."""
+    Кабинет, который требует входа заново, остановить нечем: если у него есть работающие кампании, это проблема.
+    Бизнес, занятый шагом воркера дольше LOCK_WAIT_SECONDS, — ChangeConflict: отзывать доступ, не попытавшись
+    остановить рекламу, нельзя. После deadline (monotonic) следующие кампании не останавливаются."""
     from app.worker.jobs import Worker, WorkerRepository
 
     repository = WorkerRepository(db)
@@ -83,7 +91,14 @@ async def stop_user_ads(
             continue
         worker = Worker(repository, resolve, dry_run=False, clock=VirtualClock(demo_now(business, SystemClock().now)))
         worker.step_key = f"owner:{uuid4()}"
-        if not await stop_platform(business, worker=worker, platform=account.platform, reason_text=reason_text):
+        try:
+            stopped = await stop_platform(
+                business, worker=worker, platform=account.platform, reason_text=reason_text, deadline=deadline
+            )
+        except TimeoutError:
+            problems.append(f"{title}: остановка не закончилась за минуту")
+            continue
+        if not stopped:
             problems.append(f"{title}: площадка не подтвердила остановку")
     return problems
 
@@ -93,18 +108,29 @@ def get_ad_stopper(request: Request) -> AdStopper:
         from app.db.session import SessionLocal
 
         with SessionLocal() as db:
-            try:
-                async with asyncio.timeout(STOP_TIMEOUT):
-                    return await stop_user_ads(
-                        db, request.app.state.platform_adapters.resolve, user_id, account_id, reason_text
-                    )
-            except TimeoutError:
-                return ["остановка не закончилась за минуту"]
+            return await stop_user_ads(
+                db,
+                request.app.state.platform_adapters.resolve,
+                user_id,
+                account_id,
+                reason_text,
+                monotonic() + STOP_TIMEOUT,
+            )
 
     return stop
 
 
 Stopper = Annotated[AdStopper, Depends(get_ad_stopper)]
+
+
+@contextmanager
+def busy_business(action: str) -> Iterator[None]:
+    try:
+        yield
+    except ServerBusy as error:
+        raise HTTPException(503, str(error)) from error
+    except ChangeConflict as error:
+        raise HTTPException(409, f"Автопилот сейчас меняет рекламу. Повторите {action} через минуту.") from error
 
 
 @router.get("/auth/config")
@@ -142,11 +168,17 @@ async def get_demo_users() -> AsyncIterator[DemoUsers]:
 def demo_login(
     request: Request, repository: Repository, demo_users: Annotated[DemoUsers, Depends(get_demo_users)]
 ) -> Response:
+    registry = request.app.state.platform_adapters
+    # Симуляторы и перемотки живут в памяти API; бизнесы удаляет и команда demo_reset из другого процесса, поэтому
+    # забываем все, чьих бизнесов больше нет. Список берётся до чтения базы: симулятор создаётся только для бизнеса,
+    # который уже есть в базе, и бизнес, созданный во время уборки, сюда не попадёт.
+    known = {business_id for business_id, _ in list(registry.fakes)} | advance_jobs.businesses()
     for business_id in demo_users.expire(datetime.now(UTC) - DEMO_USER_TTL):
+        remove_business_media(business_id)
+    for business_id in demo_users.missing(known):
         advance_jobs.forget(business_id)
         for platform in ("direct", "vk"):
-            request.app.state.platform_adapters.fakes.pop((business_id, platform), None)
-        remove_business_media(business_id)
+            registry.fakes.pop((business_id, platform), None)
     if demo_users.count() >= MAX_DEMO_USERS:
         raise HTTPException(503, "Демо сейчас занято. Попробуйте через несколько часов.")
     user = repository.save_user(DEMO_UID_PREFIX + secrets.token_hex(16), "demo", None)
@@ -261,13 +293,12 @@ async def delete_me(
     background: BackgroundTasks,
     response: Response,
 ) -> dict:
-    # Остановка до отзыва: потом управлять кампаниями будет нечем. Неудача не мешает удалению, но о ней сообщаем.
-    problems = await stop_ads(user.id, None, "Остановили рекламу перед удалением ваших данных.")
-    revocations = await run_in_threadpool(repository.revocations, user.id)
-    try:
+    # Остановка до отзыва: потом управлять кампаниями будет нечем. Неподтверждённая остановка не мешает удалению, но о
+    # ней сообщаем; бизнес, занятый шагом воркера, — повтор через минуту.
+    with busy_business("удаление"):
+        problems = await stop_ads(user.id, None, "Остановили рекламу перед удалением ваших данных.")
+        revocations = await run_in_threadpool(repository.revocations, user.id)
         businesses = await run_in_threadpool(repository.delete_user, user.id, LOCK_WAIT_SECONDS)
-    except ChangeConflict as error:
-        raise HTTPException(409, "Автопилот сейчас меняет рекламу. Повторите удаление через минуту.") from error
     for business_id in businesses:
         await run_in_threadpool(remove_business_media, business_id)
     # Отзыв идёт после ответа: площадка может отвечать по 10 секунд, а данные у нас уже удалены.
@@ -315,7 +346,8 @@ async def disconnect_account(
     background: BackgroundTasks,
     response: Response,
 ) -> dict:
-    problems = await stop_ads(user.id, id, "Остановили рекламу на площадке перед отключением кабинета.")
+    with busy_business("отключение"):
+        problems = await stop_ads(user.id, id, "Остановили рекламу на площадке перед отключением кабинета.")
     revocations = await run_in_threadpool(repository.revocations, user.id, id)
     if not await run_in_threadpool(repository.disconnect_account, user.id, id):
         raise HTTPException(404, "Кабинет не найден.")

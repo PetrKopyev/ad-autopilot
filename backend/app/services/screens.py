@@ -20,15 +20,17 @@ from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
-from app.services.onboarding import MAX_BUDGET_KOP, OnboardingError
+from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
 
-
-def short(title: str, limit: int = 40) -> str:
-    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+SAME_EXCEPT = {
+    "text": "Меняем только текст объявления, картинка та же.",
+    "image": "Меняем только картинку, текст объявления тот же.",
+    "audience": "Меняем только аудиторию, объявление то же.",
+}
 
 
 class ScreensService:
@@ -41,20 +43,12 @@ class ScreensService:
     def budget(self, business: Business) -> dict:
         day = today(self.worker.clock)
         month = self.repository.rows(StatsDaily, business.id, date=Window(day.replace(day=1), day))
-        budget = aggregate_budget(
+        return aggregate_budget(
             business.month_budget_kop,
             month,
             self.repository.rows(BudgetLedger, business.id, month=day.replace(day=1)),
             day,
         )
-        stats_spend = {}
-        for row in month:
-            stats_spend[row.platform] = stats_spend.get(row.platform, 0) + row.cost_kop
-        for platform in budget["platforms"]:
-            platform["spent_kop"] = max(platform["spent_kop"], stats_spend.get(platform["platform"], 0))
-        budget["spent_kop"] = sum(platform["spent_kop"] for platform in budget["platforms"])
-        budget["remaining_kop"] = max(0, business.month_budget_kop - budget["spent_kop"])
-        return budget
 
     def status(self, business: Business) -> dict:
         last_check = self.repository.last_check(business.id)
@@ -228,7 +222,7 @@ class ScreensService:
         with self.repository.business_lock(business.id):
             ad = self.repository.find(Ad, business_id=business.id, id=ad_id)
             if ad is None:
-                raise LookupError("Объявление не найдено.")
+                raise NotFound("Объявление не найдено.")
             if active:
                 await self.check_remaining(business)
             group = self.repository.find(AdGroup, business_id=business.id, id=ad.ad_group_id)
@@ -278,19 +272,23 @@ class ScreensService:
             days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудиторию"}[experiment.hypothesis]
             variants = [ads.get(id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)]
-            contents = [{"title": ad.title, "text": ad.text} if ad else {"title": "", "text": ""} for ad in variants]
-            # Варианты называем буквами, как в итогах проверки; при одинаковых заголовках различает начало текста.
-            field = "text" if contents[0]["title"] == contents[1]["title"] else "title"
-            arms_text = " и ".join(
-                f"вариант {letter} «{short(content[field])}»" for letter, content in zip("АБ", contents, strict=True)
-            )
-            comparing = f"Сравниваем {arms_text}."
+            # Варианты (А и Б) экран показывает сам, из arms; строка comparing говорит только, что между ними меняется.
+            contents = [
+                {
+                    "title": ad.title if ad else "",
+                    "text": ad.text if ad else "",
+                    "image": f"/api/plan/assets/{ad.asset_id}/file" if ad and ad.asset_id else None,
+                }
+                for ad in variants
+            ]
+            comparing = SAME_EXCEPT[experiment.hypothesis]
             if experiment.status == "running":
                 comparing += f" До конца проверки: {plural(days, PLURALS['days'])}."
             items.append(
                 {
                     "id": experiment.id,
                     "title": f"Сравниваем {hypothesis}",
+                    "hypothesis": experiment.hypothesis,
                     "comparing": comparing,
                     "arms": contents,
                     "remaining_impressions": remaining if experiment.status == "running" else 0,

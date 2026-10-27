@@ -32,8 +32,11 @@ class FakeRepository:
         # Остановка рекламы перед отзывом: (user_id, account_id, токен кабинета в момент остановки).
         self.stops: list[tuple[int, int | None, str | None]] = []
         self.stop_confirmed = True
+        self.stop_error: Exception | None = None
 
     async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> list[str]:
+        if self.stop_error:
+            raise self.stop_error
         account = self.accounts.get(account_id) if account_id else None
         self.stops.append((user_id, account_id, account.access_token_enc if account else None))
         return [] if self.stop_confirmed else ["Яндекс Директ: площадка не подтвердила остановку"]
@@ -163,6 +166,10 @@ class FakeRepository:
                     return account
                 return None
 
+            def scalars(self, statement):
+                # Неподтверждённые изменения при отключении кабинета проверяет тест с базой.
+                return []
+
             def commit(self) -> None:
                 pass
 
@@ -179,6 +186,9 @@ class FakeDemoUsers:
     def expire(self, before: datetime) -> list[int]:
         expired = {user.id for user in self.demo() if user.created_at < before}
         return [business_id for user_id in expired for business_id in self.repository.delete_user(user_id)]
+
+    def missing(self, business_ids: set[int]) -> set[int]:
+        return business_ids - set(self.repository.businesses)
 
     def count(self) -> int:
         return len(self.demo())

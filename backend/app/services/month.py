@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 from app.db.models import BudgetLedger, Business
+from app.domain.explain import MONTHS
 from app.platforms.base import Operation
 from app.services.budget_guard import stop_all
 from app.services.optimize import rebalance_budget
-from app.worker.clock import today
+from app.worker.clock import MOSCOW, today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
@@ -22,12 +24,15 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         months = [row.month for row in worker.repository.rows(BudgetLedger, business.id)]
         previous = min(months).isoformat() if months else month.isoformat()
     if monthrange(day.year, day.month)[1] - day.day == 3 and business.auto_continue:
+        next_month = (month + timedelta(days=31)).replace(day=1)
+        # Текст с датой, а не «через три дня»: уведомление читают и позже. С началом месяца оно уже не нужно.
         worker.notice(
             business,
             "MONTH_CONTINUE_NOTICE",
-            "Через три дня начнётся новый месяц, и реклама продолжится с тем же бюджетом. Если продолжать не нужно, "
-            "выключите «Продолжать в следующем месяце» в настройках.",
+            f"{next_month.day} {MONTHS[next_month.month - 1]} начнётся новый месяц, и реклама продолжится с тем же "
+            "бюджетом. Если продолжать не нужно, выключите «Продолжать в следующем месяце» в настройках.",
             key=f"month_notice:{month.isoformat()}",
+            expires_at=datetime.combine(next_month, time(), MOSCOW).isoformat(),
         )
     if previous >= month.isoformat():
         worker.remember(business, month=month.isoformat())

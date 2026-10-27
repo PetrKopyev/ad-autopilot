@@ -17,6 +17,7 @@ from app.services.screens import ScreensService
 from app.services.sync import sync_moderation
 from tests.integration.harness import make_world
 from tests.services.test_experiments import control_snapshot, design, running_experiment, wire_content
+from tests.services.test_stop_before_revoke import later
 
 
 async def test_experiment_starts_after_eight_days_of_scheduler_ticks(tmp_path, monkeypatch):
@@ -281,14 +282,25 @@ async def test_stop_platform_before_revoke_pauses_campaign_and_writes_history():
     world = await make_world()
     worker = world.worker()
     worker.step_key = "owner:revoke"
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is True
+    assert (
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=later()
+        )
+        is True
+    )
     (change,) = world.changes(reason_code="ACCOUNT_REVOKE")
     assert (change.actor, change.kind, change.status) == ("owner", "pause", "applied")
     assert change.reason_text == "Остановили."
     assert world.campaign.status == "paused_owner"
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Повтор.") is True
+    assert (
+        await stop_platform(world.business, worker=worker, platform="direct", reason_text="Повтор.", deadline=later())
+        is True
+    )
     assert len(world.changes(reason_code="ACCOUNT_REVOKE")) == 1
-    assert await stop_platform(world.business, worker=worker, platform="vk", reason_text="Другая.") is True
+    assert (
+        await stop_platform(world.business, worker=worker, platform="vk", reason_text="Другая.", deadline=later())
+        is True
+    )
 
 
 async def test_stop_platform_reports_unconfirmed_stop(monkeypatch):
@@ -299,5 +311,10 @@ async def test_stop_platform_reports_unconfirmed_stop(monkeypatch):
     monkeypatch.setattr(world.adapter, "apply", AsyncMock(side_effect=PlatformError("Площадка недоступна.")))
     worker = world.worker()
     worker.step_key = "owner:revoke"
-    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is False
+    assert (
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=later()
+        )
+        is False
+    )
     assert world.campaign.status != "paused_owner"

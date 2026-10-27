@@ -44,3 +44,12 @@ it('подсказка о ежедневном пересчёте видна т�
   fireEvent.change(screen.getByLabelText(labels.filterAuthor), { target: { value: '' } });
   expect(screen.getByText(labels.routineHint)).toBeTruthy();
 });
+
+it('отмену остановки называет продолжением рекламы, другие отмены — по исходному изменению', async () => {
+  const revert = (id: number, reverts_id: number) => ({ ...entry(id, 'revert'), reverts_id, can_revert: false });
+  serve([revert(4, 1), revert(5, 2), revert(6, 99), entry(1, 'pause'), entry(2, 'budget')]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 4');
+  const titles = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
+  expect(titles.slice(0, 3)).toEqual([labels.resumedAfterStop, labels.revertedLine('изменение бюджета'), labels.revertedPlain]);
+});

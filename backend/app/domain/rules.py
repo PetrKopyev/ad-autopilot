@@ -215,12 +215,15 @@ def decide(
         if last_ad and active_groups[ad.platform] <= settings.min_active_groups:
             decisions.append(Decision(ad.id, Action.NOTIFY, "MIN_ACTIVE_GROUPS"))
             continue
+        days = [day.day for day in settled_days(ad.days, now.date(), settings)]
         numbers = {
             "clicks": assessment.metrics.clicks,
             "leads": assessment.metrics.leads,
             "spend": assessment.metrics.spend,
             "ref_cpl": reference_cpl or 0,
             "impressions": assessment.metrics.impressions,
+            "period_start": min(days).isoformat(),
+            "period_end": max(days).isoformat(),
         }
         decisions.append(Decision(ad.id, Action.PAUSE, assessment.reason_code, numbers=numbers))
         active_ads[ad.group_id] -= 1

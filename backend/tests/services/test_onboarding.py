@@ -134,7 +134,10 @@ class MemoryRepository(LaunchRepository):
         return self.rows(Business, user_id=user_id)
 
     def business(self, business_id: int) -> Business:
-        return self.rows(Business, id=business_id)[0]
+        business = self.fresh_business(business_id)
+        if business is None:
+            raise ValueError("Бизнес не найден.")
+        return business
 
     def marking(self, business_id: int) -> MarkingProfile | None:
         return next(iter(self.rows(MarkingProfile, business_id=business_id)), None)
@@ -193,6 +196,9 @@ class MemoryRepository(LaunchRepository):
 
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return next(iter(self.rows(Asset, id=asset_id, business_id=business_id)), None)
+
+    def fresh_business(self, business_id: int) -> Business | None:
+        return next(iter(self.rows(Business, id=business_id)), None)
 
     def campaign(self, campaign_id: int) -> Campaign | None:
         return next(iter(self.rows(Campaign, id=campaign_id)), None)

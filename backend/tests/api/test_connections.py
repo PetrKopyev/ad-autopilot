@@ -122,3 +122,160 @@ def test_business_lock_does_not_take_connection_from_request_pool(small_pool, mo
                     assert engine.pool.checkedout() == 1 and locks.pool.checkedout() == 1
     finally:
         locks.dispose()
+
+
+@pytest.mark.db
+def test_plan_ai_calls_do_not_hold_a_connection(small_pool, monkeypatch, tmp_path) -> None:
+    # Идеи, картинки и тексты ИИ готовит десятки секунд: всё это время соединение запроса было занято, и двое
+    # пользователей, собирающих план, исчерпывали пул.
+    from app.db import session as db_session
+    from app.db.models import PlatformAccount
+    from app.services.plan import PlanRepository, PlanService
+    from tests.services.test_onboarding import (
+        LIMITS,
+        NOW,
+        TODAY,
+        ScriptedLLM,
+        VariedArt,
+        font_path,
+        make_world,
+        onboard,
+    )
+
+    _, engine, _, asset_id = small_pool
+    locks = create_engine(engine.url, pool_size=2, max_overflow=0, isolation_level="AUTOCOMMIT")
+    monkeypatch.setitem(db_session.LOCK_ENGINES, engine, locks)
+    memory = make_world(tmp_path / "memory")
+    asyncio.run(onboard(memory))
+    held = []
+
+    class WatchingLLM(ScriptedLLM):
+        async def complete_json(self, system: str, user: str):
+            held.append(engine.pool.checkedout())
+            return await super().complete_json(system, user)
+
+    class WatchingArt(VariedArt):
+        async def generate(self, prompt: str, *, seed: int, business_id: int):
+            held.append(engine.pool.checkedout())
+            return await super().generate(prompt, seed=seed, business_id=business_id)
+
+    try:
+        with db_session.SessionLocal() as db:
+            asset = db.get(Asset, asset_id)
+            business = db.get(Business, asset.business_id)
+            for column in Business.__table__.columns.keys():
+                if column not in {"id", "user_id", "created_at"}:
+                    setattr(business, column, getattr(memory.business, column))
+            db.delete(asset)
+            db.add(PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t"))
+            db.commit()
+            service = PlanService(
+                PlanRepository(db),
+                WatchingLLM(),
+                lambda budget, record: WatchingArt(b"", budget, record=record),
+                tmp_path / "plan",
+                LIMITS,
+                font_path=font_path(),
+                seeds=iter(range(1, 100)).__next__,
+            )
+            plan = asyncio.run(service.get_plan(business.id, NOW, TODAY))
+            assert plan["groups"] and len(held) > 3 and set(held) == {0}
+            # План пересобирается, картинки уже есть: ИИ пишет только тексты.
+            business.month_budget_kop += 100_000
+            db.commit()
+            held.clear()
+            asyncio.run(service.get_plan(business.id, NOW, TODAY))
+        assert held and set(held) == {0}
+        assert engine.pool.checkedout() == 0
+    finally:
+        locks.dispose()
+
+
+@pytest.mark.db
+def test_full_lock_pool_answers_server_busy_at_once(small_pool, monkeypatch) -> None:
+    # Пул блокировок исчерпан (перемотки демо): запрос не ждёт соединение в цикле событий, а сразу отвечает «сервер
+    # занят», отличая это от «бизнес занят».
+    import time
+
+    from app.db import session as db_session
+    from app.services.changes import ChangesRepository, ServerBusy
+
+    _, engine, _, asset_id = small_pool
+    locks = create_engine(engine.url, pool_size=1, max_overflow=0, pool_timeout=0, isolation_level="AUTOCOMMIT")
+    monkeypatch.setitem(db_session.LOCK_ENGINES, engine, locks)
+    try:
+        with db_session.SessionLocal() as db, locks.connect():
+            business_id = db.get(Asset, asset_id).business_id
+            started = time.monotonic()
+            with pytest.raises(ServerBusy), ChangesRepository(db).business_lock(business_id):
+                pass
+            assert time.monotonic() - started < 0.5
+        with db_session.SessionLocal() as db, ChangesRepository(db).business_lock(business_id):
+            assert locks.pool.checkedout() == 1
+    finally:
+        locks.dispose()
+
+
+@pytest.mark.db
+def test_platform_checks_before_launch_do_not_hold_a_connection(small_pool, tmp_path) -> None:
+    from datetime import date
+
+    from app.db import session as db_session
+    from app.domain.types import PlatformLimit
+    from app.platforms.fake import FakeAdapter
+    from app.services.launch import LaunchRepository, LaunchService
+
+    _, engine, _, asset_id = small_pool
+    held = []
+
+    class WatchingAdapter(FakeAdapter):
+        async def min_budgets(self):
+            held.append(engine.pool.checkedout())
+            return await super().min_budgets()
+
+        async def geo_targeting(self, city: str):
+            held.append(engine.pool.checkedout())
+            return await super().geo_targeting(city)
+
+    with db_session.SessionLocal() as db:
+        business = db.get(Business, db.get(Asset, asset_id).business_id)
+        service = LaunchService(LaunchRepository(db), lambda business_id, platform: WatchingAdapter(), tmp_path)
+        limits = {"direct": PlatformLimit("direct", 10_000_000, 500_000, 3_500_000)}
+        asyncio.run(service.check_platforms(business, ["direct"], limits, date(2026, 1, 5)))
+    assert held == [0, 0]
+
+
+@pytest.mark.db
+def test_connection_is_returned_when_handler_fails(small_pool) -> None:
+    from fastapi import APIRouter, Depends
+    from sqlalchemy import text
+
+    from app.api.routing import ReleasingRoute, request_session
+
+    _, engine, _, _ = small_pool
+
+    def get_db():
+        with request_session() as db:
+            yield db
+
+    router = APIRouter(route_class=ReleasingRoute)
+
+    @router.get("/fail")
+    def fail(db=Depends(get_db)) -> dict:
+        db.execute(text("select 1"))
+        raise RuntimeError("boom")
+
+    @router.get("/ok")
+    def ok(db=Depends(get_db)) -> dict:
+        return {"value": db.execute(text("select 1")).scalar()}
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def run() -> list[int]:
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            return [(await client.get(path)).status_code for path in ("/fail", "/fail", "/ok")]
+
+    assert asyncio.run(run()) == [500, 500, 200]
+    assert engine.pool.checkedout() == 0

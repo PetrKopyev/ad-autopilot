@@ -10,7 +10,6 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from threading import Lock
 
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
@@ -32,6 +31,7 @@ from app.services.onboarding import (
     DESCRIPTION_KEYS,
     AiLimits,
     Blocked,
+    NotFound,
     OnboardingError,
     OnboardingRepository,
     SpendLLM,
@@ -76,6 +76,12 @@ class PlanRepository(OnboardingRepository):
 
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return self.db.scalar(select(Asset).where(Asset.id == asset_id, Asset.business_id == business_id))
+
+    def fresh_business(self, business_id: int) -> Business | None:
+        """Строка из базы, а не из сессии: под блокировкой видны удаление и правки, сделанные, пока её ждали."""
+        return self.db.scalar(
+            select(Business).where(Business.id == business_id).execution_options(populate_existing=True)
+        )
 
 
 def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
@@ -156,65 +162,77 @@ def launch_blockers(
 VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="video")
 
 
+type Built = dict[str, tuple[list[int], bytes]]
+
+
 class VideoQueue:
     """Очередь сборок роликов: у бизнеса не больше одной ожидающей сборки, всего бизнесов в очереди — не больше limit.
 
     Пока ролики бизнеса собираются, новый выбор картинок только отмечает, что нужна ещё одна сборка: она начнётся после
     текущей и прочитает выбор заново, поэтому побеждает последний выбор. Сборка, которая не сохранила результат из-за
-    занятого бизнеса, повторяется через delay секунд, не больше retries раз."""
+    занятого бизнеса, повторяется через delay секунд, не больше retries раз. Собранные ролики (Built) переходят от
+    попытки к попытке: ffmpeg запускается заново только для сегмента, у которого изменился набор картинок.
+
+    Очередь живёт в цикле событий API, и между await её состояние никто не меняет: блокировка потоков не нужна."""
 
     def __init__(self, limit: int = 20, retries: int = 12, delay: float = 5) -> None:
         self.limit = limit
         self.retries = retries
         self.delay = delay
-        self._guard = Lock()
         self._active: set[int] = set()
         self._again: set[int] = set()
 
-    async def request(self, business_id: int, build: Callable[[int], bool]) -> None:
-        with self._guard:
-            if business_id in self._active:
-                self._again.add(business_id)
-                return
-            if len(self._active) >= self.limit:
-                logger.warning("Очередь сборки роликов заполнена, бизнес %s пропущен", business_id)
-                return
-            self._active.add(business_id)
+    async def request(self, business_id: int, build: Callable[[int, Built], bool]) -> None:
+        if business_id in self._active:
+            self._again.add(business_id)
+            return
+        if len(self._active) >= self.limit:
+            logger.warning("Очередь сборки роликов заполнена, бизнес %s пропущен", business_id)
+            return
+        self._active.add(business_id)
+        built: Built = {}
         try:
             retries = 0
             while True:
-                with self._guard:
-                    self._again.discard(business_id)
-                saved = await asyncio.get_running_loop().run_in_executor(VIDEO_EXECUTOR, build, business_id)
-                with self._guard:
-                    if business_id in self._again:
-                        continue
+                self._again.discard(business_id)
+                saved = await asyncio.get_running_loop().run_in_executor(VIDEO_EXECUTOR, build, business_id, built)
+                if business_id in self._again:
+                    continue
                 if saved or retries >= self.retries:
                     return
                 retries += 1
                 await asyncio.sleep(self.delay)
         finally:
-            with self._guard:
-                self._active.discard(business_id)
-                self._again.discard(business_id)
+            self._active.discard(business_id)
+            self._again.discard(business_id)
 
 
 VIDEO_QUEUE = VideoQueue()
 
 
-def build_videos(repository: PlanRepository, media_root: Path, business_id: int, font_path: str = DEFAULT_FONT) -> bool:
+def build_videos(
+    repository: PlanRepository,
+    media_root: Path,
+    business_id: int,
+    font_path: str = DEFAULT_FONT,
+    built: Built | None = None,
+) -> bool:
     """Видео из 3–4 выбранных картинок сегмента; без ffmpeg пропускаем: ролик загружается вручную.
 
     Ролик пересобирается, только если изменился его набор картинок; прежний файл удаляется. ffmpeg работает без
     блокировки бизнеса (до 180 секунд), а результат сохраняется под ней и только если выбор за это время не
     изменился: иначе новый ролик соберёт задача, запущенная последним выбором. False — бизнес был занят и ничего не
-    сохранено: сборку нужно повторить."""
+    сохранено: сборку нужно повторить. built — ролики, собранные прошлыми попытками; дополняется этой."""
     if shutil.which("ffmpeg") is None:
         return True
-    built: dict[str, tuple[list[int], bytes]] = {}
+    built = {} if built is None else built
     for segment, chosen, video in video_segments(repository, business_id):
         sources = [asset.id for asset in chosen]
-        if len(chosen) < 3 or (video is not None and video.formats.get("sources") == sources):
+        if (
+            len(chosen) < 3
+            or (video is not None and video.formats.get("sources") == sources)
+            or (segment in built and built[segment][0] == sources)
+        ):
             continue
         plan = repository.latest_plan(business_id)
         group = next(item for item in plan.payload["groups"] if item["segment"] == segment)
@@ -319,20 +337,27 @@ class PlanService:
         self.domain = domain
 
     async def get_plan(self, business_id: int, now: datetime, today: date) -> dict:
-        business = self.repository.business(business_id)
-        if business.description_approved_at is None:
-            raise Blocked("Подтвердите описание бизнеса: без него мы не готовим план.")
-        platforms = connected_platforms(self.repository.accounts(business_id))
-        digest = inputs_hash(business, platforms)
-        plan = self.repository.latest_plan(business_id)
+        business, platforms, digest, plan = self.inputs(self.repository.business(business_id))
         if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
             with self.repository.business_lock(business_id):
-                latest = self.repository.latest_plan(business_id)
-                if latest is None or (latest.status != "launched" and latest.payload["inputs_hash"] != digest):
-                    plan = await self.build(business, platforms, digest, latest, now, today)
-                else:
-                    plan = latest
+                # Пока ждали блокировку, план мог собрать соседний запрос, а бизнес — измениться или удалиться.
+                business, platforms, digest, plan = self.inputs(self.locked_business(business_id))
+                if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
+                    plan = await self.build(business, platforms, digest, plan, now, today)
         return self.view(business, plan, today)
+
+    def inputs(self, business: Business) -> tuple[Business, list[str], str, Plan | None]:
+        if business.description_approved_at is None:
+            raise Blocked("Подтвердите описание бизнеса: без него мы не готовим план.")
+        platforms = connected_platforms(self.repository.accounts(business.id))
+        return business, platforms, inputs_hash(business, platforms), self.repository.latest_plan(business.id)
+
+    def locked_business(self, business_id: int) -> Business:
+        """Под блокировкой: удалённому бизнесу ИИ не генерирует и файлы не пишутся (удаление тоже идёт под ней)."""
+        business = self.repository.fresh_business(business_id)
+        if business is None:
+            raise NotFound("Бизнес не найден.")
+        return business
 
     async def build(
         self, business: Business, platforms: list[str], digest: str, previous: Plan | None, now: datetime, today: date
@@ -348,7 +373,8 @@ class PlanService:
                 ids = assets.setdefault(segments[index % len(segments)], [])
                 asset.selected = len(ids) < 2
                 ids.append(asset.id)
-            self.repository.commit()
+        # Тексты пишет ИИ, по секундам на каждый: соединение на это время возвращается в пул.
+        self.repository.commit()
         draft = description_draft(business)
         primary = (lines(business.description["fields"]["services"]["value"]) or ["Услуги"])[0]
         limits = budget_limits(business, platforms, today, self.domain)
@@ -422,11 +448,14 @@ class PlanService:
     async def generate_images(self, business: Business, budget: ArtBudget, count: int) -> list[Asset]:
         llm = SpendLLM(self.llm, self.repository, business.id, budget, "image_ideas")
         art = self.art_factory(budget, self.record_art)
+        hashes = [asset.phash for asset in self.repository.assets(business.id) if asset.phash]
+        # Идеи и картинки ИИ готовит десятки секунд: соединение на это время возвращается в пул. Дальше каждая запись
+        # (вызов ИИ, картинка) сама завершается commit.
+        self.repository.commit()
         try:
             ideas = await generate_ideas(llm, business.niche_class or "other", count=count)
         except (YandexGPTError, ValueError):
             return []
-        hashes = [asset.phash for asset in self.repository.assets(business.id) if asset.phash]
         created = []
         for idea in ideas:
             try:
@@ -450,7 +479,7 @@ class PlanService:
                 phash=checked.phash,
                 cost_kop=checked.cost_kop,
             )
-            self.repository.add(asset)
+            self.save_with_file(asset)
             hashes.append(checked.phash)
             created.append(asset)
         return created
@@ -458,11 +487,19 @@ class PlanService:
     def store(self, business_id: int, name: str, suffix: str, data: bytes) -> str:
         return store(self.media_root, business_id, name, suffix, data)
 
+    def save_with_file(self, asset: Asset) -> None:
+        """Строка не сохранилась — её файл удаляется: файлов без строк не остаётся."""
+        try:
+            self.repository.add(asset)
+        except BaseException:
+            remove_media(self.media_root, asset.file_path)
+            raise
+
     def draft_group(self, business_id: int, group_id: int) -> tuple[Plan, dict]:
         plan = self.repository.latest_plan(business_id)
         group = next((item for item in plan.payload["groups"] if item["id"] == group_id), None) if plan else None
         if group is None:
-            raise LookupError("Группа не найдена.")
+            raise NotFound("Группа не найдена.")
         if plan.status == "launched":
             raise Blocked("Реклама уже запущена. Картинки меняются в разделе «Реклама».")
         return plan, group
@@ -474,16 +511,17 @@ class PlanService:
         self.repository.commit()
 
     async def regenerate_images(self, business_id: int, group_id: int, now: datetime, today: date) -> dict:
-        business = self.repository.business(business_id)
-        plan, group = self.draft_group(business_id, group_id)
+        self.draft_group(business_id, group_id)
         with self.repository.business_lock(business_id):
+            business = self.locked_business(business_id)
+            plan, group = self.draft_group(business_id, group_id)
             budget = ai_budget(self.repository, business, self.limits, today)
             if self.generations_remaining(budget) == 0:
                 raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
             created = await self.generate_images(business, budget, REGENERATE_COUNT)
-        if not created:
-            raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")
-        self.attach(plan, group["segment"], created)
+            if not created:
+                raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")
+            self.attach(plan, group["segment"], created)
         return self.view(business, plan, today)
 
     def upload_photo(self, business_id: int, group_id: int, data: bytes, today: date) -> dict:
@@ -508,7 +546,7 @@ class PlanService:
                 phash=checked.phash,
                 selected=True,
             )
-            self.repository.add(asset)
+            self.save_with_file(asset)
             self.attach(plan, group["segment"], [asset])
         return self.view(business, plan, today)
 
@@ -516,15 +554,15 @@ class PlanService:
         """Отмечает выбранные картинки; True — выбор изменился и ролики нужно пересобрать."""
         images = [asset for asset in self.repository.assets(business_id) if asset.kind in IMAGE_KINDS]
         if not set(asset_ids) <= {asset.id for asset in images}:
-            raise LookupError("Картинка не найдена.")
+            raise NotFound("Картинка не найдена.")
         changed = {asset.id for asset in images if asset.selected} != set(asset_ids)
         for asset in images:
             asset.selected = asset.id in asset_ids
         self.repository.commit()
         return changed
 
-    def build_videos(self, business_id: int) -> bool:
-        return build_videos(self.repository, self.media_root, business_id, self.font_path)
+    def build_videos(self, business_id: int, built: Built | None = None) -> bool:
+        return build_videos(self.repository, self.media_root, business_id, self.font_path, built)
 
     def generations_remaining(self, budget: ArtBudget) -> int:
         return max(0, (budget.limit_kop - budget.spent_kop) // (REGENERATE_COUNT * ART_COST_KOP))

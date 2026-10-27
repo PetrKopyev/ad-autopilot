@@ -1,5 +1,6 @@
 """Один и тот же сценарий на MemoryWorkerRepository и на WorkerRepository с PostgreSQL: память ведёт себя как SQL."""
 
+import hashlib
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -461,8 +462,11 @@ async def test_rejection_notices_of_same_ad_id_on_two_platforms_are_separate(rep
     platform = RejectingPlatform("Нужна лицензия")
     await sync_moderation(worker(repository, {"direct": platform, "vk": platform}), world.business)
     assert len(repository.rows(WorkerRun, world.business.id, kind="notification")) == 2
-    unread = repository.unread_notifications(world.business.id, {"MODERATION_REJECTED"}, 10)
+    unread = repository.unread_notifications(world.business.id, {"MODERATION_REJECTED"}, 10, NOW)
     assert sorted(row.log[0]["target_id"] for row in unread) == ["direct:a-1", "vk:a-1"]
+    # Ключ: причина и объявление, без повтора объявления в ключе.
+    reason = hashlib.sha256("Нужна лицензия".encode()).hexdigest()[:16]
+    assert sorted(row.slot_key for row in unread) == [f"moderation:{reason}:direct:a-1", f"moderation:{reason}:vk:a-1"]
 
 
 def test_unread_notifications_and_mark_read(repository) -> None:
@@ -493,10 +497,13 @@ def test_unread_notifications_and_mark_read(repository) -> None:
     }
     repository.save(*rows.values())
     names = {row.id: name for name, row in rows.items()}
-    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10)] == ["new", "old"]
-    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 1)] == ["new"]
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10, NOW)] == [
+        "new",
+        "old",
+    ]
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 1, NOW)] == ["new"]
     repository.mark_read(business_id, [rows["new"].id, rows["step"].id], NOW)
-    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10)] == ["old"]
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10, NOW)] == ["old"]
     assert repository.find(WorkerRun, id=rows["step"].id).log == [{"reason_code": "ANOMALY"}]
 
 
@@ -523,13 +530,13 @@ def test_unread_notifications_show_one_latest_per_theme(repository) -> None:
     ]
     repository.save(*rows)
     codes = {"BUDGET_OPPORTUNITY", "NOT_SHOWING", "MODERATION_REJECTED"}
-    latest = repository.unread_notifications(business_id, codes, 3)
+    latest = repository.unread_notifications(business_id, codes, 3, NOW)
     assert [row.slot_key for row in latest] == ["o30", "mod-2", "ad-2"]
-    everything = repository.unread_notifications(business_id, codes, 10)
+    everything = repository.unread_notifications(business_id, codes, 10, NOW)
     assert [row.slot_key for row in everything] == ["o30", "mod-2", "ad-2", "ad-1"]
     assert len(repository.same_theme(latest[0])) == 30
     repository.mark_read(business_id, repository.same_theme(latest[0]), NOW)
-    assert [row.slot_key for row in repository.unread_notifications(business_id, {"BUDGET_OPPORTUNITY"}, 10)] == []
+    assert [row.slot_key for row in repository.unread_notifications(business_id, {"BUDGET_OPPORTUNITY"}, 10, NOW)] == []
 
 
 def test_facts_are_notified_in_trial_mode_and_only_proposals_wait(repository) -> None:
@@ -541,3 +548,51 @@ def test_facts_are_notified_in_trial_mode_and_only_proposals_wait(repository) ->
     trial.notice(world.business, "BUDGET_STOP", "Реклама остановлена.", key="action", proposal=True)
     statuses = {row.slot_key: row.status for row in repository.rows(WorkerRun, world.business.id, kind="notification")}
     assert statuses == {"fact": "ok", "action": "proposed"}
+
+
+def test_notice_about_a_date_is_hidden_once_the_date_has_come(repository) -> None:
+    # «Новый месяц через три дня» после перемотки демо или долгого отсутствия уже неправда.
+    business_id = tree(repository).business.id
+    expires_at = (NOW + timedelta(days=3)).isoformat()
+    repository.save(
+        run(
+            business_id,
+            kind="notification",
+            slot_key="month",
+            log=[
+                {
+                    "reason_code": "MONTH_CONTINUE_NOTICE",
+                    "text": "1 апреля начнётся новый месяц",
+                    "expires_at": expires_at,
+                }
+            ],
+        ),
+        run(
+            business_id,
+            kind="notification",
+            slot_key="other",
+            log=[{"reason_code": "ANOMALY", "text": "Нет обращений"}],
+        ),
+    )
+    codes = {"MONTH_CONTINUE_NOTICE", "ANOMALY"}
+    before = repository.unread_notifications(business_id, codes, 10, NOW + timedelta(days=3) - timedelta(seconds=1))
+    assert sorted(row.slot_key for row in before) == ["month", "other"]
+    after = repository.unread_notifications(business_id, codes, 10, NOW + timedelta(days=3))
+    assert [row.slot_key for row in after] == ["other"]
+
+
+def test_notices_without_target_are_grouped_by_text_not_merged(repository) -> None:
+    business_id = tree(repository).business.id
+    repository.save(
+        *(
+            run(
+                business_id,
+                kind="notification",
+                slot_key=key,
+                log=[{"reason_code": "ANOMALY", "text": text, "target_id": None}],
+            )
+            for key, text in (("a", "Сайт не открывается"), ("b", "Счётчик молчит"), ("c", "Счётчик молчит"))
+        )
+    )
+    unread = repository.unread_notifications(business_id, {"ANOMALY"}, 10, NOW)
+    assert sorted(row.log[0]["text"] for row in unread) == ["Сайт не открывается", "Счётчик молчит"]

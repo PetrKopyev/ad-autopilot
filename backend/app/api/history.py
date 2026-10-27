@@ -8,7 +8,7 @@ from app.auth.sessions import current_user, require_csrf
 from app.db.models import ChangeLog, User
 from app.demo_flags import demo_now
 from app.platforms.base import PlatformError
-from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository
+from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository, ServerBusy
 from app.services.rollback import ConfirmationRequired, RollbackService, can_revert
 from app.worker.clock import SystemClock
 
@@ -107,6 +107,8 @@ async def revert(
         raise HTTPException(
             409, {"confirmation_required": True, "message": str(error), "changes": error.changes}
         ) from error
+    except ServerBusy as error:
+        raise HTTPException(503, str(error)) from error
     except ChangeConflict as error:
         raise HTTPException(409, str(error)) from error
     except (ValueError, KeyError) as error:
