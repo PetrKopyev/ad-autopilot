@@ -6,7 +6,11 @@ test.skip(!process.env.BASE_URL, 'Вручную: BASE_URL=https://localhost npm
 for (const width of [390, 1280]) {
   test(`демо: мастер, 30 дней автопилота, откат и пауза (${width}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
     await page.goto('/login');
+    await expect(page.getByRole('heading', { name: copy.login.title, exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: copy.navigation.label })).toHaveCount(0);
     await page.getByRole('button', { name: 'Войти в демо', exact: true }).click();
     await expect(page.getByLabel(copy.setup.business.website)).toHaveValue('https://salon.example/');
     await expect(page.getByLabel(copy.setup.business.city, { exact: true })).toHaveValue('Москва');
@@ -54,10 +58,12 @@ for (const width of [390, 1280]) {
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.history, exact: true }).click();
     await page.getByLabel(copy.historyScreen.filterAuthor).selectOption('autopilot');
     await expect(page.locator('.history-entry').first()).toContainText('Автопилот');
-    await page.getByRole('button', { name: copy.history.undo, exact: true }).first().click();
-    await page.getByRole('button', { name: copy.historyScreen.confirmYes, exact: true }).click();
+    // Отмена остановки подписана «Продолжить», остальных изменений — «Отменить».
+    const labels = copy.historyScreen;
+    await page.locator('.history-entry').getByRole('button', { name: new RegExp(`^(${copy.history.undo}|${labels.resume})$`) }).first().click();
+    await page.getByRole('button', { name: new RegExp(`^(${labels.confirmYes}|${labels.resumeYes})$`) }).click();
     await page.getByLabel(copy.historyScreen.filterAuthor).selectOption('');
-    await expect(page.getByRole('heading', { name: /Вы отменили/ }).first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: new RegExp(`^(Вы отменили|${labels.resumedAfterStop})`) }).first()).toBeVisible();
 
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.home, exact: true }).click();
     await page.getByRole('button', { name: copy.home.stopAll, exact: true }).click();
@@ -65,5 +71,36 @@ for (const width of [390, 1280]) {
     await expect(page.getByText(copy.home.paused, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: copy.settings.resume, exact: true }).click();
     await expect(page.getByText(/^Работает,/)).toBeVisible();
+
+    const consoleErrors: string[] = [];
+    page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+    await page.getByRole('navigation').getByRole('link', { name: copy.navigation.settings, exact: true }).click();
+    await expect(page.getByRole('heading', { name: copy.settings.title, exact: true })).toBeVisible();
+    const budgetField = page.getByLabel(copy.settingsScreen.budgetLabel);
+    await expect(budgetField).toHaveValue('30000');
+    await expect(page.getByRole('textbox', { name: new RegExp(`^${copy.settingsScreen.description.services}`) })).not.toHaveValue('');
+    await budgetField.fill('35000');
+    const saved = page.waitForResponse((response) => response.url().endsWith('/api/business/budget') && response.request().method() === 'PUT');
+    await page.getByRole('button', { name: copy.settingsScreen.save, exact: true }).first().click();
+    expect((await saved).status()).toBe(200);
+    await expect(page.getByRole('status').filter({ hasText: copy.settingsScreen.saved })).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel(copy.settingsScreen.budgetLabel)).toHaveValue('35000');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+    await testInfo.attach(`settings-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
+    expect(consoleErrors).toEqual([]);
+
+    for (const name of [copy.navigation.home, copy.navigation.ads, copy.navigation.statistics, copy.navigation.history, copy.navigation.clients, copy.navigation.settings]) {
+      await page.getByRole('navigation').getByRole('link', { name, exact: true }).click();
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.getByRole('status').filter({ hasText: copy.screens.loading })).toHaveCount(0);
+    }
+    for (const name of [copy.service.policyTitle, copy.setup.accounts.vk, copy.service.errorsTitle]) {
+      await page.getByRole('contentinfo').getByRole('link', { name, exact: true }).click();
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    }
+    await page.goto('/plan');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    expect(pageErrors).toEqual([]);
   });
 }

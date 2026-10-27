@@ -40,7 +40,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Адрес клиента берётся из X-Forwarded-For только от Caddy: по нему работают лимиты входа и запросов.
+    command:
+      [
+        "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+        "--proxy-headers", "--forwarded-allow-ips", "${CADDY_IP:-172.31.250.10}",
+      ]
 
   worker:
     <<: *backend
@@ -55,9 +60,13 @@ services:
     image: caddy:2
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
+    # Демо слушает только 127.0.0.1 (BIND_ADDR в .env.demo), сервер — все адреса.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${BIND_ADDR:-0.0.0.0}:80:80"
+      - "${BIND_ADDR:-0.0.0.0}:443:443"
+    networks:
+      default:
+        ipv4_address: ${CADDY_IP:-172.31.250.10}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - type: bind
@@ -71,6 +80,12 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${APP_SUBNET:-172.31.250.0/24}
 
 volumes:
   media:

@@ -116,6 +116,9 @@ def test_pause_resume_only_kill_switch_and_repeated_pause(setup):
     assert client.post("/api/autopilot/pause").status_code == 200
     count = len(world.repository.rows(ChangeLog))
     assert world.campaign.status == "paused_owner"
+    stop = next(row for row in world.repository.rows(ChangeLog) if row.reason_code == "OWNER_STOP")
+    # Запись видна после выполнения: прошедшее время, а не «Останавливаем».
+    assert stop.reason_text == "Остановили рекламу на всех площадках."
     assert client.post("/api/autopilot/pause").status_code == 200
     assert len(world.repository.rows(ChangeLog)) == count
     assert client.post("/api/autopilot/resume").status_code == 200
@@ -288,7 +291,8 @@ def test_experiments_and_safe_business(setup):
     assert len(items) == 2
     assert "Убедительной разницы" in items[0]["conclusion"]
     assert items[1]["remaining_impressions"] == 4000
-    assert f"/ads#{control.id}" in items[1]["comparing"]
+    assert "/ads#" not in items[1]["comparing"]
+    assert items[1]["comparing"].startswith(f"Сравниваем вариант А «{control.title}» и вариант Б «")
     result = client.get("/api/business").json()
     assert result["marking"]["inn"] == result["marking"]["phone"] == ""
     assert result["marking"]["confirmed_in_platform"] == {"direct": True}

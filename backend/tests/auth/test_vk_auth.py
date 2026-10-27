@@ -320,3 +320,31 @@ async def test_renew_account_marks_account_for_reauth(repository, vk_api) -> Non
     with pytest.raises(AuthExpired):
         await vk.renew_account(FakeDB(repository, 1), 1)
     assert repository.accounts[1].status == "needs_reauth"
+
+
+def test_manual_key_is_bound_only_to_current_users_business(client, repository, vk_api) -> None:
+    repository.businesses[2] = Business(id=2, user_id=2)
+    sign_in(client, repository)
+    response = key_request(client, repository, business_id=2)
+    assert response.status_code == 404
+    assert not repository.accounts and not vk_api.calls
+    response = key_request(client, repository)
+    assert response.status_code == 200 and response.json()["business_id"] == 1
+    assert repository.accounts[1].business_id == 1
+
+
+def test_vk_start_is_rate_limited_per_user(client, repository, vk_api) -> None:
+    sign_in(client, repository)
+    for _ in range(10):
+        start(client)
+    response = client.get("/api/auth/vk/start")
+    assert response.status_code == 429 and response.headers["content-type"].startswith("text/html")
+    assert "Подождите минуту" in response.text and '<a href="/">' in response.text
+    assert int(response.headers["Retry-After"]) > 0
+
+
+def test_manual_key_is_rate_limited_per_user(client, repository, vk_api) -> None:
+    token = vk_api.post(TOKEN).respond(401, json={"error": "invalid_client"})
+    sign_in(client, repository)
+    assert [key_request(client, repository).status_code for _ in range(6)] == [400] * 5 + [429]
+    assert "ключ VK" in key_request(client, repository).json()["detail"] and token.call_count == 5

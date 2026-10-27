@@ -81,7 +81,7 @@ async def test_vk_package_id_from_env_is_passed_through_registry(monkeypatch):
 
     monkeypatch.setenv("VK_PACKAGE_ID", "321")
     config = Settings()
-    info = AccountInfo("ok", "Самара", "https://salon.example", None, True, "test-only")
+    info = AccountInfo("ok", "https://salon.example", None, True, "test-only")
     async with httpx.AsyncClient() as http:
         registry = AdapterRegistry(lambda *_: info, mode="live", http=http, config=config)
         assert registry.resolve(1, "vk")._package_id == 321

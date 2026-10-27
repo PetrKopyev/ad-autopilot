@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.content.images import DEFAULT_FONT, ImageRejected, make_formats
 from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
 from app.demo_flags import demo_enabled
+from app.domain.explain import rubles
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
 from app.platforms.base import (
@@ -18,14 +19,36 @@ from app.platforms.base import (
     PlatformError,
     TargetSpec,
 )
+from app.platforms.direct import weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
 from app.services.demo import configure_adapter
 from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers
 
+# Запуск, начатый раньше, считается брошенным (процесс API умер), и его можно повторить.
+LAUNCH_STALE = timedelta(minutes=10)
 TITLES = {"direct": "Яндекс Директ", "vk": "ВКонтакте"}
 CAMPAIGN_TYPES = {"direct": "unified", "vk": "vk_plan"}
 IMAGE_FORMATS = {"direct": "direct_1_1", "vk": "vk_square"}
+
+
+def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
+    """Почему площадка не примет лимиты кампании; None — примет.
+
+    Минимумы: Директ — недельный, VK — дневной и на кампанию, симулятор — day/period. Недельный лимит считается
+    той же функцией, что у адаптера Директа: в конце недели или месяца он меньше семи дневных."""
+    daily = minimum.get("daily_limit_kop", minimum.get("day", 0))
+    period = minimum.get("period_cap_kop", minimum.get("period", 0))
+    weekly = minimum.get("weekly_limit_kop", 0)
+    full_week = min(limit.daily_limit * 7, limit.remaining_cap)
+    if limit.daily_limit < daily or limit.remaining_cap < period or full_week < weekly:
+        return f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}»."
+    if weekly_limit(limit.daily_limit, limit.remaining_cap, today) < weekly:
+        return (
+            f"До конца недели осталось мало дней: «{TITLES[platform]}» не примет недельный бюджет меньше "
+            f"{rubles(weekly)} ₽. Запустите рекламу с понедельника или увеличьте бюджет месяца."
+        )
+    return None
 
 
 class LaunchBlocked(Exception):
@@ -55,6 +78,9 @@ class LaunchRepository(PlanRepository):
 
     def save_ledger(self, ledger: BudgetLedger) -> None:
         self.db.merge(ledger)
+
+    def refresh(self, item: object) -> None:
+        self.db.refresh(item)
 
 
 class LaunchService:
@@ -100,39 +126,51 @@ class LaunchService:
             raise LaunchBlocked(reasons)
         platforms = plan.payload["platforms"]
         limits = budget_limits(business, platforms, today, self.domain)
-        adapters = await self.check_platforms(business, platforms, limits)
+        adapters, geo = await self.check_platforms(business, platforms, limits, today)
         entered = False
         try:
             with self.repository.business_lock(business_id):
+                # План прочитан до блокировки: второй запрос мог дождаться, пока первый создаст кампании.
+                self.repository.refresh(plan)
+                if plan.status == "launched":
+                    return self.result(plan)
+                started = plan.payload.get("launch", {}).get("started_at")
+                if started and now - datetime.fromisoformat(started) < LAUNCH_STALE:
+                    raise LaunchBlocked(["Запуск уже идёт. Подождите минуту и обновите страницу."])
+                self.save_launch(plan, started_at=now.isoformat())
                 entered = True
-                refs = await self.create_paused(business, plan, platforms, limits, adapters)
+                refs = await self.create_paused(business, plan, platforms, limits, adapters, geo)
             await self.activate(business, plan, refs, adapters, limits, now)
         except Exception as error:
-            if isinstance(error, ChangeConflict) and not entered:
+            if isinstance(error, ChangeConflict | LaunchBlocked) and not entered:
                 raise
             await self.stop_created(plan, adapters)
-            self.save_launch(plan, error=self.explain(error))
+            self.save_launch(plan, error=self.explain(error), started_at=None)
             raise LaunchFailed(self.explain(error)) from error
         self.finish(business, plan, platforms, limits, now, today)
         return self.result(plan)
 
     async def check_platforms(
-        self, business: Business, platforms: list[str], limits: dict[str, PlatformLimit]
-    ) -> dict[str, AdPlatform]:
-        adapters = {}
+        self, business: Business, platforms: list[str], limits: dict[str, PlatformLimit], today: date
+    ) -> tuple[dict[str, AdPlatform], dict[str, dict]]:
+        """До создания кампаний: кабинет доступен, бюджет не ниже минимумов площадки, город найден в её регионах."""
+        adapters, geo = {}, {}
         for platform in platforms:
+            # Нулевой дневной остаток ниже любого минимума: объясняем настоящую причину, а не «не хватает бюджета».
+            if not limits[platform].daily_limit:
+                raise LaunchBlocked(["На сегодня бюджет месяца почти исчерпан: запустите рекламу с начала дня."])
             try:
                 adapters[platform] = self.resolve_adapter(business.id, platform)
                 minimum = await adapters[platform].min_budgets()
             except PlatformError as error:
                 raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
-            if limits[platform].daily_limit < minimum.get("day", 0) or limits[platform].remaining_cap < minimum.get(
-                "period", 0
-            ):
-                raise LaunchBlocked([f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}»."])
-            if not limits[platform].daily_limit:
-                raise LaunchBlocked(["На сегодня бюджет месяца почти исчерпан: запустите рекламу с начала дня."])
-        return adapters
+            if reason := below_minimum(platform, limits[platform], minimum, today):
+                raise LaunchBlocked([reason])
+            try:
+                geo[platform] = await adapters[platform].geo_targeting(business.city)
+            except PlatformError as error:
+                raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
+        return adapters, geo
 
     def explain(self, error: Exception) -> str:
         reason = str(error) if isinstance(error, PlatformError | ChangeConflict) else "Непредвиденная ошибка."
@@ -156,6 +194,7 @@ class LaunchService:
         platforms: list[str],
         limits: dict[str, PlatformLimit],
         adapters: dict[str, AdPlatform],
+        geo: dict[str, dict],
     ) -> dict[str, tuple[Campaign, ExternalRefs]]:
         """Кампании создаются остановленными, но уже с лимитами: сбой на любом шаге не оставляет трат."""
         created = {}
@@ -172,7 +211,7 @@ class LaunchService:
                 self.save_launch(
                     plan, campaigns=plan.payload.get("launch", {}).get("campaigns", {}) | {platform: campaign.id}
                 )
-            spec = self.spec(business, campaign, groups, images)
+            spec = self.spec(business, campaign, groups, images, geo[platform])
             if demo_enabled() and isinstance(adapter, FakeAdapter):
                 configure_adapter(adapter, spec)
             refs = await adapter.create_campaign_tree(spec)
@@ -256,7 +295,12 @@ class LaunchService:
         return campaign
 
     def spec(
-        self, business: Business, campaign: Campaign, plan_groups: list[dict], images: dict[str, list[str]]
+        self,
+        business: Business,
+        campaign: Campaign,
+        plan_groups: list[dict],
+        images: dict[str, list[str]],
+        geo: dict,
     ) -> CampaignTreeSpec:
         """Внутренние id в дереве — id строк БД: по ним воркер собирает ExternalRefs."""
         groups, ads, targets = self.repository.tree_rows(campaign.id)
@@ -285,7 +329,7 @@ class LaunchService:
                         for target in targets
                         if target.ad_group_id == group.id
                     ),
-                    {"city": business.city},
+                    geo,
                 )
                 for group in groups
             ),
@@ -382,7 +426,7 @@ class LaunchService:
             )
         plan.status = "launched"
         plan.payload = plan.payload | {
-            "launch": plan.payload["launch"] | {"launched_at": now.isoformat(), "error": None}
+            "launch": plan.payload["launch"] | {"launched_at": now.isoformat(), "error": None, "started_at": None}
         }
         business.settings = business.settings | {
             "_worker": business.settings.get("_worker", {}) | {"started_on": today.isoformat()}

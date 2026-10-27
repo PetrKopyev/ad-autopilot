@@ -8,3 +8,8 @@
 .home-confirm { max-width: 540px; width: calc(100% - 32px); max-height: calc(100dvh - 32px); padding: 24px; border: 1px solid var(--color-border); border-radius: 18px; color: var(--color-text); }
 .home-confirm::backdrop { background: rgb(20 32 45 / 50%); }
 @media (max-width: 720px) { .home-columns { grid-template-columns: minmax(0, 1fr); } .home-heading > .button { width: 100%; } }
+.home-notice { display: grid; gap: 8px; padding: 16px; border-left: 4px solid var(--color-primary); border-radius: var(--radius-small); background: var(--color-primary-soft); }
+.home-notice h3, .home-notice p { margin: 0; }
+.home-notice h3 { font-size: 1rem; }
+.home-notice--warning { border-left-color: var(--color-warning); background: var(--color-warning-soft); }
+.home-notice--danger { border-left-color: var(--color-danger); background: var(--color-danger-soft); }

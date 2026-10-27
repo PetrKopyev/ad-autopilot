@@ -1,11 +1,14 @@
 import { api } from './client';
 import { mockEnabled } from './screens';
-import { setupGet } from './setup';
-import type { Business, Description, Marking } from './setup';
+import { setupGet, setupMutation } from './setup';
+import type { Business, Description, Marking, StopResult } from './setup';
 
-// Proposed contract: the backend has no settings endpoints yet.
+// Описание сервер хранит вместе со служебными данными проверки сайта; форме нужны только поля.
+export interface StoredDescription { fields: Description }
+// Закрытые реквизиты маркировки сервер не возвращает: ИНН, название и телефон приходят пустыми.
 export interface BusinessSettings extends Business {
-  description: Description | null; auto_continue: boolean; marking: Marking | null;
+  description: StoredDescription | null; auto_continue: boolean;
+  marking: (Omit<Marking, 'confirmed_in_platform'> & { confirmed_in_platform: Partial<Marking['confirmed_in_platform']> }) | null;
 }
 export async function getBusiness(signal?: AbortSignal): Promise<BusinessSettings> {
   if (mockEnabled) return (await import('./mocks')).mockBusinessSettings();
@@ -27,7 +30,7 @@ export async function pauseAutopilot() {
   if (mockEnabled) { (await import('./mocks')).mockPauseAutopilot(); return; }
   await api('/api/autopilot/pause', { method: 'POST' });
 }
-export async function deleteMyData() {
-  if (mockEnabled) { (await import('./mocks')).mockDeleteMyData(); return; }
-  await api('/api/me', { method: 'DELETE' });
+export async function deleteMyData(): Promise<StopResult> {
+  if (mockEnabled) return (await import('./mocks')).mockDeleteMyData();
+  return setupMutation('/api/me', 'DELETE');
 }

@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, EmptyState, ErrorBanner, Money } from '../components';
 import { copy } from '../copy';
-import { getBreakdown, getDaily, getSummary } from '../api/screens';
-import { displayDate, getPeriod, type PeriodChoice } from '../api/period';
+import { getAds, getBreakdown, getDaily, getSummary } from '../api/screens';
+import { getPeriod, type PeriodChoice } from '../api/period';
+import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Daily, StatsLevel } from '../api/types';
-import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, platformName } from './StatsShared';
+import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, adLabels, platformName } from './StatsShared';
 import { formatMoney } from '../components/Money';
 
 function DailyChart({ daily }: { daily: Daily }) {
   const chart = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(700);
-  const points = daily.items;
-  const hasData = points.some((point) => point.sources.length > 0);
+  // Период кончается сегодняшним днём: он ещё идёт, и его неполные цифры обрушили бы линии.
+  // На графике его нет, в таблице он помечен, как и другие дни, которые площадки ещё уточняют.
+  const currentDay = daily.items.length > 1 && daily.items[daily.items.length - 1].is_incomplete;
+  const points = currentDay ? daily.items.slice(0, -1) : daily.items;
+  const hasData = daily.items.some((point) => point.sources.length > 0);
   useEffect(() => {
     if (!chart.current) return;
     const observer = new ResizeObserver(([entry]) => { if (entry.contentRect.width > 0) setWidth(entry.contentRect.width); });
@@ -28,7 +32,7 @@ function DailyChart({ daily }: { daily: Daily }) {
   if (!hasData) return <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />;
   return <>
     <div className="stats-chart-key"><span>{copy.screens.chartSpend}</span><span>{copy.screens.chartLeads}</span></div>
-    <p className="muted">{copy.screens.chartExplanation}</p>
+    <p className="muted">{[copy.screens.chartExplanation, currentDay && copy.screens.chartToday, copy.screens.chartPending].filter(Boolean).join(' ')}</p>
     <svg ref={chart} className="stats-chart" viewBox={`0 0 ${width} 260`} role="img" aria-label={copy.statistics.chart}>
       <title>{copy.statistics.chart}</title>
       {[...new Set([0, Math.ceil(maxLeads / 2), maxLeads])].map((leads) => {
@@ -43,17 +47,18 @@ function DailyChart({ daily }: { daily: Daily }) {
       <polyline points={line('cost_kop', maxCost)} fill="none" stroke="#245e4c" strokeWidth="3" strokeLinejoin="round" />
       <polyline points={line('leads', maxLeads)} fill="none" stroke="#326bc0" strokeWidth="3" strokeLinejoin="round" strokeDasharray="7 4" />
       {points.map((point, index) => <g key={point.date}>
-        <circle cx={x(index)} cy={y(point.cost_kop, maxCost)} r="3" fill="#245e4c" />
-        <circle cx={x(index)} cy={y(point.leads, maxLeads)} r="3" fill="#326bc0" />
+        <circle cx={x(index)} cy={y(point.cost_kop, maxCost)} r={point.is_incomplete ? 4 : 3} fill={point.is_incomplete ? '#fff' : '#245e4c'} stroke="#245e4c" strokeWidth="2" />
+        <circle cx={x(index)} cy={y(point.leads, maxLeads)} r={point.is_incomplete ? 4 : 3} fill={point.is_incomplete ? '#fff' : '#326bc0'} stroke="#326bc0" strokeWidth="2" />
       </g>)}
       <text x={left} y="242">{displayDate(points[0].date)}</text><text x={right} y="242" textAnchor="end">{displayDate(points[points.length - 1].date)}</text>
     </svg>
     <details className="stats-chart-details"><summary>{copy.screens.chartDetails}</summary>
       <div className="stats-table-scroll" tabIndex={0} role="region" aria-label={copy.screens.chartDetails}><table className="stats-table">
         <thead><tr><th scope="col">{copy.screens.day}</th><th scope="col">{copy.home.spent}</th><th scope="col">{copy.home.leads}</th></tr></thead>
-        <tbody>{points.map((point) => <tr key={point.date}><th scope="row">{displayDate(point.date)}{point.is_incomplete ? ' *' : ''}</th>
+        <tbody>{daily.items.map((point) => <tr key={point.date}><th scope="row">{displayDate(point.date)}{point.is_incomplete ? ' *' : ''}</th>
           <td><Money kopecks={point.cost_kop} /></td><td>{point.leads}</td></tr>)}</tbody>
       </table></div>
+      <p className="muted">{copy.screens.chartFootnote}</p>
     </details>
   </>;
 }
@@ -64,9 +69,18 @@ export function StatsPage() {
   const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
   const daily = useResource(useCallback(async (signal: AbortSignal) => getDaily(await getPeriod(choice, signal), signal), [choice]));
   const breakdown = useResource(useCallback(async (signal: AbortSignal) => getBreakdown(await getPeriod(choice, signal), level, signal), [choice, level]));
+  // Кампании, группы и объявления называем так же, как в разделе «Реклама», а не номерами.
+  const ads = useResource(useCallback((signal: AbortSignal) => getAds(signal), []));
+  const names = new Map<string, string>();
+  for (const ad of ads.data?.items ?? []) {
+    names.set(`campaign:${ad.campaign_id}`, ad.campaign_name);
+    names.set(`group:${ad.group_id}`, ad.group_name);
+  }
+  for (const [id, name] of adLabels(ads.data?.items ?? [])) names.set(`ad:${id}`, name);
   function rowLabel(id: number | string | null) {
     if (id === null) return copy.screens.unknownGroup;
-    return level === 'platform' ? platformName(String(id)) : copy.screens.entity(copy.screens.levels[level], id);
+    if (level === 'platform') return platformName(String(id));
+    return names.get(`${level}:${id}`) ?? copy.screens.entity(copy.screens.rowLabels[level], id);
   }
   return <div className="page-stack">
     <h1>{copy.statistics.title}</h1><DemoNotice /><PeriodPicker value={choice} onChange={setChoice} />

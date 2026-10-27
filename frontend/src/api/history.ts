@@ -11,7 +11,7 @@ export interface HistoryEntry {
   reverts_id: number | null; can_revert: boolean; revert_warning: string | null;
 }
 export interface HistoryPage { items: HistoryEntry[]; total: number; page: number; page_size: number }
-export interface HistoryFilter { platform: '' | 'direct' | 'vk'; actor: '' | 'autopilot' | 'owner' | 'external' }
+export interface HistoryFilter { platform: '' | 'direct' | 'vk'; actor: '' | HistoryEntry['actor'] }
 
 export async function getHistoryPage(filter: HistoryFilter, pageSize: number, signal?: AbortSignal): Promise<HistoryPage> {
   if (mockEnabled) return (await import('./mocks')).mockHistoryPage(filter, pageSize);

@@ -17,6 +17,7 @@ SCOPES = {"login": ("login:info", "login:email"), "direct": ("direct:api", "metr
 AUTHORIZE_URL = "https://oauth.yandex.ru/authorize"
 TOKEN_URL = "https://oauth.yandex.ru/token"
 PROFILE_URL = "https://login.yandex.ru/info"
+DEVICE_NAME = "Автопилот рекламы"
 
 
 class YandexError(Exception):
@@ -95,7 +96,11 @@ def _json(response: httpx.Response) -> dict:
     return data
 
 
-async def exchange_code(code: str, state: OAuthState) -> dict:
+def device_id(business_id: int) -> str:
+    return f"ad-autopilot-business-{business_id}"
+
+
+async def exchange_code(code: str, state: OAuthState, business_id: int | None = None) -> dict:
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -103,6 +108,9 @@ async def exchange_code(code: str, state: OAuthState) -> dict:
         "redirect_uri": redirect_uri(),
         "code_verifier": state.pkce_verifier,
     }
+    if business_id is not None:
+        # Отозвать через revoke_token можно только токен, выданный для устройства: устройство — бизнес.
+        data |= {"device_id": device_id(business_id), "device_name": DEVICE_NAME}
     if settings.yandex_client_secret.get_secret_value():
         data["client_secret"] = settings.yandex_client_secret.get_secret_value()
     try:

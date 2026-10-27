@@ -663,12 +663,16 @@ async def test_spend_today_and_minimums(adapter, api):
                 "Properties": [
                     {"Name": "MinimumWeeklySpendLimit", "Value": "300000001"},
                     {"Name": "MinimumAverageCPC", "Value": "900000"},
+                    # Минимум общего счёта к дневному лимиту кампании не относится.
+                    {"Name": "MinimumAccountDailyBudget", "Value": "1000000000"},
                 ],
             }
         ],
     )
     assert await adapter.min_budgets() == {"weekly_limit_kop": 30001}
     assert request_body(route) == {"method": "get", "params": {"DictionaryNames": ["Currencies"]}}
+    assert await adapter.min_budgets() == {"weekly_limit_kop": 30001}
+    assert route.call_count == 1
     assert await adapter.get_balance_hint() is None
 
 
@@ -1066,3 +1070,85 @@ async def test_end_date_known_far_skips_get(adapter, api):
     calls = route.call_count
     await adapter.extend_end_date("1")
     assert route.call_count == calls
+
+
+def geo_regions(*items: tuple[int, str, int | None, str]) -> dict:
+    return {
+        "result": {
+            "GeoRegions": [
+                {"GeoRegionId": id_, "GeoRegionName": name, "ParentId": parent, "GeoRegionType": kind}
+                for id_, name, parent, kind in items
+            ]
+        }
+    }
+
+
+GEO_TREE = (
+    (225, "Россия", 3, "Country"),
+    (3, "Центр", 225, "District"),
+    (10174, "Санкт-Петербург и Ленинградская область", 17, "Administrative area"),
+    (17, "Северо-Запад", 225, "District"),
+    (10897, "Мурманская область", 17, "Administrative area"),
+    (10176, "Кировск", 10174, "City"),
+    (20171, "Кировск", 10897, "City"),
+    (11079, "Нижегородская область", 40, "Administrative area"),
+    (40, "Поволжье", 225, "District"),
+    (20044, "Арзамас", 11079, "City"),
+    (149, "Беларусь", 166, "Country"),
+    (166, "СНГ", 10001, "Region"),
+    (26034, "Арзамас", 149, "City"),
+    (10002, "Белгородская область", 3, "Administrative area"),
+    (4, "Белгород", 10002, "City"),
+)
+
+
+@pytest.mark.parametrize(
+    "city,region",
+    [
+        ("Москва", 213),
+        ("  МОСКВА\t", 213),
+        ("  москва и Московская   область ", 1),
+        ("Санкт-Петербург", 2),
+        ("Казань", 43),
+    ],
+)
+async def test_geo_targeting_known_city_needs_no_request(adapter, api, city, region) -> None:
+    assert await adapter.geo_targeting(city) == {"region_ids": [region]}
+    assert not api.calls
+
+
+async def test_geo_targeting_finds_other_city_in_russia_once_and_caches(adapter, api) -> None:
+    route = api.post(f"{V5}/dictionaries").respond(json=geo_regions(*GEO_TREE))
+    assert await adapter.geo_targeting("Арзамас") == {"region_ids": [20044]}
+    assert await adapter.geo_targeting("белгород") == {"region_ids": [4]}
+    assert route.call_count == 1
+    assert json.loads(route.calls.last.request.content) == {
+        "method": "get",
+        "params": {"DictionaryNames": ["GeoRegions"]},
+    }
+
+
+async def test_geo_targeting_explains_unknown_and_ambiguous_city(adapter, api) -> None:
+    api.post(f"{V5}/dictionaries").respond(json=geo_regions(*GEO_TREE))
+    with pytest.raises(PlatformError, match="«Урюпинск» не найден в справочнике регионов Яндекс Директа"):
+        await adapter.geo_targeting("Урюпинск")
+    with pytest.raises(PlatformError, match="несколько мест с названием «Кировск»"):
+        await adapter.geo_targeting("Кировск")
+
+
+async def test_geo_targeting_unavailable_dictionary_is_platform_error(adapter, api) -> None:
+    api.post(f"{V5}/dictionaries").respond(500)
+    with pytest.raises(PlatformError):
+        await adapter.geo_targeting("Арзамас")
+    api.post(f"{V5}/dictionaries").respond(json={"result": {"GeoRegions": [{"GeoRegionId": "x"}]}})
+    with pytest.raises(PlatformError, match="некорректные"):
+        await adapter.geo_targeting("Арзамас")
+    assert await adapter.geo_targeting("Самара") == {"region_ids": [51]}
+
+
+async def test_group_without_regions_is_rejected_instead_of_targeting_whole_world(adapter, api, plan):
+    """Без region_ids Директ показывал бы рекламу по всему миру (RegionIds [0]): адаптер не подставляет умолчание."""
+    group = replace(plan.groups[0], targeting={})
+    with pytest.raises(ValueError, match="RegionIds"):
+        await adapter.create_campaign_tree(replace(plan, groups=(group,)))
+    assert not api.calls

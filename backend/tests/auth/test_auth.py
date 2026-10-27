@@ -1,5 +1,6 @@
 import base64
 import hashlib
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
@@ -8,7 +9,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from app.db.models import Business, User
+from app.db.models import Business, PlatformAccount, User
 
 from .conftest import FakeRepository, hash_token
 
@@ -259,7 +260,10 @@ def test_disconnect_requires_csrf_and_ownership(
     repository.businesses[1].user_id = 2
     assert client.delete("/api/accounts/1", headers=csrf).status_code == 404
     repository.businesses[1].user_id = 1
-    assert client.delete("/api/accounts/1", headers=csrf).status_code == 204
+    response = client.delete("/api/accounts/1", headers=csrf)
+    assert response.status_code == 200 and response.json()["stopped"] is True
+    # Реклама остановлена, пока токен кабинета ещё действовал.
+    assert repository.stops[-1] == (1, 1, "test-access")
     assert repository.accounts[1].status == "revoked"
     assert repository.accounts[1].access_token_enc == ""
     assert repository.accounts[1].refresh_token_enc is None
@@ -378,25 +382,42 @@ def test_delete_me_requires_login_and_csrf(client: TestClient, repository: FakeR
     assert 1 in repository.users
 
 
-def test_delete_me_removes_user_and_own_files_only(
+def test_delete_me_removes_user_and_own_business_directories_only(
     client: TestClient, repository: FakeRepository, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("app.config.settings.media_dir", tmp_path / "media")
-    mine, theirs = tmp_path / "media/1/a.jpg", tmp_path / "media/2/b.jpg"
+    # Прежний ролик уже не упомянут ни в одной строке assets, но лежит в каталоге бизнеса.
+    mine, old_video, theirs = tmp_path / "media/1/a.jpg", tmp_path / "media/1/video-old.mp4", tmp_path / "media/2/b.jpg"
     outside = tmp_path / "outside.jpg"
-    for path in (mine, theirs, outside):
+    for path in (mine, old_video, theirs, outside):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"x")
     sign_in(client, repository, user_id=2)
     sign_in(client, repository)
-    repository.assets = [(1, "1/a.jpg"), (1, "../outside.jpg"), (2, "2/b.jpg")]
     response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
-    assert response.status_code == 204
+    assert response.status_code == 200
+    assert response.json() == {"stopped": True, "message": "Данные удалены. Рекламу перед удалением остановили."}
     assert 1 not in repository.users and 2 in repository.users
-    assert not mine.exists()
-    assert theirs.exists() and outside.exists()
+    assert not (tmp_path / "media/1").exists()
+    assert theirs.exists() and outside.exists() and (tmp_path / "media").is_dir()
     assert not client.cookies
     assert client.get("/api/me").status_code == 401
+
+
+def test_delete_me_stops_ads_before_revoking_and_reports_unconfirmed_stop(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    sign_in(client, repository)
+    repository.accounts[1] = PlatformAccount(
+        id=1, business_id=1, platform="direct", auth_mode="oauth", status="ok", access_token_enc="direct-token"
+    )
+    repository.stop_confirmed = False
+    response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
+    assert response.status_code == 200
+    assert response.json()["stopped"] is False
+    assert "не все площадки подтвердили остановку" in response.json()["message"]
+    assert repository.stops == [(1, None, None)]
+    assert 1 not in repository.users and mock_yandex["revoke"].call_count == 1
 
 
 DEMO_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
@@ -459,18 +480,33 @@ def test_demo_login_rejects_cross_site_requests(client, repository, monkeypatch,
 
 
 def test_demo_login_rate_limited_per_ip(client, repository, monkeypatch):
-    from app.api import auth
+    from app.api import limits
 
     now = [1000.0]
     monkeypatch.setattr("app.config.settings.demo_login", True)
-    monkeypatch.setattr(auth, "monotonic", lambda: now[0])
-    auth.demo_logins.extend((now[0], "203.0.113.7") for _ in range(10))
+    monkeypatch.setattr(limits, "monotonic", lambda: now[0])
+    limits.demo_login_limit.hits["ip:203.0.113.7"] = deque([now[0]] * 10)
     for _ in range(10):
         assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
     response = client.post("/api/auth/demo", headers=DEMO_HEADERS)
     assert response.status_code == 429 and len(repository.users) == 10
+    assert response.json()["detail"] == "Слишком много входов в демо. Подождите минуту."
     now[0] += 60
     assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
+
+
+def test_yandex_start_is_rate_limited_per_ip_with_page(client, monkeypatch):
+    from app.api import limits
+
+    now = [1000.0]
+    monkeypatch.setattr(limits, "monotonic", lambda: now[0])
+    for _ in range(20):
+        start(client)
+    response = client.get("/api/auth/yandex/start")
+    assert response.status_code == 429 and response.headers["content-type"].startswith("text/html")
+    assert "Слишком много попыток входа" in response.text and response.headers["Retry-After"] == "61"
+    now[0] += 60
+    start(client)
 
 
 def test_demo_login_expires_old_demo_users_and_caps_live_ones(client, repository, monkeypatch, tmp_path):
@@ -492,14 +528,13 @@ def test_demo_login_expires_old_demo_users_and_caps_live_ones(client, repository
     }
     (tmp_path / "7").mkdir()
     (tmp_path / "7" / "photo.jpg").write_bytes(b"x")
-    repository.assets = [(7, "7/photo.jpg")]
     fakes = client.app.state.platform_adapters.fakes
     fakes.update({(7, "direct"): FakeAdapter(), (7, "vk"): FakeAdapter(), (8, "direct"): FakeAdapter()})
     advance_jobs.start(7, 1)
     assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == 204
     assert old.id not in repository.users and {owner.id, fresh.id} <= set(repository.users)
     assert set(repository.businesses) == {8, 9}
-    assert not (tmp_path / "7" / "photo.jpg").exists()
+    assert not (tmp_path / "7").exists()
     assert set(fakes) == {(8, "direct")} and advance_jobs.get(7) is None
     for index in range(47):
         repository.save_user(f"demo-{index}", "demo", None)

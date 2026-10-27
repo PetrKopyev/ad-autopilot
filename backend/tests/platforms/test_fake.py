@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +16,9 @@ from app.platforms.base import (
     RateLimited,
 )
 from app.platforms.fake import AdTruth, FailureScenario, FakeAdapter, VirtualClock, salon_scenario
+from app.worker.clock import today
+
+MIDNIGHT = datetime(2025, 12, 31, 21, tzinfo=UTC)  # полночь 1 января по Москве
 
 
 def single_plan(*, daily: int = 1_000_000, period: int = 10_000_000, id: str = "test") -> CampaignTreeSpec:
@@ -163,13 +166,13 @@ async def test_settled_waits_for_custom_conversion_delay() -> None:
 
 @pytest.mark.parametrize("evil,expected", [(False, 10_000), (True, 12_500)])
 async def test_evil_spends_twenty_five_percent_over_both_caps(evil: bool, expected: int) -> None:
-    adapter = make_adapter(evil=evil)
+    adapter = make_adapter(evil=evil, clock=VirtualClock(MIDNIGHT))
     await adapter.create_campaign_tree(single_plan(daily=10_000, period=10_000))
-    day = adapter.clock.now.date()
+    day = today(adapter.clock)
     adapter.clock.advance(hours=23)
     assert await adapter.get_spend_today() == expected
     adapter.clock.advance(days=4)
-    rows = await adapter.get_stats(day, adapter.clock.now.date())
+    rows = await adapter.get_stats(day, today(adapter.clock))
     assert sum(row.cost_kop for row in rows) == expected
 
 
@@ -183,17 +186,27 @@ async def test_zero_or_unaffordable_limits_prevent_spend(daily: int, period: int
 
 
 async def test_caps_and_midnight_are_per_campaign_and_per_day() -> None:
-    adapter = make_adapter()
+    adapter = make_adapter(clock=VirtualClock(MIDNIGHT))
     await adapter.create_campaign_tree(single_plan(daily=10_000, period=25_000))
     await adapter.create_campaign_tree(single_plan(id="other", daily=15_000, period=35_000))
-    start = adapter.clock.now.date()
+    start = today(adapter.clock)
     adapter.clock.advance(days=1)
     assert await adapter.get_spend_today() == 0
     rows = await adapter.get_stats(start, start, "campaign")
     assert sorted(row.cost_kop for row in rows) == [10_000, 15_000]
     adapter.clock.advance(days=4)
-    rows = await adapter.get_stats(start, adapter.clock.now.date(), "campaign")
+    rows = await adapter.get_stats(start, today(adapter.clock), "campaign")
     assert sum(row.cost_kop for row in rows) == 60_000
+
+
+async def test_days_follow_moscow_time_not_utc() -> None:
+    adapter = make_adapter(clock=VirtualClock(datetime(2026, 1, 1, 20, 30, tzinfo=UTC)))
+    await adapter.create_campaign_tree(single_plan(daily=10_000))
+    # 23:30 по Москве: дневной лимит тратится до полуночи и снова — после неё, хотя по UTC это один день.
+    adapter.clock.advance(hours=1)
+    assert await adapter.get_spend_today() == 10_000
+    rows = await adapter.get_stats(date(2026, 1, 1), date(2026, 1, 2))
+    assert [(row.date, row.cost_kop) for row in rows] == [(date(2026, 1, 1), 10_000), (date(2026, 1, 2), 10_000)]
 
 
 @pytest.mark.parametrize("entity", ["campaign", "group", "ad"])

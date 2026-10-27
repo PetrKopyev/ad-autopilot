@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, UnidentifiedImageError
 
-from app.auth.vk import VkClient, invalid_response
+from app.auth.vk import API_URL, VkClient, invalid_response
 from app.platforms.base import (
     CampaignTreeSpec,
     EntityState,
@@ -23,6 +23,7 @@ from app.platforms.base import (
     StatLevel,
     StatRow,
 )
+from app.platforms.regions import Region, RegionCache, find_region, not_found
 
 # Все места, где документация VK неоднозначна, собраны здесь; сверять с живым кабинетом.
 API_FORMAT = {
@@ -38,6 +39,10 @@ API_FORMAT = {
     "min_period_cap_kop": 10000,
     "page": 250,
 }
+# Регионы VK со своими id (не Яндекса): GET /api/v2/regions.json, см. https://ads.vk.com/doc/api/object/Region
+RUSSIA = 188
+RUSSIAN = {"Accept-Language": "ru-RU"}
+REGIONS = RegionCache()
 PATHS = {"campaign": "ad_plans", "group": "ad_groups", "ad": "banners"}
 STAT_PATHS = {"campaign": "ad_plans", "group": "ad_groups", "ad": "banners"}
 MODERATION = {"allowed": "approved", "banned": "rejected"}
@@ -113,11 +118,14 @@ class VkAdapter(VkClient):
     def _today(self) -> date:
         return datetime.now(self._tz).date()
 
-    async def _items(self, path: str, params: dict) -> list[dict]:
+    async def _items(self, path: str, params: dict, headers: dict | None = None) -> list[dict]:
         items: list[dict] = []
         while True:
             data = await self._request(
-                "GET", f"{path}.json", params={**params, "limit": API_FORMAT["page"], "offset": len(items)}
+                "GET",
+                f"{path}.json",
+                params={**params, "limit": API_FORMAT["page"], "offset": len(items)},
+                headers=headers,
             )
             page = data.get("items")
             if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
@@ -496,6 +504,40 @@ class VkAdapter(VkClient):
 
     async def limits(self) -> PlatformLimits:
         return self._limits
+
+    async def geo_targeting(self, city: str) -> dict[str, Any]:
+        """Город ищется в дереве регионов VK; не найден там — поиском _q (мелкие города в дерево не входят)."""
+        regions = await REGIONS.get(API_URL, self._regions)
+        region = find_region(city, regions.values(), regions, country=RUSSIA, platform="VK Рекламы")
+        if region is None:
+            try:
+                found = await self._region_items({"_q": city.strip(), "_flags": "geo_tree"})
+            except PlatformError as error:
+                # Поиск по _q в документации VK не описан: отказ в нём значит «не нашли», а не сбой площадки.
+                if error.status_code != 400:
+                    raise
+                found = []
+            region = find_region(city, found, regions, country=RUSSIA, platform="VK Рекламы")
+        if region is None:
+            raise not_found(city, "VK Рекламы")
+        return {"regions": [region]}
+
+    async def _regions(self) -> list[Region]:
+        return await self._region_items({"_flags__in": "geo_tree_extended,rb_active"})
+
+    async def _region_items(self, params: dict) -> list[Region]:
+        items = await self._items("regions", params | {"fields": "id,name,parent_id"}, RUSSIAN)
+        try:
+            return [
+                Region(
+                    _integer(item["id"]),
+                    str(item["name"]),
+                    _integer(item["parent_id"]) if item.get("parent_id") is not None else None,
+                )
+                for item in items
+            ]
+        except (KeyError, TypeError, ValueError):
+            raise invalid_response() from None
 
     async def min_budgets(self) -> dict[str, int]:
         return {

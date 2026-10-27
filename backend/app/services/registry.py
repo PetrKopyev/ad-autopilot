@@ -23,36 +23,15 @@ from app.services.plan import ArtFactory
 
 # YandexGPT Pro 5.1: 80 копеек за 1000 токенов на вход и на выход (docs/internal/research-platforms.md).
 TOKEN_TARIFF = TokenTariff(80, 80)
-# Идентификаторы регионов Яндекса (Директ). Для города вне списка запуск в Директе не выполняется.
-CITY_REGIONS = {
-    "москва": 213,
-    "санкт-петербург": 2,
-    "новосибирск": 65,
-    "екатеринбург": 54,
-    "нижний новгород": 47,
-    "казань": 43,
-    "челябинск": 56,
-    "омск": 66,
-    "самара": 51,
-    "ростов-на-дону": 39,
-    "уфа": 172,
-    "красноярск": 62,
-    "воронеж": 193,
-    "пермь": 50,
-    "волгоград": 38,
-    "краснодар": 35,
-}
 
 
 @dataclass(frozen=True)
 class AccountInfo:
     status: str
-    city: str
     href: str
     counter_id: int | None
     marking_confirmed: bool
     token: str = field(repr=False)
-    login: str | None = None
 
 
 type Loader = Callable[[int, str], AccountInfo | None]
@@ -72,12 +51,10 @@ def db_loader(session_factory: Callable[[], Session]) -> Loader:
             marking = db.get(MarkingProfile, business_id)
             return AccountInfo(
                 account.status,
-                business.city,
                 business.site_url,
                 business.metrica_counter_id,
                 bool(marking and marking.confirmed_in_platform.get(platform) is True),
                 account.access_token_enc,
-                account.external_login,
             )
 
     return load
@@ -127,16 +104,12 @@ class AdapterRegistry:
                 config=self.config,
                 client=self.http,
             )
-        region = CITY_REGIONS.get(info.city.strip().lower())
-        if region is None:
-            raise PlatformError(f"Для города «{info.city}» пока не настроен регион Яндекс Директа.")
         return DirectAdapter(
             info.token,
             config=self.config,
             client=self.http,
             counter_ids=(info.counter_id,) if info.counter_id else (),
             href=info.href,
-            region_ids=(region,),
             marking_confirmed=info.marking_confirmed,
         )
 

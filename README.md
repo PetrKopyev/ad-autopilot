@@ -19,7 +19,7 @@ VITE_MOCK=1 npm run dev
 Полный стенд использует настоящий бэкенд и FakeAdapter. Ключи Яндекса, VK и Yandex Cloud не нужны: вход, чтение сайта, тексты и картинки работают без внешней сети. Каждый вход через «Войти в демо» создаёт отдельного пользователя и новый сценарий.
 
 1. Скопируйте `.env.demo.example` в `.env.demo`. Задайте локальный пароль PostgreSQL одновременно в `POSTGRES_PASSWORD` и `DATABASE_URL` (используйте URL-безопасные символы), случайный `SECRET_KEY` длиной от 32 символов и Fernet-ключ в `TOKEN_ENCRYPTION_KEY`. Получить их можно через `secrets.token_urlsafe(48)` и `cryptography.fernet.Fernet.generate_key().decode()` в локальном Python. Не используйте секреты боевого сервиса.
-2. Подготовьте фронтенд и backend-образ. Если зависимости ещё не установлены, установите их отдельно. Для текущего package.json используйте `npm install --package-lock=false` в `frontend`: закреплённая dev-зависимость Playwright добавлена без изменения lock-файла.
+2. Установите зависимости фронтенда: `npm ci` в `frontend`. Backend-образ ставит Python-зависимости из `backend/requirements.lock` с проверкой хешей.
 3. Выполните:
 
 ```sh
@@ -72,7 +72,7 @@ BASE_URL=https://localhost CHROMIUM_PATH=/path/to/chromium npm run e2e
 cd backend
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[dev]'
+pip install --require-hashes -r requirements-dev.lock
 ruff check .
 pytest -m "not db"
 ```

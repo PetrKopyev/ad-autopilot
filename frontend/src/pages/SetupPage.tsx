@@ -4,10 +4,10 @@ import { Button, Card, ErrorBanner, Stepper } from '../components';
 import { copy } from '../copy';
 import { checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getCounters, getGoals, getMe,
   rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
-import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck } from '../api/setup';
+import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { NotFoundPage } from './PlaceholderPage';
-import { MedicalNotice, SiteInstructions } from './SetupShared';
+import { MedicalNotice, SiteInstructions, StopNotice } from './SetupShared';
 import './Setup.css';
 
 interface Draft {
@@ -38,6 +38,7 @@ export function SetupPage() {
   const [busy, setBusy] = useState(false);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState('');
+  const [stopResult, setStopResult] = useState<StopResult>();
   const [marking, setMarking] = useState<Marking>({ subject_type: 'ip', inn: '', name: '', phone: '', confirmed_in_platform: { direct: false, vk: false } });
   const [innTouched, setInnTouched] = useState(false);
   const innError = !validInn(marking.inn) ? copy.launchFlow.innError
@@ -98,7 +99,7 @@ export function SetupPage() {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [current, draft.business, revision]);
   async function act(action: () => Promise<void>) {
-    if (busy) return; setBusy(true); setError('');
+    if (busy) return; setBusy(true); setError(''); setStopResult(undefined);
     try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
@@ -164,6 +165,7 @@ export function SetupPage() {
         </>}
       </>}
       {current === 2 && <>
+        {stopResult && <StopNotice result={stopResult} />}
         <div className="account-grid">{(['direct', 'vk'] as const).map((platform) => {
           const account = me?.accounts.find((item) => item.platform === platform);
           return <Card key={platform} className="page-stack">
@@ -172,7 +174,7 @@ export function SetupPage() {
             {platform === 'direct' ? account?.status === 'ok' ? <p role="status">{copy.setup.accounts.directConnected}</p>
               : <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
               : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
-            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { await disconnectAccount(account.id); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
+            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(account.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
             <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
           </Card>;
         })}</div>

@@ -318,7 +318,16 @@ class OnboardingService:
         self.repository.add(business)
         return business_view(business)
 
-    async def site_check(self, business_id: int, now: datetime, today: date, *, owner_text: str | None = None) -> dict:
+    async def site_check(
+        self,
+        business_id: int,
+        now: datetime,
+        today: date,
+        *,
+        owner_text: str | None = None,
+        on_miss: Callable[[], None] | None = None,
+    ) -> dict:
+        """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша."""
         business = self.repository.business(business_id)
         cached = business.description.get("check")
         if (
@@ -328,6 +337,8 @@ class OnboardingService:
             and now - datetime.fromisoformat(cached["checked_at"]) < CHECK_TTL
         ):
             return self.check_view(business, cached)
+        if on_miss is not None:
+            on_miss()
         with self.repository.business_lock(business_id):
             site = await self.reader(business.site_url)
             llm = SpendLLM(

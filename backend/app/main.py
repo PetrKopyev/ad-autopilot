@@ -13,6 +13,7 @@ from app.api.business import router as business_router
 from app.api.clients import router as clients_router
 from app.api.experiments import router as experiments_router
 from app.api.history import router as history_router
+from app.api.notifications import router as notifications_router
 from app.api.plan import router as plan_router
 from app.api.stats import router as stats_router
 from app.api.vk import router as vk_router
@@ -57,6 +58,7 @@ def health() -> dict[str, bool | str]:
 app.include_router(router)
 app.include_router(auth_router)
 app.include_router(history_router)
+app.include_router(notifications_router)
 app.include_router(stats_router)
 app.include_router(clients_router)
 app.include_router(vk_router)

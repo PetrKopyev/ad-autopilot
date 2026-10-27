@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,18 @@ def settings_environment(monkeypatch):
     # Unit tests use synthetic configuration and never need a local .env or database.
     for name, value in TEST_ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
+
+
+@pytest.fixture(autouse=True)
+def process_memory():
+    """Лимиты частоты и справочники регионов живут в памяти процесса: каждый тест начинает с чистых."""
+    yield
+    if limits := sys.modules.get("app.api.limits"):
+        for limit in limits.RateLimit.limits:
+            limit.reset()
+    for name, cache in (("app.platforms.direct", "GEO_REGIONS"), ("app.platforms.vk", "REGIONS")):
+        if module := sys.modules.get(name):
+            getattr(module, cache).clear()
 
 
 @pytest.fixture(scope="session", autouse=True)

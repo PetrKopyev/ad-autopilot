@@ -13,11 +13,12 @@ from app.api.auth import require_demo
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.db.models import Business
-from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs
+from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs, demo_now
 from app.platforms.base import AdPlatform
 from app.services.changes import ChangeConflict
 from app.services.demo import DemoRepository, DemoService
 from app.services.experiments import create_experiment
+from app.worker.clock import SystemClock
 from app.worker.jobs import Worker
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,8 @@ def demo_status(business: Business, today: date) -> dict:
     progress = advance_jobs.get(business.id)
     return {
         "today": today,
+        # Точное демо-время: по нему клиент считает «только что» и «N мин назад» у записей демо-истории.
+        "now": demo_now(business, SystemClock().now).isoformat(),
         "total_days": business.settings.get("_demo", {}).get("days", 0),
         "advance": None
         if progress is None

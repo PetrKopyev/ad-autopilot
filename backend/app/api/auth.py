@@ -1,15 +1,17 @@
 import secrets
-from collections import deque
-from collections.abc import Iterator
+import shutil
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from threading import Lock
-from time import monotonic
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
+from app.api.limits import demo_login_limit, yandex_start_limit
 from app.auth import yandex
+from app.auth.revoke import revoke_tokens
 from app.auth.sessions import (
     OAUTH_COOKIE,
     SESSION_COOKIE,
@@ -23,20 +25,65 @@ from app.auth.sessions import (
     require_csrf,
     set_session_cookies,
 )
-from app.db.models import Session, User
-from app.demo_flags import advance_jobs, demo_enabled
+from app.db.models import Business, PlatformAccount, Session, User
+from app.demo_flags import advance_jobs, demo_enabled, demo_now
+from app.platforms.fake import VirtualClock
+from app.services.budget_guard import stop_platform
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
+from app.worker.clock import SystemClock
 
 router = APIRouter(prefix="/api")
 
+type AdStopper = Callable[[int, int | None, str], Awaitable[bool]]
 
-def _remove_media(file_path: str) -> None:
+
+def remove_business_media(business_id: int) -> None:
+    """Каталог бизнеса целиком: в нём и прежние ролики, на которые уже не ссылается ни одна строка assets."""
     from app.config import settings
 
     root = settings.media_dir.resolve()
-    path = (root / file_path).resolve()
-    if path.is_relative_to(root) and path.is_file():
-        path.unlink()
+    path = (root / str(business_id)).resolve()
+    if path != root and path.is_relative_to(root) and path.is_dir():
+        shutil.rmtree(path)
+
+
+def get_ad_stopper(request: Request) -> AdStopper:
+    async def stop(user_id: int, account_id: int | None, reason_text: str) -> bool:
+        from sqlalchemy import select
+
+        from app.db.session import SessionLocal
+        from app.worker.jobs import Worker, WorkerRepository
+
+        with SessionLocal() as db:
+            repository = WorkerRepository(db)
+            statement = (
+                select(PlatformAccount)
+                .join(Business)
+                .where(Business.user_id == user_id, PlatformAccount.status == "ok")
+                .order_by(PlatformAccount.id)
+            )
+            if account_id is not None:
+                statement = statement.where(PlatformAccount.id == account_id)
+            stopped = True
+            for account in db.scalars(statement).all():
+                business = repository.business(account.business_id)
+                worker = Worker(
+                    repository,
+                    request.app.state.platform_adapters.resolve,
+                    dry_run=False,
+                    clock=VirtualClock(demo_now(business, SystemClock().now)),
+                )
+                worker.step_key = f"owner:{uuid4()}"
+                done = await stop_platform(
+                    business, worker=worker, platform=account.platform, reason_text=reason_text
+                )
+                stopped = stopped and done
+            return stopped
+
+    return stop
+
+
+Stopper = Annotated[AdStopper, Depends(get_ad_stopper)]
 
 
 @router.get("/auth/config")
@@ -52,9 +99,6 @@ def require_demo() -> None:
 
 MAX_DEMO_USERS = 50
 DEMO_USER_TTL = timedelta(hours=24)
-DEMO_LOGINS_PER_MINUTE = 10
-demo_logins: deque[tuple[float, str]] = deque()
-demo_logins_lock = Lock()
 
 
 def require_same_origin(request: Request) -> None:
@@ -66,17 +110,6 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(403, "Не удалось проверить запрос. Обновите страницу и попробуйте снова.")
 
 
-def limit_demo_logins(request: Request) -> None:
-    now = monotonic()
-    host = request.client.host if request.client else ""
-    with demo_logins_lock:
-        while demo_logins and demo_logins[0][0] <= now - 60:
-            demo_logins.popleft()
-        if sum(item == host for _, item in demo_logins) >= DEMO_LOGINS_PER_MINUTE:
-            raise HTTPException(429, "Слишком много входов в демо. Подождите минуту.")
-        demo_logins.append((now, host))
-
-
 def get_demo_users() -> Iterator[DemoUsers]:
     from app.db.session import SessionLocal
 
@@ -85,18 +118,16 @@ def get_demo_users() -> Iterator[DemoUsers]:
 
 
 @router.post(
-    "/auth/demo", dependencies=[Depends(require_demo), Depends(require_same_origin), Depends(limit_demo_logins)]
+    "/auth/demo", dependencies=[Depends(require_demo), Depends(require_same_origin), Depends(demo_login_limit)]
 )
 def demo_login(
     request: Request, repository: Repository, demo_users: Annotated[DemoUsers, Depends(get_demo_users)]
 ) -> Response:
-    businesses, paths = demo_users.expire(datetime.now(UTC) - DEMO_USER_TTL)
-    for business_id in businesses:
+    for business_id in demo_users.expire(datetime.now(UTC) - DEMO_USER_TTL):
         advance_jobs.forget(business_id)
         for platform in ("direct", "vk"):
             request.app.state.platform_adapters.fakes.pop((business_id, platform), None)
-    for path in paths:
-        _remove_media(path)
+        remove_business_media(business_id)
     if demo_users.count() >= MAX_DEMO_USERS:
         raise HTTPException(503, "Демо сейчас занято. Попробуйте через несколько часов.")
     user = repository.save_user(DEMO_UID_PREFIX + secrets.token_hex(16), "demo", None)
@@ -123,6 +154,8 @@ def yandex_start(
     purpose: yandex.Purpose = "login",
     business_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> Response:
+    if limited := yandex_start_limit.page(request, session):
+        return limited
     if purpose == "direct" and session is None:
         raise HTTPException(401, "Сначала войдите через Яндекс ID.")
     business = repository.get_business(session.user_id, business_id) if purpose == "direct" else None
@@ -176,7 +209,7 @@ async def yandex_callback(
     if oauth_state.purpose == "direct":
         repository.get_business(session.user_id, business_id)
     try:
-        tokens = await yandex.exchange_code(code, oauth_state)
+        tokens = await yandex.exchange_code(code, oauth_state, business_id)
         profile = await yandex.get_profile(tokens["access_token"])
     except yandex.YandexError as failure:
         raise HTTPException(400, str(failure)) from None
@@ -200,14 +233,31 @@ def logout(session: Annotated[Session, Depends(current_session)], repository: Re
     return response
 
 
-@router.delete("/me", status_code=204, dependencies=[Depends(require_csrf)])
-def delete_me(user: Annotated[User, Depends(current_user)], repository: Repository) -> Response:
-    # Platform tokens are not revoked: the Yandex and VK clients have no revoke call; they are deleted with the rows.
-    for path in repository.delete_user(user.id):
-        _remove_media(path)
-    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+@router.delete("/me", dependencies=[Depends(require_csrf)])
+async def delete_me(
+    request: Request,
+    user: Annotated[User, Depends(current_user)],
+    repository: Repository,
+    stop_ads: Stopper,
+    background: BackgroundTasks,
+    response: Response,
+) -> dict:
+    # Остановка до отзыва: потом управлять кампаниями будет нечем. Неудача не мешает удалению, но о ней сообщаем.
+    stopped = await stop_ads(user.id, None, "Остановили рекламу перед удалением ваших данных.")
+    revocations = await run_in_threadpool(repository.revocations, user.id)
+    for business_id in await run_in_threadpool(repository.delete_user, user.id):
+        remove_business_media(business_id)
+    # Отзыв идёт после ответа: площадка может отвечать по 10 секунд, а данные у нас уже удалены.
+    background.add_task(revoke_tokens, request.app.state.http, revocations)
+    response.headers["Cache-Control"] = "no-store"
     clear_cookies(response)
-    return response
+    return {
+        "stopped": stopped,
+        "message": "Данные удалены. Рекламу перед удалением остановили."
+        if stopped
+        else "Данные удалены, но не все площадки подтвердили остановку рекламы. Проверьте в кабинетах "
+        "Яндекс Директа и VK, что кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
+    }
 
 
 @router.get("/me")
@@ -231,8 +281,26 @@ def me(user: Annotated[User, Depends(current_user)], repository: Repository, res
     }
 
 
-@router.delete("/accounts/{id}", status_code=204, dependencies=[Depends(require_csrf)])
-def disconnect_account(id: int, user: Annotated[User, Depends(current_user)], repository: Repository) -> Response:
-    if not repository.disconnect_account(user.id, id):
+@router.delete("/accounts/{id}", dependencies=[Depends(require_csrf)])
+async def disconnect_account(
+    request: Request,
+    id: int,
+    user: Annotated[User, Depends(current_user)],
+    repository: Repository,
+    stop_ads: Stopper,
+    background: BackgroundTasks,
+    response: Response,
+) -> dict:
+    stopped = await stop_ads(user.id, id, "Остановили рекламу на площадке перед отключением кабинета.")
+    revocations = await run_in_threadpool(repository.revocations, user.id, id)
+    if not await run_in_threadpool(repository.disconnect_account, user.id, id):
         raise HTTPException(404, "Кабинет не найден.")
-    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    background.add_task(revoke_tokens, request.app.state.http, revocations)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "stopped": stopped,
+        "message": "Кабинет отключён. Рекламу на этой площадке перед отключением остановили."
+        if stopped
+        else "Кабинет отключён, но площадка не подтвердила остановку рекламы. Проверьте в её кабинете, что "
+        "кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
+    }

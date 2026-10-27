@@ -295,7 +295,7 @@ def test_deleting_user_removes_every_business_row_despite_restricted_account_key
             users = [world.user.id, kept.user.id]
             db.commit()
         with OrmSession(engine) as db:
-            assert AuthRepository(db).delete_user(world.user.id) == [f"{world.business.id}/a.jpg"]
+            assert AuthRepository(db).delete_user(world.user.id) == [world.business.id]
         with OrmSession(engine) as db:
             for model in BUSINESS_TABLES:
                 count = select(func.count()).select_from(model).where(model.business_id == world.business.id)
@@ -561,3 +561,28 @@ def test_naive_launch_time_is_read_as_utc(db_session):
     )
     db_session.flush()
     assert OnboardingRepository(db_session).launched_at(world.business.id) == naive.replace(tzinfo=UTC)
+
+
+def test_revocations_skip_vk_account_connected_in_another_business(db_session):
+    from app.auth.sessions import AuthRepository
+
+    mine, theirs = make_tree(db_session, suffix="mine"), make_tree(db_session, suffix="theirs")
+    second = Business(user_id=mine.user.id, site_url="https://b.example.test", city="Самара", month_budget_kop=100_000)
+    db_session.add(second)
+    db_session.flush()
+    vk = PlatformAccount(
+        business_id=second.id, platform="vk", auth_mode="oauth", access_token_enc="v", external_login="777"
+    )
+    other = PlatformAccount(
+        business_id=theirs.business.id, platform="vk", auth_mode="oauth", access_token_enc="o", external_login="777"
+    )
+    db_session.add_all([vk, other])
+    db_session.flush()
+    repository = AuthRepository(db_session)
+    assert [item.platform for item in repository.revocations(mine.user.id)] == ["direct"]
+    assert repository.revocations(mine.user.id, vk.id) == []
+    other.status = "revoked"
+    db_session.flush()
+    revocations = sorted(repository.revocations(mine.user.id), key=lambda item: item.platform)
+    assert [(item.platform, item.user_id) for item in revocations] == [("direct", None), ("vk", "777")]
+    assert repository.revocations(theirs.user.id, theirs.account.id)[0].access_token == "t"

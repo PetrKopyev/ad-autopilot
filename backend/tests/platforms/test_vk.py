@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -420,3 +421,73 @@ async def test_balance_hint_and_min_budgets(adapter: VkAdapter, api) -> None:
     api.get(f"{API}/user.json").respond(json={"id": 5})
     assert await adapter.get_balance_hint() is None
     assert (await adapter.min_budgets())["daily_limit_kop"] > 0
+
+
+VK_TREE = [
+    {"id": 100001, "name": "Бывший СССР", "parent_id": -1},
+    {"id": 188, "name": "Россия", "parent_id": 100001},
+    {"id": 340, "name": "Беларусь", "parent_id": 100001},
+    {"id": 70, "name": "Московская область", "parent_id": 188},
+    {"id": 1, "name": "Москва", "parent_id": 188},
+    {"id": 99, "name": "Нижегородская область", "parent_id": 188},
+    {"id": 151, "name": "Ленинградская область", "parent_id": 188},
+    {"id": 2, "name": "Санкт-Петербург", "parent_id": 188},
+    {"id": 777, "name": "Королёв", "parent_id": 70},
+    {"id": 4001, "name": "Брест", "parent_id": 340},
+    {"id": 4002, "name": "Брест", "parent_id": 99},
+]
+
+
+def regions_route(api: respx.MockRouter, items: list[dict] = VK_TREE) -> respx.Route:
+    return api.get(f"{API}/regions.json", params={"_flags__in": "geo_tree_extended,rb_active"}).respond(
+        json={"count": len(items), "items": items}
+    )
+
+
+async def test_geo_targeting_uses_vk_region_ids_in_russian_and_caches(adapter, api) -> None:
+    route = regions_route(api)
+    assert await adapter.geo_targeting("Москва") == {"regions": [1]}
+    assert await adapter.geo_targeting("  мОСКВА ") == {"regions": [1]}
+    assert await adapter.geo_targeting("королев") == {"regions": [777]}
+    assert route.call_count == 1
+    request = route.calls.last.request
+    assert request.headers["Accept-Language"] == "ru-RU" and request.headers["Authorization"] == "Bearer tok"
+    assert parse_qs(request.url.query.decode())["fields"] == ["id,name,parent_id"]
+
+
+async def test_geo_targeting_picks_city_whose_parent_region_is_in_russia(adapter, api) -> None:
+    regions_route(api)
+    assert await adapter.geo_targeting("Брест") == {"regions": [4002]}
+
+
+async def test_geo_targeting_searches_small_city_by_name(adapter, api) -> None:
+    regions_route(api)
+    search = api.get(f"{API}/regions.json", params={"_q": "Урюпинск"}).respond(
+        json={
+            "count": 2,
+            "items": [
+                {"id": 9001, "name": "Урюпинск", "parent_id": 99},
+                {"id": 9002, "name": "Урюпинка", "parent_id": 99},
+            ],
+        }
+    )
+    assert await adapter.geo_targeting(" Урюпинск ") == {"regions": [9001]}
+    assert parse_qs(search.calls.last.request.url.query.decode())["_flags"] == ["geo_tree"]
+
+
+@pytest.mark.parametrize("reply", [{"json": {"count": 0, "items": []}}, {"status_code": 400, "json": {"error": "bad"}}])
+async def test_geo_targeting_not_found_is_clear_error(adapter, api, reply) -> None:
+    regions_route(api)
+    api.get(f"{API}/regions.json", params={"_q": "Нигдеград"}).respond(**reply)
+    with pytest.raises(PlatformError, match="«Нигдеград» не найден в справочнике регионов VK Рекламы"):
+        await adapter.geo_targeting("Нигдеград")
+
+
+async def test_created_group_gets_vk_regions(adapter, api) -> None:
+    regions_route(api)
+    route = mock_creation(api)
+    targeting = await adapter.geo_targeting("Санкт-Петербург")
+    group = replace(tree().groups[0], targeting=targeting)
+    await adapter.create_campaign_tree(tree(groups=(group,)))
+    body = json.loads(route.calls.last.request.content)
+    assert body["ad_groups"][0]["targetings"]["geo"] == {"regions": [2]}

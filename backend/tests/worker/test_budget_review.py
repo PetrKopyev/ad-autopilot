@@ -218,7 +218,9 @@ async def test_worker_apply_reuses_slot_change_but_never_trusts_unreconciled_pen
         # Предложение пробного режима не остановило рекламу: после выхода из него действие применяется по-настоящему.
         change = await worker.apply(world.business, world.campaign, operations, **options)
         assert change is not existing and change.status == "applied"
-        assert (existing.idempotency_key, world.changes(idempotency_key=key)) == (None, [change])
+        assert world.changes(idempotency_key=key) == [change]
+        # Предложение заменено настоящим изменением и в истории рядом с ним не остаётся.
+        assert existing not in world.changes()
         assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
 
 
@@ -312,3 +314,60 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     assert [group.id for group in groups if group.frozen_until is not None] == [original.entity_id]
     local = next(group for group in world.repository.rows(AdGroup) if group.external_id == original.entity_id)
     assert not group_available(worker, world.business, local)
+
+
+async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_budget_is_enough(monkeypatch):
+    world = await make_world()
+    world.clock.advance(days=2)
+    worker = world.worker()
+    below = AsyncMock(return_value=30_000)
+    monkeypatch.setattr("app.services.optimize.below_platform_minimum", below)
+    world.business.month_budget_kop -= 100_000
+    await rebalance_budget(worker, world.business)
+    (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
+    assert "меньше минимума площадки (300 ₽)" in pause.reason_text
+    assert world.campaign.status == "paused_auto" and world.campaign.daily_limit_kop > 0
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+    below.return_value = None
+    world.clock.advance(days=1)
+    world.business.month_budget_kop += 50_000
+    worker.step_key = "rebalance_budget:next"
+    await rebalance_budget(worker, world.business)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert [op["after"] for op in resume.operations if op["field"] == "status"] == ["active"]
+    assert world.campaign.status == "active"
+    assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.platforms.base import ExternalRefs, StatRow
+    from app.platforms.direct import DirectAdapter
+    from app.services.optimize import below_platform_minimum
+    from tests.platforms.test_direct import configuration
+    from tests.services.test_changes import MemoryRepository
+
+    day, now = date(2026, 11, 30), datetime(2026, 11, 30, 12, tzinfo=UTC)
+    adapter = DirectAdapter("test-only", config=configuration())
+    adapter._today = lambda: day
+    adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 30_000})
+    repository = MemoryRepository()
+    campaign = Campaign(id=1, external_id="1", platform="direct", daily_limit_kop=10_000, period_cap_kop=500_000)
+    repository.entities = {("campaign", "1"): campaign}
+    worker = SimpleNamespace(
+        repository=repository,
+        resolve_adapter=lambda *_: adapter,
+        refs=lambda item: ExternalRefs("1", {}, {}, {}),
+        clock=SimpleNamespace(now=now),
+    )
+    operations = [Operation("set_budget", "campaign", "1", "daily_limit_kop", 10_000, 20_000)]
+    # Понедельник и последний день месяца: уйдёт 200 ₽ при минимуме 300 ₽, хотя 7 дневных — 1400 ₽.
+    adapter.get_stats = AsyncMock(return_value=[])
+    assert await below_platform_minimum(worker, repository.current_business, campaign, operations) == 30_000
+    adapter.get_stats = AsyncMock(
+        return_value=[StatRow("1", "1", date(2026, 11, 30), "campaign", 1, 1, 10_000, {}, now, False)]
+    )
+    assert await below_platform_minimum(worker, repository.current_business, campaign, operations) is None
+    await adapter.aclose()

@@ -34,7 +34,9 @@ export async function uploadPhoto(group_id: number, file: File): Promise<Plan> {
     if (!result) throw new ApiError(copy.errors.invalidResponse);
     return result;
   } catch (error) {
-    if (error instanceof ApiError && error.status >= 400 && error.status !== 401) throw new ApiError(copy.launchFlow.uploadError, error.status);
+    if (error instanceof ApiError && error.status >= 400 && error.status !== 401) {
+      throw new ApiError(error.detail ?? copy.launchFlow.uploadError, error.status, error.detail);
+    }
     throw error;
   }
 }

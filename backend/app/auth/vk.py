@@ -150,12 +150,14 @@ class VkClient:
         except (ValueError, AttributeError):
             return None
 
-    async def _request(self, method: str, path: str, *, authenticated: bool = True, **kwargs) -> dict:
+    async def _request(
+        self, method: str, path: str, *, authenticated: bool = True, headers: dict | None = None, **kwargs
+    ) -> dict:
         if self._blocked_until and self._blocked_until > datetime.now(UTC):
             raise RateLimited(max(1, int((self._blocked_until - datetime.now(UTC)).total_seconds())))
         if authenticated and not self._token:
             raise AuthExpired()
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **(headers or {})}
         if authenticated:
             headers["Authorization"] = f"Bearer {self._token}"
         try:

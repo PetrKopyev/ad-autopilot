@@ -1,9 +1,10 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, SecretStr
 
+from app.api.limits import vk_key_limit, vk_start_limit
 from app.auth import vk
 from app.auth.sessions import Repository, current_session, current_user, require_csrf
 from app.db.models import Session, User
@@ -35,10 +36,13 @@ def _redirect() -> RedirectResponse:
 
 @router.get("/auth/vk/start")
 def vk_start(
+    request: Request,
     repository: Repository,
     session: Annotated[Session, Depends(current_session)],
     business_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> Response:
+    if limited := vk_start_limit.page(request, session):
+        return limited
     business = repository.get_business(session.user_id, business_id)
     state = vk.create_state(session.id, session.user_id, business.id)
     try:
@@ -83,7 +87,7 @@ async def vk_callback(
     return _redirect()
 
 
-@router.post("/accounts/vk/key", dependencies=[Depends(require_csrf)])
+@router.post("/accounts/vk/key", dependencies=[Depends(vk_key_limit), Depends(require_csrf)])
 async def vk_key(
     body: VkKey,
     user: Annotated[User, Depends(current_user)],

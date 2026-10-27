@@ -1,26 +1,29 @@
-from collections.abc import Iterator
+import asyncio
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import UTC, datetime
-from email import policy
-from email.parser import BytesParser
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Message
 
 from app.api.business import human_errors
+from app.api.limits import assets_limit, regenerate_limit, upload_limit
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.content.images import MAX_BYTES
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
-from app.services.plan import PlanRepository, PlanService
+from app.services.plan import VIDEO_EXECUTOR, PlanRepository, PlanService, build_videos
 from app.services.registry import build_art_factory, build_llm
 
 router = APIRouter(prefix="/api/plan")
 MAX_UPLOAD = MAX_BYTES + 64 * 1024
+TOO_LARGE = "Файл слишком большой: не больше 10 МБ."
 
 
 class RegenerateIn(BaseModel):
@@ -71,34 +74,50 @@ def get_launch_service(request: Request) -> Iterator[LaunchService]:
         )
 
 
+def get_video_builder() -> Callable[[int], None]:
+    """Сборка роликов идёт после ответа в своём сеансе БД: сеанс запроса к этому времени уже закрыт."""
+
+    def build(business_id: int) -> None:
+        from app.db.session import SessionLocal
+
+        with SessionLocal() as db:
+            build_videos(PlanRepository(db), media_root(), business_id)
+
+    return build
+
+
 Plans = Annotated[PlanService, Depends(get_plan_service)]
 Launches = Annotated[LaunchService, Depends(get_launch_service)]
+VideoBuilder = Annotated[Callable[[int], None], Depends(get_video_builder)]
 
 
-async def read_upload(request: Request) -> tuple[int, bytes]:
-    """Разбор multipart без python-multipart: поля group_id и file, размер ограничен до чтения."""
-    length = request.headers.get("content-length", "")
-    content_type = request.headers.get("content-type", "")
-    if not length.isdecimal() or int(length) > MAX_UPLOAD:
-        raise HTTPException(413, "Файл слишком большой: не больше 10 МБ.")
-    if not content_type.startswith("multipart/form-data"):
-        raise HTTPException(422, "Загрузите фото как файл.")
-    body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > MAX_UPLOAD:
-            raise HTTPException(413, "Файл слишком большой: не больше 10 МБ.")
-    message = BytesParser(policy=policy.HTTP).parsebytes(
-        b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + bytes(body)
-    )
-    parts = {
-        part.get_param("name", header="content-disposition"): part.get_payload(decode=True)
-        for part in message.iter_parts()
-    }
-    try:
-        return int(parts["group_id"]), parts["file"]
-    except (KeyError, TypeError, ValueError) as error:
-        raise HTTPException(422, "Выберите группу и файл.") from error
+async def rebuild_videos(build: Callable[[int], None], business_id: int) -> None:
+    await asyncio.get_running_loop().run_in_executor(VIDEO_EXECUTOR, build, business_id)
+
+
+class LimitedBody(APIRoute):
+    """Тело больше MAX_UPLOAD отклоняется до разбора multipart: по Content-Length и при чтении потока."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def limited(request: Request) -> Response:
+            length = request.headers.get("content-length")
+            if length is not None and (not length.isdecimal() or int(length) > MAX_UPLOAD):
+                raise HTTPException(413, TOO_LARGE)
+            received = 0
+
+            async def receive() -> Message:
+                nonlocal received
+                message = await request.receive()
+                received += len(message.get("body", b""))
+                if received > MAX_UPLOAD:
+                    raise HTTPException(413, TOO_LARGE)
+                return message
+
+            return await handler(Request(request.scope, receive))
+
+        return limited
 
 
 @router.get("")
@@ -107,23 +126,47 @@ async def get_plan(business: CurrentBusiness, service: Plans, today: Today) -> d
         return await service.get_plan(business.id, datetime.now(UTC), today)
 
 
-@router.post("/regenerate-images", dependencies=[Depends(require_csrf)])
+@router.post("/regenerate-images", dependencies=[Depends(regenerate_limit), Depends(require_csrf)])
 async def regenerate(body: RegenerateIn, business: CurrentBusiness, service: Plans, today: Today) -> dict:
     with human_errors():
         return await service.regenerate_images(business.id, body.group_id, datetime.now(UTC), today)
 
 
-@router.post("/upload-photo", dependencies=[Depends(require_csrf)])
-async def upload_photo(request: Request, business: CurrentBusiness, service: Plans, today: Today) -> dict:
-    group_id, data = await read_upload(request)
+async def upload_photo(
+    group_id: Annotated[int, Form()],
+    file: Annotated[UploadFile, File()],
+    business: CurrentBusiness,
+    service: Plans,
+    today: Today,
+    build: VideoBuilder,
+    background: BackgroundTasks,
+) -> dict:
+    # Тип проверяет Pillow по содержимому (accept_upload); имя и Content-Type части не учитываются.
+    data = await file.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, TOO_LARGE)
     with human_errors():
-        return await run_in_threadpool(service.upload_photo, business.id, group_id, data, today)
+        result = await run_in_threadpool(service.upload_photo, business.id, group_id, data, today)
+    background.add_task(rebuild_videos, build, business.id)
+    return result
 
 
-@router.put("/assets", dependencies=[Depends(require_csrf)])
-def save_assets(body: AssetsIn, business: CurrentBusiness, service: Plans) -> dict:
+router.add_api_route(
+    "/upload-photo",
+    upload_photo,
+    methods=["POST"],
+    dependencies=[Depends(upload_limit), Depends(require_csrf)],
+    route_class_override=LimitedBody,
+)
+
+
+@router.put("/assets", dependencies=[Depends(assets_limit), Depends(require_csrf)])
+def save_assets(
+    body: AssetsIn, business: CurrentBusiness, service: Plans, build: VideoBuilder, background: BackgroundTasks
+) -> dict:
     with human_errors():
-        service.select_assets(business.id, body.asset_ids)
+        if service.select_assets(business.id, body.asset_ids):
+            background.add_task(rebuild_videos, build, business.id)
     return {"selected": body.asset_ids}
 
 

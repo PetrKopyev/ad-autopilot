@@ -8,10 +8,11 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from app.api.autopilot import Screens
 from app.api.demo import router as demo_router
+from app.api.limits import site_check_limit
 from app.api.stats import CurrentBusiness, Today
-from app.auth.sessions import current_user, require_csrf
+from app.auth.sessions import current_session, current_user, require_csrf
 from app.content.site_reader import read_site
-from app.db.models import User
+from app.db.models import Session, User
 from app.demo_flags import demo_enabled
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
@@ -102,9 +103,18 @@ def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> di
 
 
 @router.get("/business/site-check")
-async def site_check(business: CurrentBusiness, service: Service, today: Today) -> dict:
+async def site_check(
+    request: Request,
+    session: Annotated[Session, Depends(current_session)],
+    business: CurrentBusiness,
+    service: Service,
+    today: Today,
+) -> dict:
+    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта.
     with human_errors():
-        return await service.site_check(business.id, datetime.now(UTC), today)
+        return await service.site_check(
+            business.id, datetime.now(UTC), today, on_miss=lambda: site_check_limit(request, session)
+        )
 
 
 @router.put("/business/description", dependencies=[Depends(require_csrf)])

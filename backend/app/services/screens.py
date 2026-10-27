@@ -15,7 +15,7 @@ from app.db.models import (
 )
 from app.db.query import Window
 from app.domain.budget import stop_margin
-from app.domain.explain import explain_experiment, rubles
+from app.domain.explain import PLURALS, explain_experiment, plural, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend, stop_all
@@ -25,6 +25,10 @@ from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
+
+
+def short(title: str, limit: int = 40) -> str:
+    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
 
 
 class ScreensService:
@@ -273,14 +277,16 @@ class ScreensService:
             remaining = sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
             days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудиторию"}[experiment.hypothesis]
-            links = " и ".join(
-                f"«{ads[id_].title}» (/ads#{id_})" for id_ in (experiment.control_ad_id, experiment.variant_ad_id)
+            # Заголовки вариантов часто совпадают: называем их буквами, как в итогах проверки.
+            arms_text = " и ".join(
+                f"вариант {letter} «{short(ads[id_].title)}»"
+                for letter, id_ in (("А", experiment.control_ad_id), ("Б", experiment.variant_ad_id))
             )
             items.append(
                 {
                     "id": experiment.id,
                     "title": f"Сравниваем {hypothesis}",
-                    "comparing": f"Сравниваем {links}. До конца проверки дней: {days}.",
+                    "comparing": f"Сравниваем {arms_text}. До конца проверки: {plural(days, PLURALS['days'])}.",
                     "remaining_impressions": remaining if experiment.status == "running" else 0,
                     "status": experiment.status,
                     "conclusion": conclusion
@@ -313,7 +319,8 @@ class ScreensService:
             "city": business.city,
             "month_budget_kop": business.month_budget_kop,
             "avg_check_kop": business.avg_check_kop,
-            "description": business.description or None,
+            # Служебная проверка сайта (check) и медицинская оценка клиенту не нужны: только поля описания.
+            "description": {"fields": business.description["fields"]} if business.description.get("fields") else None,
             "auto_continue": business.auto_continue,
             "marking": safe_marking,
         }

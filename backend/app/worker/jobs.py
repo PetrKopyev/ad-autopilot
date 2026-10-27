@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -17,15 +17,17 @@ from app.db.models import (
     ChangeLog,
     Experiment,
     LeadsSurvey,
+    OAuthState,
+    Session,
     StatsDaily,
     Target,
     WorkerRun,
 )
 from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
-from app.platforms.base import AdPlatform, ExternalRefs, Operation
+from app.platforms.base import AdPlatform, ExternalRefs, Operation, PlatformError
 from app.platforms.fake import FakeAdapter, VirtualClock
-from app.services.changes import ChangeConflict, ChangesRepository, ChangesService
+from app.services.changes import PENDING, ChangeConflict, ChangesRepository, ChangesService
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
 from app.worker.locks import business_lock
 
@@ -74,6 +76,10 @@ class WorkerRepository(ChangesRepository):
 
     def refresh(self, item) -> None:
         self.db.refresh(item)
+
+    def remove(self, item) -> None:
+        self.db.delete(item)
+        self.db.commit()
 
     @contextmanager
     def business_lock(self, business_id: int) -> Iterator[None]:
@@ -130,6 +136,31 @@ class WorkerRepository(ChangesRepository):
         """
         values = {column.key: getattr(run, column.key) for column in WorkerRun.__table__.columns if column.key != "id"}
         self.db.execute(insert(WorkerRun).values(values).on_conflict_do_nothing(index_elements=RUN_SLOT))
+        self.db.commit()
+
+    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
+        """Непрочитанные уведомления бизнеса с этими кодами, новые сверху; прочитанное помечено read_at в журнале."""
+        return list(
+            self.db.scalars(
+                select(WorkerRun)
+                .where(
+                    WorkerRun.business_id == business_id,
+                    WorkerRun.kind == "notification",
+                    WorkerRun.status == "ok",
+                    WorkerRun.log[0]["reason_code"].astext.in_(codes),
+                    ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
+                )
+                .order_by(WorkerRun.started_at.desc(), WorkerRun.id.desc())
+                .limit(limit)
+            )
+        )
+
+    def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
+        self.db.execute(
+            update(WorkerRun)
+            .where(WorkerRun.business_id == business_id, WorkerRun.kind == "notification", WorkerRun.id.in_(ids))
+            .values(log=WorkerRun.log.op("||")(cast([{"read_at": now.isoformat()}], JSONB)))
+        )
         self.db.commit()
 
     def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
@@ -196,6 +227,12 @@ class WorkerRepository(ChangesRepository):
         )
         self.db.commit()
 
+    def prune_auth(self, now: datetime) -> None:
+        """Просроченные сессии и запросы входа (вместе с отметками использованных кодов) больше не нужны."""
+        self.db.execute(delete(Session).where(Session.expires_at <= now))
+        self.db.execute(delete(OAuthState).where(OAuthState.expires_at <= now))
+        self.db.commit()
+
 
 class MemoryWorkerRepository(WorkerRepository):
     """Та же служба применения, модели и сценарии, без подключения к БД."""
@@ -225,6 +262,9 @@ class MemoryWorkerRepository(WorkerRepository):
                 if hasattr(item, "id") and item.id is None:
                     item.id = max((row.id for row in table), default=0) + 1
                 table.append(item)
+
+    def remove(self, item) -> None:
+        self.tables[type(item)].remove(item)
 
     @contextmanager
     def business_lock(self, business_id: int) -> Iterator[None]:
@@ -300,6 +340,18 @@ class MemoryWorkerRepository(WorkerRepository):
         if None in keys.values() or self.find(WorkerRun, **keys) is None:
             self.save(run)
 
+    def unread_notifications(self, business_id: int, codes: Collection[str], limit: int) -> list[WorkerRun]:
+        rows = [
+            row
+            for row in self.rows(WorkerRun, business_id, kind="notification", status="ok")
+            if row.log[0].get("reason_code") in codes and not any("read_at" in entry for entry in row.log)
+        ]
+        return sorted(rows, key=lambda row: (row.started_at, row.id), reverse=True)[:limit]
+
+    def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
+        for row in self.rows(WorkerRun, business_id, kind="notification", id=set(ids)):
+            row.log = row.log + [{"read_at": now.isoformat()}]
+
     def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
         return max(
             (
@@ -340,6 +392,10 @@ class MemoryWorkerRepository(WorkerRepository):
             if row.kind == "notification"
             or row.started_at >= now - (HEARTBEAT_KEEP if row.kind == "heartbeat" else RUNS_KEEP)
         ]
+
+    def prune_auth(self, now: datetime) -> None:
+        for model in (Session, OAuthState):
+            self.tables[model] = [row for row in self.tables.get(model, []) if row.expires_at > now]
 
 
 class Worker:
@@ -418,12 +474,16 @@ class Worker:
 
     def demo_available(self, business: Business) -> bool:
         for campaign in self.campaigns(business):
-            adapter = self.resolve_adapter(business.id, campaign.platform)
+            try:
+                adapter = self.resolve_adapter(business.id, campaign.platform)
+            except PlatformError:
+                # Кабинет требует входа заново: шаги остальных площадок, включая страж бюджета, всё равно идут.
+                continue
             if isinstance(adapter, FakeAdapter) and campaign.external_id not in adapter._states:
                 self.notice(
                     business,
                     "DEMO_STATE_LOST",
-                    "Демо-данные площадки потеряны после перезапуска API. Создайте новый демо-запуск.",
+                    "Демо-данные пропали после перезапуска сервера. Войдите в демо заново.",
                     key=f"demo_state_lost:{business.id}",
                 )
                 return False
@@ -469,15 +529,19 @@ class Worker:
             dry = existing.status == "proposed" or existing.evidence.get("_service", {}).get("dry_run")
             if existing.status == "pending" and not dry:
                 # Сверка в начале шага не прочитала площадку: исход неизвестен, шаг повторится после сверки.
-                raise ChangeConflict("Применение не подтверждено; шаг будет повторён после сверки.")
+                raise ChangeConflict("Площадка не подтвердила изменение. Проверим ещё раз в ближайшие минуты.")
             if existing.status != "failed" and not (dry and not self.proposed(business)):
                 # Применённое, предложенное или отменённое владельцем действие слота повторно не выполняется:
                 # после отмены объект и так защищён от автопилота на время frozen_until.
                 return existing
-            # Неудачная попытка или предложение пробного режима, из которого бизнес уже вышел, остаются в журнале,
-            # а ключ переходит к настоящему применению.
-            existing.idempotency_key = None
-            self.repository.save(existing)
+            if dry:
+                # Предложение пробного режима, из которого бизнес уже вышел, заменяется настоящим применением:
+                # иначе в истории рядом висели бы «Предложено» и выполненное то же самое действие.
+                self.repository.remove(existing)
+            else:
+                # Неудачная попытка остаётся в журнале, а ключ переходит к новой.
+                existing.idempotency_key = None
+                self.repository.save(existing)
         change = await self.changes.apply_change(
             business_id=business.id,
             adapter=self.resolve_adapter(business.id, campaign.platform),
@@ -496,7 +560,7 @@ class Worker:
             now=self.clock.now,
         )
         if change.status != "applied" and not self.proposed(business):
-            raise ChangeConflict("Применение не подтверждено; шаг будет повторён после сверки.")
+            raise ChangeConflict("Площадка не подтвердила изменение. Проверим ещё раз в ближайшие минуты.")
         self.cache_context(change)
         return change
 
@@ -567,7 +631,7 @@ class Worker:
                 for change in recovered:
                     self.cache_context(change)
                 if kind != "budget_guard" and self.repository.pending(business.id):
-                    raise ChangeConflict("Площадка пока недоступна для сверки.")
+                    raise ChangeConflict(PENDING)
                 await handlers()[kind](self, business)
                 run.status = "ok"
             except Exception:
@@ -580,8 +644,10 @@ class Worker:
                 self.repository.save(run)
 
     def prune(self) -> None:
-        """Раз в сутки: пульс хранится двое суток, прогоны шагов — 90 дней, уведомления не удаляются."""
+        """Раз в сутки: пульс хранится двое суток, прогоны шагов — 90 дней, уведомления не удаляются;
+        просроченные сессии и запросы входа удаляются."""
         self.repository.prune_runs(self.clock.now)
+        self.repository.prune_auth(self.clock.now)
 
     async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""

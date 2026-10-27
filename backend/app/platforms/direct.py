@@ -33,6 +33,7 @@ from app.platforms.base import (
     StatRow,
     _money,
 )
+from app.platforms.regions import Region, RegionCache, find_region, normalize, not_found
 
 MICROS_PER_KOP = 10_000
 AUTH_URL = "https://oauth.yandex.ru/authorize"
@@ -47,6 +48,29 @@ MARKING_FIELDS = {
     "ContragentFieldNames": ["Name", "Kpp", "Phone", "EpayNumber", "RegNumber", "OksmNumber"],
     "ContragentTinInfoFieldNames": ["TinType", "Tin"],
 }
+
+# Геобаза Яндекса, id сверены 27.10.2026: https://yandex.ru/dev/tasks-api/doc/ru/regions.md
+CITY_REGIONS = {
+    "москва": 213,
+    "москва и московская область": 1,
+    "санкт-петербург": 2,
+    "новосибирск": 65,
+    "екатеринбург": 54,
+    "нижний новгород": 47,
+    "казань": 43,
+    "челябинск": 56,
+    "омск": 66,
+    "самара": 51,
+    "ростов-на-дону": 39,
+    "уфа": 172,
+    "красноярск": 62,
+    "воронеж": 193,
+    "пермь": 50,
+    "волгоград": 38,
+    "краснодар": 35,
+}
+RUSSIA = 225
+GEO_REGIONS = RegionCache()
 
 
 def _invalid() -> PlatformError:
@@ -81,6 +105,19 @@ def _status(item: dict) -> str:
     return "pending"
 
 
+def budget_end(today: date) -> date:
+    """Последний день недельного лимита: воскресенье или конец месяца, что раньше."""
+    next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return min(today + timedelta(days=6 - today.weekday()), next_month - timedelta(days=1))
+
+
+def weekly_limit(daily_kop: int, period_kop: int, today: date) -> int:
+    """WeeklySpendLimit новой кампании: дневной лимит на оставшиеся дни недели (месяца), не больше кэпа.
+
+    Ту же сумму проверяет запуск против MinimumWeeklySpendLimit: в воскресенье она равна одному дневному лимиту."""
+    return min(daily_kop * ((budget_end(today) - today).days + 1), period_kop)
+
+
 class DirectAdapter:
     def __init__(
         self,
@@ -94,7 +131,7 @@ class DirectAdapter:
         strategy: str = "WB_MAXIMUM_CLICKS",
         text_campaign: bool = False,
         href: str = "",
-        region_ids: tuple[int, ...] = (0,),
+        region_ids: tuple[int, ...] = (),
         marking_confirmed: bool = False,
         timeout: float = 30.0,
         report_attempts: int = 20,
@@ -140,6 +177,7 @@ class DirectAdapter:
         self._semaphore = asyncio.Semaphore(5)
         self._create_lock = asyncio.Lock()
         self._limits = PlatformLimits()
+        self._minimums: dict[str, int] | None = None
         self._trees: dict[str, ExternalRefs] = {}
         self._tz = ZoneInfo(getattr(config, "tz_default", "Europe/Moscow"))
 
@@ -369,12 +407,10 @@ class DirectAdapter:
             raise _invalid() from None
 
     def _weekly_limit(self, daily_kop: int, period_kop: int) -> int:
-        return min(daily_kop * ((self._budget_end() - self._today()).days + 1), period_kop)
+        return weekly_limit(daily_kop, period_kop, self._today())
 
     def _budget_end(self) -> date:
-        today = self._today()
-        next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
-        return min(today + timedelta(days=6 - today.weekday()), next_month - timedelta(days=1))
+        return budget_end(self._today())
 
     def _campaign_settings(self, weekly_kop: int) -> dict:
         strategy = {"WeeklySpendLimit": weekly_kop * MICROS_PER_KOP}
@@ -1100,17 +1136,46 @@ class DirectAdapter:
         return self._limits
 
     async def min_budgets(self) -> dict[str, int]:
+        """Минимум, который относится к нашей стратегии: MinimumWeeklySpendLimit (Dictionaries v5, Currencies).
+
+        Дневной бюджет кампании (DailyBudget) мы не задаём, а MinimumAccountDailyBudget относится к общему счёту,
+        поэтому дневного минимума у Директа для нас нет. Валютные минимумы не меняются, читаем их один раз."""
+        if self._minimums is not None:
+            return dict(self._minimums)
         clients = await self._api("clients", "get", {"FieldNames": ["Currency"]})
         currencies = await self._api("dictionaries", "get", {"DictionaryNames": ["Currencies"]})
         try:
             currency = clients["Clients"][0]["Currency"]
             properties = next(item["Properties"] for item in currencies["Currencies"] if item["Currency"] == currency)
             values = {item["Name"]: item["Value"] for item in properties}
-            result = {"weekly_limit_kop": _kop(values["MinimumWeeklySpendLimit"], round_up=True)}
-            if "MinDailyBudget" in values:
-                result["daily_limit_kop"] = _kop(values["MinDailyBudget"], round_up=True)
-            return result
+            self._minimums = {"weekly_limit_kop": _kop(values["MinimumWeeklySpendLimit"], round_up=True)}
         except (KeyError, IndexError, StopIteration, TypeError, ValueError):
+            raise _invalid() from None
+        return dict(self._minimums)
+
+    async def geo_targeting(self, city: str) -> dict[str, Any]:
+        """Город из словаря без запроса; остальные — по справочнику GeoRegions (Dictionaries API v5)."""
+        if (region := CITY_REGIONS.get(normalize(city))) is not None:
+            return {"region_ids": [region]}
+        regions = await GEO_REGIONS.get(self._base_url, self._geo_regions)
+        region = find_region(city, regions.values(), regions, country=RUSSIA, platform="Яндекс Директа")
+        if region is None:
+            raise not_found(city, "Яндекс Директа")
+        return {"region_ids": [region]}
+
+    async def _geo_regions(self) -> list[Region]:
+        data = await self._api("dictionaries", "get", {"DictionaryNames": ["GeoRegions"]})
+        try:
+            return [
+                Region(
+                    _integer(item["GeoRegionId"]),
+                    str(item["GeoRegionName"]),
+                    _integer(item["ParentId"]) if item.get("ParentId") is not None else None,
+                    item.get("GeoRegionType") == "City",
+                )
+                for item in data["GeoRegions"]
+            ]
+        except (KeyError, TypeError, ValueError):
             raise _invalid() from None
 
     async def set_marking(self, profile: Mapping[str, str]) -> None:

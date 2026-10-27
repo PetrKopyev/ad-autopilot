@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from collections import Counter
+from collections.abc import Collection
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -10,6 +13,27 @@ from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
+
+
+def moderation_key(platform: str, external_id: str) -> str:
+    """Ключ approvals и rewritten в settings["_worker"]; до F13 ключом был голый внешний id."""
+    return f"{platform}:{external_id}"
+
+
+def shared_ids(worker: Worker, business: Business) -> set[str]:
+    """Внешние id объявлений, которые есть на нескольких площадках: старый голый ключ к ним не относится однозначно."""
+    counts = Counter(
+        external_id
+        for platform in {campaign.platform for campaign in worker.campaigns(business)}
+        for external_id in platform_ads(worker, business, platform)
+    )
+    return {external_id for external_id, count in counts.items() if count > 1}
+
+
+def approved_at(meta: dict, platform: str, external_id: str, shared: Collection[str] = ()) -> str | None:
+    approvals = meta.get("approvals", {})
+    legacy = None if external_id in shared else approvals.get(external_id)
+    return approvals.get(moderation_key(platform, external_id), legacy)
 
 
 def platform_ads(worker: Worker, business: Business, platform: str) -> dict[str, Ad]:
@@ -75,6 +99,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
     meta = worker.metadata(business)
     approvals = meta.get("approvals", {})
     rewritten = meta.get("rewritten", [])
+    shared = shared_ids(worker, business)
     for campaign in worker.campaigns(business):
         ads = platform_ads(worker, business, campaign.platform)
         adapter = worker.resolve_adapter(business.id, campaign.platform)
@@ -82,9 +107,11 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
             ad = ads.get(info.entity_id)
             if ad is None:
                 continue
+            key = moderation_key(campaign.platform, info.entity_id)
             ad.moderation_status, ad.moderation_reason = info.status, info.reason
             if info.status == "approved":
-                approvals.setdefault(info.entity_id, info.updated_at.isoformat())
+                approved = approved_at(meta, campaign.platform, info.entity_id, shared)
+                approvals[key] = approved or info.updated_at.isoformat()
                 if ad.status == "moderation":
                     ad.status = "active"
             elif info.status == "rejected":
@@ -92,14 +119,18 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                 worker.notice(
                     business,
                     "MODERATION_REJECTED",
-                    info.reason or "Объявление отклонено.",
-                    key=f"moderation:{info.entity_id}:{info.updated_at.isoformat()}",
+                    f"Объявление «{ad.title}»: {info.reason.rstrip('. ')}."
+                    if info.reason
+                    else f"Объявление «{ad.title}» не прошло проверку, причину площадка не указала.",
+                    # Время ответа площадки меняется при каждом опросе: одно уведомление на объявление и причину.
+                    key=f"moderation:{key}:{hashlib.sha256((info.reason or '').encode()).hexdigest()[:16]}",
                 )
                 # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
                 reason = (info.reason or "").casefold()
                 if (
                     worker.rewrite_rejected
-                    and info.entity_id not in rewritten
+                    and key not in rewritten
+                    and (info.entity_id in shared or info.entity_id not in rewritten)
                     and any(word in reason for word in ("текст", "заголов", "опечат"))
                     and not any(word in reason for word in ("медицин", "документ", "лиценз"))
                 ):
@@ -115,7 +146,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                         reason_params={"reason": info.reason or ""},
                         suffix=f"rewrite:{ad.id}",
                     )
-                    rewritten = list(set(rewritten) | {info.entity_id})
+                    rewritten = sorted(set(rewritten) | {key})
                     if not worker.proposed(business):
                         ad.status = "moderation"
             worker.repository.save(ad)

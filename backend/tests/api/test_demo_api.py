@@ -448,7 +448,9 @@ def test_status_date_uses_configured_timezone(demo, monkeypatch):
     client.app.dependency_overrides.pop(get_today)
     monkeypatch.setattr(settings, "tz_default", "Asia/Vladivostok")
     world.business.settings = {"_demo": {"days": 1, "now": "2026-01-01T20:30:00+00:00"}}
-    assert client.get("/api/demo/status").json()["today"] == "2026-01-02"
+    status = client.get("/api/demo/status").json()
+    assert status["today"] == "2026-01-02"
+    assert status["now"] == "2026-01-01T20:30:00+00:00"
 
 
 def test_demo_settings_are_reread_under_lock_and_merged(demo, monkeypatch):
@@ -518,3 +520,32 @@ async def test_scheduler_start_warns_about_demo(monkeypatch, caplog):
         caplog.clear()
         await main.start_scheduler(None)
         assert any(record.levelname == "WARNING" for record in caplog.records) is enabled
+
+
+def test_history_after_leaving_trial_mode_has_no_proposal_next_to_real_change(demo):
+    import asyncio
+
+    from app.services.optimize import rebalance_budget
+
+    client, world, worker = demo
+    launch(client)
+    worker.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:trial"
+    world.business.settings = world.business.settings | {"dry_run": True}
+    world.business.month_budget_kop = 2_000_000
+    asyncio.run(rebalance_budget(worker, world.business))
+    items = client.get("/api/history?page_size=100").json()["items"]
+    assert [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"] == ["proposed"]
+    world.business.settings = {key: value for key, value in world.business.settings.items() if key != "dry_run"}
+    asyncio.run(rebalance_budget(worker, world.business))
+    items = client.get("/api/history?page_size=100").json()["items"]
+    assert [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"] == ["applied"]
+
+
+def test_business_screen_gets_only_description_fields(demo):
+    client, _, _ = demo
+    launch(client)
+    description = client.get("/api/business").json()["description"]
+    assert set(description) == {"fields"}
+    assert set(description["fields"]) == {"services", "prices", "address", "difference"}
+    assert all("value" in item for item in description["fields"].values())

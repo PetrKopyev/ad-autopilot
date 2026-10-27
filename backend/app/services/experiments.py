@@ -22,7 +22,7 @@ from app.domain.settings import DEFAULT_SETTINGS
 from app.domain.types import AdSnapshot, ExperimentDesign
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
-from app.services.changes import ChangeConflict
+from app.services.changes import PENDING, ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, SpendLLM, ai_budget, description_draft
 from app.services.plan import PlanRepository, PlanService
 from app.services.registry import build_art_factory, build_llm
@@ -31,6 +31,8 @@ from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
+
+VARIANT_UNCONFIRMED = "Площадка ещё не подтвердила новый вариант объявления. Проверим ещё раз в ближайшие минуты."
 
 
 def completed_hypotheses(worker: Worker, business: Business, group_id: int) -> tuple[str, ...]:
@@ -58,6 +60,9 @@ def group_available(worker: Worker, business: Business, group: AdGroup, *, ignor
 
     def blocks(change: ChangeLog) -> bool:
         if change.actor == "system" and change.kind == "budget":
+            return False
+        # Внешние id уникальны только внутри площадки: изменение другой площадки эту группу не трогает.
+        if change.platform is not None and change.platform != campaign.platform:
             return False
         # SCALE другой группы хранит операцию с общим кэпом кампании.
         if change.entity_type == "group" and change.entity_id != group.external_id:
@@ -166,7 +171,7 @@ async def _create_experiment(
         )
         return None
     if not worker.proposed(business) and any(item is not existing for item in repository.pending(business.id)):
-        raise ChangeConflict("Сначала требуется сверить незавершённые изменения бизнеса.")
+        raise ChangeConflict(PENDING)
     params = {"hypothesis": hypothesis, "n_per_arm": design.n_per_arm, "days": design.estimated_days}
     proposal = existing or ChangeLog(
         business_id=business.id,
@@ -178,7 +183,7 @@ async def _create_experiment(
         operations=[],
         reason_code="EXPERIMENT_START",
         reason_params=params,
-        reason_text="Предложено: " + explain("EXPERIMENT_START", params) + f" ≈ {design.estimated_days} дней.",
+        reason_text=explain("EXPERIMENT_START", params),
         evidence={
             "experiment_key": key,
             "design": asdict(design) | {"hypothesis": hypothesis},
@@ -328,11 +333,11 @@ async def launch_variant(worker, business, campaign, group, control, change, des
         await adapter.apply(operation)
     except PlatformError:
         # Повтор завершит отправку на модерацию; поиск по ref исключает второй Ads.add.
-        raise ChangeConflict("Добавление варианта требует повторной сверки.") from None
+        raise ChangeConflict(VARIANT_UNCONFIRMED) from None
     states = await adapter.get_state(refs)
     state = states.get(ref)
     if state is None or state.creative != creative:
-        raise ChangeConflict("Добавление варианта пока не подтверждено; требуется повторная сверка.")
+        raise ChangeConflict(VARIANT_UNCONFIRMED)
     variant = platform_ads(worker, business, campaign.platform).get(state.entity_id)
     if variant is None:
         if demo_enabled() and isinstance(adapter, FakeAdapter):

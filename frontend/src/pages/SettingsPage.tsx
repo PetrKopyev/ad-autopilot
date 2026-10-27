@@ -6,11 +6,12 @@ import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
 import { connectAccount, disconnectAccount, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
-import type { Description, DescriptionKey, Marking } from '../api/setup';
+import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { useResource } from '../api/useResource';
+import { StopNotice } from './SetupShared';
 import './Setup.css';
 
 const labels = copy.settingsScreen;
@@ -46,10 +47,10 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
 function DescriptionBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
   const [values, setValues] = useState<Record<DescriptionKey, string>>(() => Object.fromEntries(
-    descriptionKeys.map((key) => [key, business.description?.[key].value ?? ''])) as Record<DescriptionKey, string>);
+    descriptionKeys.map((key) => [key, business.description?.fields[key].value ?? ''])) as Record<DescriptionKey, string>);
   function submit() {
     const description = Object.fromEntries(descriptionKeys.map((key) => [key,
-      { ...(business.description?.[key] ?? { quote: null, question: '' }), value: values[key].trim(), verified: true }])) as Description;
+      { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: values[key].trim(), verified: true }])) as Description;
     void section.run(() => saveDescription(description), labels.saved);
   }
   return <Block title={copy.settings.business}>
@@ -66,13 +67,15 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   const [budget, setBudget] = useState(rublesText(business.month_budget_kop));
   const [average, setAverage] = useState(rublesText(business.avg_check_kop));
   const [autoContinue, setAutoContinue] = useState(business.auto_continue);
+  const [savedBudget, setSavedBudget] = useState(business.month_budget_kop);
   const budgetKop = rublesToKopecks(budget.trim());
   const averageKop = average.trim() === '' ? null : rublesToKopecks(average.trim());
   const averageBad = average.trim() !== '' && averageKop === null;
   function submit() {
     if (budgetKop === null || averageBad) return;
+    // Неизменённый бюджет не отправляем: каждое сохранение бюджета — запись в истории и пересчёт лимитов.
     void section.run(async () => {
-      await saveBudget(budgetKop);
+      if (budgetKop !== savedBudget) { await saveBudget(budgetKop); setSavedBudget(budgetKop); }
       await saveBusinessSettings(autoContinue, averageKop);
     }, labels.saved);
   }
@@ -95,21 +98,23 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
 function AccountsBlock() {
   const section = useSection();
   const session = useSession();
+  const [stopResult, setStopResult] = useState<StopResult>();
   const me = session.data;
   const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
   return <Block title={copy.settings.accounts}>
     <p className="muted">{labels.accountsHint}</p>
     {session.error && <ErrorBanner message={session.error} onRetry={session.reload} />}
     <Status section={section} />
+    {stopResult && <StopNotice result={stopResult} />}
     {me && <div className="account-grid">{platforms.map((platform) => {
       const account = me.accounts.find((item) => item.platform === platform.id);
       return <Card key={platform.id} className="page-stack"><h3>{platform.name}</h3>
         <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected
           : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
         <div className="actions">
-          <Button variant="secondary" disabled={section.busy} onClick={() => void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); })}>{!account || account.status === 'revoked' ? copy.settings.connect : copy.settings.reconnect}</Button>
+          <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); }); }}>{!account || account.status === 'revoked' ? copy.settings.connect : copy.settings.reconnect}</Button>
           {account && account.status !== 'revoked' && <Button variant="secondary" disabled={section.busy}
-            onClick={() => void section.run(async () => { await disconnectAccount(account.id); session.reload(); })}>{copy.settings.disconnect}</Button>}
+            onClick={() => { setStopResult(undefined); void section.run(async () => { setStopResult(await disconnectAccount(account.id)); session.reload(); }); }}>{copy.settings.disconnect}</Button>}
         </div></Card>;
     })}</div>}
   </Block>;
@@ -117,7 +122,9 @@ function AccountsBlock() {
 
 function MarkingBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
-  const [marking, setMarking] = useState<Marking>(business.marking ?? emptyMarking);
+  const [marking, setMarking] = useState<Marking>(() => business.marking
+    ? { ...business.marking, confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...business.marking.confirmed_in_platform } }
+    : emptyMarking);
   const [innTouched, setInnTouched] = useState(false);
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
@@ -153,12 +160,13 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
 function AutopilotBlock() {
   const section = useSection();
   const status = useResource(useCallback((signal: AbortSignal) => getAutopilotStatus(signal), []));
-  const paused = status.data?.status === 'paused';
+  const state = status.data?.status;
+  const paused = state === 'paused' || state === 'budget_stop';
   return <Block title={labels.autopilot}>
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
-    {status.data && <p>{paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
+    {state && <p>{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
     <Status section={section} />
-    {status.data && <div className="actions"><Button variant={paused ? 'primary' : 'secondary'} disabled={section.busy}
+    {state && state !== 'draft' && <div className="actions"><Button variant={paused ? 'primary' : 'secondary'} disabled={section.busy}
       onClick={() => void section.run(async () => { await (paused ? resumeAutopilot() : pauseAutopilot()); status.reload(); })}>
       {paused ? copy.settings.resume : labels.pause}</Button></div>}
   </Block>;
@@ -174,7 +182,8 @@ function DeleteBlock() {
     <p>{labels.deleteHint}</p>
     <form className="page-stack" onSubmit={(event) => {
       event.preventDefault();
-      if (confirmed) void section.run(async () => { await deleteMyData(); session.reload(); navigate('/login'); });
+      // Итог остановки рекламы показываем на странице входа: после удаления владелец попадает туда.
+      if (confirmed) void section.run(async () => { const stopResult = await deleteMyData(); session.reload(); navigate('/login', { state: { stopResult } }); });
     }}>
       <label className="field">{labels.deleteLabel}<input autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></label>
       <Status section={section} />

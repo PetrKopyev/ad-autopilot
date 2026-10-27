@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { connectAccount, demoLogin, getAuthConfig } from '../api/setup';
+import type { StopResult } from '../api/setup';
 import { mockEnabled } from '../api/screens';
 import { useSession } from '../api/session';
 import { copy } from '../copy';
+import { StopNotice } from './SetupShared';
 import './Setup.css';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const session = useSession();
+  const stopResult = (useLocation().state as { stopResult?: StopResult } | null)?.stopResult;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [demo, setDemo] = useState(false);
@@ -34,6 +37,7 @@ export function LoginPage() {
   }
   return <div className="page-stack launch-flow">
     <h1>{copy.login.title}</h1>
+    {stopResult && <StopNotice result={stopResult} />}
     <Card className="page-stack">
       <p>{copy.login.description}</p>
       {error && <ErrorBanner message={error} />}

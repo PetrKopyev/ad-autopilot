@@ -25,7 +25,8 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         worker.notice(
             business,
             "MONTH_CONTINUE_NOTICE",
-            "Через три дня начнётся новый месячный бюджет. Продление можно остановить.",
+            "Через три дня начнётся новый месяц, и реклама продолжится с тем же бюджетом. Если продолжать не нужно, "
+            "выключите «Продолжать в следующем месяце» в настройках.",
             key=f"month_notice:{month.isoformat()}",
         )
     if previous >= month.isoformat():

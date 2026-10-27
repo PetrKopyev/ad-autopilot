@@ -3,6 +3,7 @@ import { getAuthConfig } from '../api/setup';
 import { advanceDemo, getDemoStatus, rememberDemoDate, type DemoStatus } from '../api/demo';
 import { useSession } from '../api/session';
 import { copy } from '../copy';
+import { displayDate, plural } from '../format';
 import { Button, Card, ErrorBanner } from './index';
 
 export function DemoPanel({ changed }: { changed: () => void }) {
@@ -50,11 +51,11 @@ export function DemoPanel({ changed }: { changed: () => void }) {
   const progress = status.advance;
   return <Card className="page-stack">
     <h2>Демо: перемотать время</h2>
-    <p className="muted">В демо площадки ненастоящие: сервис ускоряет время, чтобы показать, как работает автопилот. После первой перемотки время в демо идёт только по этим кнопкам</p>
+    <p className="muted">В демо площадки ненастоящие: сервис ускоряет время, чтобы показать, как работает автопилот. После первой перемотки время в демо идёт только по этим кнопкам.</p>
     <div className="actions">{[1, 7, 30].map((days) => <Button key={days} variant="secondary"
-      disabled={busy || running || status.total_days + days > 120} onClick={() => void advance(days)}>+{days} {days === 1 ? 'день' : 'дней'}</Button>)}</div>
+      disabled={busy || running || status.total_days + days > 120} onClick={() => void advance(days)}>+{days} {plural(days, 'день', 'дня', 'дней')}</Button>)}</div>
     <p role="status">{running && progress ? `Автопилот обрабатывает прошедшие дни: ${progress.done} из ${progress.days}…`
-      : `${progress?.state === 'done' ? 'Готово. ' : ''}Демо-дата: ${status.today}. Перемотано ${status.total_days} из 120 дней.`}</p>
+      : `${progress?.state === 'done' ? 'Готово. ' : ''}Демо-дата: ${displayDate(status.today)}. Перемотано ${status.total_days} из 120 дней.`}</p>
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
   </Card>;
 }

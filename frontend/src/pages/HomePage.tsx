@@ -1,20 +1,44 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { BudgetRing, Button, Card, EmptyState, ErrorBanner, StatusBadge } from '../components';
 import { copy } from '../copy';
 import { getAutopilotStatus, getHistory, getSummary, stopAllAds } from '../api/screens';
-import { displayDate, displayTime, getPeriod, type PeriodChoice } from '../api/period';
+import { getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
+import { useBusinessNow } from '../api/useBusinessNow';
+import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
+import { displayDate, displayDateTime, justNow } from '../format';
 import { ClientsSummary, DemoNotice, PeriodPicker, Sources, SummaryFigures } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { resumeAutopilot } from '../api/settings';
 import './Home.css';
+
+function Notifications({ items, changed }: { items: AppNotification[]; changed: () => void }) {
+  const [busy, setBusy] = useState<number>();
+  const [error, setError] = useState('');
+  async function read(id: number) {
+    setBusy(id); setError('');
+    try { await readNotification(id); changed(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    finally { setBusy(undefined); }
+  }
+  return <Card className="page-stack" aria-labelledby="notifications-title"><h2 id="notifications-title">{copy.home.notifications}</h2>
+    {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+    {items.map((item) => <article key={item.id} className={`home-notice home-notice--${item.level}`}>
+      <h3>{item.title}</h3>
+      <time className="muted" dateTime={item.created_at}>{displayDateTime(item.created_at)}</time>
+      <p>{item.text}</p>
+      <div className="actions"><Button variant="secondary" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button></div>
+    </article>)}
+  </Card>;
+}
 
 export function HomePage() {
   const [choice, setChoice] = useState<PeriodChoice>('month');
   const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
   const autopilot = useResource(getAutopilotStatus);
   const history = useResource(getHistory);
+  const notifications = useResource(getNotifications);
   const dialog = useRef<HTMLDialogElement>(null);
   const stopLock = useRef(false);
   const [stopping, setStopping] = useState(false);
@@ -22,15 +46,14 @@ export function HomePage() {
   const [stopped, setStopped] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState('');
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const now = useBusinessNow();
   const status = autopilot.data;
-  const minutes = status?.last_check_at ? Math.max(0, Math.floor((now - Date.parse(status.last_check_at)) / 60000)) : null;
-  const stale = status?.status === 'running' && (minutes === null || minutes > 15);
-  const statusText = status?.status === 'running' ? (minutes === null ? copy.screens.heartbeatMissing : copy.home.working(minutes))
+  // В демо точного времени бизнеса нет: показываем время проверки, а не «N минут назад», и не судим о давности.
+  const minutes = status?.last_check_at && now !== null ? Math.max(0, Math.floor((now - Date.parse(status.last_check_at)) / 60000)) : null;
+  const stale = status?.status === 'running' && now !== null && (minutes === null || minutes > 15);
+  const working = !status?.last_check_at ? copy.screens.heartbeatMissing
+    : minutes === null ? copy.home.checkedAt(displayDateTime(status.last_check_at)) : copy.home.working(minutes);
+  const statusText = status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
       : status?.status === 'draft' ? copy.screens.draft : copy.home.paused;
   async function stop() {
@@ -45,7 +68,9 @@ export function HomePage() {
       <Button variant="danger" onClick={() => { setStopError(undefined); dialog.current?.showModal(); }} disabled={stopping || stopped || status?.status === 'paused'}>{copy.home.stopAll}</Button>
     </div>
     <DemoNotice />
-    <DemoPanel changed={() => { summary.reload(); autopilot.reload(); history.reload(); }} />
+    <DemoPanel changed={() => { summary.reload(); autopilot.reload(); history.reload(); notifications.reload(); }} />
+    {/* Уведомления — дополнение к главной: если их нет или они не загрузились, блока нет. */}
+    {notifications.data && notifications.data.length > 0 && <Notifications items={notifications.data} changed={notifications.reload} />}
     {stopped && <p role="status">{copy.screens.stopped}</p>}
     <Card className="page-stack">
       {autopilot.loading && <p role="status">{copy.screens.loading}</p>}
@@ -82,7 +107,7 @@ export function HomePage() {
         {history.loading && <p role="status">{copy.screens.loading}</p>}
         {history.error && <ErrorBanner message={history.error} onRetry={history.reload} />}
         {history.data && (history.data.items.length ? history.data.items.slice(0, 3).map((item) => <div className="home-list-item" key={item.id}>
-          <time className="muted" dateTime={item.created_at}>{displayTime(item.created_at)}</time>
+          <time className="muted" dateTime={item.created_at}>{justNow(item.created_at, now) ? copy.historyScreen.justNow : displayDateTime(item.created_at)}</time>
           <p>{item.reason_text}</p><StatusBadge>{copy.screens.historyStates[item.status as keyof typeof copy.screens.historyStates] ?? copy.screens.pending}</StatusBadge>
         </div>) : <EmptyState title={copy.screens.noHistory} description={copy.screens.historyHint} />)}
         <Link to="/history">{copy.screens.allHistory}</Link>

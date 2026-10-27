@@ -1,5 +1,4 @@
 import hashlib
-from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -29,8 +28,15 @@ class FakeRepository:
         self.businesses: dict[int, Business] = {}
         self.accounts: dict[int, PlatformAccount] = {}
         self.used_codes: set[str] = set()
-        self.assets: list[tuple[int, str]] = []
         self.stored_tokens: dict[int, dict[str, str | None]] = {}
+        # Остановка рекламы перед отзывом: (user_id, account_id, токен кабинета в момент остановки).
+        self.stops: list[tuple[int, int | None, str | None]] = []
+        self.stop_confirmed = True
+
+    async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> bool:
+        account = self.accounts.get(account_id) if account_id else None
+        self.stops.append((user_id, account_id, account.access_token_enc if account else None))
+        return self.stop_confirmed
 
     def get_session(self, token: str) -> Session | None:
         session = self.sessions.get(hash_token(token))
@@ -46,12 +52,12 @@ class FakeRepository:
     def delete_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
 
-    def delete_user(self, user_id: int) -> list[str]:
-        business_ids = {business.id for business in self.businesses.values() if business.user_id == user_id}
+    def delete_user(self, user_id: int) -> list[int]:
+        business_ids = [business.id for business in self.businesses.values() if business.user_id == user_id]
         self.users.pop(user_id, None)
         self.sessions = {key: item for key, item in self.sessions.items() if item.user_id != user_id}
         self.businesses = {key: item for key, item in self.businesses.items() if key not in business_ids}
-        return [path for business_id, path in self.assets if business_id in business_ids]
+        return business_ids
 
     def save_state(self, state: OAuthState) -> None:
         self.states[state.state] = state
@@ -124,6 +130,27 @@ class FakeRepository:
             account for account in self.accounts.values() if self.businesses[account.business_id].user_id == user_id
         ]
 
+    def revocations(self, user_id: int, account_id: int | None = None) -> list:
+        from app.auth.revoke import revocation, same_vk_access
+
+        mine = [
+            account
+            for account in self.accounts.values()
+            if self.businesses[account.business_id].user_id == user_id
+            and account.status != "revoked"
+            and account_id in (None, account.id)
+        ]
+        removed = {account.id for account in mine} if account_id is None else {account_id}
+        result = []
+        for account in mine:
+            shared = account.platform == "vk" and any(
+                same_vk_access(account, other) and other.status != "revoked" and other.id not in removed
+                for other in self.accounts.values()
+            )
+            if not shared and (item := revocation(account)) is not None:
+                result.append(item)
+        return result
+
     def disconnect_account(self, user_id: int, account_id: int) -> bool:
         from app.auth.sessions import AuthRepository
 
@@ -149,10 +176,9 @@ class FakeDemoUsers:
     def demo(self) -> list[User]:
         return [user for user in self.repository.users.values() if user.yandex_uid.startswith("demo-")]
 
-    def expire(self, before: datetime) -> tuple[list[int], list[str]]:
+    def expire(self, before: datetime) -> list[int]:
         expired = {user.id for user in self.demo() if user.created_at < before}
-        businesses = [item.id for item in self.repository.businesses.values() if item.user_id in expired]
-        return businesses, [path for user_id in expired for path in self.repository.delete_user(user_id)]
+        return [business_id for user_id in expired for business_id in self.repository.delete_user(user_id)]
 
     def count(self) -> int:
         return len(self.demo())
@@ -175,7 +201,7 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
 
     from unittest.mock import AsyncMock
 
-    from app.api.auth import get_demo_users
+    from app.api.auth import get_ad_stopper, get_demo_users
     from app.auth import yandex
     from app.auth.sessions import get_repository
     from app.config import Settings
@@ -192,13 +218,14 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
         pytest.fail("Auth unit tests must not connect to a database")
 
     monkeypatch.setattr(engine, "connect", forbid_database)
-    monkeypatch.setattr("app.api.auth.demo_logins", deque())
     app.dependency_overrides[get_repository] = lambda: repository
     app.dependency_overrides[get_demo_users] = lambda: FakeDemoUsers(repository)
+    app.dependency_overrides[get_ad_stopper] = lambda: repository.stop_ads
     with TestClient(app, base_url="https://testserver", follow_redirects=False) as test_client:
         yield test_client
     app.dependency_overrides.pop(get_repository, None)
     app.dependency_overrides.pop(get_demo_users, None)
+    app.dependency_overrides.pop(get_ad_stopper, None)
 
 
 @pytest.fixture
@@ -212,6 +239,7 @@ def mock_yandex() -> Iterator[respx.MockRouter]:
                 "token_type": "bearer",
             }
         )
+        router.post("https://oauth.yandex.ru/revoke_token", name="revoke").respond(json={"status": "ok"})
         router.get("https://login.yandex.ru/info").respond(
             json={
                 "id": "100",

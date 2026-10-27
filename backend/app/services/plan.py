@@ -3,6 +3,7 @@ import json
 import secrets
 import shutil
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -23,6 +24,7 @@ from app.db.models import Asset, Business, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import allocate, plan_budget, platform_shares, split_group_limits
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
+from app.services.changes import ChangeConflict
 from app.services.onboarding import (
     DESCRIPTION_KEYS,
     AiLimits,
@@ -141,6 +143,93 @@ def launch_blockers(
     if business.medical_level != "none" and medical_acknowledged is False:
         result.append("Подтвердите, что понимаете: для такой рекламы могут потребовать лицензию.")
     return result
+
+
+# ffmpeg собирает ролик до 180 секунд: не больше двух сборок сразу и вне пула потоков, который обслуживает запросы.
+VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="video")
+
+
+def build_videos(repository: PlanRepository, media_root: Path, business_id: int, font_path: str = DEFAULT_FONT) -> None:
+    """Видео из 3–4 выбранных картинок сегмента; без ffmpeg пропускаем: ролик загружается вручную.
+
+    Ролик пересобирается, только если изменился его набор картинок; прежний файл удаляется. ffmpeg работает без
+    блокировки бизнеса (до 180 секунд), а результат сохраняется под ней и только если выбор за это время не
+    изменился: иначе новый ролик соберёт задача, запущенная последним выбором. Бизнес занят — тоже пропускаем."""
+    if shutil.which("ffmpeg") is None:
+        return
+    built: dict[str, tuple[list[int], bytes]] = {}
+    for segment, chosen, video in video_segments(repository, business_id):
+        sources = [asset.id for asset in chosen]
+        if len(chosen) < 3 or (video is not None and video.formats.get("sources") == sources):
+            continue
+        plan = repository.latest_plan(business_id)
+        group = next(item for item in plan.payload["groups"] if item["segment"] == segment)
+        try:
+            images = [media_root / asset.file_path for asset in chosen]
+            built[segment] = (sources, build_video(images, group["ads"][0]["title"], font_path=font_path).data)
+        except (VideoError, ValueError):
+            continue
+    # commit завершает чтение: под блокировкой выбор перечитывается заново.
+    repository.commit()
+    replaced = []
+    try:
+        with repository.business_lock(business_id):
+            for segment, chosen, video in video_segments(repository, business_id):
+                sources = [asset.id for asset in chosen]
+                if len(chosen) < 3:
+                    if video is not None:
+                        video.selected = False
+                    continue
+                if video is not None and video.formats.get("sources") == sources:
+                    video.selected = True
+                    continue
+                if segment not in built or built[segment][0] != sources:
+                    continue
+                path = store(media_root, business_id, f"video-{segment.replace(' ', '-')}", "mp4", built[segment][1])
+                if video is None:
+                    video = Asset(business_id=business_id, kind="video", idea_text=segment, file_path=path)
+                    repository.add(video)
+                else:
+                    replaced.append(video.file_path)
+                video.file_path = path
+                video.formats = video.formats | {"sources": sources}
+                video.selected = True
+            repository.commit()
+    except ChangeConflict:
+        return
+    for file_path in replaced:
+        remove_media(media_root, file_path)
+
+
+def video_segments(repository: PlanRepository, business_id: int) -> list[tuple[str, list[Asset], Asset | None]]:
+    plan = repository.latest_plan(business_id)
+    if plan is None:
+        return []
+    assets = repository.assets(business_id)
+    by_id = {asset.id: asset for asset in assets}
+    return [
+        (
+            segment,
+            [by_id[id_] for id_ in ids if id_ in by_id and by_id[id_].selected][:4],
+            next((asset for asset in assets if asset.kind == "video" and asset.idea_text == segment), None),
+        )
+        for segment, ids in plan.payload["assets"].items()
+    ]
+
+
+def store(media_root: Path, business_id: int, name: str, suffix: str, data: bytes) -> str:
+    directory = media_root / str(business_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}-{secrets.token_hex(4)}.{suffix}"
+    path.write_bytes(data)
+    return f"{business_id}/{path.name}"
+
+
+def remove_media(media_root: Path, file_path: str) -> None:
+    root = media_root.resolve()
+    path = (root / file_path).resolve()
+    if path.is_relative_to(root) and path.is_file():
+        path.unlink()
 
 
 class PlanService:
@@ -306,11 +395,7 @@ class PlanService:
         return created
 
     def store(self, business_id: int, name: str, suffix: str, data: bytes) -> str:
-        directory = self.media_root / str(business_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{name}-{secrets.token_hex(4)}.{suffix}"
-        path.write_bytes(data)
-        return f"{business_id}/{path.name}"
+        return store(self.media_root, business_id, name, suffix, data)
 
     def draft_group(self, business_id: int, group_id: int) -> tuple[Plan, dict]:
         plan = self.repository.latest_plan(business_id)
@@ -350,7 +435,7 @@ class PlanService:
             checked = accept_upload(data, existing_hashes=[asset.phash for asset in assets if asset.phash])
         except ImageRejected as error:
             raise OnboardingError(
-                "Фото не подошло: нужен JPG или PNG от 256 пикселей по короткой стороне, до 10 МБ, без дублей."
+                "Фото не подошло: нужен JPG, PNG или WebP от 256 пикселей по короткой стороне, до 10 МБ, без дублей."
             ) from error
         asset = Asset(
             business_id=business_id,
@@ -361,48 +446,21 @@ class PlanService:
         )
         self.repository.add(asset)
         self.attach(plan, group["segment"], [asset])
-        self.build_videos(business_id)
         return self.view(business, plan, today)
 
-    def select_assets(self, business_id: int, asset_ids: list[int]) -> None:
+    def select_assets(self, business_id: int, asset_ids: list[int]) -> bool:
+        """Отмечает выбранные картинки; True — выбор изменился и ролики нужно пересобрать."""
         images = [asset for asset in self.repository.assets(business_id) if asset.kind in IMAGE_KINDS]
         if not set(asset_ids) <= {asset.id for asset in images}:
-            raise OnboardingError("Картинка не найдена.")
+            raise LookupError("Картинка не найдена.")
+        changed = {asset.id for asset in images if asset.selected} != set(asset_ids)
         for asset in images:
             asset.selected = asset.id in asset_ids
         self.repository.commit()
-        self.build_videos(business_id)
+        return changed
 
     def build_videos(self, business_id: int) -> None:
-        """Видео из 3–4 выбранных картинок сегмента; без ffmpeg пропускаем: ролик загружается вручную."""
-        plan = self.repository.latest_plan(business_id)
-        if plan is None or shutil.which("ffmpeg") is None:
-            return
-        assets = self.repository.assets(business_id)
-        by_id = {asset.id: asset for asset in assets}
-        for segment, ids in plan.payload["assets"].items():
-            chosen = [by_id[id_] for id_ in ids if id_ in by_id and by_id[id_].selected]
-            video = next((asset for asset in assets if asset.kind == "video" and asset.idea_text == segment), None)
-            if len(chosen) < 3:
-                if video:
-                    video.selected = False
-                continue
-            group = next(item for item in plan.payload["groups"] if item["segment"] == segment)
-            try:
-                built = build_video(
-                    [self.media_root / asset.file_path for asset in chosen[:4]],
-                    group["ads"][0]["title"],
-                    font_path=self.font_path,
-                )
-            except (VideoError, ValueError):
-                continue
-            path = self.store(business_id, f"video-{segment.replace(' ', '-')}", "mp4", built.data)
-            if video is None:
-                video = Asset(business_id=business_id, kind="video", idea_text=segment, file_path=path)
-                self.repository.add(video)
-            video.file_path = path
-            video.selected = True
-        self.repository.commit()
+        build_videos(self.repository, self.media_root, business_id, self.font_path)
 
     def generations_remaining(self, budget: ArtBudget) -> int:
         return max(0, (budget.limit_kop - budget.spent_kop) // (REGENERATE_COUNT * ART_COST_KOP))

@@ -3,7 +3,7 @@ import { Button, Card, ErrorBanner } from '../components';
 import { copy } from '../copy';
 import { answerClientQuestion, getClientQuestions } from '../api/clients';
 import type { ClientQuestion } from '../api/clients';
-import { displayDate } from '../api/period';
+import { displayDate } from '../format';
 import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
 import './Setup.css';

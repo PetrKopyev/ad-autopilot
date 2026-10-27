@@ -82,12 +82,22 @@ def test_pixel_bomb_rejected() -> None:
 
 
 def test_gif_and_animated_png_rejected(photo: Image.Image) -> None:
-    with pytest.raises(ImageRejected, match="JPG and PNG"):
+    with pytest.raises(ImageRejected, match="JPG, PNG and WebP"):
         accept_upload(encoded(photo, "GIF"))
     frames = [photo, Image.new("RGB", photo.size, "red")]
     data = encoded(frames[0], save_all=True, append_images=frames[1:], duration=100)
     with pytest.raises(ImageRejected, match="single-frame"):
         accept_upload(data)
+    animated = encoded(frames[0], "WEBP", save_all=True, append_images=frames[1:], duration=100)
+    with pytest.raises(ImageRejected, match="single-frame"):
+        accept_upload(animated)
+
+
+def test_webp_is_accepted_and_reencoded_to_jpeg(photo: Image.Image) -> None:
+    result = accept_upload(encoded(photo, "WEBP", quality=90))
+    with Image.open(BytesIO(result.data)) as decoded:
+        assert decoded.format == "JPEG"
+    assert (result.width, result.height) == photo.size
 
 
 def test_transparent_empty_image_rejected() -> None:

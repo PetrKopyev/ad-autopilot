@@ -15,7 +15,9 @@ from app.db.models import (
     ChangeLog,
     Experiment,
     LeadsSurvey,
+    OAuthState,
     PlatformAccount,
+    Session,
     StatsDaily,
     User,
     WorkerRun,
@@ -26,7 +28,7 @@ from app.platforms.base import ModerationInfo, Operation, StatRow
 from app.platforms.fake import VirtualClock
 from app.services.experiments import group_available
 from app.services.screens import ScreensService
-from app.services.sync import sync_moderation, sync_stats
+from app.services.sync import approved_at, sync_moderation, sync_stats
 from app.worker.jobs import (
     HEARTBEAT_KEEP,
     RUN_STALE,
@@ -369,3 +371,115 @@ async def test_sync_keeps_same_external_ids_of_two_platforms_apart_and_is_idempo
     await sync_moderation(worker(repository, adapters), world.business)
     assert (world.ads["direct"][0].moderation_status, world.ads["vk"][0].moderation_status) == ("approved", "rejected")
     assert (world.ads["direct"][0].status, world.ads["vk"][0].status) == ("active", "rejected")
+
+
+async def test_moderation_approvals_are_kept_per_platform(repository) -> None:
+    world = tree(repository, ("direct", "vk"))
+    adapters = {"direct": StubPlatform(100, "approved"), "vk": StubPlatform(200, "rejected")}
+    await sync_moderation(worker(repository, adapters), world.business)
+    meta = world.business.settings["_worker"]
+    assert meta["approvals"] == {"direct:a-1": NOW.isoformat()}
+    assert approved_at(meta, "direct", "a-1") == NOW.isoformat() and approved_at(meta, "vk", "a-1") is None
+
+
+async def test_moderation_reads_old_bare_keys_and_moves_them_under_platform(repository) -> None:
+    world = tree(repository, ("direct",))
+    old = (NOW - timedelta(days=3)).isoformat()
+    world.business.settings = {"_worker": {"approvals": {"a-1": old}, "rewritten": ["a-1"]}}
+    repository.save(world.business)
+    assert approved_at(world.business.settings["_worker"], "direct", "a-1") == old
+    await sync_moderation(worker(repository, {"direct": StubPlatform(100, "approved")}), world.business)
+    assert world.business.settings["_worker"]["approvals"]["direct:a-1"] == old
+
+
+def test_prune_removes_expired_sessions_and_oauth_states(repository) -> None:
+    world = tree(repository)
+    user_id = world.business.user_id
+    sessions = {
+        "expired": Session(id=uuid4().hex, user_id=user_id, expires_at=NOW, csrf_secret="x"),
+        "live": Session(id=uuid4().hex, user_id=user_id, expires_at=NOW + timedelta(seconds=1), csrf_secret="x"),
+    }
+    states = {
+        "expired": OAuthState(state="old-" + uuid4().hex, purpose="login", expires_at=NOW - timedelta(minutes=1)),
+        "used_code": OAuthState(state="used-code:" + uuid4().hex, purpose="login", expires_at=NOW),
+        "live": OAuthState(state="new-" + uuid4().hex, purpose="login", expires_at=NOW + timedelta(minutes=5)),
+    }
+    repository.save(*sessions.values(), *states.values())
+    worker(repository).prune()
+    left_sessions = {row.id for row in repository.rows(Session)}
+    left_states = {row.state for row in repository.rows(OAuthState)}
+    assert {name for name, row in sessions.items() if row.id in left_sessions} == {"live"}
+    assert {name for name, row in states.items() if row.state in left_states} == {"live"}
+
+
+def test_change_of_other_platform_with_same_external_ids_does_not_block_group(repository) -> None:
+    world = tree(repository, ("direct", "vk"))
+    repository.save(change(world.business, platform="vk", entity_type="ad", entity_id="a-1"))
+    assert group_available(worker(repository), world.business, world.groups["direct"]) is True
+    assert group_available(worker(repository), world.business, world.groups["vk"]) is False
+
+
+async def test_old_bare_approval_is_ignored_when_id_exists_on_two_platforms(repository) -> None:
+    world = tree(repository, ("direct", "vk"))
+    old = (NOW - timedelta(days=3)).isoformat()
+    world.business.settings = {"_worker": {"approvals": {"a-1": old}}}
+    repository.save(world.business)
+    adapters = {"direct": StubPlatform(100, "approved"), "vk": StubPlatform(200, "approved")}
+    await sync_moderation(worker(repository, adapters), world.business)
+    approvals = world.business.settings["_worker"]["approvals"]
+    assert approvals["direct:a-1"] == approvals["vk:a-1"] == NOW.isoformat()
+
+
+class RejectingPlatform(StubPlatform):
+    def __init__(self, reason: str) -> None:
+        super().__init__(0, "rejected")
+        self.reason = reason
+        self.clock = VirtualClock(NOW)
+
+    async def get_moderation(self, refs) -> list[ModerationInfo]:
+        # Директ и VK отдают время ответа равным моменту опроса.
+        return [ModerationInfo("a-1", "rejected", self.reason, self.clock.now)]
+
+
+async def test_rejection_notice_is_one_per_ad_and_reason_not_per_poll(repository) -> None:
+    world = tree(repository, ("direct",))
+    platform = RejectingPlatform("Нужна лицензия")
+    for hours in range(3):
+        platform.clock = VirtualClock(NOW + timedelta(hours=hours))
+        await sync_moderation(worker(repository, {"direct": platform}, now=platform.clock.now), world.business)
+    platform.reason = "Неверный адрес"
+    await sync_moderation(worker(repository, {"direct": platform}), world.business)
+    notices = repository.rows(WorkerRun, world.business.id, kind="notification")
+    assert sorted(row.log[0]["text"] for row in notices) == [
+        "Объявление «Т1»: Неверный адрес.",
+        "Объявление «Т1»: Нужна лицензия.",
+    ]
+
+
+def test_unread_notifications_and_mark_read(repository) -> None:
+    world = tree(repository)
+    business_id = world.business.id
+    rows = {
+        "old": run(business_id, kind="notification", slot_key="n1", started_at=NOW, log=[{"reason_code": "ANOMALY"}]),
+        "new": run(
+            business_id,
+            kind="notification",
+            slot_key="n2",
+            started_at=NOW + timedelta(hours=1),
+            log=[{"reason_code": "ANOMALY"}],
+        ),
+        "other_code": run(
+            business_id, kind="notification", slot_key="n3", log=[{"reason_code": "EXPERIMENT_TOO_LONG"}]
+        ),
+        "proposed": run(
+            business_id, kind="notification", slot_key="n4", status="proposed", log=[{"reason_code": "ANOMALY"}]
+        ),
+        "step": run(business_id, slot_key="n5", log=[{"reason_code": "ANOMALY"}]),
+    }
+    repository.save(*rows.values())
+    names = {row.id: name for name, row in rows.items()}
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10)] == ["new", "old"]
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 1)] == ["new"]
+    repository.mark_read(business_id, [rows["new"].id, rows["step"].id], NOW)
+    assert [names[row.id] for row in repository.unread_notifications(business_id, {"ANOMALY"}, 10)] == ["old"]
+    assert repository.find(WorkerRun, id=rows["step"].id).log == [{"reason_code": "ANOMALY"}]

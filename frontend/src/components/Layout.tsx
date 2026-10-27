@@ -27,7 +27,7 @@ export function Layout() {
     finally { setBusy(false); }
   }
   return (
-    <div className="app-layout">
+    <div className={`app-layout${session.data ? '' : ' app-layout--guest'}`}>
       <a className="skip-link" href="#main">{copy.navigation.skip}</a>
       <header className="app-header">
         <Link to="/" className="brand">{copy.appName}</Link>
@@ -35,7 +35,8 @@ export function Layout() {
           <Button variant="secondary" disabled={busy} onClick={() => void signOut()}>{copy.launchFlow.logout}</Button>
         </div> : session.data === null && <Link to="/login" className="header-link">{copy.login.title}</Link>}
       </header>
-      <aside className="sidebar">
+      {/* Разделы закрыты до входа: меню показываем только вошедшему. */}
+      {session.data && <aside className="sidebar">
         <nav aria-label={copy.navigation.label}>
           {navigation.map(({ to, label }) => (
             <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`}>
@@ -44,7 +45,7 @@ export function Layout() {
           ))}
         </nav>
         <Link className="setup-link" to="/setup">{copy.common.start}</Link>
-      </aside>
+      </aside>}
       <main id="main" className="main-content" tabIndex={-1}>
         {(error || session.error) && <ErrorBanner message={error || session.error!} onRetry={error ? () => void signOut() : session.reload} />}
         <Outlet />

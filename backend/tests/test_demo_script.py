@@ -16,7 +16,10 @@ def stand(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text(f'#!/bin/sh\necho "$@" > "{tmp_path}/docker-args"\n')
+    docker.write_text(
+        f'#!/bin/sh\necho "$@" >> "{tmp_path}/docker-args"\n'
+        '[ "$1" = network ] && [ -n "${OLD_SUBNET:-}" ] && echo "$OLD_SUBNET"\nexit 0\n'
+    )
     docker.chmod(0o755)
 
     def run(env_file: str, **env: str) -> subprocess.CompletedProcess:
@@ -36,8 +39,29 @@ def test_demo_starts_separate_compose_project(stand, env_file):
     root, run = stand
     result = run("COMPOSE_PROJECT_NAME=autopilot-demo\n" + env_file)
     assert result.returncode == 0, result.stderr
-    args = (root / "docker-args").read_text().split()
+    calls = (root / "docker-args").read_text().splitlines()
+    args = calls[-1].split()
     assert args[:3] == ["compose", "-p", "autopilot-demo"] and args[-3:] == ["up", "-d", "--build"]
+    assert not any(call.endswith(" down") for call in calls)
+
+
+@pytest.mark.parametrize(
+    "env_file,old,removed",
+    [
+        ("", "172.18.0.0/16", True),
+        ("", "172.31.250.0/24", False),
+        ("APP_SUBNET=10.20.0.0/24\n", "172.31.250.0/24", True),
+        ("APP_SUBNET=10.20.0.0/24\n", "10.20.0.0/24", False),
+    ],
+)
+def test_demo_recreates_old_stand_with_other_subnet(stand, env_file, old, removed):
+    root, run = stand
+    result = run("APP_DOMAIN=localhost\n" + env_file, OLD_SUBNET=old)
+    assert result.returncode == 0, result.stderr
+    calls = (root / "docker-args").read_text().splitlines()
+    assert calls[0].startswith("network inspect autopilot-demo_default")
+    assert any(call.endswith(" down") for call in calls) is removed
+    assert calls[-1].endswith("up -d --build")
 
 
 @pytest.mark.parametrize(

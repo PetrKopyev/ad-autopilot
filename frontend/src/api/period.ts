@@ -16,7 +16,3 @@ export async function getPeriod(choice: PeriodChoice, signal?: AbortSignal): Pro
   const demoDate = mockEnabled ? null : await getDemoDate(signal);
   return periodFor(choice, demoDate ? new Date(`${demoDate}T12:00:00`) : new Date());
 }
-export function displayDate(value: string): string {
-  return new Date(value.length === 10 ? `${value}T12:00:00` : value).toLocaleDateString('ru-RU');
-}
-export function displayTime(value: string): string { return new Date(value).toLocaleString('ru-RU'); }

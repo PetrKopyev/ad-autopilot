@@ -392,6 +392,35 @@ async def test_postgresql_filters_history_by_owner_platform_actor_and_page(datab
 
 
 @pytest.mark.db
+async def test_postgresql_history_hides_routine_limit_recalculation_unless_system_is_asked(database, tree):
+    db, business, user = database
+    adapter, refs = tree
+    repository = ChangesRepository(db)
+    for index, (kind, operation) in enumerate(
+        (
+            ("budget", Operation("set_budget", "campaign", refs.campaign_id, "daily_limit_kop", 10_000, 12_000)),
+            ("pause", Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto")),
+        )
+    ):
+        await ChangesService(repository, dry_run=False).apply_change(
+            business_id=business.id,
+            adapter=adapter,
+            refs=refs,
+            operations=[operation],
+            actor="system",
+            platform="fake",
+            kind=kind,
+            reason_code="BUDGET_REBALANCE",
+            reason_text="Пересчитали лимиты.",
+            now=datetime(2026, 10, 20, tzinfo=UTC) + timedelta(days=index),
+        )
+    rows, total = repository.history(user.id)
+    assert total == 1 and [row.kind for row in rows] == ["pause"]
+    rows, total = repository.history(user.id, actor="system")
+    assert total == 2
+
+
+@pytest.mark.db
 def test_postgresql_business_lock_survives_commit_and_rejects_parallel_writer(database):
     db, business, _ = database
     first = ChangesRepository(db)
@@ -404,3 +433,15 @@ def test_postgresql_business_lock_survives_commit_and_rejects_parallel_writer(da
                     pytest.fail("Parallel writer acquired a held business lock")
         with second.business_lock(business.id):
             pass
+
+
+def test_conflict_texts_shown_to_owner_have_no_internal_jargon():
+    import inspect
+
+    from app.services import changes, experiments
+    from app.worker import jobs
+
+    sources = "".join(inspect.getsource(module) for module in (changes, experiments, jobs))
+    for text in (changes.PENDING, experiments.VARIANT_UNCONFIRMED):
+        assert "свер" not in text.lower()
+    assert "шаг будет повторён" not in sources and "требуется сверить" not in sources

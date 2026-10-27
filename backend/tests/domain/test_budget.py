@@ -167,3 +167,19 @@ def test_group_limits_start_equal_and_use_updated_weights():
     updated = split_group_limits(platform, {"a": Decimal("1.2"), "b": Decimal(1), "c": Decimal(0)})
     assert updated[0].daily_limit > updated[1].daily_limit
     assert updated[2].remaining_cap == updated[2].daily_limit == updated[2].weekly_limit == 0
+
+
+@pytest.mark.parametrize("month_start", [date(2026, 2, 1), date(2028, 2, 1), date(2026, 4, 1), date(2026, 1, 1)])
+def test_odd_kopecks_split_without_loss_in_months_of_any_length(month_start):
+    days = (month_start.replace(month=month_start.month % 12 + 1) - month_start).days
+    plan = plan_budget(1_000_003, 0, month_start)
+    assert plan.authorized == 920_002
+    assert sum(limit.remaining_cap for limit in plan.limits) == plan.authorized
+    daily = sum(limit.daily_limit for limit in plan.limits)
+    assert daily == plan.authorized // days and daily * days <= plan.authorized
+    spent, today = 0, month_start
+    while today.month == month_start.month:
+        plan = plan_budget(1_000_003, spent, today)
+        spent += sum(limit.daily_limit for limit in plan.limits)
+        today += timedelta(days=1)
+    assert plan.authorized - days < spent <= plan.authorized

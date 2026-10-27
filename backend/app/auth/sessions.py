@@ -10,7 +10,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import Asset, Business, OAuthState, PlatformAccount, Session, User
+from app.auth.revoke import Revocation, revocation, same_vk_access
+from app.db.models import Business, OAuthState, PlatformAccount, Session, User
 from app.db.session import SessionLocal
 
 SESSION_COOKIE = "__Host-session"
@@ -127,11 +128,40 @@ class AuthRepository:
         self.db.commit()
         return accounts
 
-    def delete_user(self, user_id: int) -> list[str]:
-        paths = list(self.db.scalars(select(Asset.file_path).join(Business).where(Business.user_id == user_id)))
+    def revocations(self, user_id: int, account_id: int | None = None) -> list[Revocation]:
+        """Токены, которые нужно отозвать при удалении пользователя или отключении кабинета.
+
+        VK удаляет все токены пользователя у client_id сразу, поэтому кабинет VK, подключённый ещё где-то тем же
+        способом, не трогаем.
+        """
+        statement = select(PlatformAccount).join(Business).where(Business.user_id == user_id)
+        if account_id is not None:
+            statement = statement.where(PlatformAccount.id == account_id)
+        accounts = list(self.db.scalars(statement.where(PlatformAccount.status != "revoked")))
+        removed = [account.id for account in accounts] if account_id is None else [account_id]
+        result = []
+        for account in accounts:
+            shared = account.platform == "vk" and any(
+                same_vk_access(account, other)
+                for other in self.db.scalars(
+                    select(PlatformAccount).where(
+                        PlatformAccount.platform == "vk",
+                        PlatformAccount.external_login == account.external_login,
+                        PlatformAccount.status != "revoked",
+                        PlatformAccount.id.not_in(removed),
+                    )
+                )
+            )
+            if not shared and (item := revocation(account)) is not None:
+                result.append(item)
+        return result
+
+    def delete_user(self, user_id: int) -> list[int]:
+        """Удаляет пользователя каскадом; возвращает id его бизнесов, чтобы удалить их каталоги с файлами."""
+        businesses = list(self.db.scalars(select(Business.id).where(Business.user_id == user_id)))
         self.db.execute(delete(User).where(User.id == user_id))
         self.db.commit()
-        return paths
+        return businesses
 
     def disconnect_account(self, user_id: int, account_id: int) -> bool:
         account = self.db.scalar(

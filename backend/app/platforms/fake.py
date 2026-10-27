@@ -29,6 +29,7 @@ from app.platforms.base import (
     TargetSpec,
     _money,
 )
+from app.worker.clock import MOSCOW, today
 
 
 class VirtualClock:
@@ -402,9 +403,9 @@ class FakeAdapter:
             raise PlatformError("Неизвестный статус.")
 
     def _simulate_minute(self, tick: datetime) -> None:
-        # Слот [tick - 1 минута, tick) относится к дню начала слота, в том числе у полуночи.
+        # Слот [tick - 1 минута, tick) относится к московскому дню начала слота, как сутки площадок.
         slot = tick - timedelta(minutes=1)
-        day = slot.date()
+        day = slot.astimezone(MOSCOW).date()
         self._finish_reviews(slot)
         for ad_id, truth in self._ad_truths.items():
             ad = self._states[ad_id]
@@ -479,14 +480,14 @@ class FakeAdapter:
                 counters.cost_kop,
                 {"lead": counters.conversions},
                 self.clock.now,
-                day <= self.clock.now.date() - timedelta(days=2) and (entity_id, day) not in unsettled,
+                day <= today(self.clock) - timedelta(days=2) and (entity_id, day) not in unsettled,
             )
             for (entity_id, campaign_id, day), counters in sorted(aggregated.items())
         ]
 
     async def get_spend_today(self) -> int:
         self._request()
-        return sum(cost for (_, day), cost in self._spent_daily.items() if day == self.clock.now.date())
+        return sum(cost for (_, day), cost in self._spent_daily.items() if day == today(self.clock))
 
     async def get_balance_hint(self) -> int | None:
         self._request()
@@ -506,3 +507,6 @@ class FakeAdapter:
     async def min_budgets(self) -> dict[str, int]:
         self._request()
         return {"day": 0, "period": 0}
+
+    async def geo_targeting(self, city: str) -> dict[str, str]:
+        return {"city": city}

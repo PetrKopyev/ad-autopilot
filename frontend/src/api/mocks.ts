@@ -94,11 +94,12 @@ export function mockHistory() {
 }
 
 // Onboarding and running screens share the business budget and account state.
-import type { Business, BusinessInput, Description, Marking, Me, SiteCheck } from './setup';
+import type { Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
 import type { Plan, PlanAsset } from './plan';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
 import type { ClientQuestion, ClientQuestions } from './clients';
 import type { BusinessSettings } from './settings';
+import type { AppNotification } from './notifications';
 interface SetupMockState {
   me: Me; business?: Business; description?: Description; counter?: number; goals?: number[];
   marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean;
@@ -127,9 +128,10 @@ export function mockSetupConnect(platform: 'login' | 'direct' | 'vk') {
   persistSetupMock();
 }
 export function mockSetupLogout() { setupMock.signedOut = true; persistSetupMock(); }
-export function mockSetupDisconnect(id: number) {
+export function mockSetupDisconnect(id: number): StopResult {
   setupMock.me.accounts = setupMock.me.accounts.filter((item) => item.id !== id);
   setupMock.plan = undefined; persistSetupMock();
+  return { stopped: true, message: 'Кабинет отключён. Рекламу на этой площадке перед отключением остановили.' };
 }
 export function mockSetupBusiness(body: BusinessInput): Business {
   setupMock.business = { ...body, id: 1 }; setupMock.description = undefined;
@@ -259,12 +261,13 @@ export function mockClientAnswer(id: string, clients: number | null) {
 }
 let businessSettings: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
   auto_continue: true, marking: null,
-  description: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
+  description: { fields: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
     { value: { services: copy.launchFlow.mockServices, prices: copy.launchFlow.mockPrices, address: copy.launchFlow.mockAddress, difference: '' }[key],
-      quote: null, verified: true, question: '' }])) as unknown as BusinessSettings['description'] };
+      quote: null, verified: true, question: '' }])) as Description } };
 function mockMonthBudget() { return setupMock.business?.month_budget_kop ?? businessSettings.month_budget_kop; }
 export function mockBusinessSettings(): BusinessSettings {
-  return structuredClone({ ...businessSettings, ...setupMock.business, description: setupMock.description ?? businessSettings.description });
+  return structuredClone({ ...businessSettings, ...setupMock.business,
+    description: setupMock.description ? { fields: setupMock.description } : businessSettings.description });
 }
 export function mockSaveBudget(kopecks: number) {
   businessSettings.month_budget_kop = kopecks;
@@ -276,4 +279,20 @@ export function mockSaveBusinessSettings(autoContinue: boolean, average: number 
 }
 export function mockPauseAutopilot() { paused = true; }
 export function mockResumeAutopilot() { paused = false; }
-export function mockDeleteMyData() { businessSettings = { ...businessSettings, marking: null }; mockSetupLogout(); }
+export function mockDeleteMyData(): StopResult {
+  businessSettings = { ...businessSettings, marking: null }; mockSetupLogout();
+  return { stopped: true, message: 'Данные удалены. Рекламу перед удалением остановили.' };
+}
+
+const notifications: AppNotification[] = [
+  { id: 2, kind: 'moderation', created_at: hoursAgo(1), level: 'warning', title: 'Площадка отклонила объявление',
+    text: 'ВКонтакте не пропустил объявление «Маникюр рядом с вами»: на картинке слишком много текста. Замените картинку в разделе «Реклама».' },
+  { id: 1, kind: 'budget', created_at: hoursAgo(26), level: 'info', title: 'Потрачена половина бюджета',
+    text: 'За месяц потратили 15 000 ₽ из 30 000 ₽. Остальное распределим на оставшиеся дни.' },
+];
+export function mockNotifications(): AppNotification[] { return structuredClone(notifications); }
+export function mockReadNotification(id: number) {
+  const index = notifications.findIndex((item) => item.id === id);
+  if (index < 0) throw new Error(copy.errors.notFound);
+  notifications.splice(index, 1);
+}

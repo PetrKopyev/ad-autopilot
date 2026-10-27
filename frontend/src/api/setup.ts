@@ -17,6 +17,8 @@ export interface SiteCheck {
   status: 'reading' | 'ready' | 'blocked'; pages_read: number; services_found: number;
   counter_id: number | null; description: Description; medical_level: 'none' | 'maybe' | 'required';
 }
+/** Перед отзывом доступа сервер останавливает рекламу; stopped=false — площадка остановку не подтвердила. */
+export interface StopResult { stopped: boolean; message: string }
 export interface Counter { id: number; name: string }
 export interface Goal { id: number; name: string }
 export interface Marking {
@@ -25,6 +27,11 @@ export interface Marking {
 }
 export async function setupGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   const result = await api<T>(path, { signal });
+  if (result === undefined) throw new ApiError(copy.errors.invalidResponse);
+  return result;
+}
+export async function setupMutation<T>(path: string, method: string): Promise<T> {
+  const result = await api<T>(path, { method });
   if (result === undefined) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
@@ -45,9 +52,9 @@ export async function logout() {
   try { sessionStorage.removeItem('ad-autopilot-setup-draft'); } catch { /* Storage may be unavailable. */ }
   try { sessionStorage.removeItem(demoDateKey); } catch { /* Storage may be unavailable. */ }
 }
-export async function disconnectAccount(id: number) {
-  if (mockEnabled) { (await import('./mocks')).mockSetupDisconnect(id); return; }
-  await api(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export async function disconnectAccount(id: number): Promise<StopResult> {
+  if (mockEnabled) return (await import('./mocks')).mockSetupDisconnect(id);
+  return setupMutation(`/api/accounts/${encodeURIComponent(id)}`, 'DELETE');
 }
 export async function connectAccount(platform: 'login' | 'direct' | 'vk', businessId?: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect(platform); return; }

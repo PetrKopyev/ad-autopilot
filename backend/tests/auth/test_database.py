@@ -103,7 +103,7 @@ def test_demo_users_expire_with_businesses_and_files() -> None:
                     # После commit в expire объекты перечитываются, а удалённые строки уже недоступны.
                     old_id, fresh_id, owner_id, business_id = old.id, fresh.id, owner.id, business.id
                     assert users.count() == before + 2
-                    assert users.expire(now - timedelta(hours=24)) == ([business_id], [f"{business_id}/a.jpg"])
+                    assert users.expire(now - timedelta(hours=24)) == [business_id]
                     db.expire_all()
                     assert db.get(User, old_id) is None and db.get(Business, business_id) is None
                     assert db.get(User, fresh_id) and db.get(User, owner_id)

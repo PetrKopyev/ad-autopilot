@@ -2,6 +2,7 @@ import json
 import shutil
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -201,22 +202,83 @@ async def test_select_assets_updates_flags_and_rejects_foreign_ids(world: World)
     ids = [asset["id"] for asset in plan["groups"][0]["assets"]][:1]
     world.plans.select_assets(world.business.id, ids)
     assert [asset.id for asset in world.repository.assets(world.business.id) if asset.selected] == ids
-    with pytest.raises(OnboardingError):
+    with pytest.raises(LookupError):
         world.plans.select_assets(world.business.id, [9999])
     world.repository.add(Asset(business_id=99, kind="image", file_path="x.jpg"))
-    with pytest.raises(OnboardingError):
+    with pytest.raises(LookupError):
         world.plans.select_assets(world.business.id, [world.repository.assets(99)[0].id])
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="Видео собирает ffmpeg")
-async def test_video_is_built_from_three_selected_images(world: World) -> None:
+async def test_video_is_built_from_three_selected_images_and_rebuilt_only_on_change(world: World) -> None:
     plan = await build(world)
     segment_assets = plan["groups"][0]["assets"]
-    world.plans.select_assets(world.business.id, [asset["id"] for asset in segment_assets])
     if len(segment_assets) < 3:
         pytest.skip("В сегменте меньше трёх картинок")
-    videos = [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
-    assert videos and (world.media / videos[0].file_path).stat().st_size > 0
+    ids = [asset["id"] for asset in segment_assets]
+    assert world.plans.select_assets(world.business.id, ids)
+    world.plans.build_videos(world.business.id)
+    (video,) = [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
+    first = video.file_path
+    assert (world.media / first).stat().st_size > 0
+
+    assert not world.plans.select_assets(world.business.id, ids)
+    world.plans.build_videos(world.business.id)
+    assert video.file_path == first
+
+    world.plans.select_assets(world.business.id, ids[:3])
+    world.plans.upload_photo(world.business.id, plan["groups"][0]["id"], picture(777), TODAY)
+    world.plans.build_videos(world.business.id)
+    assert video.file_path != first and video.selected
+    assert not (world.media / first).exists() and (world.media / video.file_path).exists()
+
+    world.plans.select_assets(world.business.id, ids[:2])
+    world.plans.build_videos(world.business.id)
+    assert not video.selected
+
+
+async def test_video_is_not_saved_when_selection_changed_during_build(world: World, monkeypatch) -> None:
+    from app.services import plan as plan_module
+
+    draft = await build(world)
+    ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
+    if len(ids) < 3:
+        pytest.skip("В сегменте меньше трёх картинок")
+    world.plans.select_assets(world.business.id, ids)
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    def build_video(images, title, font_path):
+        world.plans.select_assets(world.business.id, ids[:2])
+        return SimpleNamespace(data=b"video")
+
+    monkeypatch.setattr(plan_module, "build_video", build_video)
+    world.plans.build_videos(world.business.id)
+    assert not [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
+    assert not list((world.media / str(world.business.id)).glob("video-*"))
+
+
+async def test_video_build_skips_busy_business(world: World, monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from app.services import plan as plan_module
+    from app.services.changes import ChangeConflict
+
+    draft = await build(world)
+    ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
+    if len(ids) < 3:
+        pytest.skip("В сегменте меньше трёх картинок")
+    world.plans.select_assets(world.business.id, ids)
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
+
+    @contextmanager
+    def busy(business_id):
+        raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        yield
+
+    monkeypatch.setattr(world.repository, "business_lock", busy)
+    world.plans.build_videos(world.business.id)
+    assert not [asset for asset in world.repository.assets(world.business.id) if asset.kind == "video"]
 
 
 async def test_readiness_reflects_blockers(world: World) -> None:

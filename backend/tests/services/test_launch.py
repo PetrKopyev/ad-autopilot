@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ import pytest
 
 from app.db.models import AdGroup, ArtCall, BudgetLedger, Campaign, ChangeLog, LLMCall
 from app.platforms.base import ExternalRefs, PlatformError
-from app.platforms.direct import DirectAdapter
+from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchBlocked, LaunchFailed
@@ -291,7 +292,6 @@ async def http():
 def info(**changes) -> AccountInfo:
     values = {
         "status": "ok",
-        "city": "Самара",
         "href": "https://salon.example/",
         "counter_id": 12345,
         "marking_confirmed": True,
@@ -336,7 +336,7 @@ async def test_registry_rebuilds_adapter_only_when_account_data_changes(http) ->
     assert registry.resolve(1, "direct") is not first and len(built) == 2
 
 
-async def test_registry_builds_direct_for_known_city_and_refuses_unknown(http) -> None:
+async def test_registry_builds_direct_for_any_city_region_is_resolved_at_launch(http) -> None:
     config = SimpleNamespace(
         direct_api_url="https://api.direct.yandex.com/json/v5",
         direct_api_v501_url="https://api.direct.yandex.com/v501",
@@ -344,5 +344,152 @@ async def test_registry_builds_direct_for_known_city_and_refuses_unknown(http) -
     )
     registry = AdapterRegistry(lambda *key: None, mode="live", http=http, config=config)
     assert isinstance(registry.build("direct", info()), DirectAdapter)
-    with pytest.raises(PlatformError, match="Урюпинск"):
-        registry.build("direct", info(city="Урюпинск"))
+
+
+class Minimums(FakeAdapter):
+    """Минимумы под ключами настоящих площадок: Директ — недельный, VK — дневной и на кампанию."""
+
+    def __init__(self, minimum: dict[str, int]) -> None:
+        super().__init__()
+        self.minimum = minimum
+
+    async def min_budgets(self) -> dict[str, int]:
+        return self.minimum
+
+
+@pytest.mark.parametrize(
+    "platform,minimum",
+    [
+        ("direct", {"weekly_limit_kop": 10**9}),
+        ("direct", {"weekly_limit_kop": 30_000, "daily_limit_kop": 10**8}),
+        ("vk", {"daily_limit_kop": 10**8, "period_cap_kop": 10_000}),
+        ("vk", {"daily_limit_kop": 10_000, "period_cap_kop": 10**9}),
+    ],
+)
+async def test_budget_below_real_platform_minimum_is_blocked(tmp_path: Path, platform, minimum) -> None:
+    adapters = {"direct": FakeAdapter(), "vk": FakeAdapter()} | {platform: Minimums(minimum)}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    with pytest.raises(LaunchBlocked, match="не хватает"):
+        await launch(world, plan)
+    assert not campaigns(world) and all(not adapter._trees for adapter in adapters.values())
+
+
+async def test_budget_at_platform_minimums_launches(tmp_path: Path) -> None:
+    world, plan = await ready(tmp_path)
+    limits = budget_limits(world.business, ["direct", "vk"], TODAY)
+    world.adapters["vk"] = Minimums(
+        {"daily_limit_kop": limits["vk"].daily_limit, "period_cap_kop": limits["vk"].remaining_cap}
+    )
+    # Четверг: Директ получит недельный лимит на четыре дня до воскресенья, его и сравниваем с минимумом.
+    weekly = weekly_limit(limits["direct"].daily_limit, limits["direct"].remaining_cap, TODAY)
+    assert weekly == limits["direct"].daily_limit * 4
+    world.adapters["direct"] = Minimums({"weekly_limit_kop": weekly})
+    assert (await launch(world, plan))["status"] == "launched"
+    assert world.adapters["direct"]._trees
+
+
+async def test_direct_minimum_is_checked_against_the_weekly_limit_actually_sent(tmp_path: Path) -> None:
+    """В четверг уходит лимит на 4 дня: минимум между 4 и 7 дневными раньше пропускался, а Директ его отклонял."""
+    world, plan = await ready(tmp_path)
+    limits = budget_limits(world.business, ["direct", "vk"], TODAY)
+    world.adapters["direct"] = Minimums({"weekly_limit_kop": limits["direct"].daily_limit * 4 + 1})
+    with pytest.raises(LaunchBlocked) as error:
+        await launch(world, plan)
+    assert error.value.reasons[0].startswith("До конца недели осталось мало дней: «Яндекс Директ» не примет")
+    assert not campaigns(world)
+
+
+async def test_exhausted_day_is_explained_before_platform_minimums(tmp_path: Path, monkeypatch) -> None:
+    from app.domain.types import PlatformLimit
+
+    world, plan = await ready(tmp_path)
+    world.adapters["direct"] = Minimums({"weekly_limit_kop": 10**9})
+    monkeypatch.setattr(
+        "app.services.launch.budget_limits",
+        lambda *args: {platform: PlatformLimit(platform, 100_000, 0, 100_000) for platform in ("direct", "vk")},
+    )
+    with pytest.raises(LaunchBlocked, match="почти исчерпан"):
+        await launch(world, plan)
+
+
+class Regions(FakeAdapter):
+    def __init__(self, geo: dict | None) -> None:
+        super().__init__()
+        self.geo = geo
+        self.specs = []
+
+    async def geo_targeting(self, city: str) -> dict:
+        if self.geo is None:
+            raise PlatformError(f"Город «{city}» не найден в справочнике регионов площадки.")
+        return self.geo
+
+    async def create_campaign_tree(self, plan_part):
+        self.specs.append(plan_part)
+        return await super().create_campaign_tree(plan_part)
+
+
+async def test_groups_get_region_of_each_platform(tmp_path: Path) -> None:
+    adapters = {"direct": Regions({"region_ids": [51]}), "vk": Regions({"regions": [123]})}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    await launch(world, plan)
+    for platform, geo in (("direct", {"region_ids": [51]}), ("vk", {"regions": [123]})):
+        groups = adapters[platform].specs[0].groups
+        assert groups and all(group.targeting == geo for group in groups)
+
+
+async def test_unknown_city_blocks_launch_before_anything_is_created(tmp_path: Path) -> None:
+    adapters = {"direct": Regions({"region_ids": [51]}), "vk": Regions(None)}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    with pytest.raises(LaunchBlocked) as error:
+        await launch(world, plan)
+    assert error.value.reasons == ["ВКонтакте: Город «Самара» не найден в справочнике регионов площадки."]
+    assert not campaigns(world) and not adapters["direct"].specs
+    assert world.repository.latest_plan(world.business.id).status == "draft"
+
+
+async def test_zero_budget_cannot_launch(tmp_path: Path) -> None:
+    world, plan = await ready(tmp_path)
+    world.business.month_budget_kop = 0
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    with pytest.raises(LaunchBlocked):
+        await launch(world, plan)
+    assert not campaigns(world)
+
+
+class SlowActivation(FakeAdapter):
+    """Первое включение кампании ждёт сигнала: второй запрос «Запустить» приходит, пока первый ещё идёт."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def apply(self, operation) -> None:
+        if operation.entity_type == "campaign" and operation.after == "active" and not self.release.is_set():
+            self.entered.set()
+            await self.release.wait()
+        await super().apply(operation)
+
+
+async def test_second_launch_while_first_is_running_creates_nothing(tmp_path: Path) -> None:
+    adapters = {"direct": SlowActivation(), "vk": FakeAdapter()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    first = asyncio.create_task(launch(world, plan))
+    await adapters["direct"].entered.wait()
+    with pytest.raises(LaunchBlocked, match="Запуск уже идёт"):
+        await launch(world, plan)
+    adapters["direct"].release.set()
+    assert (await first)["status"] == "launched"
+    assert len(campaigns(world)) == 2
+    launches = [row for row in world.repository.rows(ChangeLog, business_id=world.business.id) if row.kind == "launch"]
+    assert sorted(row.platform for row in launches) == ["direct", "vk"]
+    assert (await launch(world, plan))["status"] == "launched"
+
+
+async def test_failed_launch_can_be_retried_at_once(tmp_path: Path) -> None:
+    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    with pytest.raises(LaunchFailed):
+        await launch(world, plan)
+    adapters["vk"].fail = False
+    assert (await launch(world, plan))["status"] == "launched"

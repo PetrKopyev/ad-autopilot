@@ -33,7 +33,7 @@ async def test_live_worker_uses_database_registry_and_one_http_client(worker_mai
         assert registry.mode == "live" and not registry.http.is_closed
         from app.services.registry import AccountInfo
 
-        registry.load = lambda *_: AccountInfo("ok", "Самара", "https://salon.example", 12, True, "test-only")
+        registry.load = lambda *_: AccountInfo("ok", "https://salon.example", 12, True, "test-only")
         direct, vk = registry.resolve(1, "direct"), registry.resolve(1, "vk")
         assert direct._client is registry.http and vk._client is registry.http
         seen.append(registry)

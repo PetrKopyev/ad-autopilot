@@ -111,6 +111,9 @@ class MemoryRepository(LaunchRepository):
     def commit(self) -> None:
         pass
 
+    def refresh(self, item: object) -> None:
+        pass
+
     def add(self, item: object) -> None:
         self.put(item)
 

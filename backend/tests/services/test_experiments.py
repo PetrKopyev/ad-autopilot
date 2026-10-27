@@ -106,7 +106,7 @@ async def test_dry_run_proposal_is_idempotent_and_does_not_touch_platform(
     second = await create_experiment(worker, world.business, control_snapshot(world), design())
     assert first is second
     assert first.status == "proposed"
-    assert "≈ 10 дней" in first.reason_text
+    assert first.reason_text.endswith("Это займёт примерно 10 дней.") and ".." not in first.reason_text
     assert first.evidence["metric"] == "ctr"
     assert len([change for change in world.repository.rows(ChangeLog) if change.status == "proposed"]) == 1
     assert not world.repository.rows(Experiment)

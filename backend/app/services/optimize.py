@@ -5,11 +5,11 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from app.db.models import Ad, AdGroup, BudgetLedger, Business, ChangeLog, Experiment, StatsDaily
+from app.db.models import Ad, AdGroup, BudgetLedger, Business, Campaign, ChangeLog, Experiment, StatsDaily
 from app.db.query import Window
 from app.domain.budget import allocate, plan_budget, platform_shares, rebalance_platform_shares
 from app.domain.experiments import design_experiment, evaluate_experiment, select_borderline
-from app.domain.explain import explain_decision, explain_experiment
+from app.domain.explain import explain_decision, explain_experiment, rubles
 from app.domain.rules import decide, ref_cpl, settled_days
 from app.domain.types import (
     Action,
@@ -24,8 +24,10 @@ from app.domain.types import (
 )
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend
+from app.services.changes import budget_operations
 from app.services.experiments import completed_hypotheses, group_available
 from app.services.plan import CAP_MULTIPLIER, campaign_limits
+from app.services.sync import approved_at, shared_ids
 from app.worker.clock import MOSCOW, today
 
 if TYPE_CHECKING:
@@ -46,6 +48,7 @@ async def snapshot(
     group_map = {group.id: group for group in groups}
     meta = worker.metadata(business)
     limits = meta.get("group_limits", {})
+    shared = shared_ids(worker, business)
     from app.config import get_domain_settings
 
     # Время изменения нужно правилам только внутри окна охлаждения: старые записи журнала не читаем.
@@ -75,7 +78,7 @@ async def snapshot(
             continue
         group = group_map[ad.ad_group_id]
         platform = campaign_map[group.campaign_id].platform
-        approved = meta.get("approvals", {}).get(ad.external_id)
+        approved = approved_at(meta, platform, ad.external_id, shared)
         days = tuple(
             DaySpend(
                 row.date,
@@ -235,6 +238,25 @@ async def optimize(worker: Worker, business: Business) -> None:
         worker.remember(business, group_limits=limits)
 
 
+async def below_platform_minimum(
+    worker: Worker, business: Business, campaign: Campaign, operations: list[Operation]
+) -> int | None:
+    """Минимальный недельный бюджет Директа, если новые лимиты его не набирают; иначе None.
+
+    Недельный лимит считается так же, как перед Campaigns.update (budget_operations): с расходом этой недели."""
+    from app.platforms.direct import DirectAdapter
+
+    adapter = worker.resolve_adapter(business.id, campaign.platform)
+    if not isinstance(adapter, DirectAdapter) or not any(op.kind == "set_budget" for op in operations):
+        return None
+    minimum = (await adapter.min_budgets()).get("weekly_limit_kop", 0)
+    _, prepared = await budget_operations(
+        worker.repository, business, adapter, worker.refs(campaign), operations, worker.clock.now
+    )
+    weekly = next(op for op in reversed(prepared) if op.budget_context).budget_context["weekly_limit_kop"]
+    return minimum if weekly < minimum else None
+
+
 async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
     from app.config import get_domain_settings
 
@@ -278,6 +300,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     )
     group_limits = {group.id: group.daily_limit for group in groups}
     local_groups = worker.repository.rows(AdGroup, business.id)
+    held = set(meta.get("below_minimum", []))
     # Неиспользуемый вес остаётся у остановленных групп: его получают только хорошие через decide().
     for limit in plan.limits:
         platform_groups = [group for group in groups if group.platform == limit.platform]
@@ -300,7 +323,16 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             )
             states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
             state = states[campaign.external_id]
-            if not desired_daily:
+            operations = [
+                Operation("set_budget", "campaign", campaign.external_id, field, before, after)
+                for field, before, after in (
+                    ("period_cap_kop", state.period_cap_kop, total_cap),
+                    ("daily_limit_kop", state.daily_limit_kop, desired_daily),
+                )
+                if before != after
+            ]
+            minimum = await below_platform_minimum(worker, business, campaign, operations) if desired_daily else None
+            if not desired_daily or minimum:
                 await worker.apply(
                     business,
                     campaign,
@@ -310,30 +342,37 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     reason_code="BUDGET_REBALANCE",
                     kind="pause",
                     actor="system",
-                    reason_text="Доступного дневного бюджета нет: кампанию остановили.",
+                    reason_text="Доступного дневного бюджета нет: кампанию остановили."
+                    if not desired_daily
+                    else f"До конца недели остаток бюджета меньше минимума площадки ({rubles(minimum)} ₽): "
+                    "кампанию остановили. Возобновим, когда бюджета снова хватит.",
                 )
                 if not worker.proposed(business):
-                    campaign.daily_limit_kop = 0
-                    worker.repository.save(campaign)
+                    if minimum:
+                        held.add(campaign.id)
+                    else:
+                        campaign.daily_limit_kop = 0
+                        worker.repository.save(campaign)
                 continue
-            operations = [
-                Operation("set_budget", "campaign", campaign.external_id, field, before, after)
-                for field, before, after in (
-                    ("period_cap_kop", state.period_cap_kop, total_cap),
-                    ("daily_limit_kop", state.daily_limit_kop, desired_daily),
+            resume = campaign.id in held and state.status == "paused_auto"
+            if resume:
+                # Кампанию останавливал только недостаток до минимума площадки: лимиты снова его набирают.
+                operations.append(
+                    Operation("set_status", "campaign", campaign.external_id, "status", "paused_auto", "active")
                 )
-                if before != after
-            ]
             await worker.apply(
                 business,
                 campaign,
                 operations,
                 reason_code="BUDGET_REBALANCE",
-                kind="budget",
+                kind="resume" if resume else "budget",
                 actor="system",
-                reason_text="Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
+                reason_text="Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
+                if resume
+                else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
             )
             if not worker.proposed(business):
+                held.discard(campaign.id)
                 # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
                 campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
                 worker.repository.save(campaign)
@@ -364,6 +403,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             if shares != {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
             else previous.isoformat(),
             group_limits=group_limits,
+            below_minimum=sorted(held),
         )
 
 

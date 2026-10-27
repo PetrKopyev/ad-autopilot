@@ -1,3 +1,5 @@
+import { plural } from './format';
+
 export const copy = {
   launchFlow: {
     loading: 'Загружаем…',
@@ -44,7 +46,7 @@ export const copy = {
     photoHint: 'Ваши фото работают лучше. JPEG, PNG или WebP, до 10 МБ.',
     photoError: 'Выберите фото JPEG, PNG или WebP размером до 10 МБ.',
     uploadError: 'Не удалось загрузить фото. Попробуйте ещё раз.',
-    remaining: (count: number) => count > 0 ? `Можно попросить ещё ${count} ${count === 1 ? 'вариант' : count < 5 ? 'варианта' : 'вариантов'} картинок.` : 'Все варианты картинок уже подготовлены. Вы можете загрузить своё фото.',
+    remaining: (count: number) => count > 0 ? `Можно попросить ещё ${count} ${plural(count, 'вариант', 'варианта', 'вариантов')} картинок.` : 'Все варианты картинок уже подготовлены. Вы можете загрузить своё фото.',
     chooseImages: 'Выберите хотя бы одну картинку в каждой группе.',
     notReady: 'Завершите настройку и подтвердите маркировку перед запуском.',
     launched: 'Реклама запущена',
@@ -188,6 +190,7 @@ export const copy = {
   home: {
     title: 'Главная',
     working: (minutes: number) => minutes === 0 ? 'Работает, проверено только что' : `Работает, последняя проверка ${minutes} мин назад`,
+    checkedAt: (time: string) => `Работает, последняя проверка ${time}`,
     paused: 'Пауза',
     exhausted: 'Бюджет месяца израсходован — снова запустим 1 числа',
     stopAll: 'Остановить всю рекламу',
@@ -198,6 +201,8 @@ export const copy = {
     clientPrice: 'Цена клиента',
     needsAttention: 'Что нужно от вас',
     recent: 'Недавно сделали',
+    notifications: 'Уведомления',
+    understood: 'Понятно',
   },
   budget: {
     spent: 'Потрачено',
@@ -253,7 +258,7 @@ export const copy = {
   clients: {
     title: 'Клиенты',
     weekly: 'Вопросы и ответы за неделю',
-    question: (count: number) => `Сколько из ${count} обращений стали клиентами?`,
+    question: (count: number) => `Сколько из ${count} ${plural(count, 'обращения', 'обращений', 'обращений')} стали клиентами?`,
     unknown: 'Не знаю',
   },
   settings: {
@@ -274,8 +279,9 @@ export const copy = {
     intro: 'Здесь видно всё, что менялось в рекламе: кто, когда и почему.',
     filterPlatform: 'Площадка',
     filterAuthor: 'Кто изменил',
+    routineHint: 'Ежедневный пересчёт дневных лимитов в пределах вашего бюджета в общий список не попадает: он виден, если выбрать «Контроль бюджета».',
     all: 'Все',
-    authors: { autopilot: 'Автопилот', owner: 'Вы', external: 'Площадка' },
+    authors: { autopilot: 'Автопилот', owner: 'Вы', system: 'Контроль бюджета', external: 'Площадка' },
     kinds: {
       pause: 'Остановка рекламы',
       resume: 'Возобновление рекламы',
@@ -290,6 +296,7 @@ export const copy = {
     statuses: { proposed: 'Предложено', pending: 'Выполняется', failed: 'Не получилось', reverted: 'Отменено' },
     revertedLine: (title: string) => `Вы отменили: ${title}`,
     revertedPlain: 'Вы отменили изменение',
+    resumedAfterStop: 'Вы продолжили рекламу',
     justNow: 'только что',
     numbers: 'Цифры',
     numberLabels: { cost_kop: 'Потрачено', leads: 'Обращений', clicks: 'Кликов', impressions: 'Показов', cost_per_lead_kop: 'Цена обращения', budget_kop: 'Бюджет' },
@@ -297,6 +304,11 @@ export const copy = {
     confirmYes: 'Да, отменить',
     confirmNo: 'Не отменять',
     reverting: 'Отменяем…',
+    resume: 'Продолжить',
+    resumeTitle: 'Продолжить рекламу?',
+    resumeYes: 'Да, продолжить',
+    resumeNo: 'Не продолжать',
+    resuming: 'Продолжаем…',
     showMore: 'Показать ещё',
     emptyTitle: 'Изменений пока нет',
     emptyDescription: 'Когда автопилот или вы что-то поменяете в рекламе, запись появится здесь.',
@@ -381,7 +393,10 @@ export const copy = {
     dates: (from: string, to: string) => `${from} — ${to}`,
     noClients: 'Клиентов пока не знаем',
     clientsWindow: 'Клиенты — за четыре завершённые недели, по вашим ответам.',
-    answeredWeeks: (answered: number, unknown: number) => `Недель с ответами: ${answered}. Без ответа: ${unknown}.`,
+    answeredWeeks: (answered: number, unknown: number) => answered === 0
+      ? 'Вы пока не ответили ни за одну из этих недель — ответы даёте в разделе «Клиенты».'
+      : unknown === 0 ? `Ответы есть за все ${answered} ${plural(answered, 'неделю', 'недели', 'недель')}.`
+        : `Ответы есть за ${answered} ${plural(answered, 'неделю', 'недели', 'недель')} из ${answered + unknown}.`,
     noPrice: 'Пока не рассчитана',
     heartbeatMissing: 'Проверки ещё не было',
     heartbeatStale: 'Автопилот давно не проверял рекламу. Проверьте подключение в настройках.',
@@ -411,7 +426,7 @@ export const copy = {
     noExperiments: 'Сейчас идеи не проверяем',
     experimentHint: 'Когда данных будет достаточно, сравним два варианта объявления.',
     experimentExplanation: 'Показываем два варианта объявления и сравниваем, на какой чаще нажимают. Проверяем также обращения: больше нажатий само по себе не означает больше клиентов.',
-    remainingShows: (count: number) => `Осталось собрать ${count.toLocaleString('ru-RU')} показов.`,
+    remainingShows: (count: number) => `Осталось собрать ${count.toLocaleString('ru-RU')} ${plural(count, 'показ', 'показа', 'показов')}.`,
     experimentStates: { running: 'Собираем данные', concluded: 'Проверка завершена', cancelled: 'Проверка остановлена' },
     changing: 'Сохраняем…',
     updatedAd: 'Состояние объявления обновлено',
@@ -424,6 +439,7 @@ export const copy = {
     platforms: { direct: 'Яндекс Директ', vk: 'ВКонтакте', fake: 'Учебная площадка' },
     unknownGroup: 'Группа не указана',
     entity: (level: string, id: string | number) => `${level} № ${id}`,
+    adVariant: (label: string, index: number) => `${label}, вариант ${index}`,
     noStats: 'За этот период данных пока нет',
     noStatsHint: 'Выберите другой период или дождитесь первых показов.',
     noSources: 'Источник и время обновления пока неизвестны.',
@@ -433,6 +449,9 @@ export const copy = {
     chartSpend: 'Расход, ₽',
     chartLeads: 'Обращения',
     chartDetails: 'Данные графика по дням',
+    chartToday: 'Сегодняшний день ещё идёт, поэтому на графике его нет.',
+    chartPending: 'Пустые точки — дни, цифры за которые площадки ещё уточняют.',
+    chartFootnote: '* — цифры за день ещё уточняются.',
     day: 'День',
     pending: 'Предложено',
     historyStates: { pending: 'Применяем', applied: 'Сделано', failed: 'Не удалось', reverted: 'Отменено', proposed: 'Предложено' },

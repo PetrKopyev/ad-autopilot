@@ -5,10 +5,10 @@ import { copy } from '../copy';
 import { getAds, getExperiments, setAdStatus } from '../api/screens';
 import { useResource } from '../api/useResource';
 import type { Ad } from '../api/types';
-import { DemoNotice, NullableMoney, platformName } from './StatsShared';
+import { DemoNotice, NullableMoney, adLabels, platformName } from './StatsShared';
 import './Ads.css';
 
-function AdCard({ ad, changed }: { ad: Ad; changed: () => void }) {
+function AdCard({ ad, name, changed }: { ad: Ad; name: string; changed: () => void }) {
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const [error, setError] = useState<string>();
@@ -24,7 +24,7 @@ function AdCard({ ad, changed }: { ad: Ad; changed: () => void }) {
     finally { lock.current = false; setBusy(false); }
   }
   return <article className="ads-ad page-stack">
-    <div className="ads-ad-heading"><h3>{ad.title}</h3><StatusBadge tone={ad.status === 'active' ? 'success' : ad.status === 'rejected' ? 'danger' : 'neutral'}>
+    <div className="ads-ad-heading"><h3>{name}</h3><StatusBadge tone={ad.status === 'active' ? 'success' : ad.status === 'rejected' ? 'danger' : 'neutral'}>
       {ad.reason ? copy.screens.because(label, ad.reason) : label}</StatusBadge></div>
     {ad.image_url && <img className="ads-image" src={ad.image_url} alt={ad.title} loading="lazy" />}
     <p>{ad.text}</p>
@@ -50,6 +50,7 @@ export function AdsPage() {
   const experiments = useResource(getExperiments);
   const items = ads.data?.items ?? [];
   const platforms = [...new Set(items.map((item) => item.platform))];
+  const names = adLabels(items);
   return <div className="page-stack">
     <div className="page-heading"><h1>{copy.ads.title}</h1><p className="muted">{copy.screens.adIntro}</p></div>
     <DemoNotice />
@@ -68,7 +69,7 @@ export function AdsPage() {
             {groups.map((groupId) => {
               const groupAds = campaignAds.filter((ad) => ad.group_id === groupId);
               return <details className="ads-branch ads-group" key={groupId} open><summary>{groupAds[0].group_name}</summary>
-                <div className="page-stack">{groupAds.map((ad) => <AdCard key={ad.id} ad={ad} changed={ads.reload} />)}</div>
+                <div className="page-stack">{groupAds.map((ad) => <AdCard key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} changed={ads.reload} />)}</div>
               </details>;
             })}
           </details>;

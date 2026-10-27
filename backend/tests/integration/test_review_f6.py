@@ -253,3 +253,51 @@ async def test_refs_reads_change_history_once_per_tick(monkeypatch):
     world.clock.advance(hours=0.5)
     assert worker.refs(world.campaign) == first
     assert calls == [world.business.id, world.business.id]
+
+
+async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_rejection(monkeypatch):
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    ad = next(iter(world.ads.values()))
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", ad.external_id, "text", ad.text, "Исправлено")])
+    for _ in range(2):
+        world.clock.advance(hours=1)
+        await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    rewrite.assert_awaited_once()
+    assert world.business.settings["_worker"]["rewritten"] == [f"direct:{ad.external_id}"]
+    assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
+
+
+async def test_stop_platform_before_revoke_pauses_campaign_and_writes_history():
+    from app.services.budget_guard import stop_platform
+
+    world = await make_world()
+    worker = world.worker()
+    worker.step_key = "owner:revoke"
+    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is True
+    (change,) = world.changes(reason_code="ACCOUNT_REVOKE")
+    assert (change.actor, change.kind, change.status) == ("owner", "pause", "applied")
+    assert change.reason_text == "Остановили."
+    assert world.campaign.status == "paused_owner"
+    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Повтор.") is True
+    assert len(world.changes(reason_code="ACCOUNT_REVOKE")) == 1
+    assert await stop_platform(world.business, worker=worker, platform="vk", reason_text="Другая.") is True
+
+
+async def test_stop_platform_reports_unconfirmed_stop(monkeypatch):
+    from app.platforms.base import PlatformError
+    from app.services.budget_guard import stop_platform
+
+    world = await make_world()
+    monkeypatch.setattr(world.adapter, "apply", AsyncMock(side_effect=PlatformError("Площадка недоступна.")))
+    worker = world.worker()
+    worker.step_key = "owner:revoke"
+    assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Остановили.") is False
+    assert world.campaign.status != "paused_owner"

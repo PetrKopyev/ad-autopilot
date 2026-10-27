@@ -95,7 +95,7 @@ async def stop_all(
                     kind="pause",
                     reason_code=reason_code,
                     reason_params=reason_params,
-                    reason_text="Останавливаем рекламу на всех площадках.",
+                    reason_text="Остановили рекламу на всех площадках.",
                     suffix="stop_all",
                 )
             except (PlatformError, ChangeConflict):
@@ -105,6 +105,36 @@ async def stop_all(
         if not worker.proposed(business):
             business.status = "budget_stop" if budget_stop else "paused"
             worker.remember(business, pending_stop=None)
+
+
+async def stop_platform(business: Business, *, worker: Worker, platform: str, reason_text: str) -> bool:
+    """Перед отзывом доступа к кабинету: без токена ни автопилот, ни страж бюджета рекламу уже не остановят.
+
+    Возвращает, подтвердила ли площадка остановку всех кампаний; остановка записывается в журнал от имени владельца.
+    """
+    stopped = True
+    for campaign in worker.campaigns(business):
+        if campaign.platform != platform:
+            continue
+        try:
+            states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
+            state = states[campaign.external_id]
+            if state.status in {"paused_auto", "paused_owner", "archived"}:
+                continue
+            change = await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_owner")],
+                actor="owner",
+                kind="pause",
+                reason_code="ACCOUNT_REVOKE",
+                reason_text=reason_text,
+                suffix="revoke",
+            )
+            stopped = stopped and change.status == "applied"
+        except (PlatformError, ChangeConflict, KeyError):
+            stopped = False
+    return stopped
 
 
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:

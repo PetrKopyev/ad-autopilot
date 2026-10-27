@@ -1,7 +1,8 @@
 import { copy } from '../copy';
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number = 0) {
+  /** detail — текст ошибки от сервера, если он его прислал. */
+  constructor(message: string, public readonly status: number = 0, public readonly detail?: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -38,6 +39,17 @@ function errorMessage(status: number): string {
     case 422: return copy.errors.validation;
     case 429: return copy.errors.rateLimit;
     default: return status >= 500 ? copy.errors.server : copy.errors.generic;
+  }
+}
+
+// Сервер объясняет ошибку сам («запуск уже идёт», «файл больше 10 МБ»): его текст понятнее общей фразы.
+// Ответы фреймворка и прокси по умолчанию («Not Found») не по-русски — для них остаётся общая фраза.
+async function serverMessage(response: Response): Promise<string | undefined> {
+  try {
+    const { detail } = await response.json() as { detail?: unknown };
+    return typeof detail === 'string' && /[а-яё]/i.test(detail) ? detail.trim() : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -79,7 +91,10 @@ export function createApiClient({
       throw new ApiError(copy.errors.network);
     }
 
-    if (!response.ok) throw new ApiError(errorMessage(response.status), response.status);
+    if (!response.ok) {
+      const detail = await serverMessage(response);
+      throw new ApiError(detail ?? errorMessage(response.status), response.status, detail);
+    }
     if (response.status === 204 || response.status === 205 || method === 'HEAD') return undefined;
 
     const text = await response.text();

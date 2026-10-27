@@ -42,8 +42,8 @@ def _decode(data: bytes, max_bytes: int = MAX_BYTES) -> Image.Image:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(data)) as source:
-                if source.format not in {"JPEG", "PNG"} or getattr(source, "n_frames", 1) != 1:
-                    raise ImageRejected("Only single-frame JPG and PNG images are supported")
+                if source.format not in {"JPEG", "PNG", "WEBP"} or getattr(source, "n_frames", 1) != 1:
+                    raise ImageRejected("Only single-frame JPG, PNG and WebP images are supported")
                 if source.width * source.height > MAX_PIXELS:
                     raise ImageRejected("Image exceeds the pixel limit")
                 source.load()

@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Connection, func, select, text
+from sqlalchemy import Connection, and_, func, select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import AD_STATUSES, ENTITY_STATUSES, Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
@@ -13,6 +13,10 @@ from app.domain.explain import TEMPLATES, explain
 from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
 
 type AdapterResolver = Callable[[int, str], AdPlatform]
+
+
+# Тексты конфликтов доходят до владельца (409): без слов «сверка» и «применение».
+PENDING = "Площадка ещё не подтвердила предыдущее изменение. Попробуйте через несколько минут."
 
 
 class ChangeConflict(ValueError):
@@ -169,6 +173,17 @@ class ChangesRepository:
         page_size: int = 20,
     ) -> tuple[list[ChangeLog], int]:
         statement = select(ChangeLog).join(Business).where(Business.user_id == user_id)
+        if actor is None:
+            # Ежедневный пересчёт лимитов в пределах бюджета владельца — бухгалтерия, а не событие: в общей ленте он
+            # вытеснял всё остальное. Он остаётся в журнале и виден с фильтром «Система»; сбой и остановка видны всегда.
+            statement = statement.where(
+                ~and_(
+                    ChangeLog.actor == "system",
+                    ChangeLog.reason_code == "BUDGET_REBALANCE",
+                    ChangeLog.kind == "budget",
+                    ChangeLog.status == "applied",
+                )
+            )
         for column, value in (
             (ChangeLog.business_id, business_id),
             (ChangeLog.platform, platform),
@@ -349,7 +364,7 @@ class ChangesService:
             op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )
         if not protective_stop and any(item.platform == platform for item in self.repository.pending(business_id)):
-            raise ChangeConflict("Сначала требуется сверить незавершённые изменения бизнеса.")
+            raise ChangeConflict(PENDING)
         if any(op.entity_id not in refs.entity_ids() for op in operations):
             raise ValueError("Операции должны относиться к переданному дереву кампании.")
         if actor == "autopilot" and not dry_run:

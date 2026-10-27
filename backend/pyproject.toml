@@ -18,6 +18,7 @@ dependencies = [
     "cryptography",
     "apscheduler>=3.10,<4",
     "pillow",
+    "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
