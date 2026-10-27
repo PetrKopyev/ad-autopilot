@@ -48,6 +48,14 @@ it('сегодняшний день не рисует на графике, но 
   expect(result.note).toContain(copy.screens.chartPending);
 });
 
+it('убирает с графика именно сегодняшний день, даже если он не последний в ответе', async () => {
+  const result = await chart('2026-10-26', [day('2026-10-25'), day('2026-10-26', true), day('2026-10-27')]);
+  expect(result.points).toBe(2);
+  expect(result.labels).toEqual([displayDate('2026-10-25'), displayDate('2026-10-27')]);
+  expect(result.rows).toBe(3);
+  expect(result.note).toContain(copy.screens.chartToday);
+});
+
 it('прошлый неполный день остаётся на графике пустой точкой', async () => {
   const result = await chart('2026-10-28', [day('2026-10-25'), day('2026-10-26', true), day('2026-10-27', true)]);
   expect(result.points).toBe(3);

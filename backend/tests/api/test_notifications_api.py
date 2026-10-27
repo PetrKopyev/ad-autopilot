@@ -142,3 +142,19 @@ def test_read_rejects_service_and_proposed_notices(setup):
     assert client.post(f"/api/notifications/{service.id}/read").status_code == 404
     assert client.post(f"/api/notifications/{proposed.id}/read").status_code == 404
     assert len(service.log) == 1 and len(proposed.log) == 1
+
+
+def test_notice_with_deadline_expires_by_demo_time(setup, monkeypatch):
+    # Демо-бизнес перемотан за срок уведомления: по его времени уведомление уже неправда, хотя по часам сервера — нет.
+    from app.config import settings
+
+    client, repository = setup
+    expires_at = datetime.now(UTC) + timedelta(days=1)
+    entry = notice(1, "MONTH_CONTINUE_NOTICE", "1 февраля начнётся новый месяц.")
+    entry.log = [entry.log[0] | {"expires_at": expires_at.isoformat()}]
+    repository.save(entry)
+    own = repository.business(1)
+    own.settings = {"_demo": {"now": (expires_at + timedelta(days=1)).isoformat()}}
+    assert [item["kind"] for item in client.get("/api/notifications").json()] == ["MONTH_CONTINUE_NOTICE"]
+    monkeypatch.setattr(settings, "demo_login", True)
+    assert client.get("/api/notifications").json() == []

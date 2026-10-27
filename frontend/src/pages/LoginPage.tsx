@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { connectAccount, demoLogin, getAuthConfig } from '../api/setup';
 import type { StopResult } from '../api/setup';
@@ -35,6 +35,7 @@ export function LoginPage() {
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
+  if (session.data) return <Navigate to="/" replace />;
   return <div className="page-stack launch-flow">
     <h1>{copy.login.title}</h1>
     {stopResult && <StopNotice result={stopResult} />}

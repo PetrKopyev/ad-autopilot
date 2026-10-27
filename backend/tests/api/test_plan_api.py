@@ -271,3 +271,44 @@ def test_asset_changes_are_rate_limited(api) -> None:
     body = {"asset_ids": [own_asset(context)]}
     statuses = [client.put("/api/plan/assets", json=body).status_code for _ in range(assets_limit.per_user + 1)]
     assert statuses[-1] == 429 and set(statuses[:-1]) == {200}
+
+
+def test_video_builder_continues_from_videos_of_previous_attempts(monkeypatch) -> None:
+    # Без built каждая попытка очереди заново запускала бы ffmpeg для уже собранных роликов.
+    from contextlib import nullcontext
+
+    from app.api import plan
+
+    calls = []
+
+    def build_videos(repository, media_root, business_id, *, built):
+        calls.append((repository.db, business_id, built))
+        return False
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: nullcontext("db"))
+    monkeypatch.setattr(plan, "build_videos", build_videos)
+    built = {"segment": ([1, 2, 3], b"video")}
+    assert plan.get_video_builder()(5, built) is False
+    assert calls == [("db", 5, built)] and calls[0][2] is built
+
+
+@pytest.mark.parametrize("extra,by_length,by_stream", [(0, 422, 400), (1, 413, 413)])
+def test_upload_limit_boundary_by_length_and_by_stream(api, monkeypatch, extra, by_length, by_stream) -> None:
+    # Ровно MAX_UPLOAD доходит до разбора multipart (тело не форма — 422 и 400), на байт больше — 413.
+    from app.api.plan import MAX_UPLOAD
+
+    client, context = api
+    calls = []
+    monkeypatch.setattr(context.world.plans, "upload_photo", lambda *args: calls.append(args))
+    headers = {"Content-Type": "multipart/form-data; boundary=b"}
+    length = {"Content-Length": str(MAX_UPLOAD + extra)}
+    response = client.post("/api/plan/upload-photo", content=b"--b--\r\n", headers=headers | length)
+    assert response.status_code == by_length
+    body = b"x" * (MAX_UPLOAD + extra)
+
+    def chunks():
+        for start in range(0, len(body), 65536):
+            yield body[start : start + 65536]
+
+    response = client.post("/api/plan/upload-photo", content=chunks(), headers=headers)
+    assert response.status_code == by_stream and not calls

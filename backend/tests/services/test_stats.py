@@ -193,6 +193,17 @@ def test_month_budget_uses_snapshots_without_double_counting(rows: list[StatsRow
     assert [item["source"] for item in result["platforms"]] == ["budget_ledger", "stats_daily"]
 
 
+def test_month_budget_edges_snapshot_without_reports_and_overspend() -> None:
+    # Отчётов за месяц ещё нет (первые часы после запуска): расход — по снимку стража, отчётный — ноль. Снимок с
+    # расходом больше бюджета даёт нулевой остаток, а не отрицательный; расход при этом не урезается.
+    ledger = [BudgetLedger(month=date(2026, 10, 1), platform="vk", spent_kop=12_000, spent_at=FETCHED_AT)]
+    result = aggregate_budget(10_000, [stats_row(date=date(2026, 9, 30))], ledger, TODAY)
+    assert (result["spent_kop"], result["reported_kop"], result["remaining_kop"]) == (12_000, 0, 0)
+    assert result["platforms"] == [
+        {"platform": "vk", "spent_kop": 12_000, "source": "budget_ledger", "spent_at": FETCHED_AT}
+    ]
+
+
 @pytest.mark.parametrize("today,days", [(date(2026, 12, 31), 1), (date(2028, 2, 28), 2)])
 def test_budget_month_boundaries_and_overspend(today: date, days: int) -> None:
     result = aggregate_budget(1, [stats_row(date=today)], [], today)

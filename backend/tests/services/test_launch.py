@@ -127,6 +127,21 @@ async def test_images_are_cut_uploaded_and_cached_per_platform(tmp_path: Path) -
     assert selected and all(set(asset.platform_refs) == {"direct", "vk"} for asset in selected)
 
 
+async def test_image_with_reference_of_other_platform_only_is_uploaded_before_campaign(tmp_path: Path) -> None:
+    # spec берёт ссылку картинки площадки из platform_refs без запасного пути: её кладёт upload_images для каждой
+    # выбранной картинки, даже если там уже есть ссылка другой площадки.
+    world, plan = await ready(tmp_path, platforms=("direct",))
+    selected = [asset for asset in world.repository.assets(world.business.id) if asset.selected]
+    for asset in selected:
+        asset.platform_refs = {"vk": f"vk-{asset.id}"}
+    await launch(world, plan)
+    assert selected and all(asset.platform_refs["vk"] == f"vk-{asset.id}" for asset in selected)
+    assert all(asset.platform_refs["direct"].startswith("fake-image-") for asset in selected)
+    (campaign,) = campaigns(world)
+    ads = [state for state in (await states(world, campaign)).values() if state.entity_type == "ad"]
+    assert ads and all(ad.image_ref.startswith("fake-image-") for ad in ads)
+
+
 async def test_second_launch_is_noop(tmp_path: Path) -> None:
     world, plan = await ready(tmp_path)
     first = await launch(world, plan)

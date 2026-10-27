@@ -395,6 +395,7 @@ export const copy = {
     periods: { week: '7 дней', month: 'Этот месяц', '30days': '30 дней' },
     shortPeriods: { week: '7 дн.', month: 'Месяц', '30days': '30 дн.' },
     dates: (from: string, to: string) => `${from} — ${to}`,
+    recentDays: (days: number) => `последние ${days} ${plural(days, 'день', 'дня', 'дней')}`,
     noClients: 'Клиентов пока не знаем',
     clientsWindow: 'Клиенты — за четыре завершённые недели, по вашим ответам.',
     answeredWeeks: (answered: number, unknown: number) => answered === 0

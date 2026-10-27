@@ -63,14 +63,17 @@ function AdCard({ ad, name, dates, changed }: { ad: Ad; name: string; dates: str
 
 export function AdsPage() {
   const ads = useResource(useCallback(async (signal: AbortSignal) => {
-    const period = lastDays(adsDays, await getBusinessToday(signal));
-    return { ...await getAds(signal, period), period };
+    // Демо-сервер не сказал свою дату — период выберет сервер объявлений: те же 14 дней по дате бизнеса.
+    const today = await getBusinessToday(signal).catch(() => null);
+    const period = today ? lastDays(adsDays, today) : null;
+    return { ...await getAds(signal, period ?? undefined), period };
   }, []));
   const experiments = useResource(getExperiments);
   const items = ads.data?.items ?? [];
   const platforms = [...new Set(items.map((item) => item.platform))];
   const names = adLabels(items);
-  const dates = ads.data ? copy.screens.dates(displayDate(ads.data.period.from), displayDate(ads.data.period.to)) : '';
+  const period = ads.data?.period;
+  const dates = period ? copy.screens.dates(displayDate(period.from), displayDate(period.to)) : copy.screens.recentDays(adsDays);
   return <div className="page-stack">
     <div className="page-heading"><h1>{copy.ads.title}</h1><p className="muted">{copy.screens.adIntro}</p></div>
     <DemoNotice />

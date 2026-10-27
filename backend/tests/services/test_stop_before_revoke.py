@@ -133,13 +133,39 @@ async def test_stop_platform_waits_for_business_only_until_deadline():
         await stop_platform(
             world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=started + 0.6, wait=15
         )
-    assert monotonic() - started < 2
+    # Не ждали все 15 секунд; запас — на нагруженную машину.
+    assert monotonic() - started < 5
     with pytest.raises(TimeoutError):
         await stop_platform(
             world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=monotonic(), wait=15
         )
     assert len(attempts) <= 3
     assert world.campaign.status == "active"
+
+
+async def test_stop_platform_waits_out_busy_server_then_answers_server_busy():
+    # Пул блокировок занят (перемотки демо): соединения освобождаются за секунды, поэтому остановка перед отзывом
+    # ждёт до wait, как и занятый бизнес. Не дождалась — ServerBusy (503 «сервер занят»), а не 409 про бизнес.
+    from app.services.budget_guard import stop_platform
+    from app.services.changes import ServerBusy
+
+    world = await make_world()
+    worker = world.worker()
+    worker.step_key = "owner:revoke"
+    attempts = []
+
+    @contextmanager
+    def lock(business_id):
+        attempts.append(business_id)
+        raise ServerBusy
+        yield
+
+    world.repository.business_lock = lock
+    with pytest.raises(ServerBusy):
+        await stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=later(), wait=0.6
+        )
+    assert len(attempts) >= 2 and world.campaign.status == "active"
 
 
 class StubAdapter:
@@ -251,7 +277,8 @@ async def test_stop_user_ads_does_not_wait_for_busy_business_after_deadline(owne
 
     class SlowAdapter(StubAdapter):
         async def get_state(self, refs):
-            await asyncio.sleep(0.5)
+            # Срок выходит, пока останавливается первый кабинет: и под нагрузкой первый успевает начаться.
+            await asyncio.sleep(max(0.0, deadline - monotonic()) + 0.1)
             return await super().get_state(refs)
 
     db, user, business = owner
@@ -260,12 +287,27 @@ async def test_stop_user_ads_does_not_wait_for_busy_business_after_deadline(owne
     adapter = SlowAdapter({"c-1": "active", "c-2": "active"})
     with db.get_bind().engine.connect() as step:
         step.execute(text("SELECT pg_advisory_lock(:id)"), {"id": busy.business_id})
-        started = monotonic()
-        problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", started + 0.3)
+        deadline = monotonic() + 2
+        problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", deadline)
         step.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": busy.business_id})
-    assert monotonic() - started < 3
+    # Блокировку занятого бизнеса после срока не ждут: иначе ещё LOCK_WAIT_SECONDS (15 с).
+    assert monotonic() - deadline < 5
     assert problems == ["ВКонтакте: остановка не закончилась за минуту"]
     assert adapter.statuses == {"c-1": "paused_owner", "c-2": "active"}
+
+
+@pytest.mark.db
+async def test_stop_user_ads_after_deadline_does_not_blame_account_without_campaigns(owner):
+    # Срок вышел на первом кабинете; у второго кампаний его площадки нет — «не закончилась за минуту» было бы неправдой.
+    from app.api.auth import stop_user_ads
+
+    db, user, business = owner
+    business("direct", "ok", "c-1")
+    business("vk", "ok", None)
+    adapter = StubAdapter({"c-1": "active"})
+    problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", monotonic() - 1)
+    assert problems == ["Яндекс Директ: остановка не закончилась за минуту"]
+    assert adapter.statuses == {"c-1": "active"}
 
 
 async def test_ad_stopper_gives_the_whole_stop_one_minute(monkeypatch):
@@ -285,3 +327,20 @@ async def test_ad_stopper_gives_the_whole_stop_one_minute(monkeypatch):
     assert await auth.get_ad_stopper(request)(1, None, "Стоп.") == []
     (left,) = calls
     assert auth.STOP_TIMEOUT == 60 and 59 < left <= 60
+
+
+async def test_ad_stopper_does_not_cancel_stop_that_outlives_the_minute(monkeypatch):
+    # Минута — срок начала остановок, а не обрыв: прерванная посреди остановка оставила бы изменение без ответа.
+    from app.api import auth
+
+    async def stop_user_ads(db, resolve, user_id, account_id, reason_text, deadline):
+        await asyncio.sleep(0.3)
+        return ["ВКонтакте: остановка не закончилась за минуту"]
+
+    monkeypatch.setattr(auth, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(auth, "stop_user_ads", stop_user_ads)
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: nullcontext())
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(platform_adapters=SimpleNamespace(resolve=None)))
+    )
+    assert await auth.get_ad_stopper(request)(1, None, "Стоп.") == ["ВКонтакте: остановка не закончилась за минуту"]

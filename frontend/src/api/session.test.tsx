@@ -22,13 +22,30 @@ function Probe() {
 }
 const me = { id: 1, login: 'owner', email: null, accounts: [] };
 
-it('на странице входа не спрашивает сервер о сессии, а после ухода с неё спрашивает', async () => {
-  vi.mocked(getMe).mockResolvedValue(me);
+it('на странице входа без cookie сессии не спрашивает сервер', async () => {
+  cookie.mockImplementation(() => '');
   render(<MemoryRouter initialEntries={['/login']}><SessionProvider><Probe /></SessionProvider></MemoryRouter>);
   expect(await screen.findByText('гость')).toBeTruthy();
   expect(getMe).not.toHaveBeenCalled();
-  act(() => go('/setup'));
+});
+
+it('вошедший на странице входа остаётся вошедшим', async () => {
+  vi.mocked(getMe).mockResolvedValue(me);
+  render(<MemoryRouter initialEntries={['/login']}><SessionProvider><Probe /></SessionProvider></MemoryRouter>);
   expect(await screen.findByText('owner')).toBeTruthy();
+  expect(getMe).toHaveBeenCalledTimes(1);
+});
+
+it('после демо-входа сессия перечитывается ещё на странице входа и не остаётся гостевой', async () => {
+  cookie.mockImplementation(() => '');
+  vi.mocked(getMe).mockResolvedValue(me);
+  render(<MemoryRouter initialEntries={['/login']}><SessionProvider><Probe /></SessionProvider></MemoryRouter>);
+  expect(await screen.findByText('гость')).toBeTruthy();
+  cookie.mockImplementation(() => '__Host-csrf=token');
+  act(() => session.reload());
+  expect(await screen.findByText('owner')).toBeTruthy();
+  act(() => go('/setup'));
+  expect(screen.getByText('owner')).toBeTruthy();
   expect(getMe).toHaveBeenCalledTimes(1);
 });
 

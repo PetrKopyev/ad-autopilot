@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, PlatformAccount, User
 from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
 from app.platforms.fake import FakeAdapter
-from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, load_operations
+from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
 from app.services.rollback import ConfirmationRequired, RollbackService, inverse_operations
 
 
@@ -385,6 +385,18 @@ async def test_api_confirmation_and_revert(client, repository, tree):
     assert response.json()["status"] == "applied"
     assert "_service" not in response.json()["evidence"]
     assert http.post(url + "?confirm=true", headers=headers).status_code == 409
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [(ServerBusy(), 503), (ChangeConflict("Изменение этого бизнеса уже выполняется. Попробуйте позже."), 409)],
+)
+def test_revert_busy_server_is_not_a_conflict_of_the_change(client, repository, monkeypatch, error, status):
+    http, _, _ = client
+    repository.get_owned.return_value = ChangeLog(id=9, business_id=1, platform="fake")
+    monkeypatch.setattr(RollbackService, "revert", AsyncMock(side_effect=error))
+    response = http.post("/api/history/9/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert (response.status_code, response.json()["detail"]) == (status, str(error))
 
 
 def test_repository_ownership_queries_include_business_owner():

@@ -161,3 +161,6 @@ def test_api_requires_owner_and_csrf(setup, monkeypatch):
         assert client.post(path, json={"clients_count": -1}, headers=headers).status_code == 422
         assert client.post(path, json={"clients_count": True}, headers=headers).status_code == 422
         assert client.post(path + "?business_id=2", json={"clients_count": 1}, headers=headers).status_code == 404
+        missing = f"/api/clients/questions/{date(2026, 9, 7)}/answer"
+        response = client.post(missing, json={"clients_count": 1}, headers=headers)
+        assert (response.status_code, response.json()["detail"]) == (404, "Вопрос не найден.")

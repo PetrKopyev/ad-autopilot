@@ -279,3 +279,101 @@ def test_connection_is_returned_when_handler_fails(small_pool) -> None:
 
     assert asyncio.run(run()) == [500, 500, 200]
     assert engine.pool.checkedout() == 0
+
+
+@pytest.mark.db
+def test_launch_returns_connection_while_platform_uploads_and_creates(small_pool, monkeypatch, tmp_path) -> None:
+    # Загрузка картинок и создание кампаний на площадке — секунды на каждый вызов: соединение запроса на это время
+    # возвращается в пул. Картинки объявлений (Ad.asset_id) сохранены до создания кампании и видны другим сеансам.
+    import itertools
+    from types import SimpleNamespace
+
+    from app.content.site_reader import SiteReadResult
+    from app.db import session as db_session
+    from app.db.models import Ad, AdGroup, Campaign, PlatformAccount
+    from app.platforms.fake import FakeAdapter
+    from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
+    from app.services.launch import LaunchRepository, LaunchService
+    from app.services.onboarding import OnboardingService
+    from app.services.plan import PlanService
+    from tests.services.test_onboarding import (
+        BUDGET_KOP,
+        COUNTER,
+        LIMITS,
+        NOW,
+        SITE,
+        TODAY,
+        ScriptedLLM,
+        VariedArt,
+        font_path,
+        onboard,
+        page_text,
+    )
+
+    _, engine, _, asset_id = small_pool
+    locks = create_engine(engine.url, pool_size=2, max_overflow=0, isolation_level="AUTOCOMMIT")
+    monkeypatch.setitem(db_session.LOCK_ENGINES, engine, locks)
+    held, images = [], []
+
+    class WatchingAdapter(FakeAdapter):
+        async def upload_image(self, file):
+            held.append(engine.pool.checkedout())
+            return await super().upload_image(file)
+
+        async def create_campaign_tree(self, plan_part):
+            held.append(engine.pool.checkedout())
+            with db_session.SessionLocal() as other:
+                images.extend(
+                    other.scalars(select(Ad.asset_id).join(AdGroup).where(AdGroup.campaign_id == int(plan_part.id)))
+                )
+            return await super().create_campaign_tree(plan_part)
+
+    async def reader(url: str) -> SiteReadResult:
+        return SiteReadResult(page_text())
+
+    metrica = FakeMetrica(
+        [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
+    )
+    adapter = WatchingAdapter()
+
+    async def run(db) -> dict:
+        repository = LaunchRepository(db)
+        llm = ScriptedLLM()
+        onboarding = OnboardingService(repository, llm, lambda business_id: metrica, LIMITS, reader=reader)
+        # Бизнес пользователя заполняется заново, а его загруженная картинка не дала бы ИИ подготовить свои.
+        asset = db.get(Asset, asset_id)
+        user_id = db.get(Business, asset.business_id).user_id
+        db.delete(asset)
+        db.commit()
+        created = onboarding.create_business(user_id, SITE, "Самара", BUDGET_KOP, None)
+        business = db.get(Business, created["id"])
+        repository.add(
+            PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t")
+        )
+        await onboard(SimpleNamespace(onboarding=onboarding, business=business), confirmed={"direct": True})
+        plans = PlanService(
+            repository,
+            llm,
+            lambda budget, record: VariedArt(b"", budget, record=record),
+            tmp_path,
+            LIMITS,
+            font_path=font_path(),
+            seeds=itertools.count(1).__next__,
+        )
+        plan = await plans.get_plan(business.id, NOW, TODAY)
+        launches = LaunchService(repository, lambda business_id, platform: adapter, tmp_path, font_path=font_path())
+        try:
+            return await launches.launch(business.id, plan["id"], True, NOW, TODAY)
+        finally:
+            db.rollback()
+            db.execute(delete(Campaign).where(Campaign.business_id == business.id))
+            db.commit()
+
+    try:
+        with db_session.SessionLocal() as db:
+            assert asyncio.run(run(db))["status"] == "launched"
+    finally:
+        locks.dispose()
+    assert held and set(held) == {0}
+    assert images and None not in images
+    assert engine.pool.checkedout() == 0

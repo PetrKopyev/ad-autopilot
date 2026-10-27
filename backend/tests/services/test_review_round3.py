@@ -88,24 +88,28 @@ def test_business_lock_gives_up_at_deadline(monkeypatch) -> None:
 async def test_waiting_for_busy_lock_pool_keeps_event_loop_running(monkeypatch) -> None:
     # Пул блокировок исчерпан перемотками: остановка перед отзывом ждёт, а остальные запросы обслуживаются.
     from app.services.budget_guard import stop_platform
-    from tests.test_event_loop import longest_pause
 
     world = await make_world()
     worker = world.worker()
     worker.step_key = "owner:revoke"
-    attempts = []
+    loop = asyncio.get_running_loop()
+    attempts, ran, served = [], [], []
 
     @contextmanager
     def lock(business_id):
+        if 1 <= len(attempts) <= 2:
+            # Прошлая попытка получила отказ: её обратный вызов выполнен, если цикл работал, пока остановка ждала
+            # (time.sleep держал бы цикл до конца остановки).
+            served.append(len(ran) == len(attempts))
         attempts.append(business_id)
+        loop.call_soon(ran.append, business_id)
         if len(attempts) <= 2:
             raise ServerBusy
         yield
 
     world.repository.business_lock = lock
-    work = stop_platform(world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=later())
-    assert await longest_pause(work) < 0.2
-    assert len(attempts) > 2 and world.campaign.status == "paused_owner"
+    await stop_platform(world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=later())
+    assert served == [True, True] and world.campaign.status == "paused_owner"
 
 
 @pytest.mark.parametrize(
@@ -219,6 +223,21 @@ async def test_month_notice_names_the_date_and_expires_with_the_month() -> None:
     )
 
 
+async def test_month_notice_in_december_names_january_of_next_year() -> None:
+    from app.services.month import month_rollover
+
+    world = await make_world()
+    world.clock.advance(days=361)
+    worker = world.worker()
+    # Декабрь уже начат: переход месяца не нужен, проверяется только уведомление о следующем.
+    worker.remember(world.business, month="2026-12-01")
+    await month_rollover(worker, world.business)
+    notices = world.repository.rows(WorkerRun, 1, kind="notification")
+    (entry,) = [notice.log[0] for notice in notices if notice.log[0]["reason_code"] == "MONTH_CONTINUE_NOTICE"]
+    assert entry["text"].startswith("1 января начнётся новый месяц")
+    assert entry["expires_at"] == "2027-01-01T00:00:00+03:00"
+
+
 def test_budget_counts_fresher_of_ledger_and_reports_and_shows_reports_separately() -> None:
     from app.services.stats import aggregate_budget
 
@@ -320,6 +339,15 @@ def test_demo_advances_are_limited_by_lock_pool() -> None:
     jobs.get(0).state = "done"
     assert jobs.start(MAX_ADVANCES, 1) is not None
     assert jobs.businesses() == set(range(MAX_ADVANCES + 1))
+
+
+def test_demo_advances_leave_lock_pool_room_for_requests_and_worker() -> None:
+    # Каждая перемотка держит соединение пула блокировок минутами: при MAX_ADVANCES, равном пулу, остановка рекламы и
+    # шаги воркера получали бы только «сервер занят».
+    from app.db.session import lock_engine
+    from app.demo_flags import MAX_ADVANCES
+
+    assert MAX_ADVANCES < lock_engine.pool.size() + lock_engine.pool._max_overflow
 
 
 def test_forgotten_advance_still_counts_until_its_thread_ends() -> None:

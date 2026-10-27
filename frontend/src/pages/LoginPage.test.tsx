@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { demoLogin } from '../api/setup';
+import { SessionProvider } from '../api/session';
+import { Layout } from '../components/Layout';
 import { LoginPage } from './LoginPage';
 
 vi.mock('../api/setup', async (original) => {
@@ -16,13 +18,13 @@ function reply(status: number, body: unknown) {
   fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
 }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); fetchMock.mockReset(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); fetchMock.mockReset(); });
 
 async function enterDemo(answer: () => void) {
   vi.stubGlobal('fetch', fetchMock);
   reply(200, { demo: true });
   answer();
-  render(<MemoryRouter><LoginPage /></MemoryRouter>);
+  render(<MemoryRouter><SessionProvider><LoginPage /></SessionProvider></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
 }
 
@@ -51,4 +53,17 @@ it('ответ без текста с необычным кодом — обща
 it('сбой не в виде ошибки — общая фраза, а не пустое сообщение', async () => {
   await enterDemo(() => vi.mocked(demoLogin).mockRejectedValueOnce('сбой'));
   expect(await screen.findByText(copy.errors.generic)).toBeTruthy();
+});
+
+it('вошедшего со страницы входа сразу уводит на главную, в шапке — его вход, а не «Вход»', async () => {
+  vi.spyOn(document, 'cookie', 'get').mockReturnValue('__Host-csrf=token');
+  vi.stubGlobal('fetch', fetchMock);
+  fetchMock.mockImplementation(async (url) => new Response(JSON.stringify(new URL(String(url)).pathname === '/api/me'
+    ? { id: 1, login: 'owner', email: null, accounts: [] } : { demo: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  render(<MemoryRouter initialEntries={['/login']}><SessionProvider><Routes><Route element={<Layout />}>
+    <Route path="login" element={<LoginPage />} /><Route index element={<h1>главная</h1>} />
+  </Route></Routes></SessionProvider></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
+  expect(screen.getByText('owner')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: copy.login.title })).toBeNull();
 });

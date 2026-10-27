@@ -176,6 +176,19 @@ async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> Non
     assert world.repository.ai_spent(world.business.id) == spent
 
 
+async def test_regenerate_without_new_images_is_blocked_and_keeps_plan(world: World, monkeypatch) -> None:
+    plan = await build(world)
+    stored = json.dumps(world.repository.latest_plan(world.business.id).payload, sort_keys=True)
+
+    async def nothing(*args) -> list:
+        return []
+
+    monkeypatch.setattr(world.plans, "generate_images", nothing)
+    with pytest.raises(Blocked, match="Не удалось получить новые картинки"):
+        await world.plans.regenerate_images(world.business.id, plan["groups"][0]["id"], NOW, TODAY)
+    assert json.dumps(world.repository.latest_plan(world.business.id).payload, sort_keys=True) == stored
+
+
 async def test_regenerate_unknown_group(world: World) -> None:
     await build(world)
     with pytest.raises(NotFound):
@@ -404,6 +417,45 @@ async def test_video_queue_repeats_build_that_found_business_busy() -> None:
         5, lambda business_id, built: attempts.append(business_id) or next(results)
     )
     assert attempts == [5, 5]
+
+
+async def test_video_queue_lets_go_of_built_videos_once_business_is_deleted(world: World, monkeypatch) -> None:
+    # Пока бизнес занят, собранные ролики ждут повтора в памяти. Бизнес удалили — следующая попытка ничего не
+    # сохраняет и завершает очередь: байты роликов не держатся все 12 повторов.
+    from contextlib import contextmanager
+
+    from app.db.models import Plan
+    from app.services import plan as plan_module
+    from app.services.changes import ChangeConflict
+    from app.services.plan import VideoQueue
+
+    draft = await build(world)
+    ids = [asset["id"] for asset in draft["groups"][0]["assets"]]
+    if len(ids) < 3:
+        pytest.skip("В сегменте меньше трёх картинок")
+    world.plans.select_assets(world.business.id, ids)
+    monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(plan_module, "build_video", lambda images, title, font_path: SimpleNamespace(data=b"video"))
+    lock = world.repository.business_lock
+
+    @contextmanager
+    def busy(business_id):
+        raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        yield
+
+    monkeypatch.setattr(world.repository, "business_lock", busy)
+    attempts = []
+
+    def attempt(business_id, built):
+        attempts.append(dict(built))
+        if len(attempts) == 2:
+            world.repository.tables[Plan] = []
+            world.repository.business_lock = lock
+        return world.plans.build_videos(business_id, built)
+
+    await VideoQueue(retries=12, delay=0).request(world.business.id, attempt)
+    assert len(attempts) == 2 and attempts[0] == {} and attempts[1]
+    assert not list((world.media / str(world.business.id)).glob("video-*"))
 
 
 async def test_readiness_reflects_blockers(world: World) -> None:

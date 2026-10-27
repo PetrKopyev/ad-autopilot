@@ -82,7 +82,11 @@ class DomainSettings:
         for name in ("confidence", "test_alpha", "test_extension_alpha", "test_extension_p", "guardrail_alpha"):
             if not 0 < getattr(self, name) < 1:
                 raise ValueError(f"{name} must be between 0 and 1")
+        # Пауза по кликам или показам без единого клика или показа не опиралась бы ни на один устоявшийся день.
         for name in (
+            "min_ctr_impressions",
+            "min_price_clicks",
+            "no_leads_clicks",
             "decision_window_days",
             "prior_leads",
             "guard_poll_minutes",

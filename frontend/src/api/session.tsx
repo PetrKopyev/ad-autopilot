@@ -1,6 +1,6 @@
-import { createContext, useCallback, useContext, useRef } from 'react';
+import { createContext, useContext, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { Navigate, Outlet, useLocation } from 'react-router';
+import { Navigate, Outlet } from 'react-router';
 import { copy } from '../copy';
 import { ApiError, hasSessionCookie } from './client';
 import { mockEnabled } from './screens';
@@ -19,10 +19,9 @@ async function loadSession(signal: AbortSignal): Promise<Me | null> {
 }
 const SessionContext = createContext<ReturnType<typeof useResource<Me | null>> | null>(null);
 
+/** Сессию спрашиваем и на странице входа: туда заходит и вошедший, а сразу после демо-входа сессия перечитывается ещё на ней. */
 export function SessionProvider({ children }: { children: ReactNode }) {
-  // На странице входа сессии нет: не спрашиваем сервер, иначе в консоли браузера каждый раз ошибка 401.
-  const guest = useLocation().pathname === '/login';
-  const session = useResource(useCallback((signal: AbortSignal) => guest ? Promise.resolve(null) : loadSession(signal), [guest]));
+  const session = useResource(loadSession);
   return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
 }
 

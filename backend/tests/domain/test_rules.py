@@ -307,3 +307,12 @@ def test_pause_names_the_settled_days_it_was_decided_on(make_ad, now):
     (pause,) = [item for item in decide(ads, groups, now, 10_000) if item.action == Action.PAUSE]
     assert pause.numbers["period_start"] == (now.date() - timedelta(days=9)).isoformat()
     assert pause.numbers["period_end"] == (now.date() - timedelta(days=3)).isoformat()
+
+
+def test_ad_without_settled_days_is_not_paused(make_ad, now):
+    # Пауза называет период устоявшихся дней; вчерашний расход без обращений ещё не повод и не ломает пояснение.
+    fresh = (DaySpend(now.date() - timedelta(days=1), 1_000_000, 100_000, 500, 0),)
+    groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(3)]
+    ads = [make_ad(id="0", group_id="0", days=fresh)] + [make_ad(id=str(i), group_id=str(i)) for i in (1, 2)]
+    history = (DaySpend(now.date() - timedelta(days=3), impressions=1, clicks=1, leads=1),)
+    assert not [item for item in decide(ads, groups, now, 10_000, history) if item.target_id == "0"]
