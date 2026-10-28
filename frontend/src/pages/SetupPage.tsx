@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
-import { Button, Card, ErrorBanner, Stepper } from '../components';
+import { Button, Card, CityCombobox, ErrorBanner, RublesInput, Stepper } from '../components';
 import { copy } from '../copy';
-import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCounters, getGoals,
-  getMe, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
+import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
+  getMe, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
 import type { AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { getBusiness } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { formatMoney } from '../components/Money';
 import { useSession } from '../api/session';
+import { cityKey } from '../components/CityCombobox';
 import { NotFoundPage } from './PlaceholderPage';
 import { MedicalNotice, SiteInstructions, StopNotice } from './SetupShared';
 import './Setup.css';
@@ -48,10 +49,11 @@ export function SetupPage() {
   const [restoring, setRestoring] = useState(!stored?.business);
   const [website, setWebsite] = useState(draft.business?.site_url ?? '');
   const [city, setCity] = useState(draft.business?.city ?? '');
-  const [budget, setBudget] = useState(draft.business ? String(draft.business.month_budget_kop / 100) : '');
+  const [budget, setBudget] = useState(draft.business ? String(Math.round(draft.business.month_budget_kop / 100)) : '');
   const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(draft.business.avg_check_kop / 100) : '');
   const [noSite, setNoSite] = useState(false);
   const [budgetHint, setBudgetHint] = useState<BudgetHint>();
+  const [cities, setCities] = useState<string[]>();
   const session = useSession();
   const me = session.data;
   const [counters, setCounters] = useState<Counter[]>([]);
@@ -86,6 +88,7 @@ export function SetupPage() {
       setCity((value) => value || 'Москва');
       setBudget((value) => value || '50000');
     }).catch(() => {});
+    void getCities(controller.signal).then((value) => { if (!controller.signal.aborted) setCities(value.cities); }).catch(() => {});
     return () => controller.abort();
   }, []);
   const userId = me?.id;
@@ -96,7 +99,7 @@ export function SetupPage() {
   function fill(value: Draft, saved: StoredMarking | null = null) {
     const business = value.business;
     setDraft(value);
-    setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(business.month_budget_kop / 100) : '');
+    setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(Math.round(business.month_budget_kop / 100)) : '');
     setAverage(business?.avg_check_kop ? String(business.avg_check_kop / 100) : '');
     setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false); setChecks(undefined);
   }
@@ -212,7 +215,9 @@ export function SetupPage() {
       let url: URL;
       try { url = new URL(website); } catch { throw new Error(copy.launchFlow.businessError); }
       if (!['http:', 'https:'].includes(url.protocol) || !city.trim()) throw new Error(copy.launchFlow.businessError);
-      const input = { site_url: url.href, city: city.trim(), month_budget_kop, avg_check_kop };
+      const chosen = cities ? cities.find((item) => cityKey(item) === cityKey(city)) : city.trim();
+      if (!chosen) throw new Error(copy.setup.business.cityError);
+      const input = { site_url: url.href, city: chosen, month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }
       const business = await createBusiness(input);
       session.reload(); setChecks(undefined);
@@ -264,8 +269,8 @@ export function SetupPage() {
         <label className="check"><input type="checkbox" checked={noSite} onChange={(event) => setNoSite(event.target.checked)} />{copy.launchFlow.websiteMissing}</label>
         {!noSite && <>
           <label className="field">{copy.setup.business.website}<input type="url" required value={website} onChange={(event) => setWebsite(event.target.value)} /></label>
-          <label className="field">{copy.setup.business.city}<input required value={city} onChange={(event) => setCity(event.target.value)} /></label>
-          <label className="field">{copy.setup.business.budget}<input required inputMode="decimal" value={budget} aria-describedby="budget-hint" onChange={(event) => setBudget(event.target.value)} /></label>
+          <CityCombobox label={copy.setup.business.city} cities={cities ?? []} value={city} onChange={setCity} required />
+          <label className="field">{copy.setup.business.budget}<RublesInput required max={maxBudgetRubles} value={budget} aria-describedby="budget-hint" onChange={setBudget} /></label>
           <div id="budget-hint" className="page-stack">
             <p className="muted">{copy.setup.business.budgetHint}</p>
             {budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}

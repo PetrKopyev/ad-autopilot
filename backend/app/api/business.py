@@ -17,6 +17,7 @@ from app.db.models import Session, User
 from app.demo_flags import demo_enabled
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
+from app.platforms.regions import CITY_REGIONS
 from app.services.changes import ChangeConflict, ServerBusy
 from app.services.demo import prepare_business, read_demo_site
 from app.services.onboarding import (
@@ -105,6 +106,11 @@ def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> di
         if demo_enabled():
             prepare_business(service.repository, service.repository.business(result["id"]))
         return result
+
+
+@router.get("/cities", dependencies=[Depends(current_user)])
+def cities() -> dict:
+    return {"cities": list(CITY_REGIONS)}
 
 
 @router.get("/business/budget-hint", dependencies=[Depends(current_user)])

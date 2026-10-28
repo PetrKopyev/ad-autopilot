@@ -33,7 +33,7 @@ from app.platforms.base import (
     StatRow,
     _money,
 )
-from app.platforms.regions import Region, RegionCache, find_region, normalize, not_found
+from app.platforms.regions import CITY_IDS, Region, RegionCache, find_region, normalize, not_found
 
 MICROS_PER_KOP = 10_000
 AUTH_URL = "https://oauth.yandex.ru/authorize"
@@ -49,26 +49,6 @@ MARKING_FIELDS = {
     "ContragentTinInfoFieldNames": ["TinType", "Tin"],
 }
 
-# Геобаза Яндекса, id сверены 27.10.2026: https://yandex.ru/dev/tasks-api/doc/ru/regions.md
-CITY_REGIONS = {
-    "москва": 213,
-    "москва и московская область": 1,
-    "санкт-петербург": 2,
-    "новосибирск": 65,
-    "екатеринбург": 54,
-    "нижний новгород": 47,
-    "казань": 43,
-    "челябинск": 56,
-    "омск": 66,
-    "самара": 51,
-    "ростов-на-дону": 39,
-    "уфа": 172,
-    "красноярск": 62,
-    "воронеж": 193,
-    "пермь": 50,
-    "волгоград": 38,
-    "краснодар": 35,
-}
 RUSSIA = 225
 GEO_REGIONS = RegionCache()
 
@@ -1155,7 +1135,7 @@ class DirectAdapter:
 
     async def geo_targeting(self, city: str) -> dict[str, Any]:
         """Город из словаря без запроса; остальные — по справочнику GeoRegions (Dictionaries API v5)."""
-        if (region := CITY_REGIONS.get(normalize(city))) is not None:
+        if (region := CITY_IDS.get(normalize(city))) is not None:
             return {"region_ids": [region]}
         regions = await GEO_REGIONS.get(self._base_url, self._geo_regions)
         region = find_region(city, regions.values(), regions, country=RUSSIA, platform="Яндекс Директа")

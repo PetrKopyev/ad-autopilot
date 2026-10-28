@@ -21,6 +21,7 @@ from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, Plat
 from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
+from app.platforms.regions import CITY_NAMES, normalize
 from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, ChangesRepository, wait_for_lock, waiting
 from app.worker.clock import MOSCOW
 
@@ -388,9 +389,11 @@ class OnboardingService:
     ) -> dict:
         url = site_url.strip()
         checked = safe_url(url if "://" in url else f"https://{url}")
-        city = city.strip()
-        if not checked or not city or len(city) > 100:
+        if not checked or not city.strip():
             raise OnboardingError("Укажите ссылку на сайт и город.")
+        if (listed := CITY_NAMES.get(normalize(city))) is None:
+            raise OnboardingError(f"Города «{city.strip()}» нет в списке. Выберите город из подсказок.")
+        city = listed
         if type(month_budget_kop) is not int or not 0 < month_budget_kop <= MAX_BUDGET_KOP:
             raise OnboardingError("Укажите положительную сумму в рублях, не более двух знаков после запятой.")
         check_budget(month_budget_kop)

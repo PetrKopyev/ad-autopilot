@@ -19,6 +19,7 @@ beforeEach(() => {
       '/api/auth/config': { demo: false },
       '/api/me': { id: 1, login: 'owner', email: null, has_business: hasBusiness, accounts: [] },
       '/api/business': { id: 7, site_url: 'https://salon.example/', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null },
+      '/api/cities': { cities: ['Казань', 'Москва', 'Москва и Московская область'] },
     };
     return new Response(JSON.stringify(answers[path]), { status: 200, headers: { 'Content-Type': 'application/json' } });
   });
@@ -42,6 +43,27 @@ it('после первого шага сессия перечитывается
   await waitFor(() => expect(screen.getByTestId('path').textContent).toBe('/setup/2'));
   await waitFor(() => expect(screen.getByTestId('business').textContent).toBe('true'));
   expect(calls().slice(-2)).toEqual(['POST /api/business', 'GET /api/me']);
+});
+
+it('город сохраняется только из списка: свободный текст не отправляется, выбранный — уходит названием из списка', async () => {
+  render(<MemoryRouter initialEntries={['/setup/1']}><SessionProvider><Routes>
+    <Route path="setup/:step" element={<SetupPage />} />
+  </Routes><Probe /></SessionProvider></MemoryRouter>);
+  await waitFor(() => expect(calls()).toContain('GET /api/cities'));
+  fireEvent.change(screen.getByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '30 000 руб' } });
+  const city = screen.getByLabelText(copy.setup.business.city);
+  fireEvent.change(city, { target: { value: 'Мск' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  expect(await screen.findByText(copy.setup.business.cityError)).toBeTruthy();
+  expect(calls()).not.toContain('POST /api/business');
+  fireEvent.change(city, { target: { value: 'моск' } });
+  expect(screen.getAllByRole('option').map((item) => item.textContent)).toEqual(['Москва', 'Москва и Московская область']);
+  fireEvent.click(screen.getByRole('option', { name: 'Москва' }));
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  await waitFor(() => expect(screen.getByTestId('path').textContent).toBe('/setup/2'));
+  const [, init] = fetchMock.mock.calls.find(([url, request]) => request?.method === 'POST' && String(url).endsWith('/api/business'))!;
+  expect(JSON.parse(String(init!.body))).toMatchObject({ city: 'Москва', month_budget_kop: 3_000_000 });
 });
 
 const field = (value: string) => ({ value, quote: value || null, verified: !!value, question: '' });
@@ -190,7 +212,7 @@ it('без черновика в вкладке шаги восстанавли�
   expect((await screen.findByRole('checkbox', { name: 'Заявка' }) as HTMLInputElement).checked).toBe(true);
   fireEvent.click(screen.getByRole('link', { name: copy.common.back }));
   expect((await screen.findByLabelText(copy.setup.business.city) as HTMLInputElement).value).toBe('Самара');
-  expect((screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement).value).toBe('30000');
+  expect((screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement).value).toBe('30\u00a0000');
   expect((screen.getByLabelText(copy.setup.business.visitPrice) as HTMLInputElement).value).toBe('1500');
 });
 

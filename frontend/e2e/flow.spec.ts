@@ -14,7 +14,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('button', { name: 'Войти в демо', exact: true }).click();
     await expect(page.getByLabel(copy.setup.business.website)).toHaveValue('https://salon.example/');
     await expect(page.getByLabel(copy.setup.business.city, { exact: true })).toHaveValue('Москва');
-    await expect(page.getByLabel(copy.setup.business.budget)).toHaveValue('50000');
+    await expect(page.getByLabel(copy.setup.business.budget)).toHaveValue('50\u00a0000');
     await page.getByRole('button', { name: copy.common.next, exact: true }).click();
     await expect(page).toHaveURL(/\/setup\/2$/);
     await page.getByRole('checkbox', { name: 'Заявка', exact: true }).check();
@@ -77,7 +77,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.settings, exact: true }).click();
     await expect(page.getByRole('heading', { name: copy.settings.title, exact: true })).toBeVisible();
     const budgetField = page.getByLabel(copy.settingsScreen.budgetLabel);
-    await expect(budgetField).toHaveValue('50000');
+    await expect(budgetField).toHaveValue('50\u00a0000');
     await expect(page.getByRole('textbox', { name: new RegExp(`^${copy.settingsScreen.description.services}`) })).not.toHaveValue('');
     await expect(page.getByText(copy.settingsScreen.markingStored('•••4689', '+7•••4567'))).toBeVisible();
     await budgetField.fill('55000');
@@ -86,7 +86,7 @@ for (const width of [390, 1280]) {
     expect((await saved).status()).toBe(200);
     await expect(page.getByRole('status').filter({ hasText: copy.settingsScreen.saved })).toBeVisible();
     await page.reload();
-    await expect(page.getByLabel(copy.settingsScreen.budgetLabel)).toHaveValue('55000');
+    await expect(page.getByLabel(copy.settingsScreen.budgetLabel)).toHaveValue('55\u00a0000');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await testInfo.attach(`settings-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     expect(consoleErrors).toEqual([]);

@@ -185,6 +185,9 @@ function mockPlatformDaily(amount: number, vk: boolean) {
   const daily = amount * 0.92 / 31 / 1.25;
   return vk ? { direct: Math.floor(daily * 0.7), vk: Math.floor(daily * 0.3) } : { direct: Math.floor(daily) };
 }
+export function mockCities() {
+  return { cities: ['Екатеринбург', 'Казань', 'Москва', 'Москва и Московская область', 'Новосибирск', 'Самара', 'Санкт-Петербург'] };
+}
 export function mockBudgetHint(amount: number, vk: boolean): BudgetHint {
   const on = vk && amount >= mockVkFrom;
   return { minimum_kop: 1_270_000, daily_kop: mockPlatformDaily(amount, on),

@@ -85,6 +85,10 @@ export async function createBusiness(body: BusinessInput): Promise<Business> {
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
+export async function getCities(signal?: AbortSignal): Promise<{ cities: string[] }> {
+  if (mockEnabled) return (await import('./mocks')).mockCities();
+  return setupGet('/api/cities', signal);
+}
 export async function getBudgetHint(month_budget_kop: number, vk: boolean, signal?: AbortSignal): Promise<BudgetHint> {
   if (mockEnabled) return (await import('./mocks')).mockBudgetHint(month_budget_kop, vk);
   return setupGet(`/api/business/budget-hint?month_budget_kop=${month_budget_kop}&vk=${vk}`, signal);
@@ -122,6 +126,8 @@ export function validInn(value: string): boolean {
     : checksum([7, 2, 4, 10, 3, 5, 9, 4, 6, 8]) === digits[10]
       && checksum([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]) === digits[11];
 }
+/** Как MAX_BUDGET_KOP на сервере. */
+export const maxBudgetRubles = 10_000_000;
 // Parse decimal rubles without floating point rounding.
 export function rublesToKopecks(value: string): number | null {
   if (!/^\d+(?:[.,]\d{1,2})?$/.test(value)) return null;

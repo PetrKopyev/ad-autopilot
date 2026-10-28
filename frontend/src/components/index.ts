@@ -1,8 +1,10 @@
 export { BudgetRing } from './BudgetRing';
 export { Button } from './Button';
 export { Card } from './Card';
+export { CityCombobox } from './CityCombobox';
 export { EmptyState } from './EmptyState';
 export { ErrorBanner } from './ErrorBanner';
 export { Money, formatMoney } from './Money';
+export { RublesInput } from './RublesInput';
 export { StatusBadge } from './StatusBadge';
 export { Stepper } from './Stepper';

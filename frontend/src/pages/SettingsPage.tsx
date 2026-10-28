@@ -1,11 +1,11 @@
 import { Fragment, useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router';
-import { Button, Card, ErrorBanner } from '../components';
+import { Button, Card, ErrorBanner, RublesInput } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
-import { connectAccount, disconnectAccount, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
+import { connectAccount, disconnectAccount, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
@@ -68,12 +68,12 @@ function DescriptionBlock({ business }: { business: BusinessSettings }) {
 
 function BudgetBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
-  const [budget, setBudget] = useState(rublesText(business.month_budget_kop));
+  const [budget, setBudget] = useState(String(Math.round(business.month_budget_kop / 100)));
   const [average, setAverage] = useState(rublesText(business.avg_check_kop));
   const [autoContinue, setAutoContinue] = useState(business.auto_continue);
   const [savedBudget, setSavedBudget] = useState(business.month_budget_kop);
   const [warning, setWarning] = useState<string | null>(null);
-  const budgetKop = rublesToKopecks(budget.trim());
+  const budgetKop = budget === String(Math.round(savedBudget / 100)) ? savedBudget : rublesToKopecks(budget);
   const averageKop = average.trim() === '' ? null : rublesToKopecks(average.trim());
   const averageBad = average.trim() !== '' && averageKop === null;
   function submit() {
@@ -87,7 +87,7 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   return <Block title={labels.budgetTitle}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <label className="field">{labels.budgetLabel}
-        <input required inputMode="decimal" value={budget} aria-invalid={budgetKop === null} aria-describedby="budget-help" onChange={(event) => setBudget(event.target.value)} /></label>
+        <RublesInput required max={maxBudgetRubles} value={budget} aria-invalid={budgetKop === null} aria-describedby="budget-help" onChange={setBudget} /></label>
       <p className="muted" id="budget-help">{budgetKop === null ? labels.budgetError : `${formatMoney(budgetKop)}. ${copy.settings.budgetHint}`}</p>
       <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
       <p className="muted" id="continue-help">{labels.nextMonth}</p>

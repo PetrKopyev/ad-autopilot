@@ -457,6 +457,7 @@ def test_business_budget_below_direct_minimum_names_the_minimum_and_why(world: W
         ("http://127.0.0.1/", "Самара", 100),
         ("javascript:alert(1)", "Самара", 100),
         ("salon.example", " ", 100),
+        ("salon.example", "Урюпинск", 2_000_000),
         ("salon.example", "Самара", 0),
         ("salon.example", "Самара", -5),
         ("salon.example", "Самара", 1.5),

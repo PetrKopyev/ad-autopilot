@@ -64,6 +64,28 @@ def test_budget_is_stored_in_kopecks(api) -> None:
     assert context.world.business.month_budget_kop == 2_234_567
 
 
+def test_city_outside_the_list_is_rejected_and_listed_city_is_stored_as_listed(api) -> None:
+    client, context = api
+    response = new_business(client, city="Урюпинск")
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Города «Урюпинск» нет в списке. Выберите город из подсказок."
+    assert context.world.business.city != "Урюпинск"
+    response = new_business(client, city="  санкт-петербург ")
+    assert response.status_code == 200, response.text
+    assert response.json()["city"] == context.world.business.city == "Санкт-Петербург"
+
+
+def test_cities_lists_targetable_cities_for_logged_in_user(api) -> None:
+    client, _ = api
+    response = client.get("/api/cities")
+    assert response.status_code == 200
+    cities = response.json()["cities"]
+    assert {"Москва", "Санкт-Петербург", "Самара", "Орёл", "Тюмень"} <= set(cities)
+    assert len(cities) == len(set(cities)) == 90
+    client.cookies.clear()
+    assert client.get("/api/cities").status_code == 401
+
+
 @pytest.mark.parametrize(
     "method,path,body",
     [

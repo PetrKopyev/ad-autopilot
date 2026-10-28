@@ -1110,6 +1110,8 @@ GEO_TREE = (
         ("  москва и Московская   область ", 1),
         ("Санкт-Петербург", 2),
         ("Казань", 43),
+        ("Орел", 10),
+        ("Тюмень", 55),
     ],
 )
 async def test_geo_targeting_known_city_needs_no_request(adapter, api, city, region) -> None:
