@@ -58,9 +58,17 @@ async def test_plan_requires_approved_description(world: World) -> None:
 async def test_plan_groups_cover_segments_for_each_platform(world: World) -> None:
     plan = await build(world)
     segments = SEGMENTS["nails"]
-    assert [(group["platform"], group["audience"].lower()) for group in plan["groups"]] == [
+    assert [(group["platform"], group["name"].split(" — ")[1]) for group in plan["groups"]] == [
         (platform, segment) for platform in ("direct", "vk") for segment in segments
     ]
+    assert plan["groups"][0]["audience"] == (
+        "Тем, кто ищет в Яндексе «маникюр классический». Регион: Самара. Объявления — в поиске и на сайтах-партнёрах "
+        "Яндекса."
+    )
+    assert plan["groups"][-1]["audience"] == (
+        "Регион: Самара. Пол, возраст и интересы не задаём: VK сам показывает рекламу тем, кто скорее оставит заявку "
+        "на сайте."
+    )
     assert plan["status"] == "draft" and plan["month_budget_kop"] == BUDGET_KOP
     assert world.business.status == "plan_ready"
     stored = world.repository.latest_plan(world.business.id)
@@ -109,6 +117,10 @@ async def test_groups_take_services_in_turn_and_ads_of_group_differ(world: World
     services = ["Маникюр классический", "Педикюр", "Наращивание ресниц"]
     assert [group["service"] for group in groups] == services * 2
     assert [group["name"].split(" — ")[0] for group in groups] == services * 2
+    plan = world.plans.view(world.business, world.repository.latest_plan(world.business.id), TODAY)
+    assert plan["groups"][1]["audience"].startswith(
+        "Тем, кто ищет в Яндексе «педикюр», «маникюр классический», «наращивание ресниц». Регион: Самара."
+    )
     assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
 
 
@@ -848,3 +860,30 @@ async def test_launched_plan_does_not_show_launch_estimate_as_daily_limits(world
     world.repository.latest_plan(world.business.id).status = "launched"
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert plan["status"] == "launched" and plan["daily_kop"] == {}
+
+
+async def test_audience_of_old_plan_comes_from_its_targeting(world: World) -> None:
+    await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    payload = deepcopy(stored.payload)
+    del payload["city"]
+    for group in payload["groups"]:
+        group["audience"] = group["segment"].capitalize()
+    stored.payload = payload
+    plan = world.plans.view(world.business, stored, TODAY)
+    assert all(group["audience"].startswith(("Тем, кто ищет в Яндексе", "Регион: Самара")) for group in plan["groups"])
+
+
+async def test_audience_names_city_of_the_plan_and_area_phrases_use_city_name(world: World) -> None:
+    world.business.city = "Москва и Московская область"
+    plan = await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.payload["groups"][0]["phrases"] == ["маникюр классический москва"]
+    assert plan["groups"][0]["audience"].startswith(
+        "Тем, кто ищет в Яндексе «маникюр классический». Регион: Москва и Московская область."
+    )
+    # Запущенный план не пересобирается при смене города: его аудитория — по городу, с которым он собран.
+    world.business.city = "Самара"
+    assert world.plans.view(world.business, stored, TODAY)["groups"][-1]["audience"].startswith(
+        "Регион: Москва и Московская область."
+    )

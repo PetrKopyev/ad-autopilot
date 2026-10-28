@@ -455,6 +455,12 @@ async def test_geo_targeting_uses_vk_region_ids_in_russian_and_caches(adapter, a
     assert parse_qs(request.url.query.decode())["fields"] == ["id,name,parent_id"]
 
 
+async def test_geo_targeting_area_of_several_regions_gets_each_vk_region(adapter, api) -> None:
+    route = regions_route(api)
+    assert await adapter.geo_targeting("Москва и Московская область") == {"regions": [1, 70]}
+    assert route.call_count == 1
+
+
 async def test_geo_targeting_picks_city_whose_parent_region_is_in_russia(adapter, api) -> None:
     regions_route(api)
     assert await adapter.geo_targeting("Брест") == {"regions": [4002]}

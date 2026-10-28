@@ -383,7 +383,7 @@ async def test_focus_facts_hold_one_service_and_its_price(salon: DescriptionDraf
 
 
 async def test_fact_check_still_rejects_invented_price_for_focused_service(salon: DescriptionDraft) -> None:
-    llm = FakeLLM(response("Педикюр", "Педикюр — 1 990 ₽"))
+    llm = FakeLLM(response("Ухоженные ноги", "Педикюр — 1 990 ₽"))
     variant = await generate_ad_text(llm, salon, platform="vk", angle="цена", segment="к празднику",
                                      service=salon.services[1])
     assert variant.used_fallback and len(llm.calls) == 3
@@ -402,13 +402,13 @@ async def test_second_ad_of_group_differs_from_first(salon: DescriptionDraft) ->
         [
             response("Педикюр рядом", " стерильные  инструменты"),
             response("Педикюр", "Педикюр — 2 500 ₽"),
-            response("Педикюр к празднику", "Педикюр — 2 500 ₽"),
+            response("Педикюр к празднику", "Ухоженные ноги на праздники — 2 500 ₽"),
         ]
     )
     variant = await generate_ad_text(
         llm, salon, platform="vk", angle="результат", segment="к празднику", service=salon.services[1], other=first
     )
-    assert variant.ad.text == "Педикюр — 2 500 ₽" and variant.attempts == 3
+    assert variant.ad.text == "Ухоженные ноги на праздники — 2 500 ₽" and variant.attempts == 3
     assert json.loads(llm.calls[0][1])["other_ad"] == {"title": "Педикюр", "text": "Стерильные инструменты"}
     assert "текст « стерильные  инструменты» совпал" in json.loads(llm.calls[1][1])["previous_errors"][0]
     assert "заголовок «Педикюр» совпал" in json.loads(llm.calls[2][1])["previous_errors"][0]
@@ -642,4 +642,49 @@ async def test_title_length_names_the_title_and_the_excess(owner: DescriptionDra
     assert json.loads(llm.calls[1][1])["previous_errors"] == [
         "заголовок «Гель-лак для обновления образа» — 30 символов, нужно не больше 25: убери или замени слово, "
         "чтобы стало хотя бы на 5 символов короче"
+    ]
+
+
+async def test_near_copy_of_first_ad_gets_one_retry_then_least_similar_answer(sokolniki: DescriptionDraft) -> None:
+    """Как на живом плане: второе объявление VK — первое с заменой одного слова. Повтор — один; оба ответа проходят
+    правила площадки, поэтому идёт менее похожий, а не шаблон."""
+    service = sokolniki.services[2]
+    first = AdText("Гель-лак к празднику", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите ваш образ!")
+    llm = SequenceLLM(
+        [
+            response("Гель-лак на праздник", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите ваш стиль!"),
+            response("Новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей"),
+        ]
+    )
+    variant = await generate_ad_text(llm, sokolniki, platform="vk", angle="результат", segment="новый дизайн",
+                                     service=service, other=first)
+    assert len(llm.calls) == 2 and not variant.used_fallback
+    assert variant.ad == AdText("Новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей")
+    previous_errors = json.loads(llm.calls[1][1])["previous_errors"]
+    assert "почти повторяет текст other_ad" in previous_errors[0]
+    assert "почти повторяет заголовок other_ad" in previous_errors[1]
+
+
+async def test_similarity_ignores_medical_disclaimer(description: DescriptionDraft) -> None:
+    description.medical = MedicalResult("required", [])
+    first = AdText("Маникюр", f"Ежедневно. {MEDICAL_DISCLAIMER}")
+    llm = FakeLLM(response("Запись открыта", "Без выходных."))
+    variant = await generate_ad_text(llm, description, platform="direct", angle="результат", segment="к празднику",
+                                     other=first)
+    assert len(llm.calls) == 1 and variant.ad.text == f"Без выходных. {MEDICAL_DISCLAIMER}"
+
+
+async def test_text_repeating_title_is_rewritten(sokolniki: DescriptionDraft) -> None:
+    llm = SequenceLLM(
+        [
+            response("Маникюр с покрытием гель-лаком к празднику", "Маникюр с покрытием гель-лаком — 2 200 ₽"),
+            response("Маникюр с покрытием гель-лаком к празднику", "Мастера со стажем от 4 лет. Запись онлайн"),
+        ]
+    )
+    variant = await generate_ad_text(llm, sokolniki, platform="direct", angle="цена", segment="к празднику",
+                                     service=sokolniki.services[2])
+    assert not variant.used_fallback and variant.attempts == 2
+    assert json.loads(llm.calls[1][1])["previous_errors"] == [
+        "текст «Маникюр с покрытием гель-лаком — 2 200 ₽» повторяет заголовок «Маникюр с покрытием гель-лаком к "
+        "празднику» — не повторяй в тексте слова заголовка, напиши то, чего в нём нет: отличие, цену или повод"
     ]

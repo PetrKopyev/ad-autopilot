@@ -23,7 +23,7 @@ from app.platforms.base import (
     StatLevel,
     StatRow,
 )
-from app.platforms.regions import Region, RegionCache, find_region, not_found
+from app.platforms.regions import AREAS, Region, RegionCache, find_region, not_found
 
 # Все места, где документация VK неоднозначна, собраны здесь; сверять с живым кабинетом.
 API_FORMAT = {
@@ -510,7 +510,10 @@ class VkAdapter(VkClient):
         return self._limits
 
     async def geo_targeting(self, city: str) -> dict[str, Any]:
-        """Город ищется в дереве регионов VK; не найден там — поиском _q (мелкие города в дерево не входят)."""
+        """Город ищется в дереве регионов VK; не найден там — поиском _q (мелкие города в дерево не входят). Пункт из
+        нескольких регионов (AREAS) — регионы его частей."""
+        if parts := AREAS.get(city):
+            return {"regions": [(await self.geo_targeting(part))["regions"][0] for part in parts]}
         regions = await REGIONS.get(API_URL, self._regions)
         region = find_region(city, regions.values(), regions, country=RUSSIA, platform="VK Рекламы")
         if region is None:

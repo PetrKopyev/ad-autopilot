@@ -34,6 +34,7 @@ from app.domain.budget import (
 )
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
+from app.platforms.regions import phrase_city
 from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict
 from app.services.onboarding import (
     DESCRIPTION_KEYS,
@@ -179,8 +180,26 @@ def budget_view(monthly_budget: int, connected: list[str], today: date, domain: 
 
 def phrases(business: Business) -> list[str]:
     names = service_names(business.description.get("fields", {}).get("services", {}).get("value", ""))
-    result = [f"{' '.join(name.split()[:4])} {business.city}".lower() for name in names[:5]]
+    result = [f"{' '.join(name.split()[:4])} {phrase_city(business.city)}".lower() for name in names[:5]]
     return list(dict.fromkeys(result))
+
+
+def audience(group: dict, city: str) -> str:
+    """Кому покажут группу — по тому, что уходит на площадку при запуске (services.launch): Директу — город и
+    ключевые фразы группы, VK — только город, без пола, возраста и интересов. Считается при показе плана: в старых
+    планах в поле audience лежит повод сегмента."""
+    if group["platform"] == "vk":
+        return (
+            f"Регион: {city}. Пол, возраст и интересы не задаём: VK сам показывает рекламу тем, кто скорее оставит "
+            "заявку на сайте."
+        )
+    own = " ".join(group.get("service", "").split()[:4]).lower()
+    themes = [phrase.removesuffix(f" {phrase_city(city).lower()}") for phrase in group["phrases"]]
+    themes.sort(key=lambda theme: theme != own)
+    if not themes:
+        return f"Регион: {city}. Ключевых фраз пока нет: добавьте услуги в описание бизнеса."
+    quoted = ", ".join(f"«{theme}»" for theme in themes)
+    return f"Тем, кто ищет в Яндексе {quoted}. Регион: {city}. Объявления — в поиске и на сайтах-партнёрах Яндекса."
 
 
 def launch_blockers(
@@ -484,7 +503,6 @@ class PlanService:
                         "segment": segment,
                         "service": service.name if service else "",
                         "name": f"{service.name if service else 'Услуги'} — {segment}",
-                        "audience": segment.capitalize(),
                         "daily_limit_kop": group_limit.daily_limit,
                         "phrases": phrases(business) if platform == "direct" else [],
                         "ads": [
@@ -515,6 +533,7 @@ class PlanService:
         payload = {
             "inputs_hash": digest,
             "built_at": now.isoformat(),
+            "city": business.city,
             "month_budget_kop": business.month_budget_kop,
             "platforms": platforms,
             "off": off,
@@ -742,7 +761,7 @@ class PlanService:
                 "id": group["id"],
                 "name": group["name"],
                 "platform": group["platform"],
-                "audience": group["audience"],
+                "audience": audience(group, payload.get("city", business.city)),
                 "daily_limit_kop": group["daily_limit_kop"],
                 "ads": [{"title": ad["title"], "text": ad["text"]} for ad in group["ads"]],
                 "assets": [
