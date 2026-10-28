@@ -5,12 +5,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { getBusiness, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
-import { saveMarking } from '../api/setup';
+import { saveDescription, saveMarking } from '../api/setup';
 import { SettingsPage } from './SettingsPage';
 
 vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn(),
   saveBudget: vi.fn(), saveBusinessSettings: vi.fn() }));
-vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn() }));
+vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn() }));
 vi.mock('../api/screens', () => ({ mockEnabled: false,
   getAutopilotStatus: async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] }) }));
 vi.mock('../api/session', () => ({ useSession: () => ({ data: { id: 1, login: 'owner', email: null, accounts: [] }, reload: () => {} }) }));
@@ -81,4 +81,35 @@ it('бюджет ниже порога ВКонтакте сохраняется
   expect(await block.findByText(warning)).toBeTruthy();
   expect(block.getByText(copy.settingsScreen.saved)).toBeTruthy();
   expect(saveBudget).toHaveBeenCalledWith(2000000);
+});
+
+it('средний чек — только цифры, как бюджет; неизменённый уходит прежней суммой', async () => {
+  vi.mocked(saveBusinessSettings).mockReset().mockResolvedValue();
+  vi.mocked(getBusiness).mockResolvedValue({ ...business, avg_check_kop: 150050 });
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('.card') as HTMLElement);
+  const average = block.getByLabelText(copy.settingsScreen.averageLabel) as HTMLInputElement;
+  expect(average.value).toBe('1 501');
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  await block.findByText(copy.settingsScreen.saved);
+  expect(saveBusinessSettings).toHaveBeenLastCalledWith(true, 150050);
+  fireEvent.change(average, { target: { value: '2 000 руб' } });
+  expect(average.value).toBe('2 000');
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  await vi.waitFor(() => expect(saveBusinessSettings).toHaveBeenLastCalledWith(true, 200000));
+});
+
+it('услуги и цены в описании — одно поле, отдельное поле цен не показывается и уходит пустым', async () => {
+  vi.mocked(saveDescription).mockResolvedValue();
+  const field = (value: string) => ({ value, quote: null, verified: true, question: '' });
+  vi.mocked(getBusiness).mockResolvedValue({ ...business, description: { fields: {
+    services: field('Маникюр — 1 500 ₽\nПедикюр'), prices: field('Маникюр — 1 500 ₽'), address: field(''), difference: field('') } } });
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.business })).closest('.card') as HTMLElement);
+  expect((block.getByLabelText(copy.settingsScreen.description.services) as HTMLTextAreaElement).value).toBe('Маникюр — 1 500 ₽\nПедикюр');
+  expect(block.queryByLabelText(copy.settingsScreen.description.prices)).toBeNull();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  await vi.waitFor(() => expect(saveDescription).toHaveBeenCalled());
+  const [sent] = vi.mocked(saveDescription).mock.calls[0];
+  expect([sent.services.value, sent.prices.value]).toEqual(['Маникюр — 1 500 ₽\nПедикюр', '']);
 });

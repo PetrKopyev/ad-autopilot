@@ -4,7 +4,7 @@ import { Button, Card, CityCombobox, ErrorBanner, RublesInput, Stepper } from '.
 import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
   getMe, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
-import type { AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
+import type { Account, AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { getBusiness } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { formatMoney } from '../components/Money';
@@ -40,6 +40,7 @@ const markingForm = (stored: StoredMarking | null): Marking => stored
   ? { subject_type: stored.subject_type, inn: '', name: stored.name, phone: '', confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...stored.confirmed_in_platform } }
   : emptyMarking;
 const fields: DescriptionKey[] = ['services', 'prices', 'address', 'difference'];
+const ownerFields: DescriptionKey[] = ['services', 'address', 'difference'];
 
 export function SetupPage() {
   const { step } = useParams();
@@ -50,7 +51,7 @@ export function SetupPage() {
   const [website, setWebsite] = useState(draft.business?.site_url ?? '');
   const [city, setCity] = useState(draft.business?.city ?? '');
   const [budget, setBudget] = useState(draft.business ? String(Math.round(draft.business.month_budget_kop / 100)) : '');
-  const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(draft.business.avg_check_kop / 100) : '');
+  const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(Math.round(draft.business.avg_check_kop / 100)) : '');
   const [noSite, setNoSite] = useState(false);
   const [budgetHint, setBudgetHint] = useState<BudgetHint>();
   const [cities, setCities] = useState<string[]>();
@@ -61,6 +62,7 @@ export function SetupPage() {
   const [checks, setChecks] = useState<AccountCheck[]>();
   const [checking, setChecking] = useState(false);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [goalsFor, setGoalsFor] = useState(0);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [reading, setReading] = useState(false);
@@ -80,6 +82,7 @@ export function SetupPage() {
   const current = Number(step ?? draft.maxStep);
   const direct = me?.accounts.find((account) => account.platform === 'direct' && account.status === 'ok');
   const vk = me?.accounts.find((account) => account.platform === 'vk' && account.status === 'ok');
+  const anyAccount = !!me?.accounts.some((account) => account.status !== 'revoked');
   useEffect(() => {
     const controller = new AbortController();
     void getAuthConfig(controller.signal).then((config) => {
@@ -100,7 +103,7 @@ export function SetupPage() {
     const business = value.business;
     setDraft(value);
     setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(Math.round(business.month_budget_kop / 100)) : '');
-    setAverage(business?.avg_check_kop ? String(business.avg_check_kop / 100) : '');
+    setAverage(business?.avg_check_kop ? String(Math.round(business.avg_check_kop / 100)) : '');
     setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false); setChecks(undefined);
   }
   // Сессия пропадает на время перечитывания: сохранённое спрашиваем один раз на пользователя.
@@ -161,7 +164,7 @@ export function SetupPage() {
   useEffect(() => {
     const controller = new AbortController(); setGoals([]);
     if (draft.counter && ready) getGoals(draft.counter, controller.signal).then((value) => {
-      if (!controller.signal.aborted) setGoals(value.items);
+      if (!controller.signal.aborted) { setGoals(value.items); setGoalsFor(draft.counter); }
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : copy.errors.generic); });
     return () => controller.abort();
   }, [draft.counter, ready, revision]);
@@ -199,7 +202,7 @@ export function SetupPage() {
       if (items.some((item) => !item.ok)) session.update(await getMe());
       if (items.some((item) => item.platform === 'metrica' && item.ok)) {
         setCounters((await getCounters()).items); setCountersLoaded(true);
-        if (draft.counter) setGoals((await getGoals(draft.counter)).items);
+        if (draft.counter) { setGoals((await getGoals(draft.counter)).items); setGoalsFor(draft.counter); }
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setChecking(false); }
@@ -234,7 +237,7 @@ export function SetupPage() {
       next();
     } else if (current === 4) {
       if (!draft.approved || !draft.description?.services.value.trim()) throw new Error(copy.launchFlow.draftError);
-      await saveDescription(draft.description); next();
+      await saveDescription({ ...draft.description, prices: { ...draft.description.prices, value: '' } }); next();
     } else {
       // Сохранённые реквизиты без правок не отправляются заново: менять их можно, только введя ИНН и телефон.
       if (!keepMarking) {
@@ -275,7 +278,7 @@ export function SetupPage() {
             <p className="muted">{copy.setup.business.budgetHint}</p>
             {budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}
           </div>
-          <label className="field">{copy.setup.business.visitPrice}<input inputMode="decimal" value={average} aria-describedby="average-hint" onChange={(event) => setAverage(event.target.value)} /></label>
+          <label className="field">{copy.setup.business.visitPrice}<RublesInput max={maxBudgetRubles} value={average} aria-describedby="average-hint" onChange={setAverage} /></label>
           <p id="average-hint" className="muted">{copy.setup.business.visitPriceHint}</p>
         </>}
       </>}
@@ -285,39 +288,42 @@ export function SetupPage() {
           const account = me?.accounts.find((item) => item.platform === platform);
           return <Card key={platform} className="page-stack">
             <h2>{copy.setup.accounts[platform]}</h2><p className="muted">{platform === 'direct' ? copy.setup.accounts.required : copy.setup.accounts.optional}</p>
-            <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
-            {platform === 'direct' ? account?.status === 'ok' ? <p role="status">{copy.setup.accounts.directConnected}</p>
-              : <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setChecks(undefined); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
-              : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
+            <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected : account.status === 'ok' ? connectedAs(account) : copy.setup.accounts.expired}</p>
+            {platform === 'direct' ? account?.status !== 'ok'
+              && <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setChecks(undefined); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
+              : account?.status === 'ok' ? <Link className="tap-link" to="/connect/vk">{copy.setup.accounts.reconnect}</Link>
+                : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
             {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(account.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); setChecks(undefined); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
             <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
           </Card>;
         })}</div>
-        <div className="actions"><Button variant="secondary" aria-busy={checking || undefined} disabled={checking} onClick={() => void checkConnection()}>
+        <div className="actions"><Button variant="secondary" aria-busy={checking || undefined} disabled={checking || !anyAccount} aria-describedby={anyAccount ? undefined : 'refresh-hint'} onClick={() => void checkConnection()}>
           {checking ? <span className="loading">{copy.launchFlow.checking}</span> : copy.launchFlow.refresh}
-        </Button></div>
+        </Button>{!anyAccount && <p className="muted" id="refresh-hint">{copy.launchFlow.refreshHint}</p>}</div>
         <div role="status" aria-live="polite">{checks && <ul className="check-results">{checks.map((item) => <li key={item.platform} className={item.ok ? undefined : 'check-failed'}>
           <strong>{copy.launchFlow.checkTitles[item.platform]}:</strong> {item.message}
         </li>)}</ul>}</div>
         <label className="field">{copy.setup.accounts.counter}<select disabled={!direct} required value={draft.counter || ''} onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
           {!counters.length && <option value="">{direct && countersLoaded ? copy.launchFlow.noCounters : copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
         </select></label>
-        <fieldset className="page-stack"><legend>{copy.setup.accounts.goal}</legend>{goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}</fieldset>
+        {goals.length ? <fieldset className="page-stack"><legend>{copy.setup.accounts.goal}</legend>{goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}</fieldset>
+          : <div className="field"><strong>{copy.setup.accounts.goal}</strong><p className="muted">{direct && draft.counter && goalsFor === draft.counter ? copy.setup.accounts.goalsNone : copy.setup.accounts.goalsFirst}</p></div>}
         <details><summary>{copy.setup.accounts.createGoal}</summary><ol>{copy.launchFlow.goalSteps.map((text) => <li key={text}>{text}</li>)}</ol></details>
         {direct && countersLoaded && !counters.length && <div className="notice"><p><strong>{copy.launchFlow.noCounters}</strong></p><p>{copy.launchFlow.createCounter}</p>
           <p>{copy.setup.website.blocked}</p><a href="https://metrika.yandex.ru/" target="_blank" rel="noreferrer">{copy.launchFlow.metricaLink}</a></div>}
       </>}
       {current === 3 && <div className="page-stack" role="status" aria-live="polite">
         {reading && <p className="loading">{copy.setup.website.reading}</p>}
-        {draft.site && <><p>{copy.launchFlow.pagesRead(draft.site.pages_read)}</p><p>{copy.setup.website.foundServices(draft.site.services_found)}</p><p>{draft.site.counter_id ? copy.setup.website.counterFound : copy.setup.website.counterMissing}</p></>}
+        {draft.site && <><p>{copy.launchFlow.pagesRead(draft.site.pages_read)}</p><p>{copy.setup.website.foundServices(draft.site.services_found)}</p>
+          {!!draft.site.services?.length && <ul className="found-services">{draft.site.services.map((item) => <li key={item.name}>{item.price_kop === null ? item.name : `${item.name} — ${formatMoney(item.price_kop)}`}</li>)}</ul>}<p>{draft.site.counter_id ? copy.setup.website.counterFound : copy.setup.website.counterMissing}</p></>}
         {!reading && !siteReady && !blocked && <div className="notice"><p>{draft.site?.counter_id ? copy.launchFlow.counterMismatch : copy.setup.website.blocked}</p><SiteInstructions /></div>}
-        <Button variant="secondary" disabled={reading} onClick={() => { setError(''); setRevision((value) => value + 1); setSiteRetry((value) => value + 1); }}>{copy.common.retry}</Button>
+        <Button variant="secondary" className={siteReady ? 'retry-small' : ''} disabled={reading} onClick={() => { setError(''); setRevision((value) => value + 1); setSiteRetry((value) => value + 1); }}>{copy.common.retry}</Button>
       </div>}
       {blocked && <div className="notice"><h2>{copy.launchFlow.blockedTitle}</h2><p>{copy.setup.website.blocked}</p>{noSite && <p>{copy.launchFlow.createSite}</p>}<SiteInstructions /></div>}
       {current === 4 && draft.description && <>
         {(draft.site?.medical_level ?? draft.medical) !== 'none' && <MedicalNotice />}
         {!fields.some((key) => draft.description![key].verified) && <><h2>{copy.launchFlow.ownDescription}</h2><p>{copy.launchFlow.ownDescriptionHint}</p></>}
-        {fields.map((key) => { const field = draft.description![key]; const sourced = field.verified && field.quote?.trim() === field.value.trim(); return <div className="field" key={key}>
+        {ownerFields.map((key) => { const field = draft.description![key]; const sourced = field.verified && field.quote?.trim() === field.value.trim(); return <div className="field" key={key}>
           <label className="field">{copy.setup.draft[key]}<textarea required={key === 'services'} value={field.value} aria-describedby={[key === 'services' ? 'services-hint' : '', sourced ? '' : `source-${key}`].filter(Boolean).join(' ') || undefined} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: false, description: { ...value.description!, [key]: { ...field, value: event.target.value } } }))} /></label>
           {key === 'services' && <p className="muted" id="services-hint">{copy.setup.draft.servicesHint}</p>}
           {!sourced && <p className="source" id={`source-${key}`}>{field.verified && field.quote ? copy.setup.draft.source(field.quote) : `${copy.setup.draft.missing}. ${field.question || copy.setup.draft.question}`}</p>}
@@ -344,6 +350,9 @@ export function SetupPage() {
     </form></Card>
   </div>;
 }
+
+const connectedAs = ({ platform, external_login }: Account) => platform === 'vk' && /^\d+$/.test(external_login)
+  ? copy.setup.accounts.vkCabinet(external_login) : copy.setup.accounts.connected(external_login);
 
 function BudgetNotes({ hint, amount }: { hint: BudgetHint; amount: number }) {
   const { direct, vk } = hint.daily_kop;

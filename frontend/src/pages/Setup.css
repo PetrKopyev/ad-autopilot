@@ -27,6 +27,8 @@
 .launch-flow .tap-link { display: flex; align-items: center; width: fit-content; min-height: 44px; }
 .launch-flow .check-results { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .launch-flow .check-results .check-failed { color: var(--color-danger); }
+.launch-flow .retry-small { justify-self: start; min-height: 40px; padding: var(--space-2) var(--space-4); font-weight: 500; }
+.launch-flow .found-services { display: grid; gap: 4px; margin: 0; padding-left: 20px; }
 .clients-answers { list-style: none; margin: 0; padding: 0; }
 @media (max-width: 600px) {
   .launch-flow .account-grid { grid-template-columns: minmax(0, 1fr); }

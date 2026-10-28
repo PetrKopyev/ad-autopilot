@@ -150,10 +150,11 @@ export function mockSetupBusiness(body: BusinessInput): Business {
 export function mockSetupSite(): SiteCheck {
   const field = (value: string, question: string) => ({ value, quote: value || null, verified: !!value, question });
   return { status: setupMock.business?.site_url ? 'ready' : 'blocked', pages_read: 3, services_found: 2,
+    services: [{ name: copy.launchFlow.mockServices, price_kop: 150_000 }, { name: copy.launchFlow.mockPedicure, price_kop: null }],
     counter_id: setupMock.business?.site_url ? 12345 : null, medical_level: 'none',
     description: {
-      services: field(copy.launchFlow.mockServices, copy.launchFlow.servicesQuestion),
-      prices: field(copy.launchFlow.mockPrices, copy.launchFlow.pricesQuestion),
+      services: field(copy.launchFlow.mockPrices, copy.launchFlow.servicesQuestion),
+      prices: field('', copy.launchFlow.pricesQuestion),
       address: field(copy.launchFlow.mockAddress, copy.launchFlow.addressQuestion),
       difference: field('', copy.launchFlow.differenceQuestion),
     } };
@@ -295,7 +296,7 @@ export function mockClientAnswer(id: string, clients: number | null) {
 let businessSettings: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
   auto_continue: true, marking: null, metrica_counter_id: null, lead_goal_ids: [], description_approved: false, medical_level: 'none',
   description: { fields: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
-    { value: { services: copy.launchFlow.mockServices, prices: copy.launchFlow.mockPrices, address: copy.launchFlow.mockAddress, difference: '' }[key],
+    { value: { services: copy.launchFlow.mockPrices, prices: '', address: copy.launchFlow.mockAddress, difference: '' }[key],
       quote: null, verified: true, question: '' }])) as Description } };
 function mockMonthBudget() { return setupMock.business?.month_budget_kop ?? businessSettings.month_budget_kop; }
 export function mockBusinessSettings(): BusinessSettings {

@@ -53,7 +53,10 @@ from app.services.onboarding import (
     detect_niche,
     launch_time,
     normalize_phone,
+    owner_fields,
     service_names,
+    split_price,
+    split_services,
     valid_inn,
 )
 from app.services.plan import PlanService
@@ -489,9 +492,11 @@ def test_draft_saves_city_or_average_check_changed_alone(world: World, city: str
 async def test_site_check_builds_verified_draft(world: World) -> None:
     result = await world.onboarding.site_check(world.business.id, NOW, TODAY)
     assert result["status"] == "ready" and result["counter_id"] == COUNTER and result["services_found"] == 1
+    assert result["services"] == [{"name": "Маникюр классический", "price_kop": 150_000}]
     fields = result["description"]
-    assert fields["services"]["value"] == "Маникюр классический" and fields["services"]["verified"]
-    assert fields["prices"]["value"] == "Маникюр классический — 1 500 ₽"
+    assert fields["services"]["value"] == "Маникюр классический — 1 500 ₽" and fields["services"]["verified"]
+    assert world.business.description["fields"]["services"]["value"] == "Маникюр классический"
+    assert world.business.description["fields"]["prices"]["value"] == "Маникюр классический — 1 500 ₽"
     assert fields["address"]["quote"] == "Адрес: г. Самара, ул. Полевая, д. 7."
     assert world.business.niche_class == "nails"
 
@@ -554,9 +559,9 @@ async def test_site_check_refresh_fills_only_empty_fields_of_unapproved_descript
     world.onboarding.save_description(world.business.id, {"address": {"value": "Самара, у вокзала"}}, False, NOW)
     world.llm.description = DESCRIPTION
     fields = (await world.onboarding.site_check(world.business.id, NOW, TODAY, refresh=True))["description"]
-    assert fields["services"]["value"] == "Маникюр классический" and fields["services"]["verified"]
+    assert fields["services"]["value"] == "Маникюр классический — 1 500 ₽" and fields["services"]["verified"]
     assert fields["address"]["value"] == "Самара, у вокзала" and not fields["address"]["verified"]
-    assert world.business.description["fields"] == fields
+    assert owner_fields(world.business.description["fields"]) == fields
 
 
 async def test_site_reread_after_cache_expiry_fills_empty_fields(world: World) -> None:
@@ -566,7 +571,7 @@ async def test_site_reread_after_cache_expiry_fills_empty_fields(world: World) -
     world.llm.description = DESCRIPTION
     fields = (await world.onboarding.site_check(world.business.id, NOW + timedelta(minutes=11), TODAY))["description"]
     assert world.llm.calls == ["description", "description"]
-    assert fields["services"]["value"] == "Маникюр классический" and fields["services"]["verified"]
+    assert fields["services"]["value"] == "Маникюр классический — 1 500 ₽" and fields["services"]["verified"]
     assert fields["address"]["value"] == "Самара, у вокзала"
 
 
@@ -1060,6 +1065,61 @@ def test_owner_services_take_price_from_prices_field() -> None:
         ("Маникюр с покрытием", 220_000),
         ("снятие покрытия", None),
     ]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("Маникюр с покрытием гель-лаком — 2 200 ₽", ("Маникюр с покрытием гель-лаком", 220_000)),
+        ("Маникюр — 2200", ("Маникюр", 220_000)),
+        ("Стрижка 2 200 руб", ("Стрижка", 220_000)),
+        ("Окрашивание (корни, длина) — 3 500,50 ₽", ("Окрашивание (корни, длина)", 350_050)),
+        ("Педикюр", ("Педикюр", None)),
+        ("Массаж 60", ("Массаж 60", None)),
+        ("Снятие покрытия — от 300 ₽", ("Снятие покрытия — от 300 ₽", None)),
+    ],
+)
+def test_owner_line_is_split_into_service_and_price(line: str, expected: tuple[str, int | None]) -> None:
+    assert split_price(line) == expected
+
+
+def test_services_and_prices_field_is_stored_as_separate_fields() -> None:
+    value = "Маникюр — 2 200,50 ₽, педикюр\nОкрашивание (корни, длина) — 3 500 ₽\nманикюр"
+    assert service_names(value) == [
+        "Маникюр — 2 200,50 ₽",
+        "педикюр",
+        "Окрашивание (корни, длина) — 3 500 ₽",
+        "маникюр",
+    ]
+    assert split_services(value, "") == (
+        "Маникюр\nпедикюр\nОкрашивание (корни, длина)",
+        "Маникюр — 2 201 ₽\nОкрашивание (корни, длина) — 3 500 ₽",
+    )
+    # Старая форма присылала цены отдельным полем: они не теряются.
+    assert split_services("Маникюр\nПедикюр", "Педикюр — 1 800 ₽") == ("Маникюр\nПедикюр", "Педикюр — 1 800 ₽")
+
+
+def test_stored_description_is_shown_with_prices_in_one_field() -> None:
+    fields = {
+        "services": {"value": "Маникюр, педикюр", "quote": None, "verified": False},
+        "prices": {"value": "Маникюр — 1 500 ₽", "quote": "Маникюр 1500", "verified": True},
+        "address": {"value": "Самара", "quote": None, "verified": False},
+    }
+    shown = owner_fields(fields)
+    assert shown["services"] == {"value": "Маникюр — 1 500 ₽\nпедикюр", "quote": "Маникюр 1500", "verified": False}
+    assert shown["prices"] == fields["prices"] and shown["address"] == fields["address"]
+
+
+async def test_combined_field_keeps_site_quotes_and_removed_price_is_dropped(world: World) -> None:
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    shown = owner_fields(world.business.description["fields"])
+    world.onboarding.save_description(world.business.id, {"services": shown["services"]}, True, NOW)
+    fields = world.business.description["fields"]
+    assert fields["services"]["verified"] and fields["prices"]["verified"]
+    assert fields["prices"]["value"] == "Маникюр классический — 1 500 ₽"
+    world.onboarding.save_description(world.business.id, {"services": {"value": "Маникюр классический"}}, True, NOW)
+    fields = world.business.description["fields"]
+    assert fields["services"]["verified"] and fields["prices"]["value"] == ""
 
 
 async def test_medical_site_gets_warning_level(tmp_path: Path) -> None:

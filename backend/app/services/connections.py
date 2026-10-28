@@ -18,9 +18,9 @@ DIRECT_CODES = {
     "3000": "Яндекс закрыл этому аккаунту доступ к API Директа. Проверьте в кабинете Директа, не заблокирован ли "
     "аккаунт, или напишите в поддержку Директа.",
 }
-DIRECT_FAILED = "Директ ответил ошибкой. Проверьте ещё раз позже."
-WORKING = {"direct": "Директ отвечает.", "vk": "VK Реклама отвечает."}
-NO_COUNTERS = "На этом аккаунте Яндекса нет счётчиков Метрики."
+DIRECT_FAILED = "ответил ошибкой. Проверьте ещё раз позже."
+WORKING = "отвечает."
+NO_COUNTERS = "на этом аккаунте Яндекса нет счётчиков."
 
 
 def failure(error: Exception) -> str:
@@ -29,7 +29,7 @@ def failure(error: Exception) -> str:
     if isinstance(error, RateLimited):
         return "Площадка просит подождать. Проверьте ещё раз через минуту."
     if isinstance(error, MetricaAccessError):
-        return "Нет доступа к Метрике. Подключите Директ заново и разрешите доступ к Метрике."
+        return "нет доступа. Подключите Директ заново и разрешите доступ к Метрике."
     code = str(getattr(error, "direct_code", ""))
     if not code:
         return str(error)
@@ -62,15 +62,15 @@ async def check_connections(
 
     async def whoami(platform: str) -> tuple[bool, str]:
         await (await run_in_threadpool(resolve, business_id, platform)).whoami()
-        return True, WORKING[platform]
+        return True, WORKING
 
     async def counters() -> tuple[bool, str]:
         found = await (await run_in_threadpool(metrica, business_id)).list_counters()
-        return (True, f"Метрика отвечает, счётчиков: {len(found)}.") if found else (False, NO_COUNTERS)
+        return (True, f"отвечает, счётчиков: {len(found)}.") if found else (False, NO_COUNTERS)
 
     results = []
     if statuses.get("direct", "revoked") == "revoked":
-        results.append({"platform": "direct", "ok": False, "message": "Директ не подключён."})
+        results.append({"platform": "direct", "ok": False, "message": "не подключён — нажмите «Подключить Директ»."})
     for platform in ("direct", "vk"):
         if statuses.get(platform) == "ok":
             results.append(await check(platform, partial(whoami, platform)))

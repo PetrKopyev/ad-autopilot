@@ -679,9 +679,9 @@ def test_accounts_check_asks_each_connected_platform_in_fake_mode(
     csrf = {"X-CSRF-Token": client.cookies["__Host-csrf"]}
     items = client.post("/api/accounts/check", headers=csrf).json()["items"]
     assert items == [
-        {"platform": "direct", "ok": True, "message": "Директ отвечает."},
-        {"platform": "vk", "ok": True, "message": "VK Реклама отвечает."},
-        {"platform": "metrica", "ok": True, "message": "Метрика отвечает, счётчиков: 1."},
+        {"platform": "direct", "ok": True, "message": "отвечает."},
+        {"platform": "vk", "ok": True, "message": "отвечает."},
+        {"platform": "metrica", "ok": True, "message": "отвечает, счётчиков: 1."},
     ]
     client.app.state.platform_adapters.resolve(1, "vk").inject_error(401)
     repository.accounts[1].status = "needs_reauth"

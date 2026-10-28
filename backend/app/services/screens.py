@@ -20,7 +20,7 @@ from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
-from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget
+from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
 from app.worker.clock import MOSCOW, today
@@ -346,7 +346,9 @@ class ScreensService:
             "month_budget_kop": business.month_budget_kop,
             "avg_check_kop": business.avg_check_kop,
             # Служебная проверка сайта (check) и медицинская оценка клиенту не нужны: только поля описания.
-            "description": {"fields": business.description["fields"]} if business.description.get("fields") else None,
+            "description": (
+                {"fields": owner_fields(business.description["fields"])} if business.description.get("fields") else None
+            ),
             "auto_continue": business.auto_continue,
             "marking": safe_marking,
             # Мастер настройки восстанавливает по ним пройденные шаги в новой вкладке и на другом устройстве.

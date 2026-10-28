@@ -279,9 +279,10 @@ def lines(value: str) -> list[str]:
 
 
 def service_names(value: str) -> list[str]:
-    """Услуги владелец пишет и по строке, и через запятую; запятая в скобках название не делит. Повторы убираются."""
+    """Услуги владелец пишет и по строке, и через запятую; запятая в скобках и в цене название не делит. Повторы
+    убираются."""
     names: dict[str, str] = {}
-    for item in re.split(r"[\n;]|,(?![^()]*\))", value):
+    for item in re.split(r"[\n;]|(?:(?<!\d),|,(?!\d))(?![^()]*\))", value):
         if name := item.strip(" -•\t"):
             names.setdefault(name.casefold(), name)
     return list(names.values())
@@ -300,6 +301,46 @@ def owner_price(name: str, prices: list[str]) -> int | None:
     return None
 
 
+PRICE_TAIL = re.compile(
+    r"\s*([—–:-])?\s*(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[,.](\d{2}))?\s*(₽|руб(?:\.|лей|ля|ль)?|р\.?)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def split_price(item: str) -> tuple[str, int | None]:
+    match = PRICE_TAIL.search(item)
+    name = item[: match.start()].strip(" -—–•\t") if match and (match[1] or match[4]) else ""
+    if not name or name.casefold().endswith(" от"):
+        return item, None
+    return name, int(re.sub(r"\D", "", match[2])) * 100 + int(match[3] or 0) or None
+
+
+def price_line(name: str, price: int) -> str:
+    return f"{name} — {rubles(price)} ₽"
+
+
+def split_services(value: str, prices: str) -> tuple[str, str]:
+    old = lines(prices)
+    services: dict[str, tuple[str, int | None]] = {}
+    for item in service_names(value):
+        name, price = split_price(item)
+        services.setdefault(name.casefold(), (name, owner_price(name, old) if price is None else price))
+    names = "\n".join(name for name, _ in services.values())
+    return names, "\n".join(price_line(name, price) for name, price in services.values() if price is not None)
+
+
+def owner_fields(fields: dict) -> dict:
+    services, prices = fields.get("services"), fields.get("prices", {})
+    if not services:
+        return fields
+    old = lines(prices.get("value", ""))
+    value = "\n".join(
+        name if (price := owner_price(name, old)) is None else price_line(name, price)
+        for name in service_names(services["value"])
+    )
+    return fields | {"services": services | {"value": value, "quote": services.get("quote") or prices.get("quote")}}
+
+
 def description_fields(draft: DescriptionDraft) -> dict[str, dict]:
     asked: dict[str, str] = {}
     for item in draft.questions:
@@ -311,7 +352,7 @@ def description_fields(draft: DescriptionDraft) -> dict[str, dict]:
         else:
             key = "difference" if head[0] == "advantages" else "services"
         asked.setdefault(key, item.question)
-    prices = [f"{service.name} — {rubles(service.price)} ₽" for service in draft.services if service.price is not None]
+    prices = [price_line(service.name, service.price) for service in draft.services if service.price is not None]
     values = {
         "services": "\n".join(service.name for service in draft.services),
         "prices": "\n".join(prices),
@@ -522,6 +563,7 @@ class OnboardingService:
                 "checked_at": now.isoformat(),
                 "pages_read": len(site.pages),
                 "services_found": len(draft.services),
+                "services": [{"name": service.name, "price_kop": service.price} for service in draft.services],
                 "counter_ids": site.counter_ids,
                 "block_reason": site.launch_block_reason,
                 "fresh": fields,
@@ -560,9 +602,10 @@ class OnboardingService:
             "block_reason": check["block_reason"],
             "pages_read": check["pages_read"],
             "services_found": check["services_found"],
+            "services": check.get("services", []),
             "counter_id": ids[0] if ids else None,
             "counter_ids": ids,
-            "description": business.description.get("fields", check["fresh"]),
+            "description": owner_fields(business.description.get("fields", check["fresh"])),
             "medical_level": business.medical_level,
         }
 
@@ -579,13 +622,16 @@ class OnboardingService:
         with waited_lock(self.repository, business_id, LOCK_WAIT_SECONDS):
             business = self.current(business_id)
             previous = business.description.get("fields", {})
-            clean = {}
+            values = {}
             for key in DESCRIPTION_KEYS:
                 item = fields.get(key)
                 value = item.get("value", "") if isinstance(item, dict) else ""
                 if not isinstance(value, str) or len(value) > MAX_FIELD:
                     raise OnboardingError("Описание слишком длинное или заполнено неверно.")
-                value = value.strip()
+                values[key] = value.strip()
+            values["services"], values["prices"] = split_services(values["services"], values["prices"])
+            clean = {}
+            for key, value in values.items():
                 old = previous.get(key, {})
                 kept = bool(value) and value == old.get("value")
                 clean[key] = {

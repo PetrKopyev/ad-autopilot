@@ -24,7 +24,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(answers[path]), { status: 200, headers: { 'Content-Type': 'application/json' } });
   });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); fetchMock.mockReset(); sessionStorage.clear(); });
+afterEach(() => { cleanup(); directStatus = 'ok'; vi.restoreAllMocks(); vi.unstubAllGlobals(); fetchMock.mockReset(); sessionStorage.clear(); });
 
 function Probe() {
   return <><p data-testid="path">{useLocation().pathname}</p><p data-testid="business">{String(useSession().data?.has_business)}</p></>;
@@ -213,7 +213,7 @@ it('без черновика в вкладке шаги восстанавли�
   fireEvent.click(screen.getByRole('link', { name: copy.common.back }));
   expect((await screen.findByLabelText(copy.setup.business.city) as HTMLInputElement).value).toBe('Самара');
   expect((screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement).value).toBe('30\u00a0000');
-  expect((screen.getByLabelText(copy.setup.business.visitPrice) as HTMLInputElement).value).toBe('1500');
+  expect((screen.getByLabelText(copy.setup.business.visitPrice) as HTMLInputElement).value).toBe('1\u00a0500');
 });
 
 it('шаг маркировки восстанавливает реквизиты и без правок ведёт к плану, не отправляя их заново', async () => {
@@ -290,8 +290,7 @@ it('под полем услуг подсказка, что их можно пе
 });
 
 let directStatus = 'ok';
-function accountsStep(counters: { id: number; name: string }[], check: unknown) {
-  directStatus = 'ok';
+function accountsStep(counters: { id: number; name: string }[], check: unknown, vk?: string, goals = [{ id: 1, name: 'Заявка' }]) {
   sessionStorage.setItem('ad-autopilot-setup-draft', JSON.stringify({
     user: 1, business: { id: 7, site_url: 'https://salon.example/', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null },
     counter: 0, goals: [], approved: false, maxStep: 2,
@@ -301,9 +300,10 @@ function accountsStep(counters: { id: number; name: string }[], check: unknown) 
     const answers: Record<string, unknown> = {
       '/api/auth/config': { demo: false, vk_oauth: false },
       '/api/me': { id: 1, login: 'owner', email: null, has_business: true,
-        accounts: [{ id: 1, business_id: 7, platform: 'direct', external_login: 'owner', status: directStatus, scopes: [] }] },
+        accounts: [{ id: 1, business_id: 7, platform: 'direct', external_login: 'owner', status: directStatus, scopes: [] },
+          ...vk ? [{ id: 2, business_id: 7, platform: 'vk', external_login: vk, status: 'ok', scopes: [] }] : []] },
       '/api/metrica/counters': { items: counters },
-      '/api/metrica/goals': { items: [{ id: 1, name: 'Заявка' }] },
+      '/api/metrica/goals': { items: goals },
       '/api/accounts/check': check,
       '/api/accounts/1': { stopped: true, message: 'Кабинет отключён.' },
     };
@@ -338,7 +338,7 @@ it('«Проверить подключение» спрашивает площ�
   expect(failed.closest('li')!.className).toBe('check-failed');
   expect(screen.getByText('Метрика отвечает, счётчиков: 1.', { exact: false })).not.toBeNull();
   expect(button.textContent).toBe(copy.launchFlow.refresh);
-  expect(screen.getByText(copy.setup.accounts.directConnected)).not.toBeNull();
+  expect(screen.getByText(copy.setup.accounts.connected('owner'))).not.toBeNull();
   const requests = calls();
   expect(requests).toContain('POST /api/accounts/check');
   expect(requests.filter((call) => call === 'GET /api/me')).toHaveLength(2);
@@ -348,7 +348,7 @@ it('истёкший доступ после проверки виден на к
   let answer!: (value: Response) => void;
   accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [{ platform: 'direct', ok: false, message: 'Доступ истёк — подключите кабинет заново.' }] });
   const button = await screen.findByRole('button', { name: copy.launchFlow.refresh });
-  await screen.findByText(copy.setup.accounts.directConnected);
+  await screen.findByText(copy.setup.accounts.connected('owner'));
   const base = fetchMock.getMockImplementation()!;
   directStatus = 'needs_reauth';
   fetchMock.mockImplementation((url, init) => new URL(String(url)).pathname === '/api/me'
@@ -416,4 +416,87 @@ it('бюджет ниже минимума называет минимум и п
   expect(await screen.findByText(plain('На Директ придётся около 301 ₽ в день.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByRole('status')).toBeNull();
+});
+
+it('без подключённых кабинетов «Проверить подключение» неактивна и объясняет почему, а вместо пустых целей — подсказка', async () => {
+  directStatus = 'revoked';
+  accountsStep([], { items: [] });
+  await screen.findByText(copy.setup.accounts.goalsFirst);
+  const button = screen.getByRole('button', { name: copy.launchFlow.refresh });
+  expect(button.hasAttribute('disabled')).toBe(true);
+  expect(document.getElementById(button.getAttribute('aria-describedby')!)!.textContent).toBe(copy.launchFlow.refreshHint);
+  expect(screen.queryByRole('group', { name: copy.setup.accounts.goal })).toBeNull();
+  expect(screen.getByRole('button', { name: copy.setup.accounts.connectDirect })).not.toBeNull();
+});
+
+it('у выбранного счётчика нет целей — подсказка создать цель, а не пустая рамка', async () => {
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [] }, undefined, []);
+  expect(await screen.findByText(copy.setup.accounts.goalsNone)).not.toBeNull();
+  expect(screen.queryByRole('group', { name: copy.setup.accounts.goal })).toBeNull();
+  expect(screen.getByRole('button', { name: copy.launchFlow.refresh }).hasAttribute('disabled')).toBe(false);
+});
+
+it('подключённый Директ — одна строка «Подключён как», подключённый ВКонтакте — номер кабинета, «Подключить заново» ссылкой', async () => {
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [] }, '29603815');
+  expect(await screen.findByText(copy.setup.accounts.vkCabinet('29603815'))).not.toBeNull();
+  expect(screen.getByText(copy.setup.accounts.connected('owner'))).not.toBeNull();
+  expect(screen.queryByText('Директ подключён')).toBeNull();
+  expect(screen.queryByRole('button', { name: copy.setup.accounts.connectDirect })).toBeNull();
+  expect(screen.queryByRole('link', { name: copy.launchFlow.vkConnect })).toBeNull();
+  const again = screen.getByRole('link', { name: copy.setup.accounts.reconnect });
+  expect(again.getAttribute('href')).toBe('/connect/vk');
+  expect(again.className).not.toContain('button');
+  expect(screen.getAllByRole('button', { name: copy.launchFlow.disconnect })).toHaveLength(2);
+});
+
+it('итог проверки не повторяет название площадки', async () => {
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [
+    { platform: 'direct', ok: true, message: 'отвечает.' }, { platform: 'metrica', ok: true, message: 'отвечает, счётчиков: 1.' }] });
+  fireEvent.click(await screen.findByRole('button', { name: copy.launchFlow.refresh }));
+  await screen.findByText('отвечает, счётчиков: 1.', { exact: false });
+  expect([...document.querySelectorAll('.check-results li')].map((item) => item.textContent)).toEqual(['Директ: отвечает.', 'Метрика: отвечает, счётчиков: 1.']);
+});
+
+it('успешная проверка сайта показывает найденные услуги с ценами, а повтор — небольшой второстепенной кнопкой', async () => {
+  conflictOn('/api/business/description', busy);
+  const answer = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (url, init) => new URL(String(url)).pathname === '/api/business/site-check'
+    ? new Response(JSON.stringify({ status: 'ready', pages_read: 2, services_found: 2, counter_id: 12345, description, medical_level: 'none',
+      services: [{ name: 'Маникюр', price_kop: 150_000 }, { name: 'Педикюр', price_kop: null }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    : answer(url, init));
+  renderStep(3);
+  await screen.findByText('Педикюр');
+  expect([...document.querySelectorAll('.found-services li')].map((item) => item.textContent?.replace(/\s/g, ' '))).toEqual(['Маникюр — 1 500 ₽', 'Педикюр']);
+  const retry = screen.getByRole('button', { name: copy.common.retry });
+  await waitFor(() => expect(retry.hasAttribute('disabled')).toBe(false));
+  expect(retry.className).toContain('button--secondary');
+  expect(retry.className).toContain('retry-small');
+});
+
+it('средний чек — только цифры с разрядами, как бюджет', async () => {
+  renderStep(1);
+  const average = await screen.findByLabelText(copy.setup.business.visitPrice) as HTMLInputElement;
+  fireEvent.change(average, { target: { value: '2 500 руб.' } });
+  expect(average.value).toBe('2 500');
+  expect(average.getAttribute('inputmode')).toBe('numeric');
+});
+
+it('услуги и цены — одно поле с одной цитатой; цены сервер разбирает сам, отдельное поле не отправляется', async () => {
+  conflictOn('/api/business/description', busy);
+  const answer = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (url, init) => init?.method === 'PUT' ? new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }) : answer(url, init));
+  sessionStorage.setItem('ad-autopilot-setup-draft', JSON.stringify({ ...JSON.parse(sessionStorage.getItem('ad-autopilot-setup-draft')!), user: 1,
+    description: { ...description, services: { value: 'Маникюр — 1 500 ₽', quote: 'Маникюр 1500', verified: true, question: '' }, prices: field('Маникюр — 1 500 ₽') } }));
+  renderStep(4);
+  const services = await screen.findByLabelText(copy.setup.draft.services) as HTMLTextAreaElement;
+  expect(copy.setup.draft.services).toBe('Услуги и цены');
+  expect(screen.queryByLabelText(copy.setup.draft.prices)).toBeNull();
+  expect(screen.getAllByText(copy.setup.draft.source('Маникюр 1500'))).toHaveLength(1);
+  fireEvent.change(services, { target: { value: 'Маникюр — 1 500 ₽\nПедикюр' } });
+  fireEvent.click(screen.getByRole('checkbox', { name: copy.launchFlow.approved }));
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  await waitFor(() => expect(screen.getByTestId('path').textContent).toBe('/setup/5'));
+  const [, init] = fetchMock.mock.calls.find(([url, request]) => request?.method === 'PUT' && String(url).endsWith('/api/business/description'))!;
+  const { description: sent } = JSON.parse(String(init!.body));
+  expect([sent.services.value, sent.prices.value]).toEqual(['Маникюр — 1 500 ₽\nПедикюр', '']);
 });

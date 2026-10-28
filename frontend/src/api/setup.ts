@@ -14,8 +14,9 @@ export interface Business extends BusinessInput { id: number }
 export type DescriptionKey = 'services' | 'prices' | 'address' | 'difference';
 export interface DescriptionField { value: string; quote: string | null; verified: boolean; question: string }
 export type Description = Record<DescriptionKey, DescriptionField>;
+export interface FoundService { name: string; price_kop: number | null }
 export interface SiteCheck {
-  status: 'reading' | 'ready' | 'blocked'; pages_read: number; services_found: number;
+  status: 'reading' | 'ready' | 'blocked'; pages_read: number; services_found: number; services: FoundService[];
   counter_id: number | null; description: Description; medical_level: 'none' | 'maybe' | 'required';
 }
 /** Перед отзывом доступа сервер останавливает рекламу; stopped=false — площадка остановку не подтвердила. */

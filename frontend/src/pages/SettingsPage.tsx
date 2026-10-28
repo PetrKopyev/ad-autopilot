@@ -20,7 +20,7 @@ const emptyMarking: Marking = { subject_type: 'ip', inn: '', name: '', phone: ''
 const markingForm = (stored: StoredMarking | null): Marking => stored
   ? { subject_type: stored.subject_type, inn: '', name: stored.name, phone: '', confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...stored.confirmed_in_platform } }
   : emptyMarking;
-const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(kopecks / 100).replace('.', ',');
+const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(Math.round(kopecks / 100));
 
 // One section with its own save status, so a failed save never hides the others.
 function useSection() {
@@ -53,12 +53,12 @@ function DescriptionBlock({ business }: { business: BusinessSettings }) {
     descriptionKeys.map((key) => [key, business.description?.fields[key].value ?? ''])) as Record<DescriptionKey, string>);
   function submit() {
     const description = Object.fromEntries(descriptionKeys.map((key) => [key,
-      { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: values[key].trim(), verified: true }])) as Description;
+      { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: key === 'prices' ? '' : values[key].trim(), verified: true }])) as Description;
     void section.run(() => saveDescription(description), labels.saved);
   }
   return <Block title={copy.settings.business}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-      {descriptionKeys.map((key) => <Fragment key={key}><label className="field">{labels.description[key]}
+      {descriptionKeys.filter((key) => key !== 'prices').map((key) => <Fragment key={key}><label className="field">{labels.description[key]}
         <textarea value={values[key]} aria-describedby={key === 'services' ? 'settings-services-hint' : undefined} onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></label>
         {key === 'services' && <p className="muted" id="settings-services-hint">{copy.setup.draft.servicesHint}</p>}</Fragment>)}
       <Status section={section} /><SaveButton section={section} />
@@ -74,10 +74,9 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   const [savedBudget, setSavedBudget] = useState(business.month_budget_kop);
   const [warning, setWarning] = useState<string | null>(null);
   const budgetKop = budget === String(Math.round(savedBudget / 100)) ? savedBudget : rublesToKopecks(budget);
-  const averageKop = average.trim() === '' ? null : rublesToKopecks(average.trim());
-  const averageBad = average.trim() !== '' && averageKop === null;
+  const averageKop = average === '' ? null : average === rublesText(business.avg_check_kop) ? business.avg_check_kop : rublesToKopecks(average);
   function submit() {
-    if (budgetKop === null || averageBad) return;
+    if (budgetKop === null) return;
     // Неизменённый бюджет не отправляем: каждое сохранение бюджета — запись в истории и пересчёт лимитов.
     void section.run(async () => {
       if (budgetKop !== savedBudget) { setWarning(await saveBudget(budgetKop)); setSavedBudget(budgetKop); }
@@ -92,11 +91,11 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
       <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
       <p className="muted" id="continue-help">{labels.nextMonth}</p>
       <label className="field">{labels.averageLabel}
-        <input inputMode="decimal" value={average} aria-invalid={averageBad} aria-describedby="average-help" onChange={(event) => setAverage(event.target.value)} /></label>
-      <p className="muted" id="average-help">{averageBad ? labels.averageError : labels.averageHint}</p>
+        <RublesInput max={maxBudgetRubles} value={average} aria-describedby="average-help" onChange={setAverage} /></label>
+      <p className="muted" id="average-help">{labels.averageHint}</p>
       <Status section={section} />
       {warning && <div className="notice" role="status"><p>{warning}</p></div>}
-      <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null || averageBad}>{section.busy ? labels.saving : labels.save}</Button></div>
+      <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null}>{section.busy ? labels.saving : labels.save}</Button></div>
     </form>
   </Block>;
 }
