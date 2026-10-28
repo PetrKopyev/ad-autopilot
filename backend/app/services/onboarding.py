@@ -301,32 +301,54 @@ def owner_price(name: str, prices: list[str]) -> int | None:
     return None
 
 
+NUMBER = r"\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+"
 PRICE_TAIL = re.compile(
-    r"\s*([—–:-])?\s*(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[,.](\d{2}))?\s*(₽|руб(?:\.|лей|ля|ль)?|р\.?)?\s*$",
+    rf"(?:^|(?P<sep>\s*[—–:-]\s*|\s+))(?P<start>от\s+)?(?P<num>{NUMBER})(?:[,.](?P<kop>\d{{2}}))?"
+    rf"(?:\s*[—–-]\s*(?P<to>{NUMBER}))?\s*(?P<cur>₽|руб(?:\.|лей|ля|ль)?|р\.?)?\s*$",
     re.IGNORECASE,
 )
+DASH = re.compile(r"\s+[—–-]\s+|:\s+")
 
 
-def split_price(item: str) -> tuple[str, int | None]:
-    match = PRICE_TAIL.search(item)
-    name = item[: match.start()].strip(" -—–•\t") if match and (match[1] or match[4]) else ""
-    if not name or name.casefold().endswith(" от"):
-        return item, None
-    return name, int(re.sub(r"\D", "", match[2])) * 100 + int(match[3] or 0) or None
+def split_price(item: str) -> tuple[str, int | None, bool]:
+    for position in range(len(item)):
+        if not (match := PRICE_TAIL.match(item, position)):
+            continue
+        head, spaced = item[:position], match["sep"] is not None and DASH.fullmatch(match["sep"])
+        if head[-1:].isdigit() and not (match["cur"] and (spaced or match["sep"].isspace())):
+            continue
+        if not (match["cur"] or match["start"] or spaced) or match["to"] and not match["cur"]:
+            continue
+        price = int(re.sub(r"\D", "", match["num"])) * 100 + int(match["kop"] or 0)
+        return head.strip(" -—–:•\t"), price, bool(match["start"] or match["to"])
+    return item, None, False
 
 
-def price_line(name: str, price: int) -> str:
-    return f"{name} — {rubles(price)} ₽"
+def price_line(name: str, price: int, start: bool = False) -> str:
+    return f"{name} — {'от ' if start else ''}{rubles(price)} ₽"
+
+
+def priced_line(name: str, prices: list[str]) -> str | None:
+    for line in prices:
+        found, price, _ = split_price(line)
+        if price is not None and found.casefold() == name.casefold():
+            return line
+    return None
 
 
 def split_services(value: str, prices: str) -> tuple[str, str]:
     old = lines(prices)
-    services: dict[str, tuple[str, int | None]] = {}
+    names: dict[str, str] = {}
+    priced = []
     for item in service_names(value):
-        name, price = split_price(item)
-        services.setdefault(name.casefold(), (name, owner_price(name, old) if price is None else price))
-    names = "\n".join(name for name, _ in services.values())
-    return names, "\n".join(price_line(name, price) for name, price in services.values() if price is not None)
+        name, price, start = split_price(item)
+        if not name:
+            priced.append(item)
+        elif name.casefold() not in names:
+            names[name.casefold()] = name
+            line = priced_line(name, old) if price is None else price_line(name, price, start)
+            priced += [line] if line else []
+    return "\n".join(names.values()), "\n".join(priced)
 
 
 def owner_fields(fields: dict) -> dict:
@@ -334,11 +356,10 @@ def owner_fields(fields: dict) -> dict:
     if not services:
         return fields
     old = lines(prices.get("value", ""))
-    value = "\n".join(
-        name if (price := owner_price(name, old)) is None else price_line(name, price)
-        for name in service_names(services["value"])
-    )
-    return fields | {"services": services | {"value": value, "quote": services.get("quote") or prices.get("quote")}}
+    shown = [priced_line(name, old) or name for name in service_names(services["value"])]
+    shown += [line for line in old if line not in shown]
+    quote = services.get("quote") or prices.get("quote")
+    return fields | {"services": services | {"value": "\n".join(shown), "quote": quote}}
 
 
 def description_fields(draft: DescriptionDraft) -> dict[str, dict]:

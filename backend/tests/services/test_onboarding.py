@@ -1070,16 +1070,30 @@ def test_owner_services_take_price_from_prices_field() -> None:
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
-        ("Маникюр с покрытием гель-лаком — 2 200 ₽", ("Маникюр с покрытием гель-лаком", 220_000)),
-        ("Маникюр — 2200", ("Маникюр", 220_000)),
-        ("Стрижка 2 200 руб", ("Стрижка", 220_000)),
-        ("Окрашивание (корни, длина) — 3 500,50 ₽", ("Окрашивание (корни, длина)", 350_050)),
-        ("Педикюр", ("Педикюр", None)),
-        ("Массаж 60", ("Массаж 60", None)),
-        ("Снятие покрытия — от 300 ₽", ("Снятие покрытия — от 300 ₽", None)),
+        ("Маникюр с покрытием гель-лаком — 2 200 ₽", ("Маникюр с покрытием гель-лаком", 220_000, False)),
+        ("Маникюр — 2200", ("Маникюр", 220_000, False)),
+        ("Маникюр: 1500р.", ("Маникюр", 150_000, False)),
+        ("Стрижка 2 200 руб", ("Стрижка", 220_000, False)),
+        ("Окрашивание (корни, длина) — 3 500,50 ₽", ("Окрашивание (корни, длина)", 350_050, False)),
+        ("Маникюр 1,500 ₽", ("Маникюр", 150_000, False)),
+        ("Маникюр 1.500 ₽", ("Маникюр", 150_000, False)),
+        ("Консультация — 0 ₽", ("Консультация", 0, False)),
+        ("Снятие покрытия — от 300 ₽", ("Снятие покрытия", 30_000, True)),
+        ("Снятие покрытия от 300 ₽", ("Снятие покрытия", 30_000, True)),
+        ("Маникюр 1500–2000 ₽", ("Маникюр", 150_000, True)),
+        ("от 2 000 ₽", ("", 200_000, True)),
+        ("Педикюр", ("Педикюр", None, False)),
+        ("Массаж 60", ("Массаж 60", None, False)),
+        ("Массаж — 60 минут", ("Массаж — 60 минут", None, False)),
+        ("Персональная тренировка 1:1", ("Персональная тренировка 1:1", None, False)),
+        ("Йога для детей 7-12", ("Йога для детей 7-12", None, False)),
+        ("Йога для детей 7 - 12", ("Йога для детей 7 - 12", None, False)),
+        ("Тренировка 1 — 2", ("Тренировка 1 — 2", None, False)),
+        ("Курс 10 занятий", ("Курс 10 занятий", None, False)),
+        ("Йога для детей 7-12 — 1 500 ₽", ("Йога для детей 7-12", 150_000, False)),
     ],
 )
-def test_owner_line_is_split_into_service_and_price(line: str, expected: tuple[str, int | None]) -> None:
+def test_owner_line_is_split_into_service_and_price(line: str, expected: tuple[str, int | None, bool]) -> None:
     assert split_price(line) == expected
 
 
@@ -1095,7 +1109,6 @@ def test_services_and_prices_field_is_stored_as_separate_fields() -> None:
         "Маникюр\nпедикюр\nОкрашивание (корни, длина)",
         "Маникюр — 2 201 ₽\nОкрашивание (корни, длина) — 3 500 ₽",
     )
-    # Старая форма присылала цены отдельным полем: они не теряются.
     assert split_services("Маникюр\nПедикюр", "Педикюр — 1 800 ₽") == ("Маникюр\nПедикюр", "Педикюр — 1 800 ₽")
 
 
@@ -1108,6 +1121,31 @@ def test_stored_description_is_shown_with_prices_in_one_field() -> None:
     shown = owner_fields(fields)
     assert shown["services"] == {"value": "Маникюр — 1 500 ₽\nпедикюр", "quote": "Маникюр 1500", "verified": False}
     assert shown["prices"] == fields["prices"] and shown["address"] == fields["address"]
+
+
+def test_unmatched_price_lines_stay_in_the_field_and_survive_save() -> None:
+    prices = "Маникюр — 1 500 ₽\nот 2 000 ₽\nСнятие покрытия — от 300 ₽\nАбонемент 4000 руб"
+    fields = {
+        "services": {"value": "Маникюр, Снятие покрытия", "quote": None},
+        "prices": {"value": prices, "quote": None},
+    }
+    shown = owner_fields(fields)["services"]["value"]
+    assert shown == "Маникюр — 1 500 ₽\nСнятие покрытия — от 300 ₽\nот 2 000 ₽\nАбонемент 4000 руб"
+    assert split_services(shown, "") == (
+        "Маникюр\nСнятие покрытия\nАбонемент",
+        "Маникюр — 1 500 ₽\nСнятие покрытия — от 300 ₽\nот 2 000 ₽\nАбонемент — 4 000 ₽",
+    )
+
+
+def test_price_from_is_not_an_exact_price_and_stays_out_of_service_name() -> None:
+    services, prices = split_services("Снятие покрытия — от 300 ₽\nМаникюр 1500–2000 ₽", "")
+    business = Business(
+        description={"fields": {"services": {"value": services}, "prices": {"value": prices}}}, medical_level="none"
+    )
+    draft = description_draft(business)
+    assert [(item.name, item.price) for item in draft.services] == [("Снятие покрытия", None), ("Маникюр", None)]
+    assert [fact.value for fact in draft.advantages] == ["Снятие покрытия — от 300 ₽", "Маникюр — от 1 500 ₽"]
+    assert service_names(services) == ["Снятие покрытия", "Маникюр"]
 
 
 async def test_combined_field_keeps_site_quotes_and_removed_price_is_dropped(world: World) -> None:
