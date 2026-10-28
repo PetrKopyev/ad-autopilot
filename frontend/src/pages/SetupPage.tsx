@@ -84,7 +84,7 @@ export function SetupPage() {
       if (!config.demo || controller.signal.aborted) return;
       setWebsite((value) => value || 'https://salon.example/');
       setCity((value) => value || 'Москва');
-      setBudget((value) => value || '30000');
+      setBudget((value) => value || '50000');
     }).catch(() => {});
     return () => controller.abort();
   }, []);
@@ -346,6 +346,5 @@ function BudgetNotes({ hint, amount }: { hint: BudgetHint; amount: number }) {
   return <>
     {direct !== undefined && <p>{copy.setup.business.budgetDaily(formatMoney(direct), vk === undefined ? undefined : formatMoney(vk))}</p>}
     {hint.off.map((item) => <p key={item.platform}>{copy.setup.business.budgetVkOff(formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>)}
-    {amount < hint.low_kop && <div className="notice" role="status"><p>{copy.setup.business.budgetLow(formatMoney(hint.low_kop))}</p></div>}
   </>;
 }

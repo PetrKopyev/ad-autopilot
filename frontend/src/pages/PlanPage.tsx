@@ -83,11 +83,11 @@ export function PlanPage() {
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {plan && <>
       <p>{copy.plan.summary(formatMoney(plan.month_budget_kop))}</p>
-      {(['direct', 'vk'] as const).map((platform) => { const daily = plan.daily_kop[platform]; return daily !== undefined && <p key={platform}>
-        {copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(platform === 'direct' ? plan.direct_budget_kop : plan.vk_budget_kop), formatMoney(daily))}
+      {(['direct', 'vk'] as const).map((platform) => { const month = platform === 'direct' ? plan.direct_budget_kop : plan.vk_budget_kop; const daily = plan.daily_kop[platform]; return month > 0 && <p key={platform}>
+        {daily === undefined ? copy.plan.platformMonth(copy.setup.accounts[platform], formatMoney(month)) : copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(month), formatMoney(daily))}
       </p>; })}
       {plan.off.map((item) => <div key={item.platform} className="notice" role="status">
-        <p>{copy.plan.platformOff(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>
+        <p>{(plan.status === 'launched' ? copy.plan.platformOffLaunched : copy.plan.platformOff)(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>
       </div>)}
       {plan.status === 'launched' ? <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card> : <>
         {plan.launch_error && <div className="notice" role="status"><p>{plan.launch_error}</p></div>}

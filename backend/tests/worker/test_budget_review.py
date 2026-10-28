@@ -1,5 +1,6 @@
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,7 +10,7 @@ from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, WorkerRun
 from app.domain.budget import campaign_limits, plan_budget
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
-from app.services.budget_guard import stop_all
+from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import rebalance_budget, snapshot
@@ -351,7 +352,6 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
     day, now = date(2026, 11, 30), datetime(2026, 11, 30, 12, tzinfo=UTC)
     adapter = DirectAdapter("test-only", config=configuration())
     adapter._today = lambda: day
-    adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 30_000})
     repository = MemoryRepository()
     campaign = Campaign(id=1, external_id="1", platform="direct", daily_limit_kop=10_000, period_cap_kop=500_000)
     repository.entities = {("campaign", "1"): campaign}
@@ -365,14 +365,19 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
     # Понедельник и последний день месяца: уйдёт 200 ₽ при минимуме 300 ₽, хотя 7 дневных — 1400 ₽.
     adapter.get_stats = AsyncMock(return_value=[])
     assert (
-        await below_platform_minimum(worker, repository.current_business, campaign, operations, 20_000, 500_000)
+        await below_platform_minimum(
+            worker, repository.current_business, campaign, operations, 20_000, 500_000, {"weekly_limit_kop": 30_000}
+        )
         == 30_000
     )
     adapter.get_stats = AsyncMock(
         return_value=[StatRow("1", "1", date(2026, 11, 30), "campaign", 1, 1, 10_000, {}, now, False)]
     )
     assert (
-        await below_platform_minimum(worker, repository.current_business, campaign, operations, 20_000, 500_000) is None
+        await below_platform_minimum(
+            worker, repository.current_business, campaign, operations, 20_000, 500_000, {"weekly_limit_kop": 30_000}
+        )
+        is None
     )
     await adapter.aclose()
 
@@ -383,12 +388,14 @@ async def test_vk_minimum_check_holds_daily_and_campaign_limits_at_platform_mini
     from app.services.optimize import below_platform_minimum
 
     adapter = FakeAdapter()
-    adapter.min_budgets = AsyncMock(return_value={"daily_limit_kop": 30_000, "period_cap_kop": 30_000})
     worker = SimpleNamespace(resolve_adapter=lambda *_: adapter)
     campaign = Campaign(id=1, external_id="1", platform="vk", daily_limit_kop=40_000, period_cap_kop=500_000)
     operations = [Operation("set_budget", "campaign", "1", "daily_limit_kop", 40_000, 29_999)]
-    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 29_999, 500_000) == 30_000
-    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 30_000, 500_000) is None
+    minimum = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
+    assert (
+        await below_platform_minimum(worker, Business(id=1), campaign, operations, 29_999, 500_000, minimum) == 30_000
+    )
+    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 30_000, 500_000, minimum) is None
 
 
 async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch):
@@ -400,3 +407,68 @@ async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch)
     (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
     assert "Дневной бюджет кампании меньше минимума площадки (1 000 000 ₽ в день)" in pause.reason_text
     assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+
+
+def report_pauses_as_owner(adapter: FakeAdapter) -> None:
+    """VK и Директ отдают остановленную кампанию как paused_owner: «blocked» и «OFF» не различают, кто остановил."""
+    original = adapter.get_state
+
+    async def get_state(refs):
+        return {
+            key: replace(state, status="paused_owner") if state.status == "paused_auto" else state
+            for key, state in (await original(refs)).items()
+        }
+
+    adapter.get_state = get_state
+
+
+async def vk_world(minimum: int):
+    world = await make_world()
+    world.campaign.platform = "vk"
+    world.adapter.min_budgets = AsyncMock(return_value={"daily_limit_kop": minimum, "period_cap_kop": 30_000})
+    return world
+
+
+async def rebalance_next_day(world, minimum: int | Decimal) -> None:
+    """minimum — минимум площадки в копейках или (Decimal) доля от дневного лимита, который получит кампания."""
+    world.clock.advance(days=1)
+    worker = world.worker()
+    if isinstance(minimum, Decimal):
+        day = today(world.clock)
+        spent, _ = await read_spend(worker, world.business)
+        started = date.fromisoformat(world.business.settings["_worker"]["started_on"])
+        limit = plan_budget(world.business.month_budget_kop, sum(spent.values()), day, ("vk",), started_on=started)
+        minimum = int(campaign_limits(limit.limits[0].daily_limit, 0, day)[0] * minimum)
+    world.adapter.min_budgets.return_value = {"daily_limit_kop": minimum, "period_cap_kop": 30_000}
+    worker.step_key = f"rebalance_budget:{world.clock.now.isoformat()}"
+    await rebalance_budget(worker, world.business)
+
+
+async def test_vk_paused_below_minimum_resumes_although_platform_reports_owner_pause():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    assert world.campaign.status == "paused_auto"
+    report_pauses_as_owner(world.adapter)
+    assert (await world.adapter.get_state(world.refs))[world.refs.campaign_id].status == "paused_owner"
+    _, groups = await snapshot(world.worker(), world.business, include_paused_campaigns=True)
+    assert all(group.active for group in groups)
+    await rebalance_next_day(world, 30_000)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert (resume.operations[-1]["before"], resume.operations[-1]["after"]) == ("paused_owner", "active")
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    assert world.campaign.status == "active" and world.campaign.daily_limit_kop >= 30_000
+    assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+async def test_vk_near_its_minimum_pauses_once_and_resumes_only_with_margin():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, Decimal("1.01"))
+    report_pauses_as_owner(world.adapter)
+    for minimum in (Decimal("0.95"), Decimal("1.01"), Decimal("0.9")):
+        await rebalance_next_day(world, minimum)
+    assert len(world.changes(reason_code="BUDGET_REBALANCE", kind="pause")) == 1
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    await rebalance_next_day(world, Decimal("0.86"))
+    assert len(world.changes(reason_code="BUDGET_REBALANCE", kind="resume")) == 1
+    assert world.adapter._states[world.refs.campaign_id].status == "active"

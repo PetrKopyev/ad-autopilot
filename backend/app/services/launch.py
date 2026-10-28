@@ -78,9 +78,10 @@ INTERRUPTED_STOP = (
 def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
     """Почему площадка не примет лимиты кампании; None — примет.
 
-    На полную неделю лимиты сверяет domain.budget.meets_minimum, та же функция, что выбирает площадки плана и
-    минимальный бюджет. Недельный лимит считается той же функцией, что у адаптера Директа: в конце недели или месяца
-    он меньше семи дневных."""
+    На полную неделю лимиты сверяет domain.budget.meets_minimum. Недельный лимит считается той же функцией, что у
+    адаптера Директа: в конце недели или месяца он меньше семи дневных. Бюджет не ниже domain.budget.budget_minimum
+    набирает 300 ₽ в неделю в любой день; совет начать с понедельника остаётся на случай, когда живой минимум Директа
+    больше."""
     if not meets_minimum(limit, minimum):
         return f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}». Увеличьте бюджет месяца."
     weekly = minimum.get("weekly_limit_kop", 0)
@@ -217,7 +218,6 @@ class LaunchService:
                     self.repository.accounts(business_id),
                     self.repository.marking(business_id),
                     self.repository.assets(business_id),
-                    today,
                     self.domain,
                     medical_acknowledged,
                 )

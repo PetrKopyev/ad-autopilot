@@ -9,6 +9,7 @@ from app.db.models import Ad, AdGroup, BudgetLedger, Business, Campaign, ChangeL
 from app.db.query import Window
 from app.domain.budget import (
     CAP_MULTIPLIER,
+    MINIMUM_MARGIN,
     allocate,
     campaign_limits,
     meets_minimum,
@@ -248,7 +249,13 @@ async def optimize(worker: Worker, business: Business) -> None:
 
 
 async def below_platform_minimum(
-    worker: Worker, business: Business, campaign: Campaign, operations: list[Operation], daily: int, cap: int
+    worker: Worker,
+    business: Business,
+    campaign: Campaign,
+    operations: list[Operation],
+    daily: int,
+    cap: int,
+    limits: dict[str, int],
 ) -> int | None:
     """Минимум площадки, который новые лимиты не набирают: недельный у Директа, дневной у остальных; иначе None.
 
@@ -257,13 +264,12 @@ async def below_platform_minimum(
 
     adapter = worker.resolve_adapter(business.id, campaign.platform)
     if not isinstance(adapter, DirectAdapter):
-        limits = await adapter.min_budgets()
         if meets_minimum(PlatformLimit(campaign.platform, cap, daily, cap), limits):
             return None
         return limits.get("daily_limit_kop", limits.get("day", 0))
     if not any(op.kind == "set_budget" for op in operations):
         return None
-    minimum = (await adapter.min_budgets()).get("weekly_limit_kop", 0)
+    minimum = limits.get("weekly_limit_kop", 0)
     _, prepared = await budget_operations(
         worker.repository, business, adapter, worker.refs(campaign), operations, worker.clock.now
     )
@@ -315,8 +321,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             settings=domain,
         )
 
+    minimums = {platform: await worker.resolve_adapter(business.id, platform).min_budgets() for platform in platforms}
     # Перенос между площадками не опускает кампанию ниже минимума площадки.
-    floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), platforms)
+    floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), minimums)
     shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
     plan = budget_plan(shares)
     group_limits = {group.id: group.daily_limit for group in groups}
@@ -353,7 +360,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 if before != after
             ]
             minimum = (
-                await below_platform_minimum(worker, business, campaign, operations, desired_daily, total_cap)
+                await below_platform_minimum(
+                    worker, business, campaign, operations, desired_daily, total_cap, minimums[campaign.platform]
+                )
                 if desired_daily
                 else None
             )
@@ -382,11 +391,25 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                         campaign.daily_limit_kop = 0
                         worker.repository.save(campaign)
                 continue
-            resume = campaign.id in held and state.status == "paused_auto"
+            resume = (
+                campaign.id in held
+                and campaign.status == "paused_auto"
+                and state.status in {"paused_auto", "paused_owner"}
+            )
+            if (
+                resume
+                and campaign.platform != "direct"
+                and not meets_minimum(
+                    PlatformLimit(campaign.platform, total_cap, desired_daily, total_cap),
+                    minimums[campaign.platform],
+                    MINIMUM_MARGIN,
+                )
+            ):
+                continue
             if resume:
                 # Кампанию останавливал только недостаток до минимума площадки: лимиты снова его набирают.
                 operations.append(
-                    Operation("set_status", "campaign", campaign.external_id, "status", "paused_auto", "active")
+                    Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")
                 )
             await worker.apply(
                 business,

@@ -184,8 +184,8 @@ def test_owner_can_change_frozen_ad_and_autopilot_waits(setup):
 def test_budget_stop_and_lower_than_spent(setup):
     client, world = setup
     ledger = world.ledger()[0]
-    ledger.spent_kop = 500_000
-    response = client.put("/api/business/budget", json={"month_budget_kop": 400_000})
+    ledger.spent_kop = 1_500_000
+    response = client.put("/api/business/budget", json={"month_budget_kop": 1_400_000})
     assert response.status_code == 409
     assert "потрачен" in response.json()["detail"]
     assert world.business.month_budget_kop == 10_000_000
@@ -417,11 +417,9 @@ def test_budget_below_direct_minimum_is_rejected_with_the_minimum(setup):
 
     client, world = setup
     world.repository.save(PlatformAccount(business_id=world.business.id, platform="vk", status="ok"))
-    response = client.put("/api/business/budget", json={"month_budget_kop": 189_999})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 1_269_999})
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "Минимальный бюджет — 1 900 ₽ в месяц: с меньшим Яндекс Директ не запустит рекламу."
-    )
+    assert response.json()["detail"].startswith("Минимальный бюджет — 12 700 ₽ в месяц. Яндекс Директ требует")
     assert world.business.month_budget_kop == 10_000_000
 
 
@@ -463,3 +461,28 @@ def test_business_returns_saved_setup_steps(setup):
     assert result["medical_level"] == "none"
     world.business.description_approved_at = None
     assert client.get("/api/business").json()["description_approved"] is False
+
+
+def test_budget_below_vk_minimum_is_saved_with_warning_and_vk_resumes_after_raise(setup):
+    from unittest.mock import AsyncMock
+
+    from app.services.optimize import rebalance_budget
+
+    client, world = setup
+    world.campaign.platform = "vk"
+    world.adapter.min_budgets = AsyncMock(return_value={"daily_limit_kop": 100_000, "period_cap_kop": 30_000})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 3_000_000})
+    assert response.status_code == 200, response.text
+    assert response.json()["warning"] == (
+        "Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума 1 000 ₽ в день."
+    )
+    assert world.business.month_budget_kop == 3_000_000
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+    response = client.put("/api/business/budget", json={"month_budget_kop": 10_000_000})
+    assert response.json()["warning"] is None
+    world.clock.advance(days=1)
+    asyncio.run(rebalance_budget(world.worker(), world.business))
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    assert world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.business.settings["_worker"]["below_minimum"] == []

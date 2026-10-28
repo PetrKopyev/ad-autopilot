@@ -180,14 +180,14 @@ function mockAsset(id: number, selected = false): PlanAsset {
   return { id, url: `data:image/svg+xml,${encodeURIComponent(svg)}`, kind: 'image', alt: copy.launchFlow.mockImage(id), label: copy.launchFlow.mockImage(id), selected };
 }
 // Пороги демо-данных близки к серверным для месяца в 31 день; настоящие считает сервер.
-const mockVkFrom = 4_220_000;
+const mockVkFrom = 4_850_000;
 function mockPlatformDaily(amount: number, vk: boolean) {
   const daily = amount * 0.92 / 31 / 1.25;
   return vk ? { direct: Math.floor(daily * 0.7), vk: Math.floor(daily * 0.3) } : { direct: Math.floor(daily) };
 }
 export function mockBudgetHint(amount: number, vk: boolean): BudgetHint {
   const on = vk && amount >= mockVkFrom;
-  return { minimum_kop: 190_000, low_kop: 1_000_000, daily_kop: mockPlatformDaily(amount, on),
+  return { minimum_kop: 1_270_000, daily_kop: mockPlatformDaily(amount, on),
     off: vk && !on ? [{ platform: 'vk', from_kop: mockVkFrom, min_daily_kop: 30_000 }] : [] };
 }
 export function mockSetupPlan(): Plan {

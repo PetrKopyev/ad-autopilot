@@ -99,11 +99,9 @@ CurrentUser = Annotated[User, Depends(current_user)]
 
 
 @router.post("/business", dependencies=[Depends(require_csrf)])
-def create_business(body: BusinessIn, user: CurrentUser, service: Service, today: Today) -> dict:
+def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> dict:
     with human_errors():
-        result = service.create_business(
-            user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop, today
-        )
+        result = service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
         if demo_enabled():
             prepare_business(service.repository, service.repository.business(result["id"]))
         return result

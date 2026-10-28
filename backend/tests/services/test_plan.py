@@ -75,14 +75,14 @@ async def test_vk_is_off_when_its_share_misses_the_platform_minimum_and_joins_af
     assert (plan["direct_budget_kop"], plan["vk_budget_kop"]) == (3_000_000, 0)
     # Январь — 31 день: весь бюджет за вычетом резерва делится на дни и запас кэпа (×1,25) у Директа.
     assert plan["daily_kop"] == {"direct": 71_225}
-    assert plan["off"] == [{"platform": "vk", "from_kop": 4_220_000, "min_daily_kop": 30_000}]
+    assert plan["off"] == [{"platform": "vk", "from_kop": 4_850_000, "min_daily_kop": 30_000}]
     first = plan["id"]
     # Бюджет подняли: план пересобирается с VK, и владелец видит его до запуска.
-    world.business.month_budget_kop = 4_220_000
+    world.business.month_budget_kop = 4_850_000
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert plan["id"] != first and plan["off"] == []
     assert {group["platform"] for group in plan["groups"]} == {"direct", "vk"}
-    assert plan["daily_kop"]["vk"] >= 30_000
+    assert plan["daily_kop"]["vk"] >= 34_500
     assert world.repository.latest_plan(world.business.id).payload["platforms"] == ["direct", "vk"]
 
 
@@ -800,7 +800,6 @@ async def test_blockers_cover_every_launch_rule(world: World) -> None:
             world.repository.accounts(business.id),
             world.repository.marking(business.id),
             world.repository.assets(business.id),
-            TODAY,
             DEFAULT_SETTINGS,
             acknowledged,
         )
@@ -824,3 +823,28 @@ async def test_blockers_cover_every_launch_rule(world: World) -> None:
     business.medical_level = "maybe"
     assert reasons(False) and not any("лицензию" in text for text in reasons(None))
     assert any("лицензию" in text for text in reasons(False))
+
+
+async def test_blocker_names_the_disconnected_platform_not_direct(world: World) -> None:
+    await build(world)
+    for account in world.repository.accounts(world.business.id):
+        if account.platform == "vk":
+            account.status = "needs_reauth"
+    blockers = launch_blockers(
+        world.business,
+        world.repository.latest_plan(world.business.id),
+        world.repository.accounts(world.business.id),
+        world.repository.marking(world.business.id),
+        world.repository.assets(world.business.id),
+        DEFAULT_SETTINGS,
+    )
+    assert any(text.startswith("Подключите ВКонтакте заново") for text in blockers)
+    assert not any("Яндекс Директа" in text for text in blockers)
+
+
+async def test_launched_plan_does_not_show_launch_estimate_as_daily_limits(world: World) -> None:
+    plan = await build(world)
+    assert set(plan["daily_kop"]) == {"direct", "vk"}
+    world.repository.latest_plan(world.business.id).status = "launched"
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert plan["status"] == "launched" and plan["daily_kop"] == {}

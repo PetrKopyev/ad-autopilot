@@ -23,7 +23,7 @@ export interface StopResult { stopped: boolean; message: string }
 /** Площадка, которую бюджет месяца не пропускает: from_kop — бюджет, с которого она подключится. */
 export interface PlatformOff { platform: 'vk'; from_kop: number; min_daily_kop: number }
 /** Подсказка к бюджету: площадки и дневные лимиты считает сервер так же, как для плана и запуска. */
-export interface BudgetHint { minimum_kop: number; low_kop: number; daily_kop: { direct?: number; vk?: number }; off: PlatformOff[] }
+export interface BudgetHint { minimum_kop: number; daily_kop: { direct?: number; vk?: number }; off: PlatformOff[] }
 export interface Counter { id: number; name: string }
 export interface Goal { id: number; name: string }
 export interface Marking {

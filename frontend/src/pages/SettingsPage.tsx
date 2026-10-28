@@ -72,6 +72,7 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   const [average, setAverage] = useState(rublesText(business.avg_check_kop));
   const [autoContinue, setAutoContinue] = useState(business.auto_continue);
   const [savedBudget, setSavedBudget] = useState(business.month_budget_kop);
+  const [warning, setWarning] = useState<string | null>(null);
   const budgetKop = rublesToKopecks(budget.trim());
   const averageKop = average.trim() === '' ? null : rublesToKopecks(average.trim());
   const averageBad = average.trim() !== '' && averageKop === null;
@@ -79,7 +80,7 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
     if (budgetKop === null || averageBad) return;
     // Неизменённый бюджет не отправляем: каждое сохранение бюджета — запись в истории и пересчёт лимитов.
     void section.run(async () => {
-      if (budgetKop !== savedBudget) { await saveBudget(budgetKop); setSavedBudget(budgetKop); }
+      if (budgetKop !== savedBudget) { setWarning(await saveBudget(budgetKop)); setSavedBudget(budgetKop); }
       await saveBusinessSettings(autoContinue, averageKop);
     }, labels.saved);
   }
@@ -94,6 +95,7 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
         <input inputMode="decimal" value={average} aria-invalid={averageBad} aria-describedby="average-help" onChange={(event) => setAverage(event.target.value)} /></label>
       <p className="muted" id="average-help">{averageBad ? labels.averageError : labels.averageHint}</p>
       <Status section={section} />
+      {warning && <div className="notice" role="status"><p>{warning}</p></div>}
       <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null || averageBad}>{section.busy ? labels.saving : labels.save}</Button></div>
     </form>
   </Block>;

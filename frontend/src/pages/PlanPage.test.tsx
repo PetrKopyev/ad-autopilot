@@ -202,10 +202,19 @@ it('без причин плашки перед запуском нет', async 
 const plain = (text: string) => (_: string, element: Element | null) => element?.tagName === 'P' && element.textContent?.replace(/ /g, ' ') === text;
 
 it('бюджет показан суммой на площадку, а выключенная из-за бюджета площадка — с суммой, с которой она подключится', async () => {
-  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), off: [{ platform: 'vk', from_kop: 4220000, min_daily_kop: 30000 }] });
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), off: [{ platform: 'vk', from_kop: 4850000, min_daily_kop: 30000 }] });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, около 712 ₽ в день.'))).toBeTruthy();
-  expect(screen.getByText(plain('ВКонтакте выключен из-за бюджета: площадке нужно минимум 300 ₽ в день, это бюджет от 42 200 ₽ в месяц. '
-    + 'Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и ВКонтакте появится в новом плане до запуска.'))).toBeTruthy();
+  expect(screen.getByText(plain('Площадка ВКонтакте выключена из-за бюджета: ей нужно минимум 300 ₽ в день, это бюджет от 48 500 ₽ в месяц. '
+    + 'Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и площадка ВКонтакте появится в новом плане до запуска.'))).toBeTruthy();
   expect(screen.queryByText(/Дневной расход/)).toBeNull();
+});
+
+it('у запущенного плана нет оценки дневного лимита и обещания нового плана', async () => {
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), status: 'launched', daily_kop: {}, off: [{ platform: 'vk', from_kop: 4850000, min_daily_kop: 30000 }] });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц.'))).toBeTruthy();
+  expect(screen.getByText(plain('Площадка ВКонтакте выключена из-за бюджета: ей нужно минимум 300 ₽ в день, это бюджет от 48 500 ₽ в месяц. '
+    + 'Весь бюджет идёт в Яндекс Директ.'))).toBeTruthy();
+  expect(screen.queryByText(/в день\./)).toBeNull();
 });

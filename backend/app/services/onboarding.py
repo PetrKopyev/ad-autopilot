@@ -352,14 +352,15 @@ def description_draft(business: Business) -> DescriptionDraft:
     return draft
 
 
-def check_budget(amount: int, today: date) -> None:
+def check_budget(amount: int) -> None:
     """Директ обязателен: бюджет, с которым его кампания не наберёт минимум площадки, не сохраняется."""
     from app.config import get_domain_settings
 
-    minimum = budget_minimum(("direct",), today, get_domain_settings())
+    minimum = budget_minimum(("direct",), get_domain_settings())
     if amount < minimum:
         raise OnboardingError(
-            f"Минимальный бюджет — {rubles(minimum)} ₽ в месяц: с меньшим Яндекс Директ не запустит рекламу."
+            f"Минимальный бюджет — {rubles(minimum)} ₽ в месяц. Яндекс Директ требует не меньше 300 ₽ на кампанию "
+            "в неделю, а мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
         )
 
 
@@ -382,7 +383,7 @@ class OnboardingService:
         self.ai_mode = ai_mode
 
     def create_business(
-        self, user_id: int, site_url: str, city: str, month_budget_kop: int, avg_check_kop: int | None, today: date
+        self, user_id: int, site_url: str, city: str, month_budget_kop: int, avg_check_kop: int | None
     ) -> dict:
         url = site_url.strip()
         checked = safe_url(url if "://" in url else f"https://{url}")
@@ -391,7 +392,7 @@ class OnboardingService:
             raise OnboardingError("Укажите ссылку на сайт и город.")
         if type(month_budget_kop) is not int or not 0 < month_budget_kop <= MAX_BUDGET_KOP:
             raise OnboardingError("Укажите положительную сумму в рублях, не более двух знаков после запятой.")
-        check_budget(month_budget_kop, today)
+        check_budget(month_budget_kop)
         if avg_check_kop is not None and (type(avg_check_kop) is not int or not 0 < avg_check_kop <= MAX_BUDGET_KOP):
             raise OnboardingError("Средний чек должен быть положительной суммой.")
         business = next(

@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -433,36 +433,48 @@ REAL_MINIMUMS = {"direct": {"weekly_limit_kop": 30_000}, "vk": {"daily_limit_kop
 
 @pytest.mark.parametrize(
     "budget,platforms",
-    [(3_000_000, {"direct"}), (4_210_000, {"direct"}), (4_220_000, {"direct", "vk"})],
+    [(1_270_000, {"direct"}), (4_840_000, {"direct"}), (4_850_000, {"direct", "vk"})],
 )
-async def test_plan_and_launch_agree_on_platforms_with_real_minimums(tmp_path: Path, budget, platforms) -> None:
-    """План решает, хватает ли доли VK на её минимум; запуск сверяет те же лимиты с минимумами площадок и пропускает."""
+@pytest.mark.parametrize(
+    "day",
+    [TODAY, date(2026, 1, 4), date(2026, 1, 31), date(2026, 2, 28)],
+    ids=["first-day", "sunday", "last-day-31", "last-day-28"],
+)
+async def test_plan_and_launch_agree_on_platforms_with_real_minimums(tmp_path: Path, budget, platforms, day) -> None:
+    """План решает, хватает ли доли VK на её минимум; запуск сверяет те же лимиты с минимумами площадок и пропускает
+    в любой день, в том числе в воскресенье и в последний день месяца."""
     adapters = {platform: Minimums(minimum) for platform, minimum in REAL_MINIMUMS.items()}
     world = make_world(tmp_path, adapters=adapters)
     world.business.month_budget_kop = budget
     await onboard(world)
-    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    now = datetime.combine(day, NOW.timetz())
+    plan = await world.plans.get_plan(world.business.id, now, day)
     assert {group["platform"] for group in plan["groups"]} == platforms
-    assert (await launch(world, plan))["status"] == "launched"
+    assert (await world.launches.launch(world.business.id, plan["id"], False, now, day))["status"] == "launched"
     assert {item.platform for item in campaigns(world)} == platforms
-    assert all(item.daily_limit_kop >= 30_000 for item in campaigns(world) if item.platform == "vk")
+    assert all(item.daily_limit_kop >= 30_000 for item in campaigns(world))
 
 
-def test_budget_at_direct_minimum_on_sunday_is_advised_to_start_on_monday() -> None:
+@pytest.mark.parametrize("day", [date(2026, 4, 5), date(2026, 3, 31), date(2026, 2, 28), date(2026, 4, 6)])
+def test_budget_at_direct_minimum_launches_on_sunday_and_last_day_of_month(day) -> None:
     from app.domain.budget import budget_minimum, launch_limits
     from app.services.launch import below_minimum
 
-    sunday, monday = date(2026, 4, 5), date(2026, 4, 6)
-    minimum = budget_minimum(("direct",), sunday)
-    assert minimum == budget_minimum(("direct",), monday) == 180_000
-    text = below_minimum(
-        "direct", launch_limits(minimum, ("direct",), sunday)["direct"], REAL_MINIMUMS["direct"], sunday
-    )
+    minimum = budget_minimum(("direct",))
+    assert minimum == 1_270_000
+    limits = launch_limits(minimum, ("direct",), day)["direct"]
+    assert below_minimum("direct", limits, REAL_MINIMUMS["direct"], day) is None
+
+
+def test_live_direct_minimum_above_300_on_sunday_is_advised_to_start_on_monday() -> None:
+    from app.domain.budget import launch_limits
+    from app.services.launch import below_minimum
+
+    sunday = date(2026, 4, 5)
+    limits = launch_limits(2_000_000, ("direct",), sunday)["direct"]
+    assert limits.daily_limit < 60_000 <= limits.daily_limit * 7
+    text = below_minimum("direct", limits, {"weekly_limit_kop": 60_000}, sunday)
     assert text.startswith("До конца недели осталось мало дней") and "Запустите рекламу с понедельника" in text
-    assert (
-        below_minimum("direct", launch_limits(minimum, ("direct",), monday)["direct"], REAL_MINIMUMS["direct"], monday)
-        is None
-    )
 
 
 async def test_direct_minimum_is_checked_against_the_weekly_limit_actually_sent(tmp_path: Path) -> None:
@@ -684,7 +696,7 @@ async def test_launch_holds_lock_until_business_is_running(tmp_path: Path, monke
     async def activate_watched(*args) -> None:
         seen.append(("activate", set(held), world.business.status))
         try:
-            world.onboarding.create_business(world.business.user_id, SITE, "Самара", BUDGET_KOP * 2, None, TODAY)
+            world.onboarding.create_business(world.business.user_id, SITE, "Самара", BUDGET_KOP * 2, None)
             seen.append("budget saved")
         except ChangeConflict:
             seen.append("budget 409")

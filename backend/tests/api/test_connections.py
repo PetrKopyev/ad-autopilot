@@ -345,7 +345,7 @@ def test_launch_returns_connection_while_platform_uploads_and_creates(small_pool
         user_id = db.get(Business, asset.business_id).user_id
         db.delete(asset)
         db.commit()
-        created = onboarding.create_business(user_id, SITE, "Самара", BUDGET_KOP, None, TODAY)
+        created = onboarding.create_business(user_id, SITE, "Самара", BUDGET_KOP, None)
         business = db.get(Business, created["id"])
         repository.add(
             PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t")
@@ -464,7 +464,7 @@ def test_saves_waiting_for_business_lock_do_not_hold_a_connection(small_pool, mo
         business_id = db.get(Asset, asset_id).business_id
     marking = {"subject_type": "ip", "inn": "526317984689", "name": "ИП Иванов", "phone": "89001234567"}
     saves = [
-        ("POST", "/api/business", {"site_url": "example.test", "city": "Москва", "month_budget_kop": 100_000}),
+        ("POST", "/api/business", {"site_url": "example.test", "city": "Москва", "month_budget_kop": 5_000_000}),
         ("PUT", "/api/business/description", {"description": {"services": {"value": "Стрижка"}}, "approved": False}),
         ("PUT", "/api/business/marking", marking),
         ("PUT", "/api/plan/assets", {"asset_ids": [asset_id]}),

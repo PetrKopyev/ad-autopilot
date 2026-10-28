@@ -7,6 +7,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.domain.budget import (
+    MINIMUM_MARGIN,
+    WORST_DAY,
     allocate,
     authorized_budget,
     budget_guard,
@@ -191,78 +193,84 @@ def test_odd_kopecks_split_without_loss_in_months_of_any_length(month_start):
 
 
 MONDAY = date(2026, 4, 6)  # апрель — 30 дней
+DIRECT_MINIMUM = {"weekly_limit_kop": 30_000}
+VK_MINIMUM = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
 
 
 @pytest.mark.parametrize(
     "monthly,connected,platforms,off",
     [
-        (500_000, ("direct",), ["direct"], {}),
-        (500_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
-        (1_400_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
-        (3_000_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
-        (4_070_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
-        (4_080_000, ("direct", "vk"), ["direct", "vk"], {}),
-        (4_080_000, ("direct",), ["direct"], {}),
+        (1_270_000, ("direct",), ["direct"], {}),
+        (1_270_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
+        (3_000_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
+        (4_840_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
+        (4_850_000, ("direct", "vk"), ["direct", "vk"], {}),
+        (4_850_000, ("direct",), ["direct"], {}),
     ],
 )
-def test_vk_joins_plan_only_when_its_share_reaches_platform_minimum(monthly, connected, platforms, off):
-    assert budget_platforms(monthly, connected, MONDAY) == (platforms, off)
-    limits = launch_limits(monthly, platforms, MONDAY)
+def test_vk_joins_plan_only_with_a_margin_over_its_minimum(monthly, connected, platforms, off):
+    assert budget_platforms(monthly, connected) == (platforms, off)
+    limits = launch_limits(monthly, platforms, WORST_DAY)
     assert set(limits) == set(platforms)
-    assert all(limits[platform].daily_limit * 7 >= 30_000 for platform in platforms)
+    assert all(limits[platform].remaining_cap >= 30_000 for platform in platforms)
     if "vk" in platforms:
-        assert limits["vk"].daily_limit >= 30_000 and limits["vk"].remaining_cap >= 30_000
+        assert limits["vk"].daily_limit >= 34_500
 
 
-def test_vk_share_one_step_below_threshold_misses_its_daily_minimum():
-    assert launch_limits(4_070_000, ("direct", "vk"), MONDAY)["vk"].daily_limit < 30_000
+def test_vk_share_one_step_below_threshold_misses_its_margin():
+    assert 30_000 < launch_limits(4_840_000, ("direct", "vk"), WORST_DAY)["vk"].daily_limit < 34_500
     # Весь бюджет уходит в Директ: его дневной лимит больше, чем у Директа при двух площадках.
-    alone = launch_limits(4_070_000, ("direct",), MONDAY)["direct"].daily_limit
-    assert alone > launch_limits(4_080_000, ("direct", "vk"), MONDAY)["direct"].daily_limit
+    alone = launch_limits(4_840_000, ("direct",), MONDAY)["direct"].daily_limit
+    assert alone > launch_limits(4_850_000, ("direct", "vk"), MONDAY)["direct"].daily_limit
 
 
 @pytest.mark.parametrize(
-    "today,direct,both",
+    "today",
     [
-        (date(2026, 2, 2), 170_000, 3_810_000),  # февраль — 28 дней
-        (MONDAY, 180_000, 4_080_000),
-        (date(2026, 3, 2), 190_000, 4_220_000),  # март — 31 день
-        (date(2026, 4, 5), 180_000, 4_080_000),  # воскресенье: минимум считается на полную неделю
+        date(2026, 2, 2),  # февраль — 28 дней
+        date(2026, 2, 28),  # последний день короткого месяца
+        MONDAY,
+        date(2026, 4, 5),  # воскресенье: недельный лимит Директа — один дневной
+        date(2026, 3, 2),  # март — 31 день
+        date(2026, 3, 29),  # воскресенье 31-дневного месяца
+        WORST_DAY,  # последний день 31-дневного месяца
     ],
 )
-def test_budget_minimum_follows_month_length(today, direct, both):
-    assert budget_minimum(("direct",), today) == direct
-    assert budget_minimum(("direct", "vk"), today) == both
-    weekly = {"weekly_limit_kop": 30_000}
-    assert meets_minimum(launch_limits(direct, ("direct",), today)["direct"], weekly)
-    assert not meets_minimum(launch_limits(direct - 10_000, ("direct",), today)["direct"], weekly)
+def test_budget_minimum_does_not_depend_on_month_or_weekday(today):
+    assert budget_minimum(("direct",)) == 1_270_000
+    assert budget_minimum(("direct", "vk")) == 4_850_000
+    direct = launch_limits(1_270_000, ("direct",), today)["direct"]
+    assert direct.daily_limit >= 30_000 and direct.remaining_cap >= 30_000
+    both = launch_limits(4_850_000, ("direct", "vk"), today)
+    assert both["direct"].remaining_cap >= 30_000 and both["vk"].daily_limit >= 34_500
 
 
-def test_short_month_lets_vk_in_with_the_budget_a_long_month_does_not():
-    assert budget_platforms(4_000_000, ("direct", "vk"), date(2026, 2, 2)) == (["direct", "vk"], {})
-    assert budget_platforms(4_000_000, ("direct", "vk"), date(2026, 3, 2)) == (["direct"], {"vk": 4_220_000})
-
-
-VK_MINIMUM = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
+def test_one_step_below_direct_minimum_misses_it_on_the_worst_day():
+    assert launch_limits(1_260_000, ("direct",), WORST_DAY)["direct"].remaining_cap < 30_000
 
 
 @pytest.mark.parametrize(
-    "limit,minimum,expected",
+    "limit,minimum,margin,expected",
     [
-        (PlatformLimit("vk", 30_000, 29_900, 30_000), VK_MINIMUM, False),
-        (PlatformLimit("vk", 30_000, 30_000, 30_000), VK_MINIMUM, True),
-        (PlatformLimit("direct", 4_285, 4_285, 4_285), {"weekly_limit_kop": 30_000}, False),
-        (PlatformLimit("direct", 4_286, 4_286, 4_286), {"weekly_limit_kop": 30_000}, True),
-        (PlatformLimit("direct", 0, 0, 0), {"day": 0, "period": 0}, True),
+        (PlatformLimit("vk", 30_000, 29_900, 30_000), VK_MINIMUM, Decimal(1), False),
+        (PlatformLimit("vk", 30_000, 30_000, 30_000), VK_MINIMUM, Decimal(1), True),
+        (PlatformLimit("vk", 34_500, 34_499, 34_500), VK_MINIMUM, MINIMUM_MARGIN, False),
+        (PlatformLimit("vk", 34_500, 34_500, 34_500), VK_MINIMUM, MINIMUM_MARGIN, True),
+        (PlatformLimit("direct", 4_285, 4_285, 4_285), DIRECT_MINIMUM, Decimal(1), False),
+        (PlatformLimit("direct", 4_286, 4_286, 4_286), DIRECT_MINIMUM, MINIMUM_MARGIN, True),
+        (PlatformLimit("direct", 0, 0, 0), {"day": 0, "period": 0}, Decimal(1), True),
     ],
 )
-def test_minimum_is_inclusive_and_checks_a_full_week(limit, minimum, expected):
-    assert meets_minimum(limit, minimum) is expected
+def test_minimum_is_inclusive_checks_a_full_week_and_margin_only_for_daily(limit, minimum, margin, expected):
+    assert meets_minimum(limit, minimum, margin) is expected
 
 
-def test_share_floors_keep_each_campaign_at_its_minimum():
-    assert share_floors(100_000, ("direct", "vk")) == {"direct": Decimal("0.053575"), "vk": Decimal("0.375")}
-    assert share_floors(0, ("direct", "vk")) == {}
+def test_share_floors_keep_each_campaign_at_its_live_minimum():
+    minimums = {"direct": DIRECT_MINIMUM, "vk": VK_MINIMUM}
+    assert share_floors(100_000, minimums) == {"direct": Decimal("0.053575"), "vk": Decimal("0.375")}
+    assert share_floors(100_000, {"direct": {"weekly_limit_kop": 70_000}})["direct"] == Decimal("0.125")
+    assert share_floors(100_000, {"direct": {"day": 0, "period": 0}}) == {"direct": Decimal(0)}
+    assert share_floors(0, minimums) == {}
 
 
 def test_rebalance_does_not_push_platform_below_its_floor():

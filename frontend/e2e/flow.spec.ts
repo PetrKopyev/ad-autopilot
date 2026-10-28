@@ -14,7 +14,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('button', { name: 'Войти в демо', exact: true }).click();
     await expect(page.getByLabel(copy.setup.business.website)).toHaveValue('https://salon.example/');
     await expect(page.getByLabel(copy.setup.business.city, { exact: true })).toHaveValue('Москва');
-    await expect(page.getByLabel(copy.setup.business.budget)).toHaveValue('30000');
+    await expect(page.getByLabel(copy.setup.business.budget)).toHaveValue('50000');
     await page.getByRole('button', { name: copy.common.next, exact: true }).click();
     await expect(page).toHaveURL(/\/setup\/2$/);
     await page.getByRole('checkbox', { name: 'Заявка', exact: true }).check();
@@ -49,7 +49,7 @@ for (const width of [390, 1280]) {
       .map((value) => Number(value.replace(/[\s\u00a0\u202f]/g, '').replace(',', '.'))).filter((value) => value > 0);
     expect(numbers.length).toBeGreaterThanOrEqual(2);
     expect(numbers[0]).toBeLessThanOrEqual(numbers[1]);
-    expect(numbers[1]).toBe(30000);
+    expect(numbers[1]).toBe(50000);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await testInfo.attach(`home-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
 
@@ -77,16 +77,16 @@ for (const width of [390, 1280]) {
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.settings, exact: true }).click();
     await expect(page.getByRole('heading', { name: copy.settings.title, exact: true })).toBeVisible();
     const budgetField = page.getByLabel(copy.settingsScreen.budgetLabel);
-    await expect(budgetField).toHaveValue('30000');
+    await expect(budgetField).toHaveValue('50000');
     await expect(page.getByRole('textbox', { name: new RegExp(`^${copy.settingsScreen.description.services}`) })).not.toHaveValue('');
     await expect(page.getByText(copy.settingsScreen.markingStored('•••4689', '+7•••4567'))).toBeVisible();
-    await budgetField.fill('35000');
+    await budgetField.fill('55000');
     const saved = page.waitForResponse((response) => response.url().endsWith('/api/business/budget') && response.request().method() === 'PUT');
     await page.getByRole('button', { name: copy.settingsScreen.save, exact: true }).first().click();
     expect((await saved).status()).toBe(200);
     await expect(page.getByRole('status').filter({ hasText: copy.settingsScreen.saved })).toBeVisible();
     await page.reload();
-    await expect(page.getByLabel(copy.settingsScreen.budgetLabel)).toHaveValue('35000');
+    await expect(page.getByLabel(copy.settingsScreen.budgetLabel)).toHaveValue('55000');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await testInfo.attach(`settings-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     expect(consoleErrors).toEqual([]);

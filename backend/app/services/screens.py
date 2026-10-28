@@ -14,7 +14,7 @@ from app.db.models import (
     StatsDaily,
 )
 from app.db.query import Window
-from app.domain.budget import stop_margin
+from app.domain.budget import budget_minimum, daily_minimum, stop_margin
 from app.domain.explain import PLURALS, explain_experiment, plural, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
@@ -349,11 +349,13 @@ class ScreensService:
         }
 
     async def save_budget(self, business: Business, amount: int) -> dict:
+        from app.config import get_domain_settings
+
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
             if type(amount) is not int or not 0 < amount <= MAX_BUDGET_KOP:
                 raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {rubles(MAX_BUDGET_KOP)} ₽.")
-            check_budget(amount, today(self.worker.clock))
+            check_budget(amount)
             spent, _ = await read_spend(self.worker, business)
             if amount <= max(sum(spent.values()), self.budget(business)["spent_kop"]):
                 raise ChangeConflict("Этот бюджет уже потрачен. Укажите сумму больше расхода за месяц.")
@@ -398,7 +400,19 @@ class ScreensService:
                 if amount < old:
                     await stop_all(business, worker=self.worker, budget_stop=True, reason_code="BUDGET_UPDATE_FAILED")
                 raise
-        return self.business(business)
+            held = set(self.worker.metadata(business).get("below_minimum", []))
+            vk_held = any(
+                campaign.platform == "vk" and campaign.id in held
+                for campaign in self.worker.current_campaigns(business)
+            )
+            warning = None
+            if vk_held and amount < budget_minimum(("direct", "vk"), get_domain_settings()):
+                minimum = daily_minimum(await self.worker.resolve_adapter(business.id, "vk").min_budgets())
+                warning = (
+                    f"Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума {rubles(minimum)} ₽ "
+                    "в день."
+                )
+        return self.business(business) | {"warning": warning}
 
     def save_settings(self, business: Business, auto_continue: bool, avg_check_kop: int | None) -> dict:
         business = self.repository.business(business.id)

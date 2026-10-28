@@ -24,7 +24,6 @@ from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, Asset, Business, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import (
-    LOW_BUDGET_KOP,
     PLATFORM_MINIMUMS,
     allocate,
     budget_minimum,
@@ -127,9 +126,9 @@ def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
 
 
 def plan_platforms(
-    business: Business, accounts: list[PlatformAccount], today: date, domain: DomainSettings
+    business: Business, accounts: list[PlatformAccount], domain: DomainSettings
 ) -> tuple[list[str], dict[str, int]]:
-    return budget_platforms(business.month_budget_kop, connected_platforms(accounts), today, domain)
+    return budget_platforms(business.month_budget_kop, connected_platforms(accounts), domain)
 
 
 def inputs_hash(business: Business, platforms: list[str], off: dict[str, int]) -> str:
@@ -168,11 +167,10 @@ def off_view(off: dict[str, int]) -> list[dict]:
 
 def budget_view(monthly_budget: int, connected: list[str], today: date, domain: DomainSettings) -> dict:
     """Подсказка мастера к бюджету: те же площадки и лимиты, что у плана и запуска."""
-    platforms, off = budget_platforms(monthly_budget, connected, today, domain)
+    platforms, off = budget_platforms(monthly_budget, connected, domain)
     limits = launch_limits(monthly_budget, platforms, today, domain)
     return {
-        "minimum_kop": budget_minimum(("direct",), today, domain),
-        "low_kop": LOW_BUDGET_KOP,
+        "minimum_kop": budget_minimum(("direct",), domain),
         "daily_kop": {platform: limits[platform].daily_limit for platform in platforms},
         "off": off_view(off),
     }
@@ -190,7 +188,6 @@ def launch_blockers(
     accounts: list[PlatformAccount],
     marking: MarkingProfile | None,
     assets: list[Asset],
-    today: date,
     domain: DomainSettings,
     medical_acknowledged: bool | None = None,
 ) -> list[str]:
@@ -200,8 +197,12 @@ def launch_blockers(
     ready = {account.platform for account in accounts if account.status == "ok"}
     selected = {asset.id for asset in assets if asset.selected}
     result = []
-    if "direct" not in ready or not set(platforms) <= ready:
+    if "direct" not in ready:
         result.append("Подключите кабинет Яндекс Директа: без него запуск невозможен.")
+    if "vk" in platforms and "vk" not in ready:
+        result.append(
+            "Подключите ВКонтакте заново: план готовили с этой площадкой, а доступа к её кабинету сейчас нет."
+        )
     if business.description_approved_at is None:
         result.append("Подтвердите описание бизнеса.")
     if not business.metrica_counter_id or not business.lead_goal_ids:
@@ -210,7 +211,7 @@ def launch_blockers(
         )
     if marking is None or not all(marking.confirmed_in_platform.get(platform) is True for platform in platforms):
         result.append("Заполните данные рекламодателя и подтвердите маркировку на подключённых площадках.")
-    if payload["inputs_hash"] != inputs_hash(business, *plan_platforms(business, accounts, today, domain)):
+    if payload["inputs_hash"] != inputs_hash(business, *plan_platforms(business, accounts, domain)):
         result.append("Сведения о бизнесе изменились после подготовки плана. Обновите план.")
     if any(not selected & set(payload["assets"].get(group_key(group), ())) for group in payload["groups"]):
         result.append("В каждой группе отметьте хотя бы одну картинку.")
@@ -399,11 +400,11 @@ class PlanService:
         self.domain = domain
 
     async def get_plan(self, business_id: int, now: datetime, today: date) -> dict:
-        business, platforms, off, digest, plan = self.inputs(self.repository.business(business_id), today)
+        business, platforms, off, digest, plan = self.inputs(self.repository.business(business_id))
         if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
             with self.repository.business_lock(business_id):
                 # Пока ждали блокировку, план мог собрать соседний запрос, а бизнес — измениться или удалиться.
-                business, platforms, off, digest, plan = self.inputs(self.locked_business(business_id), today)
+                business, platforms, off, digest, plan = self.inputs(self.locked_business(business_id))
                 if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
                     # Новый план — новые кампании: кампании незавершённого запуска остались бы без плана и без
                     # присмотра. Сначала их останавливает воркер (services.launch.recover_launch).
@@ -412,10 +413,10 @@ class PlanService:
                     plan = await self.build(business, platforms, off, digest, plan, now, today)
         return self.view(business, plan, today)
 
-    def inputs(self, business: Business, today: date) -> tuple[Business, list[str], dict[str, int], str, Plan | None]:
+    def inputs(self, business: Business) -> tuple[Business, list[str], dict[str, int], str, Plan | None]:
         if business.description_approved_at is None:
             raise Blocked("Подтвердите описание бизнеса: без него мы не готовим план.")
-        platforms, off = plan_platforms(business, self.repository.accounts(business.id), today, self.domain)
+        platforms, off = plan_platforms(business, self.repository.accounts(business.id), self.domain)
         digest = inputs_hash(business, platforms, off)
         return business, platforms, off, digest, self.repository.latest_plan(business.id)
 
@@ -729,8 +730,12 @@ class PlanService:
         shares = allocate(business.month_budget_kop, platform_shares(platforms, self.domain))
         accounts = self.repository.accounts(business.id)
         marking = self.repository.marking(business.id)
-        blockers = launch_blockers(business, plan, accounts, marking, assets, today, self.domain)
-        limits = launch_limits(payload["month_budget_kop"], platforms, today, self.domain)
+        blockers = launch_blockers(business, plan, accounts, marking, assets, self.domain)
+        limits = (
+            {}
+            if plan.status == "launched"
+            else launch_limits(payload["month_budget_kop"], platforms, today, self.domain)
+        )
         groups = [
             {
                 "id": group["id"],

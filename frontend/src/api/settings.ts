@@ -22,9 +22,9 @@ export async function getBusiness(signal?: AbortSignal): Promise<BusinessSetting
   if (mockEnabled) return (await import('./mocks')).mockBusinessSettings();
   return setupGet('/api/business', signal);
 }
-export async function saveBudget(month_budget_kop: number) {
-  if (mockEnabled) { (await import('./mocks')).mockSaveBudget(month_budget_kop); return; }
-  await api('/api/business/budget', { method: 'PUT', body: { month_budget_kop } });
+export async function saveBudget(month_budget_kop: number): Promise<string | null> {
+  if (mockEnabled) { (await import('./mocks')).mockSaveBudget(month_budget_kop); return null; }
+  return (await api<{ warning: string | null }>('/api/business/budget', { method: 'PUT', body: { month_budget_kop } }))?.warning ?? null;
 }
 export async function saveBusinessSettings(auto_continue: boolean, avg_check_kop: number | null) {
   if (mockEnabled) { (await import('./mocks')).mockSaveBusinessSettings(auto_continue, avg_check_kop); return; }

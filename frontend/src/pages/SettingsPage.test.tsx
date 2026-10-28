@@ -3,12 +3,13 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getBusiness } from '../api/settings';
+import { getBusiness, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { saveMarking } from '../api/setup';
 import { SettingsPage } from './SettingsPage';
 
-vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn() }));
+vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn(),
+  saveBudget: vi.fn(), saveBusinessSettings: vi.fn() }));
 vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn() }));
 vi.mock('../api/screens', () => ({ mockEnabled: false,
   getAutopilotStatus: async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] }) }));
@@ -66,4 +67,18 @@ it('без сохранённой маркировки сразу показыв
   const block = await marking({ ...business, marking: null });
   expect((block.getByRole('textbox', { name: copy.setup.advertiser.taxId }) as HTMLInputElement).value).toBe('');
   expect(block.queryByRole('button', { name: copy.settingsScreen.markingCancel })).toBeNull();
+});
+
+it('бюджет ниже порога ВКонтакте сохраняется, а предупреждение сервера видно под формой', async () => {
+  const warning = 'Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума 300 ₽ в день.';
+  vi.mocked(saveBudget).mockResolvedValue(warning);
+  vi.mocked(saveBusinessSettings).mockResolvedValue();
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('.card') as HTMLElement);
+  fireEvent.change(block.getByLabelText(copy.settingsScreen.budgetLabel), { target: { value: '20000' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText(warning)).toBeTruthy();
+  expect(block.getByText(copy.settingsScreen.saved)).toBeTruthy();
+  expect(saveBudget).toHaveBeenCalledWith(2000000);
 });

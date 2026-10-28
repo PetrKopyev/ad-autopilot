@@ -13,8 +13,9 @@ PLATFORM_MINIMUMS = {
     "direct": {"weekly_limit_kop": 30_000},
     "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000},
 }
+MINIMUM_MARGIN = Decimal("1.15")
+WORST_DAY = date(2026, 3, 31)
 MINIMUM_STEP_KOP = 10_000
-LOW_BUDGET_KOP = 1_000_000
 
 
 def allocate(amount: int, weights: Mapping[str, Decimal]) -> dict[str, int]:
@@ -144,10 +145,10 @@ def launch_limits(
     return result
 
 
-def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int]) -> bool:
-    """Лимиты кампании на полную неделю не ниже минимумов площадки: Директ — недельный, VK — дневной и на кампанию,
-    симулятор — day/period. Неполную неделю запуска проверяет launch.below_minimum."""
-    daily = minimum.get("daily_limit_kop", minimum.get("day", 0))
+def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int], margin: Decimal = Decimal(1)) -> bool:
+    """Лимиты кампании на полную неделю не ниже минимумов площадки: Директ — недельный, VK — дневной (с запасом
+    margin) и на кампанию, симулятор — day/period. Неполную неделю запуска проверяет launch.below_minimum."""
+    daily = minimum.get("daily_limit_kop", minimum.get("day", 0)) * margin
     period = minimum.get("period_cap_kop", minimum.get("period", 0))
     weekly = minimum.get("weekly_limit_kop", 0)
     return limit.daily_limit >= daily and limit.remaining_cap >= period and limit.daily_limit * 7 >= weekly
@@ -155,16 +156,22 @@ def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int]) -> bool:
 
 def budget_minimum(
     platforms: Sequence[str],
-    today: date,
     settings: DomainSettings = DEFAULT_SETTINGS,
     minimums: Mapping[str, Mapping[str, int]] = PLATFORM_MINIMUMS,
 ) -> int:
-    """Наименьший бюджет месяца, кратный 100 ₽, с которым лимиты каждой площадки при запуске сегодня не ниже её
-    минимума."""
+    """Наименьший бюджет месяца, кратный 100 ₽, с которым лимиты каждой площадки при запуске в худший день не ниже её
+    минимума. Худший день — последний день 31-дневного месяца (WORST_DAY): дневной лимит меньше всего, а недельный
+    лимит Директа равен одному дневному. Порог не зависит от текущего месяца и дня недели, запуск с ним проходит в любой
+    день. VK нужен запас MINIMUM_MARGIN: её дневной лимит падает в течение дня после расхода, и без запаса кампания у
+    порога чередовала бы паузы и возобновления."""
 
     def enough(steps: int) -> bool:
-        limits = launch_limits(steps * MINIMUM_STEP_KOP, platforms, today, settings)
-        return all(meets_minimum(limits[platform], minimums.get(platform, {})) for platform in platforms)
+        limits = launch_limits(steps * MINIMUM_STEP_KOP, platforms, WORST_DAY, settings)
+        return all(
+            meets_minimum(limits[platform], minimums.get(platform, {}), MINIMUM_MARGIN)
+            and limits[platform].remaining_cap >= minimums.get(platform, {}).get("weekly_limit_kop", 0)
+            for platform in platforms
+        )
 
     low, high = 0, 1
     while not enough(high):
@@ -176,28 +183,31 @@ def budget_minimum(
 
 
 def budget_platforms(
-    monthly_budget: int, connected: Sequence[str], today: date, settings: DomainSettings = DEFAULT_SETTINGS
+    monthly_budget: int, connected: Sequence[str], settings: DomainSettings = DEFAULT_SETTINGS
 ) -> tuple[list[str], dict[str, int]]:
-    """Площадки плана и бюджет месяца, с которого подключится выключенная. Доля VK, не набирающая её минимум, уходит в
-    Директ: Директ обязателен, его минимум не даёт сохранить меньший бюджет."""
+    """Площадки плана и бюджет месяца, с которого подключится выключенная. Доля VK, не набирающая её минимум с запасом,
+    уходит в Директ: Директ обязателен, его минимум не даёт сохранить меньший бюджет."""
     if len(connected) < 2:
         return list(connected), {}
-    needed = budget_minimum(connected, today, settings)
+    needed = budget_minimum(connected, settings)
     if monthly_budget >= needed:
         return list(connected), {}
     return [platform for platform in connected if platform != "vk"], {"vk": needed}
 
 
-def share_floors(total_daily: int, platforms: Sequence[str]) -> dict[str, Decimal]:
+def daily_minimum(minimum: Mapping[str, int]) -> int:
+    """Дневной лимит, с которым кампания набирает минимум площадки на полную неделю."""
+    return max(minimum.get("daily_limit_kop", minimum.get("day", 0)), -(-minimum.get("weekly_limit_kop", 0) // 7))
+
+
+def share_floors(total_daily: int, minimums: Mapping[str, Mapping[str, int]]) -> dict[str, Decimal]:
     """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум."""
     if not total_daily:
         return {}
-    result = {}
-    for platform in platforms:
-        minimum = PLATFORM_MINIMUMS[platform]
-        daily = max(minimum.get("daily_limit_kop", 0), -(-minimum.get("weekly_limit_kop", 0) // 7))
-        result[platform] = Decimal(daily) * CAP_MULTIPLIER / total_daily
-    return result
+    return {
+        platform: Decimal(daily_minimum(minimum)) * CAP_MULTIPLIER / total_daily
+        for platform, minimum in minimums.items()
+    }
 
 
 def stop_margin(total_daily_limit: int, settings: DomainSettings = DEFAULT_SETTINGS) -> int:
