@@ -85,7 +85,7 @@ export function PlanPage() {
       <p>{copy.plan.summary(formatMoney(plan.month_budget_kop), formatMoney(plan.direct_budget_kop), formatMoney(plan.vk_budget_kop))}</p>
       {plan.status === 'launched' ? <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card> : <>
         {plan.launch_error && <div className="notice" role="status"><p>{plan.launch_error}</p></div>}
-        {(!plan.marking_confirmed || !plan.ready_to_launch) && <div className="notice"><p>{copy.plan.marking}</p><p>{copy.launchFlow.notReady}</p><Link to="/setup">{copy.common.start}</Link></div>}
+        {plan.blockers.length > 0 && <div className="notice"><p>{copy.launchFlow.blockers}</p><ul>{plan.blockers.map((text) => <li key={text}>{text}</li>)}</ul><Link to="/setup">{copy.common.start}</Link></div>}
         {medical && <><MedicalNotice /><label className="check"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} />{copy.launchFlow.understand}</label></>}
         {plan.groups.map((group) => { const generating = jobState(group.id, 'generate'); const uploading = jobState(group.id, 'upload'); return <Card key={group.id} className="page-stack">
           <h2>{group.name}</h2><p className="muted">{copy.setup.accounts[group.platform]}</p>

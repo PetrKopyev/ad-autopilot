@@ -28,7 +28,7 @@ from app.services.onboarding import (
     OnboardingRepository,
     OnboardingService,
 )
-from app.services.registry import build_llm
+from app.services.registry import build_llm, llm_mode
 
 router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 router.include_router(demo_router)
@@ -89,6 +89,7 @@ async def get_onboarding_service(request: Request) -> AsyncIterator[OnboardingSe
             request.app.state.platform_adapters.metrica,
             AiLimits.from_settings(settings),
             reader=read_demo_site if settings.platform_mode == "fake" else read_site,
+            ai_mode=llm_mode(settings),
         )
 
 

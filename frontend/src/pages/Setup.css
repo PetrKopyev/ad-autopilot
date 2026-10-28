@@ -25,6 +25,8 @@
 .launch-flow .file-input:focus-visible + label { outline: 3px solid #537dd1; outline-offset: 4px; }
 .launch-flow fieldset:disabled .photo-upload label, .launch-flow .file-input:disabled + label { opacity: .55; cursor: not-allowed; }
 .launch-flow .tap-link { display: flex; align-items: center; width: fit-content; min-height: 44px; }
+.launch-flow .check-results { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.launch-flow .check-results .check-failed { color: var(--color-danger); }
 .clients-answers { list-style: none; margin: 0; padding: 0; }
 @media (max-width: 600px) {
   .launch-flow .account-grid { grid-template-columns: minmax(0, 1fr); }

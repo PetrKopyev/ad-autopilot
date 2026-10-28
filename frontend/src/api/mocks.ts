@@ -101,7 +101,7 @@ export function mockHistory() {
 }
 
 // Onboarding and running screens share the business budget and account state.
-import type { Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
+import type { AccountCheck, Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
 import type { Plan, PlanAsset } from './plan';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
 import type { ClientQuestion, ClientQuestions } from './clients';
@@ -159,6 +159,13 @@ export function mockSetupSite(): SiteCheck {
     } };
 }
 export function mockSetupDescription(description: Description) { setupMock.description = description; setupMock.plan = undefined; persistSetupMock(); }
+export function mockSetupCheck(): { items: AccountCheck[] } {
+  const connected = (platform: 'direct' | 'vk') => setupMock.me.accounts.some((item) => item.platform === platform && item.status === 'ok');
+  return { items: [
+    { platform: 'direct', ok: connected('direct'), message: connected('direct') ? copy.launchFlow.mockDirectWorks : copy.launchFlow.mockDirectMissing },
+    ...connected('vk') ? [{ platform: 'vk' as const, ok: true, message: copy.launchFlow.mockVkWorks }] : [],
+  ] };
+}
 export function mockSetupCounters() { return { items: [{ id: 12345, name: copy.launchFlow.mockCounter }] }; }
 export function mockSetupGoals(counter: number) { return { items: counter === 12345 ? [{ id: 1, name: copy.launchFlow.mockGoal }] : [] }; }
 export function mockSetupMetrica(counter: number, goals: number[]) { setupMock.counter = counter; setupMock.goals = goals; persistSetupMock(); }
@@ -182,7 +189,7 @@ export function mockSetupPlan(): Plan {
   if (setupMock.plan?.month_budget_kop !== budget) setupMock.plan = undefined;
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
     vk_budget_kop: vkBudget, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
-    marking_confirmed: marking, ready_to_launch: ready, status: 'draft',
+    marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: 'draft',
     groups: (vk ? ['direct', 'vk'] as const : ['direct'] as const).map((platform, index) => ({
       id: index + 1, name: copy.plan.groupExample, platform, audience: copy.launchFlow.mockAudience,
       daily_limit_kop: Math.floor((platform === 'vk' ? vkBudget : budget - vkBudget) / 31),
@@ -190,6 +197,7 @@ export function mockSetupPlan(): Plan {
       assets: [mockAsset(index * 100 + 1, true), mockAsset(index * 100 + 2)],
     })) };
   setupMock.plan.ready_to_launch = ready; setupMock.plan.marking_confirmed = marking;
+  setupMock.plan.blockers = ready ? [] : [marking ? copy.launchFlow.accountsError : copy.launchFlow.markingError];
   return structuredClone(setupMock.plan);
 }
 export function mockPlanRegenerate(groupId: number): Plan {

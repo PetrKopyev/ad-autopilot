@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 from starlette.concurrency import run_in_threadpool
 
-from app.api.limits import demo_login_limit, yandex_start_limit
+from app.api.limits import accounts_check_limit, demo_login_limit, yandex_start_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.auth import yandex
 from app.auth.revoke import revoke_tokens
@@ -37,6 +37,7 @@ from app.platforms.base import AdPlatform
 from app.platforms.fake import VirtualClock
 from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, stop_platform
 from app.services.changes import ChangeConflict, ServerBusy
+from app.services.connections import check_connections
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
 from app.services.launch import TITLES
 from app.worker.clock import SystemClock
@@ -142,7 +143,9 @@ def busy_business(action: str) -> Iterator[None]:
 @router.get("/auth/config")
 def auth_config(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return {"demo": demo_enabled()}
+    from app.config import settings
+
+    return {"demo": demo_enabled(), "vk_oauth": bool(settings.vk_client_id)}
 
 
 def require_demo() -> None:
@@ -377,3 +380,22 @@ async def disconnect_account(
         else f"Кабинет отключён, но площадка не подтвердила остановку рекламы ({'; '.join(problems)}). Проверьте в "
         "её кабинете, что кампании «Автопилот» остановлены: управлять ими мы больше не можем.",
     }
+
+
+@router.post("/accounts/check", dependencies=[Depends(accounts_check_limit), Depends(require_csrf)])
+async def check_accounts(
+    request: Request,
+    user: Annotated[User, Depends(current_user)],
+    repository: Repository,
+    response: Response,
+    business_id: Annotated[int | None, Query(gt=0)] = None,
+) -> dict:
+    business = repository.get_business(user.id, business_id)
+    statuses = {
+        account.platform: account.status
+        for account in repository.list_accounts(user.id)
+        if account.business_id == business.id
+    }
+    registry = request.app.state.platform_adapters
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": await check_connections(business.id, statuses, registry.resolve, registry.metrica)}

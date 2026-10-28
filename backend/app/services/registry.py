@@ -183,8 +183,15 @@ class DemoArt:
         return output.getvalue()
 
 
-def build_llm(config: Any, http: httpx.AsyncClient) -> LLMClient:
+def llm_mode(config: Any) -> str:
+    """Чем отвечает ИИ: заглушкой или моделью YandexGPT. При смене режима проверка сайта перечитывает его заново."""
     if config.platform_mode == "fake" or not config.yc_api_key.get_secret_value() or not config.yc_folder_id:
+        return "demo"
+    return config.yandexgpt_model
+
+
+def build_llm(config: Any, http: httpx.AsyncClient) -> LLMClient:
+    if llm_mode(config) == "demo":
         return DemoLLM()
     return YandexGPTClient(
         http,

@@ -360,12 +360,14 @@ class OnboardingService:
         limits: AiLimits,
         *,
         reader: Callable[[str], Awaitable[SiteReadResult]] = read_site,
+        ai_mode: str = "",
     ) -> None:
         self.repository = repository
         self.llm = llm
         self.metrica = metrica
         self.limits = limits
         self.reader = reader
+        self.ai_mode = ai_mode
 
     def create_business(
         self, user_id: int, site_url: str, city: str, month_budget_kop: int, avg_check_kop: int | None
@@ -498,6 +500,7 @@ class OnboardingService:
             fields = description_fields(draft)
             check = {
                 "site_url": url,
+                "ai_mode": self.ai_mode,
                 "checked_at": now.isoformat(),
                 "pages_read": len(site.pages),
                 "services_found": len(draft.services),
@@ -526,6 +529,7 @@ class OnboardingService:
             cached
             and owner_text is None
             and cached["site_url"] == business.site_url
+            and cached.get("ai_mode", "") == self.ai_mode
             and now - datetime.fromisoformat(cached["checked_at"]) < CHECK_TTL
         ):
             return cached

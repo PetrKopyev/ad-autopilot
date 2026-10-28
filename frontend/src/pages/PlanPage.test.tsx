@@ -13,7 +13,7 @@ const interrupted = 'Запуск рекламы не завершился. Вс
 function plan(launch_error: string | null): Plan {
   return {
     id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, generations_remaining: 2, medical_level: 'none',
-    marking_confirmed: true, ready_to_launch: true, launch_error, status: 'draft',
+    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft',
     groups: [{ id: 1, name: 'Маникюр', platform: 'direct', audience: 'Рядом', daily_limit_kop: 100000, ads: [{ title: 'Маникюр', text: 'Запись онлайн' }],
       assets: [{ id: 1, url: '/api/plan/assets/1/file', kind: 'image', alt: 'Френч с золотой фольгой', label: 'Френч с золотой фольгой', selected: true }] }],
   };
@@ -182,4 +182,19 @@ it('картинку можно скачать, и ссылка не перек�
   link.addEventListener('click', (event) => event.preventDefault());
   fireEvent.click(link);
   expect(screen.getByRole('checkbox')).toHaveProperty('checked', true);
+});
+
+it('плашка перед запуском называет настоящие причины, а не маркировку, если она подтверждена', async () => {
+  const reason = 'В каждой группе отметьте хотя бы одну картинку.';
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), ready_to_launch: false, blockers: [reason] });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText(reason, { selector: 'li' })).not.toBeNull();
+  expect(screen.queryByText(/подтвердите маркировку/)).toBeNull();
+});
+
+it('без причин плашки перед запуском нет', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByText('Маникюр', { selector: 'h2' });
+  expect(screen.queryByText('Перед запуском осталось:')).toBeNull();
 });

@@ -513,6 +513,17 @@ async def test_site_check_refresh_reads_site_past_fresh_cache(world: World) -> N
     assert world.business.description["check"]["checked_at"] == later.isoformat()
 
 
+async def test_site_check_cache_is_dropped_when_ai_mode_changes(world: World) -> None:
+    """Подключили YandexGPT вместо заглушки: проверка из кэша с ответом заглушки больше не отдаётся."""
+    misses = []
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("demo"))
+    world.onboarding.ai_mode = "yandexgpt/latest"
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("gpt"))
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("cached"))
+    assert misses == ["demo", "gpt"] and world.llm.calls == ["description", "description"]
+    assert world.business.description["check"]["ai_mode"] == "yandexgpt/latest"
+
+
 EMPTY_DESCRIPTION = json.dumps({"services": [], "address": {"value": "", "quote": ""}, "advantages": []})
 
 
@@ -1223,3 +1234,20 @@ async def test_demo_ai_is_free_and_never_counts_toward_weekly_limit(world: World
     await DemoArt(budget).generate("Уютный салон", seed=1, business_id=world.business.id)
     assert not world.repository.rows(LLMCall) and not world.repository.rows(ArtCall)
     assert ai_budget(world.repository, world.business, LIMITS, TODAY).spent_kop == 0
+
+
+def test_ai_mode_names_the_model_only_with_keys_in_live_mode() -> None:
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from app.services.registry import llm_mode
+
+    def config(mode: str, key: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            platform_mode=mode, yc_api_key=SecretStr(key), yc_folder_id="folder", yandexgpt_model="yandexgpt/latest"
+        )
+
+    assert llm_mode(config("live", "")) == "demo"
+    assert llm_mode(config("fake", "key")) == "demo"
+    assert llm_mode(config("live", "key")) == "yandexgpt/latest"

@@ -507,13 +507,14 @@ def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, 
 
     monkeypatch.setenv("PLATFORM_MODE", mode)
     monkeypatch.setenv("APP_BASE_URL", "https://localhost")
+    monkeypatch.delenv("VK_CLIENT_ID", raising=False)
     if flag is None:
         monkeypatch.delenv("DEMO_LOGIN", raising=False)
     else:
         monkeypatch.setenv("DEMO_LOGIN", flag)
     monkeypatch.setattr("app.config.settings", Settings())
     config = client.get("/api/auth/config")
-    assert config.json() == {"demo": enabled}
+    assert config.json() == {"demo": enabled, "vk_oauth": False}
     assert config.headers["cache-control"] == "no-store"
     assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == (204 if enabled else 404)
     assert bool(repository.users) is enabled
@@ -643,3 +644,56 @@ def test_delete_me_waits_for_business_lock_and_reports_busy(
     response = client.delete("/api/me", headers={"X-CSRF-Token": client.cookies["__Host-csrf"]})
     assert response.status_code == 409 and "Повторите удаление" in response.json()["detail"]
     assert waits == [15] and 1 in repository.users
+
+
+@pytest.mark.parametrize("client_id,shown", [("", False), ("vk-app", True)])
+def test_auth_config_tells_whether_vk_login_is_set_up(client, monkeypatch, client_id, shown):
+    monkeypatch.setattr("app.config.settings.vk_client_id", client_id)
+    assert client.get("/api/auth/config").json()["vk_oauth"] is shown
+
+
+def test_accounts_check_needs_login_csrf_and_own_business(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    login(client, repository)
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    assert client.post("/api/accounts/check").status_code == 403
+    csrf = {"X-CSRF-Token": client.cookies["__Host-csrf"]}
+    repository.businesses[2] = Business(id=2, user_id=2)
+    assert client.post("/api/accounts/check", params={"business_id": 2}, headers=csrf).status_code == 404
+    response = client.post("/api/accounts/check", params={"business_id": 1}, headers=csrf)
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    client.cookies.clear()
+    assert client.post("/api/accounts/check", headers=csrf).status_code == 401
+
+
+def test_accounts_check_asks_each_connected_platform_in_fake_mode(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    login(client, repository)
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.accounts[2] = PlatformAccount(id=2, business_id=1, platform="vk", status="ok", external_login="vk")
+    csrf = {"X-CSRF-Token": client.cookies["__Host-csrf"]}
+    items = client.post("/api/accounts/check", headers=csrf).json()["items"]
+    assert items == [
+        {"platform": "direct", "ok": True, "message": "Директ отвечает."},
+        {"platform": "vk", "ok": True, "message": "VK Реклама отвечает."},
+        {"platform": "metrica", "ok": True, "message": "Метрика отвечает, счётчиков: 1."},
+    ]
+    client.app.state.platform_adapters.resolve(1, "vk").inject_error(401)
+    repository.accounts[1].status = "needs_reauth"
+    items = client.post("/api/accounts/check", headers=csrf).json()["items"]
+    assert items == [
+        {"platform": "direct", "ok": False, "message": "Доступ истёк — подключите кабинет заново."},
+        {"platform": "vk", "ok": False, "message": "Доступ истёк — подключите кабинет заново."},
+    ]
+
+
+def test_accounts_check_is_rate_limited(
+    client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
+) -> None:
+    login(client, repository)
+    csrf = {"X-CSRF-Token": client.cookies["__Host-csrf"]}
+    statuses = [client.post("/api/accounts/check", headers=csrf).status_code for _ in range(7)]
+    assert statuses == [200] * 6 + [429]
+    assert "слишком часто" in client.post("/api/accounts/check", headers=csrf).json()["detail"]

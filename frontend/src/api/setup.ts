@@ -40,7 +40,8 @@ export async function getMe(signal?: AbortSignal): Promise<Me> {
   if (mockEnabled) return (await import('./mocks')).mockSetupMe();
   return setupGet('/api/me', signal);
 }
-export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean }> {
+/** vk_oauth — на сервере настроено приложение VK: можно войти через VK, а не только ключом API. */
+export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean; vk_oauth: boolean }> {
   return setupGet('/api/auth/config', signal);
 }
 export async function demoLogin() {
@@ -67,6 +68,12 @@ export async function connectAccount(platform: 'login' | 'direct' | 'vk', busine
 export async function connectVkKey(client_id: string, client_secret: string, businessId: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect('vk'); return; }
   await api('/api/accounts/vk/key', { method: 'POST', body: { client_id, client_secret, business_id: businessId } });
+}
+/** Живая проверка подключённых площадок: по каждой — работает ли и что делать, если нет. */
+export interface AccountCheck { platform: 'direct' | 'vk' | 'metrica'; ok: boolean; message: string }
+export async function checkAccounts(businessId?: number): Promise<{ items: AccountCheck[] }> {
+  if (mockEnabled) return (await import('./mocks')).mockSetupCheck();
+  return setupMutation(`/api/accounts/check${businessId ? `?business_id=${encodeURIComponent(businessId)}` : ''}`, 'POST');
 }
 export async function createBusiness(body: BusinessInput): Promise<Business> {
   if (mockEnabled) return (await import('./mocks')).mockSetupBusiness(body);

@@ -95,3 +95,4 @@ regenerate_limit = RateLimit(
 assets_limit = RateLimit("Картинки меняются слишком часто. Подождите минуту.", per_ip=120, per_user=60)
 upload_limit = RateLimit("Фото загружаются слишком часто. Подождите минуту и попробуйте снова.", per_ip=30, per_user=15)
 vk_key_limit = RateLimit("Слишком много попыток подключить ключ VK. Подождите минуту.", per_ip=20, per_user=5)
+accounts_check_limit = RateLimit("Подключение проверяется слишком часто. Подождите минуту.", per_ip=20, per_user=6)

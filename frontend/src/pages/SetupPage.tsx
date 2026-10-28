@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { Button, Card, ErrorBanner, Stepper } from '../components';
 import { copy } from '../copy';
-import { checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getCounters, getGoals, getMe,
-  rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
-import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
+import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getCounters, getGoals,
+  getMe, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
+import type { AccountCheck, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { getBusiness } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { useSession } from '../api/session';
@@ -53,6 +53,9 @@ export function SetupPage() {
   const session = useSession();
   const me = session.data;
   const [counters, setCounters] = useState<Counter[]>([]);
+  const [countersLoaded, setCountersLoaded] = useState(false);
+  const [checks, setChecks] = useState<AccountCheck[]>();
+  const [checking, setChecking] = useState(false);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -93,7 +96,7 @@ export function SetupPage() {
     setDraft(value);
     setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(business.month_budget_kop / 100) : '');
     setAverage(business?.avg_check_kop ? String(business.avg_check_kop / 100) : '');
-    setNoSite(false); setCounters([]); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false);
+    setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false);
   }
   // Сессия пропадает на время перечитывания: сохранённое спрашиваем один раз на пользователя.
   const loadedFor = useRef<number>();
@@ -130,7 +133,7 @@ export function SetupPage() {
     const controller = new AbortController();
     if (direct && ready) getCounters(controller.signal).then((result) => {
       if (controller.signal.aborted) return;
-      setCounters(result.items);
+      setCounters(result.items); setCountersLoaded(true);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : copy.errors.generic); });
     return () => controller.abort();
   }, [direct, ready, revision]);
@@ -170,6 +173,19 @@ export function SetupPage() {
     if (busy) return; setBusy(true); setError(''); setStopResult(undefined);
     try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
+  }
+  // Проверка не перечитывает сессию: карточки кабинетов не пропадают на время запроса, итог — текстом под кнопкой.
+  async function checkConnection() {
+    if (checking) return; setChecking(true); setError('');
+    try {
+      const { items } = await checkAccounts(draft.business?.id);
+      setChecks(items);
+      if (items.some((item) => item.platform === 'metrica' && item.ok)) {
+        setCounters((await getCounters()).items); setCountersLoaded(true);
+        if (draft.counter) setGoals((await getGoals(draft.counter)).items);
+      }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    finally { setChecking(false); }
   }
   function next(value: Partial<Draft> = {}) {
     setDraft((previous) => ({ ...previous, ...value, maxStep: Math.max(previous.maxStep, current + 1) }));
@@ -255,13 +271,19 @@ export function SetupPage() {
             <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
           </Card>;
         })}</div>
-        <Button variant="secondary" onClick={() => { session.reload(); setRevision((value) => value + 1); }}>{copy.launchFlow.refresh}</Button>
+        <div className="actions"><Button variant="secondary" aria-busy={checking || undefined} disabled={checking} onClick={() => void checkConnection()}>
+          {checking ? <span className="loading">{copy.launchFlow.checking}</span> : copy.launchFlow.refresh}
+        </Button></div>
+        <div role="status" aria-live="polite">{checks && <ul className="check-results">{checks.map((item) => <li key={item.platform} className={item.ok ? undefined : 'check-failed'}>
+          <strong>{copy.launchFlow.checkTitles[item.platform]}:</strong> {item.message}
+        </li>)}</ul>}</div>
         <label className="field">{copy.setup.accounts.counter}<select disabled={!direct} required value={draft.counter || ''} onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
-          {!counters.length && <option value="">{copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
+          {!counters.length && <option value="">{direct && countersLoaded ? copy.launchFlow.noCounters : copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
         </select></label>
         <fieldset className="page-stack"><legend>{copy.setup.accounts.goal}</legend>{goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}</fieldset>
         <details><summary>{copy.setup.accounts.createGoal}</summary><ol>{copy.launchFlow.goalSteps.map((text) => <li key={text}>{text}</li>)}</ol></details>
-        {direct && !counters.length && <div className="notice"><p>{copy.setup.website.blocked}</p><SiteInstructions /></div>}
+        {direct && countersLoaded && !counters.length && <div className="notice"><p><strong>{copy.launchFlow.noCounters}</strong></p><p>{copy.launchFlow.createCounter}</p>
+          <p>{copy.setup.website.blocked}</p><a href="https://metrika.yandex.ru/" target="_blank" rel="noreferrer">{copy.launchFlow.metricaLink}</a></div>}
       </>}
       {current === 3 && <div className="page-stack" role="status" aria-live="polite">
         {reading && <p className="loading">{copy.setup.website.reading}</p>}

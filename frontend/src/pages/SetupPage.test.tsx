@@ -266,3 +266,55 @@ it('под полем услуг подсказка, что их можно пе
   expect(services.getAttribute('aria-describedby')).toBe('services-hint');
   expect(document.getElementById('services-hint')!.textContent).toBe(copy.setup.draft.servicesHint);
 });
+
+function accountsStep(counters: { id: number; name: string }[], check: unknown) {
+  sessionStorage.setItem('ad-autopilot-setup-draft', JSON.stringify({
+    user: 1, business: { id: 7, site_url: 'https://salon.example/', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null },
+    counter: 0, goals: [], approved: false, maxStep: 2,
+  }));
+  fetchMock.mockImplementation(async (url) => {
+    const path = new URL(String(url)).pathname;
+    const answers: Record<string, unknown> = {
+      '/api/auth/config': { demo: false, vk_oauth: false },
+      '/api/me': { id: 1, login: 'owner', email: null, has_business: true,
+        accounts: [{ id: 1, business_id: 7, platform: 'direct', external_login: 'owner', status: 'ok', scopes: [] }] },
+      '/api/metrica/counters': { items: counters },
+      '/api/metrica/goals': { items: [{ id: 1, name: 'Заявка' }] },
+      '/api/accounts/check': check,
+    };
+    return new Response(JSON.stringify(answers[path] ?? {}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+  renderStep(2);
+}
+
+it('пустой список счётчиков объясняет, что их нет на аккаунте, и как создать', async () => {
+  accountsStep([], { items: [] });
+  expect(await screen.findByText(copy.launchFlow.noCounters, { selector: 'strong' })).not.toBeNull();
+  expect(screen.getByText(copy.launchFlow.createCounter)).not.toBeNull();
+  expect(screen.getByRole('option').textContent).toBe(copy.launchFlow.noCounters);
+});
+
+it('«Проверить подключение» спрашивает площадки и показывает итог текстом, не перечитывая сессию', async () => {
+  let answer!: (value: Response) => void;
+  accountsStep([{ id: 12345, name: 'Счётчик' }], null);
+  const base = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation((url, init) => new URL(String(url)).pathname === '/api/accounts/check'
+    ? new Promise<Response>((resolve) => { answer = resolve; }) : base(url, init));
+  const button = await screen.findByRole('button', { name: copy.launchFlow.refresh });
+  await screen.findByText('Счётчик (12345)');
+  fireEvent.click(button);
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBe('true'));
+  expect(button.textContent).toBe(copy.launchFlow.checking);
+  answer(new Response(JSON.stringify({ items: [
+    { platform: 'direct', ok: false, message: 'Яндекс ещё не одобрил доступ к API Директа.' },
+    { platform: 'metrica', ok: true, message: 'Метрика отвечает, счётчиков: 1.' },
+  ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  const failed = await screen.findByText('Яндекс ещё не одобрил доступ к API Директа.', { exact: false });
+  expect(failed.closest('li')!.className).toBe('check-failed');
+  expect(screen.getByText('Метрика отвечает, счётчиков: 1.', { exact: false })).not.toBeNull();
+  expect(button.textContent).toBe(copy.launchFlow.refresh);
+  expect(screen.getByText(copy.setup.accounts.directConnected)).not.toBeNull();
+  const requests = calls();
+  expect(requests).toContain('POST /api/accounts/check');
+  expect(requests.filter((call) => call === 'GET /api/me')).toHaveLength(1);
+});
