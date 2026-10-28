@@ -122,6 +122,7 @@ async def site_check(
 
 @router.put("/business/description", dependencies=[Depends(require_csrf)])
 def save_description(body: DescriptionIn, business: CurrentBusiness, service: Service) -> dict:
+    # Синхронный обработчик: запись ждёт блокировку бизнеса в пуле потоков, а не в цикле событий.
     fields = {key: item.model_dump() for key, item in body.description.items()}
     with human_errors():
         return service.save_description(business.id, fields, body.approved, datetime.now(UTC))

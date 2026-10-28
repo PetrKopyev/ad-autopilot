@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -29,6 +29,8 @@ def budget_protection(change: ChangeLog, business=None) -> bool:
         "SPEND_MISMATCH",
         "MONTH_STOP",
         "BUDGET_UPDATE_FAILED",
+        # Кампания брошенного запуска: бизнес не запущен, и за включённой рекламой никто бы не следил.
+        "LAUNCH_INTERRUPTED",
     }:
         return True
     return change.kind == "pause" and business is not None and (
@@ -36,12 +38,39 @@ def budget_protection(change: ChangeLog, business=None) -> bool:
     )
 
 
-def can_revert(change: ChangeLog, business=None, *, actor: str = "owner", reverts: Sequence[ChangeLog] = ()) -> bool:
+REPLACED = (
+    "Эта кампания осталась от прежнего плана: реклама идёт по кампаниям нового, и включать её снова мы не будем. "
+    "Её расход по-прежнему учитывается в бюджете."
+)
+
+
+def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) -> bool:
+    """Откат вернул бы включённой кампанию прежнего плана: реклама с устаревшими объявлениями, без доли бюджета и без
+    присмотра шагов воркера (Worker.current_campaigns). Откат к остановленной кампании разрешён."""
+    return any(
+        op["entity_type"] == "campaign"
+        and op["field"] == "status"
+        and op["before"] == "active"
+        and (change.platform, op["entity_id"]) in replaced
+        for op in change.operations
+    )
+
+
+def can_revert(
+    change: ChangeLog,
+    business=None,
+    *,
+    actor: str = "owner",
+    reverts: Sequence[ChangeLog] = (),
+    replaced: Collection[tuple[str, str]] = (),
+) -> bool:
+    """replaced — кампании прежних планов (ChangesRepository.replaced_entities)."""
     return (
         change.status == "applied"
         and change.kind != "revert"
         and not (change.evidence or {}).get("_service", {}).get("dry_run")
         and not budget_protection(change, business)
+        and not turns_on_replaced(change, replaced)
         and (change.actor != "external" or actor == "owner")
         and not any(
             item.status in {"pending", "applied"} and not (item.evidence or {}).get("_service", {}).get("dry_run")
@@ -159,9 +188,13 @@ class RollbackService:
             if original is None:
                 raise ValueError("Изменение не найдено.")
             business = self.repository.business(business_id)
-            if not can_revert(original, business, actor=actor, reverts=self.repository.reverts(original.id)):
+            replaced = self.repository.replaced_entities(business_id)
+            reverts = self.repository.reverts(original.id)
+            if not can_revert(original, business, actor=actor, reverts=reverts, replaced=replaced):
                 if budget_protection(original, business):
                     raise ChangeConflict("Это защита бюджета, отменить нельзя.")
+                if turns_on_replaced(original, replaced):
+                    raise ChangeConflict(REPLACED)
                 if original.actor == "external" and actor != "owner":
                     raise ChangeConflict("Изменение в кабинете может отменить только владелец.")
                 raise ChangeConflict("Изменение недоступно для отката или откат уже выполняется.")

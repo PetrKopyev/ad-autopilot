@@ -25,7 +25,7 @@ from app.db.models import Asset, Business, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import allocate, plan_budget, platform_shares, split_group_limits
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
-from app.services.changes import ChangeConflict
+from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict
 from app.services.onboarding import (
     DESCRIPTION_KEYS,
     AiLimits,
@@ -37,6 +37,7 @@ from app.services.onboarding import (
     ai_budget,
     description_draft,
     lines,
+    waited_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,19 @@ IMAGE_CANDIDATES = 8
 REGENERATE_COUNT = 2
 MAX_ASSETS = 40
 IMAGE_KINDS = ("image", "upload")
+UNSETTLED = (
+    "Прошлый запуск рекламы не завершился. Сначала остановим всё, что он успел создать на площадках, чтобы реклама не "
+    "тратила деньги без присмотра, — обычно это занимает до получаса. Потом план соберётся по новым данным. Если "
+    "площадка просит войти в кабинет заново, войдите: без этого рекламу не остановить. Если кабинет больше не нужен, "
+    "остановите кампанию «Автопилот» в нём самом и отключите кабинет на шаге «Кабинеты»."
+)
+
+# Незавершённый запуск, неудача которого не записана: он идёт или брошен. Повтор под блокировкой отличит одно от
+# другого (services.launch).
+UNFINISHED = (
+    "Запуск рекламы не завершился. Если он ещё идёт, подождите минуту и обновите страницу. Если нет, нажмите "
+    "«Запустить рекламу» ещё раз: повтор продолжит с уже созданного, кампании не задвоятся."
+)
 
 type ArtFactory = Callable[[ArtBudget, Callable[[ArtRecord], Awaitable[None]]], ArtClient]
 
@@ -75,6 +89,18 @@ class PlanRepository(OnboardingRepository):
 
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return self.db.scalar(select(Asset).where(Asset.id == asset_id, Asset.business_id == business_id))
+
+
+def launch_unsettled(plan: Plan) -> bool:
+    """Запуск плана начат, но не завершён и не остановил созданное: кампании на площадках могут работать."""
+    return plan.status != "launched" and bool(plan.payload.get("launch", {}).get("started_at"))
+
+
+def launch_error(plan: Plan) -> str | None:
+    """Объяснение прошлой попытки запуска на экране плана; у запущенного плана его нет."""
+    if plan.status == "launched":
+        return None
+    return plan.payload.get("launch", {}).get("error") or (UNFINISHED if launch_unsettled(plan) else None)
 
 
 def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
@@ -337,6 +363,10 @@ class PlanService:
                 # Пока ждали блокировку, план мог собрать соседний запрос, а бизнес — измениться или удалиться.
                 business, platforms, digest, plan = self.inputs(self.locked_business(business_id))
                 if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
+                    # Новый план — новые кампании: кампании незавершённого запуска остались бы без плана и без
+                    # присмотра. Сначала их останавливает воркер (services.launch.recover_launch).
+                    if plan is not None and launch_unsettled(plan):
+                        raise Blocked(UNSETTLED)
                     plan = await self.build(business, platforms, digest, plan, now, today)
         return self.view(business, plan, today)
 
@@ -547,14 +577,18 @@ class PlanService:
         return self.view(business, plan, today)
 
     def select_assets(self, business_id: int, asset_ids: list[int]) -> bool:
-        """Отмечает выбранные картинки; True — выбор изменился и ролики нужно пересобрать."""
-        images = [asset for asset in self.repository.assets(business_id) if asset.kind in IMAGE_KINDS]
-        if not set(asset_ids) <= {asset.id for asset in images}:
-            raise NotFound("Картинка не найдена.")
-        changed = {asset.id for asset in images if asset.selected} != set(asset_ids)
-        for asset in images:
-            asset.selected = asset.id in asset_ids
-        self.repository.commit()
+        """Отмечает выбранные картинки; True — выбор изменился и ролики нужно пересобрать.
+
+        Под блокировкой: запуск держит её, пока загружает картинки на площадки, и выбор посреди запуска не меняется.
+        Как и шаги мастера, ждёт её несколько секунд и только потом отвечает 409."""
+        with waited_lock(self.repository, business_id, LOCK_WAIT_SECONDS):
+            images = [asset for asset in self.repository.assets(business_id) if asset.kind in IMAGE_KINDS]
+            if not set(asset_ids) <= {asset.id for asset in images}:
+                raise NotFound("Картинка не найдена.")
+            changed = {asset.id for asset in images if asset.selected} != set(asset_ids)
+            for asset in images:
+                asset.selected = asset.id in asset_ids
+            self.repository.commit()
         return changed
 
     def build_videos(self, business_id: int, built: Built | None = None) -> bool:
@@ -607,5 +641,6 @@ class PlanService:
             and all(marking.confirmed_in_platform.get(platform) is True for platform in platforms),
             "ready_to_launch": not blockers,
             "blockers": blockers,
+            "launch_error": launch_error(plan),
             "status": "launched" if plan.status == "launched" else "draft",
         }

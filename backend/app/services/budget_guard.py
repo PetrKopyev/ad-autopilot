@@ -184,7 +184,9 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
     ledgers = {row.platform: row for row in worker.repository.rows(BudgetLedger, business.id, month=month)}
     reported = sum(max(spent.get(platform, 0), row.spent_kop) for platform, row in ledgers.items())
     reported += sum(value for platform, value in spent.items() if platform not in ledgers)
-    daily = sum(campaign.daily_limit_kop for campaign in campaigns)
+    # Запас — по лимитам действующего плана: кампании прежних планов остановлены, а если владелец включил такую в
+    # кабинете, её расход виден в observed_daily.
+    daily = sum(campaign.daily_limit_kop for campaign in worker.current_campaigns(business))
     # При внешнем повышении кэпа фактический темп может превышать сохранённый лимит.
     # Увеличиваем защитный запас по приросту ledger, без запроса состояния кампаний.
     observed_daily = 0

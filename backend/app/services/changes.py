@@ -1,17 +1,28 @@
 import asyncio
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
-from time import monotonic
+from time import monotonic, sleep
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import Connection, and_, func, select, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.orm import Session
 
-from app.db.models import AD_STATUSES, ENTITY_STATUSES, Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, Target
+from app.db.models import (
+    AD_STATUSES,
+    ENTITY_STATUSES,
+    Ad,
+    AdGroup,
+    Business,
+    Campaign,
+    ChangeLog,
+    Experiment,
+    Plan,
+    Target,
+)
 from app.demo_flags import ADVANCING, advance_jobs
 from app.domain.explain import TEMPLATES, explain
 from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
@@ -115,7 +126,35 @@ def affected_entities(
     return result
 
 
+def replaced_campaigns(plans: Sequence[Plan]) -> set[int]:
+    """Кампании всех планов, кроме действующего — последнего запущенного (Worker.current_campaigns)."""
+    current = max((plan for plan in plans if plan.status == "launched"), key=lambda plan: plan.version, default=None)
+    return {
+        campaign_id
+        for plan in plans
+        if plan is not current
+        for campaign_id in plan.payload.get("launch", {}).get("campaigns", {}).values()
+    }
+
+
 LOCK_WAIT_SECONDS = 15
+
+
+@contextmanager
+def waiting(lock: Callable[[], AbstractContextManager], seconds: float) -> Iterator[None]:
+    """Берёт блокировку lock(), дожидаясь до seconds секунд, пока её отпустят; ждёт поток (sleep), поэтому только вне
+    цикла событий. Не дождались — ChangeConflict."""
+    deadline = monotonic() + seconds
+    with ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(lock())
+                break
+            except ChangeConflict:
+                if monotonic() >= deadline:
+                    raise
+            sleep(0.5)
+        yield
 
 
 async def wait_for_lock(stack: ExitStack, repository: "ChangesRepository", business_id: int, seconds: float) -> None:
@@ -250,6 +289,16 @@ class ChangesRepository:
             for item in items
             if item.external_id is not None
         }
+
+    def replaced_entities(self, business_id: int) -> set[tuple[str, str]]:
+        """Кампании прежних планов на площадках: (площадка, внешний id)."""
+        ids = replaced_campaigns(list(self.db.scalars(select(Plan).where(Plan.business_id == business_id))))
+        rows = self.db.execute(
+            select(Campaign.platform, Campaign.external_id).where(
+                Campaign.business_id == business_id, Campaign.id.in_(ids), Campaign.external_id.is_not(None)
+            )
+        )
+        return {(platform, external_id) for platform, external_id in rows}
 
     def experiments(self, change: ChangeLog) -> list[Experiment]:
         condition = Experiment.change_id == change.id
@@ -450,7 +499,7 @@ class ChangesService:
                 for operation in operations:
                     await adapter.apply(operation)
         except PlatformError:
-            self._metadata(change, error="Площадка сообщила об ошибке применения. Требуется сверка.")
+            self._metadata(change, error="Площадка ответила ошибкой.")
         await self._reconcile(change, adapter, now=now)
         return change
 
@@ -476,8 +525,8 @@ class ChangesService:
                 platform_pauses=isinstance(adapter, (DirectAdapter, VkAdapter)),
             )
         except PlatformError:
-            # При недоступном чтении исход неизвестен: pending будет проверен после рестарта.
-            self._metadata(change, error="Не удалось сверить состояние площадки. Проверим повторно.")
+            # При недоступном чтении исход неизвестен: pending сверят следующий ход воркера или повтор запуска.
+            self._metadata(change, error="Площадка не ответила, прошло ли изменение. Узнаем, когда она ответит снова.")
             self.repository.save(change)
             return
         if mismatches:

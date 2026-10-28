@@ -53,3 +53,11 @@ it('отмену остановки называет продолжением р
   const titles = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
   expect(titles.slice(0, 3)).toEqual([labels.resumedAfterStop, labels.revertedLine('изменение бюджета'), labels.revertedPlain]);
 });
+
+it('кнопки отката нет, если сервер не разрешает откат (кампания прежнего плана, защита бюджета)', async () => {
+  serve([{ ...entry(1, 'pause'), can_revert: false }, { ...entry(2, 'budget'), can_revert: false }, entry(3, 'budget')]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.queryByRole('button', { name: labels.resume })).toBeNull();
+  expect(screen.getAllByRole('button', { name: copy.history.undo })).toHaveLength(1);
+});

@@ -10,10 +10,17 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, User
+from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Plan, User
 from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
 from app.platforms.fake import FakeAdapter
-from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, differences, load_operations
+from app.services.changes import (
+    ChangeConflict,
+    ChangesRepository,
+    ChangesService,
+    differences,
+    load_operations,
+    replaced_campaigns,
+)
 
 
 class MemoryRepository(ChangesRepository):
@@ -132,6 +139,15 @@ async def test_apply_error_with_unchanged_state_is_failed(repository, tree, monk
     assert change.status == "failed"
     assert change.evidence["_service"]["differences"][0]["current"] == 10_000
     assert "private error" not in str(change.evidence)
+
+
+async def test_apply_error_note_has_no_internal_jargon(repository, tree, monkeypatch):
+    """Пометка об ошибке площадки лежит в изменении, пока его не проверили: без слов «сверка» и «применение»."""
+    adapter, refs = tree
+    monkeypatch.setattr(adapter, "apply", AsyncMock(side_effect=PlatformError("private error")))
+    monkeypatch.setattr(ChangesService, "_reconcile", AsyncMock())
+    error = (await apply_budget(repository, adapter, refs)).evidence["_service"]["error"]
+    assert error and "свер" not in error.lower() and "примен" not in error.lower()
 
 
 async def test_lost_apply_response_is_reconciled_as_applied(repository, tree, monkeypatch):
@@ -433,6 +449,23 @@ def test_postgresql_business_lock_survives_commit_and_rejects_parallel_writer(da
                     pytest.fail("Parallel writer acquired a held business lock")
         with second.business_lock(business.id):
             pass
+
+
+def test_campaigns_of_earlier_launched_and_failed_plans_are_replaced():
+    """v1 запущен, v2 упал, v3 запущен: действующий — последний запущенный, а кампании v1 и v2 прежние, хотя v1 тоже
+    запущен. Порядок строк и id не важны: берётся версия."""
+
+    def plan(id: int, version: int, status: str, campaigns: dict) -> Plan:
+        return Plan(id=id, version=version, status=status, payload={"launch": {"campaigns": campaigns}})
+
+    plans = [
+        plan(1, 3, "launched", {"direct": 5, "vk": 6}),
+        plan(3, 1, "launched", {"direct": 1, "vk": 2}),
+        plan(2, 2, "failed", {"direct": 3, "vk": 4}),
+        plan(4, 4, "draft", {}),
+    ]
+    assert replaced_campaigns(plans) == {1, 2, 3, 4}
+    assert replaced_campaigns(plans[1:]) == {3, 4}
 
 
 def test_conflict_texts_shown_to_owner_have_no_internal_jargon():

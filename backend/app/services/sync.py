@@ -104,7 +104,8 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
     meta = worker.metadata(business)
     approvals = meta.get("approvals", {})
     rewritten = meta.get("rewritten", [])
-    campaigns = worker.campaigns(business)
+    # Объявления прежних планов не показываются: их отказы не исправляются и не приходят уведомлениями.
+    campaigns = worker.current_campaigns(business)
     # Сущности площадки читаются один раз на шаг: и для поиска объявлений, и для ссылок опроса каждой кампании.
     entities = {
         platform: worker.repository.local_entities(business.id, platform)

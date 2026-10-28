@@ -22,6 +22,7 @@ NOTICES = {
     "NOT_SHOWING": ("Объявление не показывается", "warning"),
     "CAMPAIGN_EXTEND_FAILED": ("Не получилось продлить кампанию в Директе", "warning"),
     "DEMO_STATE_LOST": ("Демо нужно начать заново", "warning"),
+    "LAUNCH_INTERRUPTED": ("Запуск рекламы не завершился", "danger"),
     "EXPERIMENT_GENERATION_FAILED": ("Проверку двух вариантов не запустили", "warning"),
     "EXPERIMENT_AI_LIMIT": ("Проверку двух вариантов отложили", "info"),
     "EXPERIMENT_WIN": ("Проверка двух вариантов закончилась", "info"),

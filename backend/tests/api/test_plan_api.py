@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import pytest
@@ -132,11 +133,14 @@ def test_upload_is_rejected_with_busy_text_when_video_builds_hold_decode_slots(a
     # Слоты разбора в потоках держат сборки роликов: очередь цикла событий свободна, ждать приходится в потоке.
     images.DECODE_SLOTS.acquire()
     images.DECODE_SLOTS.acquire()
-    try:
-        response = upload(client)
-    finally:
-        images.DECODE_SLOTS.release()
-        images.DECODE_SLOTS.release()
+    # Загрузка в обход очереди ждала бы слот без срока: запрос идёт в своём потоке со сроком, и такая поломка роняет
+    # тест, а не вешает его. Слоты отпускаются и тогда — зависший запрос доделывается, и пул закрывается.
+    with ThreadPoolExecutor(1) as pool:
+        try:
+            response = pool.submit(upload, client).result(timeout=5)
+        finally:
+            images.DECODE_SLOTS.release()
+            images.DECODE_SLOTS.release()
     assert response.status_code == 503 and response.headers["Retry-After"] == "60"
     assert response.json()["detail"] == "Сервер сейчас занят. Попробуйте загрузить фото через минуту."
     assert uploads(context) == 0

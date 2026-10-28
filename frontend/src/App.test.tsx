@@ -84,7 +84,7 @@ it('сбой при вопросе о сессии показывает ошиб
   expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
 });
 
-it('после удаления данных вход показывает итог остановки рекламы, а не уводит на главную', async () => {
+it('после удаления данных вход показывает итог остановки рекламы, а не уводит на главную; после входа ведёт в мастер', async () => {
   cookie = '__Host-csrf=token';
   withBusiness();
   answers['/api/autopilot/status'] = { status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] };
@@ -103,6 +103,25 @@ it('после удаления данных вход показывает ит�
   expect((await screen.findByRole('alert')).textContent).toBe(message);
   expect(screen.getByTestId('path').textContent).toBe('/login');
   expect(screen.getByRole('heading', { name: copy.login.title })).toBeTruthy();
+  // Страница входа перечитывает сессию сама: в шапке — «Вход», а итог остановки остаётся на месте.
+  expect(await screen.findByRole('link', { name: copy.login.title })).toBeTruthy();
+  expect(screen.queryByText('demo')).toBeNull();
+  expect(screen.getByRole('alert').textContent).toBe(message);
+  expect(screen.getByTestId('path').textContent).toBe('/login');
+  answers['/api/me'] = { id: 2, login: 'demo-2', email: null, has_business: false, accounts: [] };
+  fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
+  expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
+  expect(screen.getByTestId('path').textContent).toBe('/setup');
+});
+
+it('вошедшего, которого «назад» вернуло на вход с прежним итогом остановки, уводит в раздел', async () => {
+  cookie = '__Host-csrf=token';
+  withBusiness();
+  const stopResult = { stopped: true, message: 'Данные удалены. Рекламу перед удалением остановили.' };
+  render(<MemoryRouter initialEntries={[{ pathname: '/login', state: { stopResult } }]}><App /><Location /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
+  expect(screen.getByTestId('path').textContent).toBe('/');
+  expect(screen.queryByText(stopResult.message)).toBeNull();
 });
 
 it('гостя из раздела сразу уводит на вход, и раздел не шлёт запросов', async () => {

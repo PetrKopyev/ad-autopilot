@@ -121,3 +121,18 @@ def test_launch_with_vk_only_is_blocked_until_direct_is_connected(api) -> None:
     response = client.post("/api/plan/launch", json={"plan_id": context.plan["id"]})
     assert response.status_code == 409 and "Директ" in response.json()["detail"]
     assert not repository.rows(Campaign) and context.world.business.status == "plan_ready"
+
+
+def test_after_launch_wizard_explains_metrica_and_settings_keep_saving_description_and_marking(api) -> None:
+    client, context = api
+    business = context.world.business
+    business.status = "running"
+    response = client.put("/api/business/metrica", json={"counter_id": 12345, "lead_goal_ids": [1]})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Реклама уже запущена. Счётчик и цели Метрики после запуска не меняются."
+    description = {"description": {"services": {"value": "Педикюр"}}, "approved": True}
+    assert client.put("/api/business/description", json=description).status_code == 200
+    marking = {"subject_type": "ooo", "inn": "7707083893", "name": "ООО Ромашка", "phone": "89001234567"}
+    assert client.put("/api/business/marking", json=marking).status_code == 200
+    assert business.description["fields"]["services"]["value"] == "Педикюр"
+    assert context.world.repository.marking(business.id).name == "ООО Ромашка"

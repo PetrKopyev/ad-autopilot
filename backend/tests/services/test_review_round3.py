@@ -57,24 +57,26 @@ def flaky_acquire(failures: int, attempts: list):
 
 
 def test_business_lock_waits_until_released(monkeypatch) -> None:
+    from app.services import changes
     from app.worker import locks
 
     attempts, sleeps = [], []
     monkeypatch.setattr(locks, "acquire", flaky_acquire(2, attempts))
-    monkeypatch.setattr(locks, "sleep", sleeps.append)
+    monkeypatch.setattr(changes, "sleep", sleeps.append)
     with locks.business_lock(None, 7, wait=10):
         pass
     assert attempts == [7, 7, 7] and sleeps == [0.5, 0.5]
 
 
 def test_business_lock_gives_up_at_deadline(monkeypatch) -> None:
+    from app.services import changes
     from app.worker import locks
 
     attempts = []
     monkeypatch.setattr(locks, "acquire", flaky_acquire(1000, attempts))
-    monkeypatch.setattr(locks, "sleep", lambda seconds: None)
+    monkeypatch.setattr(changes, "sleep", lambda seconds: None)
     clock = iter(range(100))
-    monkeypatch.setattr(locks, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(changes, "monotonic", lambda: next(clock))
     with pytest.raises(ChangeConflict), locks.business_lock(None, 7, wait=3):
         pass
     # Дедлайн 0 + 3: попытки в моменты 1, 2, 3, на третьей — отказ.

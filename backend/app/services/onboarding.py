@@ -1,12 +1,14 @@
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
-from contextlib import ExitStack
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from threading import Lock
 from typing import Any
 
 from sqlalchemy import func, select
+from starlette.concurrency import run_in_threadpool
 
 from app.content.art import ArtBudget
 from app.content.art import ArtCall as ArtRecord
@@ -18,7 +20,7 @@ from app.content.yandexgpt import CompletionResult, YandexGPTError
 from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
-from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, ChangesRepository, wait_for_lock
+from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, ChangesRepository, wait_for_lock, waiting
 from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
@@ -27,6 +29,7 @@ MEDICAL_ORDER = ("none", "maybe", "required")
 MAX_BUDGET_KOP = 1_000_000_000
 DRAFT_STATUSES = ("draft", "plan_ready")
 LAUNCHED = "Реклама уже запущена. Сведения о бизнесе меняются в настройках."
+METRICA_LAUNCHED = "Реклама уже запущена. Счётчик и цели Метрики после запуска не меняются."
 CHECK_TTL = timedelta(minutes=10)
 MAX_FIELD = 2000
 QUESTIONS = {
@@ -46,10 +49,36 @@ NICHES = (
 # (повторный вход на шаг мастера), дожидается идущей и берёт её результат из кэша: сайт второй раз не читается и лимит
 # частоты не тратится.
 SITE_CHECKS: dict[int, asyncio.Event] = {}
+# Сохранения описания, маркировки и Метрики, которые сейчас ждут блокировку бизнеса: не больше одного на бизнес. Ждёт
+# поток из пула запросов, и сотни одновременных сохранений одного бизнеса заняли бы весь пул; пока одно ждёт,
+# остальным сразу 409.
+LOCK_WAITERS: set[int] = set()
+WAITERS_LOCK = Lock()
+SAVING = "Предыдущее сохранение ещё ждёт своей очереди. Повторите через несколько секунд."
 
 
 class OnboardingError(ValueError):
     pass
+
+
+@contextmanager
+def waited_lock(repository: "OnboardingRepository", business_id: int, seconds: float) -> Iterator[None]:
+    """Блокировка бизнеса, которую ждут до seconds секунд: её держат на секунды шаг автопилота, проверка сайта и
+    перемотка демо. Ждёт поток (sleep), поэтому вызывается только вне цикла событий. Не дождались — ChangeConflict.
+
+    Соединение сессии на время ожидания возвращается в пул: ждущие запросы не занимают его у остальных."""
+    with WAITERS_LOCK:
+        if business_id in LOCK_WAITERS:
+            raise ChangeConflict(SAVING)
+        LOCK_WAITERS.add(business_id)
+    with ExitStack() as stack:
+        try:
+            repository.commit()
+            stack.enter_context(waiting(lambda: repository.business_lock(business_id), seconds))
+        finally:
+            with WAITERS_LOCK:
+                LOCK_WAITERS.discard(business_id)
+        yield
 
 
 class Blocked(Exception):
@@ -325,18 +354,28 @@ class OnboardingService:
             if self.repository.user_businesses(user_id):
                 raise Blocked(LAUNCHED)
             business = Business(user_id=user_id, site_url=checked, city=city, month_budget_kop=month_budget_kop)
-        elif business.site_url != checked:
-            # Под блокировкой: проверка сайта пишет ответ ИИ под ней же и не запишет описание старого сайта поверх
-            # сброшенного. Пока она идёт — 409, владелец повторит через несколько секунд. Запуск, завершившийся до
-            # блокировки, сведения уже не меняет.
-            with self.repository.business_lock(business.id):
-                business = self.current(business.id)
-                if business.status not in DRAFT_STATUSES:
-                    raise Blocked(LAUNCHED)
-                self.reset_description(business)
-                self.update(business, checked, city, month_budget_kop, avg_check_kop)
+            self.update(business, checked, city, month_budget_kop, avg_check_kop)
             return business_view(business)
-        self.update(business, checked, city, month_budget_kop, avg_check_kop)
+        if (business.site_url, business.city, business.month_budget_kop, business.avg_check_kop) == (
+            checked,
+            city,
+            month_budget_kop,
+            avg_check_kop,
+        ):
+            # Повторное «Далее» без правок ничего не пишет: блокировка не нужна, и проверка сайта, которая её держит,
+            # не отвечает на него 409.
+            return business_view(business)
+        # Под блокировкой: проверка сайта пишет ответ ИИ под ней же и не запишет описание старого сайта поверх
+        # сброшенного, а запуск держит её от проверки плана до перевода бизнеса в running, и бюджет посреди запуска не
+        # меняется. Как и описание, ждём её несколько секунд и только потом отвечаем 409. Если запуск завершился, пока
+        # ждали, бизнес уже не черновик: сведения и бюджет не меняются.
+        with waited_lock(self.repository, business.id, LOCK_WAIT_SECONDS):
+            business = self.current(business.id)
+            if business.status not in DRAFT_STATUSES:
+                raise Blocked(LAUNCHED)
+            if business.site_url != checked:
+                self.reset_description(business)
+            self.update(business, checked, city, month_budget_kop, avg_check_kop)
         return business_view(business)
 
     def reset_description(self, business: Business) -> None:
@@ -470,33 +509,37 @@ class OnboardingService:
         business.niche_class = detect_niche(text, business.medical_level)
 
     def save_description(self, business_id: int, fields: dict, approved: bool, now: datetime) -> dict:
-        business = self.repository.business(business_id)
-        previous = business.description.get("fields", {})
-        clean = {}
-        for key in DESCRIPTION_KEYS:
-            item = fields.get(key)
-            value = item.get("value", "") if isinstance(item, dict) else ""
-            if not isinstance(value, str) or len(value) > MAX_FIELD:
-                raise OnboardingError("Описание слишком длинное или заполнено неверно.")
-            value = value.strip()
-            old = previous.get(key, {})
-            kept = bool(value) and value == old.get("value")
-            clean[key] = {
-                "value": value,
-                "quote": old.get("quote") if kept else None,
-                "verified": bool(old.get("verified")) if kept else False,
-                "question": QUESTIONS[key],
-            }
-        if approved and not clean["services"]["value"]:
-            raise OnboardingError("Укажите услуги и подтвердите описание.")
-        description = dict(business.description)
-        description["fields"] = clean
-        business.description = description
-        business.description_approved_at = now if approved else None
-        owner_level = classify(" ".join(item["value"] for item in clean.values())).level
-        business.medical_level = worst_medical(description.get("site_medical", "none"), owner_level)
-        self.apply_niche(business)
-        self.repository.commit()
+        # Описание владелец меняет и после запуска — в настройках, поэтому статус не проверяется. Под блокировкой и по
+        # строке из базы: проверка сайта записывает описание целиком и не затрёт сохранённое. Блокировку держат и шаг
+        # автопилота, и перемотка демо: ждём несколько секунд, как проверка сайта, и только потом отвечаем 409.
+        with waited_lock(self.repository, business_id, LOCK_WAIT_SECONDS):
+            business = self.current(business_id)
+            previous = business.description.get("fields", {})
+            clean = {}
+            for key in DESCRIPTION_KEYS:
+                item = fields.get(key)
+                value = item.get("value", "") if isinstance(item, dict) else ""
+                if not isinstance(value, str) or len(value) > MAX_FIELD:
+                    raise OnboardingError("Описание слишком длинное или заполнено неверно.")
+                value = value.strip()
+                old = previous.get(key, {})
+                kept = bool(value) and value == old.get("value")
+                clean[key] = {
+                    "value": value,
+                    "quote": old.get("quote") if kept else None,
+                    "verified": bool(old.get("verified")) if kept else False,
+                    "question": QUESTIONS[key],
+                }
+            if approved and not clean["services"]["value"]:
+                raise OnboardingError("Укажите услуги и подтвердите описание.")
+            description = dict(business.description)
+            description["fields"] = clean
+            business.description = description
+            business.description_approved_at = now if approved else None
+            owner_level = classify(" ".join(item["value"] for item in clean.values())).level
+            business.medical_level = worst_medical(description.get("site_medical", "none"), owner_level)
+            self.apply_niche(business)
+            self.repository.commit()
         return {"approved": approved, "medical_level": business.medical_level}
 
     async def counters(self, business_id: int) -> dict:
@@ -510,16 +553,28 @@ class OnboardingService:
         return {"items": [{"id": item.id, "name": item.name} for item in await client.list_goals(counter_id)]}
 
     async def save_metrica(self, business_id: int, counter_id: int, goal_ids: list[int]) -> dict:
-        business = self.repository.business(business_id)
         goals = {item["id"] for item in (await self.goals(business_id, counter_id))["items"]}
         if not goal_ids or not set(goal_ids) <= goals:
             raise OnboardingError("Выберите хотя бы одну цель выбранного счётчика.")
-        site_counters = business.description.get("check", {}).get("counter_ids", [])
-        if site_counters and counter_id not in site_counters:
-            raise OnboardingError("Выбранный счётчик не совпадает со счётчиком на сайте. Вернитесь к выбору счётчика.")
-        business.metrica_counter_id = counter_id
-        business.lead_goal_ids = sorted(set(goal_ids))
-        self.repository.commit()
+        # Метрика спрошена до блокировки: её ответа запись не ждёт. Блокировку запись ждёт, как описание и маркировка,
+        # в пуле потоков: ожидание и запросы к базе не останавливают цикл событий.
+        return await run_in_threadpool(self.write_metrica, business_id, counter_id, goal_ids)
+
+    def write_metrica(self, business_id: int, counter_id: int, goal_ids: list[int]) -> dict:
+        # Под блокировкой и по строке из базы: по целям считаются заявки в статистике и автопилоте, и запуск,
+        # завершившийся до блокировки, их уже не меняет.
+        with waited_lock(self.repository, business_id, LOCK_WAIT_SECONDS):
+            business = self.current(business_id)
+            if business.status not in DRAFT_STATUSES:
+                raise Blocked(METRICA_LAUNCHED)
+            site_counters = business.description.get("check", {}).get("counter_ids", [])
+            if site_counters and counter_id not in site_counters:
+                raise OnboardingError(
+                    "Выбранный счётчик не совпадает со счётчиком на сайте. Вернитесь к выбору счётчика."
+                )
+            business.metrica_counter_id = counter_id
+            business.lead_goal_ids = sorted(set(goal_ids))
+            self.repository.commit()
         return {"counter_id": counter_id, "lead_goal_ids": business.lead_goal_ids}
 
     def save_marking(
@@ -533,11 +588,17 @@ class OnboardingService:
             raise OnboardingError("Проверьте ИНН: нужны 10 или 12 цифр с верной контрольной суммой.")
         if len(inn) != (10 if subject_type == "ooo" else 12):
             raise OnboardingError("Для ООО укажите ИНН из 10 цифр, для ИП, самозанятого и физлица — из 12.")
-        profile = self.repository.marking(business_id) or MarkingProfile(business_id=business_id)
-        profile.subject_type = subject_type
-        profile.inn_enc = inn
-        profile.name = name
-        profile.phone_enc = normalize_phone(phone)
-        profile.confirmed_in_platform = {platform: confirmed.get(platform) is True for platform in ("direct", "vk")}
-        self.repository.add(profile)
+        phone = normalize_phone(phone)
+        # Маркировку владелец меняет и после запуска — в настройках, поэтому статус не проверяется. Под блокировкой:
+        # запись не идёт посреди запуска или шага автопилота, и удалённому бизнесу профиль не создаётся. Как и описание,
+        # ждёт блокировку несколько секунд.
+        with waited_lock(self.repository, business_id, LOCK_WAIT_SECONDS):
+            self.current(business_id)
+            profile = self.repository.marking(business_id) or MarkingProfile(business_id=business_id)
+            profile.subject_type = subject_type
+            profile.inn_enc = inn
+            profile.name = name
+            profile.phone_enc = phone
+            profile.confirmed_in_platform = {platform: confirmed.get(platform) is True for platform in ("direct", "vk")}
+            self.repository.add(profile)
         return {"confirmed_in_platform": profile.confirmed_in_platform}

@@ -7,7 +7,6 @@ from app.db.models import (
     AdGroup,
     BudgetLedger,
     Business,
-    Campaign,
     ChangeLog,
     Experiment,
     MarkingProfile,
@@ -107,7 +106,8 @@ class ScreensService:
         spent, _ = await read_spend(self.worker, business)
         budget = self.budget(business)
         margin = stop_margin(
-            sum(campaign.daily_limit_kop for campaign in self.worker.campaigns(business)), get_domain_settings()
+            sum(campaign.daily_limit_kop for campaign in self.worker.current_campaigns(business)),
+            get_domain_settings(),
         )
         if max(sum(spent.values()), budget["spent_kop"]) >= max(0, business.month_budget_kop - margin):
             raise ChangeConflict(
@@ -129,7 +129,7 @@ class ScreensService:
             await rebalance_budget(self.worker, business, force=True)
             stopped = set(meta.get("kill_switch_campaigns", []))
             active = False
-            for campaign in self.worker.campaigns(business):
+            for campaign in self.worker.current_campaigns(business):
                 if campaign.owner_paused or not campaign.daily_limit_kop:
                     continue
                 last = self.repository.last_status_change(
@@ -174,11 +174,15 @@ class ScreensService:
         return self.status(business)
 
     def ads(self, business: Business, start: date, end: date) -> dict:
-        campaigns = {row.id: row for row in self.repository.rows(Campaign, business.id)}
-        groups = {row.id: row for row in self.repository.rows(AdGroup, business.id)}
+        # Только объявления действующего плана: у прежних планов статусы навсегда остались такими, какими их оставил
+        # упавший запуск. Их расход входит в итоги статистики и бюджета, которые считаются по всем строкам.
+        campaigns = {row.id: row for row in self.worker.current_campaigns(business)}
+        groups = {row.id: row for row in self.repository.rows(AdGroup, business.id) if row.campaign_id in campaigns}
         stats = self.repository.rows(StatsDaily, business.id, date=Window(start, end))
         items = []
         for ad in self.repository.rows(Ad, business.id):
+            if ad.ad_group_id not in groups:
+                continue
             group = groups[ad.ad_group_id]
             campaign = campaigns[group.campaign_id]
             reason = None
@@ -224,12 +228,15 @@ class ScreensService:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
             ad = self.repository.find(Ad, business_id=business.id, id=ad_id)
-            if ad is None:
+            group = ad and self.repository.find(AdGroup, business_id=business.id, id=ad.ad_group_id)
+            campaign = group and next(
+                (row for row in self.worker.current_campaigns(business) if row.id == group.campaign_id), None
+            )
+            # Объявления прежних планов экран не показывает и не включает.
+            if campaign is None:
                 raise NotFound("Объявление не найдено.")
             if active:
                 await self.check_remaining(business)
-            group = self.repository.find(AdGroup, business_id=business.id, id=ad.ad_group_id)
-            campaign = next(row for row in self.worker.campaigns(business) if row.id == group.campaign_id)
             status = "active" if active else "paused_owner"
             if ad.status != status:
                 if not ad.external_id:

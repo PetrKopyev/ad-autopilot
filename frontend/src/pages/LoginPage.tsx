@@ -18,9 +18,10 @@ export function LoginPage() {
   // Куда вести после входа. Переходим, только когда сессия перечитана: иначе раздел ещё видит гостя и вернёт на вход.
   const [next, setNext] = useState('/');
   // После удаления данных сюда приходят ещё со старой сессией и перечитывают её уже здесь: перечитанная раньше, она
-  // увела бы из раздела на вход без итога остановки. На главную уводим, только если вход случился здесь, после гостя.
-  const guest = useRef(false);
-  if (session.data === null) guest.current = true;
+  // увела бы из раздела на вход без итога остановки. С итогом остановки уводим, только когда сессия перечитана здесь:
+  // после входа или если «назад» вернуло сюда уже вошедшего. Каждое чтение даёт новый объект, поэтому перечитанную
+  // отличаем от той, с которой пришли, по ссылке: промежуточный рендер без сессии React может пропустить.
+  const arrived = useRef(session.data);
   useEffect(() => { if (stopResult) session.reload(); }, [stopResult]);
   useEffect(() => {
     const controller = new AbortController();
@@ -41,7 +42,7 @@ export function LoginPage() {
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
-  if (session.data && (!stopResult || guest.current)) return <Navigate to={next} replace />;
+  if (session.data && (!stopResult || session.data !== arrived.current)) return <Navigate to={next} replace />;
   return <div className="page-stack launch-flow">
     <h1>{copy.login.title}</h1>
     {stopResult && <StopNotice result={stopResult} />}

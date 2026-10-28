@@ -77,6 +77,18 @@ def test_lists_unread_owner_notices_newest_first_without_repeats(setup):
     assert items[1]["text"] == "Объявление «А»: нужна лицензия."
 
 
+def test_interrupted_launch_is_shown_as_danger(setup):
+    client, repository = setup
+    repository.save(notice(1, "LAUNCH_INTERRUPTED", "Запуск рекламы не завершился. Всё остановили."))
+    (item,) = client.get("/api/notifications").json()
+    assert (item["kind"], item["title"], item["level"]) == (
+        "LAUNCH_INTERRUPTED",
+        "Запуск рекламы не завершился",
+        "danger",
+    )
+    assert item["text"] == "Запуск рекламы не завершился. Всё остановили."
+
+
 def test_returns_at_most_twenty(setup):
     client, repository = setup
     repository.save(

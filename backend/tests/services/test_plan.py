@@ -2,6 +2,7 @@ import asyncio
 import json
 import shutil
 import threading
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,10 @@ from PIL import Image
 
 from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
 from app.content.art import ART_COST_KOP
+from app.content.images import check_image, run_decoding
 from app.db.models import ArtCall, Asset, LLMCall
+from app.services import plan as plan_module
+from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, NotFound, OnboardingError
 from app.services.plan import launch_blockers
 from tests.services.test_onboarding import (
@@ -92,6 +96,18 @@ async def test_images_are_generated_checked_and_accounted(world: World) -> None:
         assert 2 <= len(group["assets"]) <= 3 and sum(asset["selected"] for asset in group["assets"]) == 2
         assert all(asset["url"].endswith("/file") for asset in group["assets"])
     assert world.llm.calls.count("ideas") == 1
+
+
+async def test_generated_images_are_checked_in_decode_queue(world: World, monkeypatch) -> None:
+    calls = []
+
+    async def spy(func, *args, **kwargs):
+        calls.append(func)
+        return await run_decoding(func, *args, **kwargs)
+
+    monkeypatch.setattr(plan_module, "run_decoding", spy)
+    await build(world)
+    assert calls == [check_image] * 8
 
 
 async def test_ai_limit_caps_generation_and_never_overspends(tmp_path: Path) -> None:
@@ -238,6 +254,37 @@ async def test_select_assets_updates_flags_and_rejects_foreign_ids(world: World)
     world.repository.add(Asset(business_id=99, kind="image", file_path="x.jpg"))
     with pytest.raises(NotFound):
         world.plans.select_assets(world.business.id, [world.repository.assets(99)[0].id])
+
+
+async def test_selection_is_not_changed_while_business_is_locked(world: World, monkeypatch) -> None:
+    """Блокировку держит запуск, пока загружает картинки на площадки: выбор посреди запуска не меняется."""
+    monkeypatch.setattr("app.services.plan.LOCK_WAIT_SECONDS", 0)
+    plan = await build(world)
+    before = [asset.id for asset in world.repository.assets(world.business.id) if asset.selected]
+    world.repository.locked = True
+    with pytest.raises(ChangeConflict):
+        world.plans.select_assets(world.business.id, [plan["groups"][0]["assets"][0]["id"]])
+    assert [asset.id for asset in world.repository.assets(world.business.id) if asset.selected] == before
+
+
+async def test_selection_waits_for_lock_like_wizard_steps(world: World, monkeypatch) -> None:
+    """Выбор картинок ждёт блокировку, как шаги мастера: короткий шаг воркера или проверки сайта не даёт 409."""
+    plan = await build(world)
+    chosen = [plan["groups"][0]["assets"][0]["id"]]
+    lock, attempts = world.repository.business_lock, []
+
+    @contextmanager
+    def released_on_second_try(business_id: int):
+        attempts.append(business_id)
+        if len(attempts) == 1:
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
+    assert world.plans.select_assets(world.business.id, chosen)
+    assert len(attempts) == 2
+    assert [asset.id for asset in world.repository.assets(world.business.id) if asset.selected] == chosen
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="Видео собирает ffmpeg")

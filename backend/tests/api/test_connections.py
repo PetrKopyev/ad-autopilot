@@ -405,8 +405,13 @@ def test_site_check_rereads_business_and_returns_connection_while_ai_answers(sma
 
     def check(url: str) -> dict:
         return {
-            "site_url": url, "checked_at": NOW.isoformat(), "pages_read": 1, "services_found": 1, "counter_ids": [],
-            "block_reason": None, "fresh": {},
+            "site_url": url,
+            "checked_at": NOW.isoformat(),
+            "pages_read": 1,
+            "services_found": 1,
+            "counter_ids": [],
+            "block_reason": None,
+            "fresh": {},
         }
 
     async def finished_elsewhere(url: str) -> SiteReadResult:
@@ -433,6 +438,62 @@ def test_site_check_rereads_business_and_returns_connection_while_ai_answers(sma
             description = db.get(Business, business_id).description
         assert description["fields"] == edited and description["check"]["services_found"] == 1
         assert held == [0, 0]
+    finally:
+        locks.dispose()
+    assert engine.pool.checkedout() == 0
+
+
+@pytest.mark.db
+def test_saves_waiting_for_business_lock_do_not_hold_a_connection(small_pool, monkeypatch) -> None:
+    # Сохранение ждёт блокировку бизнеса до 15 секунд. Соединение запроса, открытое до ожидания, на это время
+    # возвращается в пул: ждущие сохранения не занимают его у остальных запросов.
+    from types import SimpleNamespace
+
+    from app.api import business as business_api
+    from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE
+    from app.db import session as db_session
+    from app.services.changes import ChangesRepository
+    from app.services.onboarding import LOCK_WAITERS
+
+    app, engine, token, asset_id = small_pool
+    locks = create_engine(engine.url, pool_size=2, max_overflow=0, isolation_level="AUTOCOMMIT")
+    monkeypatch.setitem(db_session.LOCK_ENGINES, engine, locks)
+    app.include_router(business_api.router)
+    app.state.platform_adapters = SimpleNamespace(metrica=lambda business_id: None)
+    with db_session.SessionLocal() as db:
+        business_id = db.get(Asset, asset_id).business_id
+    marking = {"subject_type": "ip", "inn": "526317984689", "name": "ИП Иванов", "phone": "89001234567"}
+    saves = [
+        ("POST", "/api/business", {"site_url": "example.test", "city": "Москва", "month_budget_kop": 100_000}),
+        ("PUT", "/api/business/description", {"description": {"services": {"value": "Стрижка"}}, "approved": False}),
+        ("PUT", "/api/business/marking", marking),
+        ("PUT", "/api/plan/assets", {"asset_ids": [asset_id]}),
+    ]
+
+    async def run() -> list[tuple]:
+        result = []
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            client.cookies.set(SESSION_COOKIE, token)
+            client.cookies.set(CSRF_COOKIE, "csrf")
+            for method, path, body in saves:
+                with db_session.SessionLocal() as db, ChangesRepository(db).business_lock(business_id):
+                    save = asyncio.create_task(
+                        client.request(method, path, json=body, headers={"X-CSRF-Token": "csrf"})
+                    )
+                    deadline = asyncio.get_running_loop().time() + 3
+                    while asyncio.get_running_loop().time() < deadline and not (
+                        business_id in LOCK_WAITERS and engine.pool.checkedout() == 0
+                    ):
+                        await asyncio.sleep(0.02)
+                    waiting = business_id in LOCK_WAITERS and not save.done()
+                    held = engine.pool.checkedout()
+                    other = (await client.get("/api/notifications")).status_code
+                result.append((path, waiting, held, other, (await save).status_code))
+        return result
+
+    try:
+        assert asyncio.run(run()) == [(path, True, 0, 200, 200) for _, path, _ in saves]
     finally:
         locks.dispose()
     assert engine.pool.checkedout() == 0

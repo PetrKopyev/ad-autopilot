@@ -1,10 +1,25 @@
+from __future__ import annotations
+
+from contextlib import ExitStack
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
 from app.content.images import DEFAULT_FONT, ImageRejected, make_formats, run_decoding
-from app.db.models import Ad, AdGroup, Asset, BudgetLedger, Business, Campaign, Plan, Target
+from app.db.models import (
+    Ad,
+    AdGroup,
+    Asset,
+    BudgetLedger,
+    Business,
+    Campaign,
+    Plan,
+    PlatformAccount,
+    Target,
+    WorkerRun,
+)
 from app.demo_flags import demo_enabled
 from app.domain.explain import rubles
 from app.domain.settings import DomainSettings
@@ -21,16 +36,35 @@ from app.platforms.base import (
 )
 from app.platforms.direct import budget_end, weekly_limit
 from app.platforms.fake import FakeAdapter
-from app.services.changes import AdapterResolver, ChangeConflict, ChangesService
+from app.services.budget_guard import STOPPED
+from app.services.changes import CLOSED_ACCOUNT, AdapterResolver, ChangeConflict, ChangesService, ServerBusy
 from app.services.demo import configure_adapter
-from app.services.onboarding import NotFound
-from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers
+from app.services.onboarding import DRAFT_STATUSES, NotFound
+from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers, launch_unsettled
+from app.worker.jobs import NoticesRepository
 
-# Запуск, начатый раньше, считается брошенным (процесс API умер), и его можно повторить.
-LAUNCH_STALE = timedelta(minutes=10)
+if TYPE_CHECKING:
+    from app.worker.jobs import Worker
+
 TITLES = {"direct": "Яндекс Директ", "vk": "ВКонтакте"}
 CAMPAIGN_TYPES = {"direct": "unified", "vk": "vk_plan"}
 IMAGE_FORMATS = {"direct": "direct_1_1", "vk": "vk_square"}
+NOT_STOPPED = (
+    "Не все созданные кампании удалось остановить: площадка не ответила. Мы повторим остановку автоматически в "
+    "течение получаса. Когда площадка снова ответит, нажмите «Запустить рекламу» ещё раз: повтор безопасен."
+)
+INTERRUPTED = (
+    "Запуск рекламы не завершился. Всё, что он успел создать на площадках, мы остановили: деньги не тратятся. "
+    "Нажмите «Запустить рекламу» ещё раз — повтор безопасен."
+)
+RUNNING = "Запуск уже идёт. Подождите минуту и обновите страницу."
+SILENT = "Площадка «{}» не отвечает. Повторите запуск через несколько минут."
+LAUNCHED_OTHER = "Реклама уже запущена по более новому плану. Обновите страницу."
+OUTDATED = "План устарел: сведения о бизнесе изменились, и мы собрали новый. Обновите страницу и проверьте новый план."
+CLOSED = "Кабинет площадки не подключён или требует входа заново."
+INTERRUPTED_STOP = (
+    "Запуск рекламы прервался, и за этой кампанией никто не следил. Остановили её, чтобы она не тратила бюджет."
+)
 
 
 def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
@@ -61,11 +95,21 @@ class LaunchBlocked(Exception):
         self.reasons = reasons
 
 
+def closed_account(platform: str, error: Exception) -> LaunchBlocked:
+    """Кабинет не открылся: истёк вход, кабинет удалён или ключ его токена сменился."""
+    return LaunchBlocked([f"{TITLES[platform]}: {error if isinstance(error, PlatformError) else CLOSED}"])
+
+
+# Бизнесы, которые запускает этот процесс. Запуск идёт только в процессе API, а он один: занятая блокировка бизнеса
+# из этого набора — идущий запуск, а не воркер или шаг мастера.
+LAUNCHING: set[int] = set()
+
+
 class LaunchFailed(Exception):
     pass
 
 
-class LaunchRepository(PlanRepository):
+class LaunchRepository(NoticesRepository, PlanRepository):
     def stage(self, *items: object) -> None:
         self.db.add_all(items)
         self.db.flush()
@@ -82,6 +126,17 @@ class LaunchRepository(PlanRepository):
 
     def save_ledger(self, ledger: BudgetLedger) -> None:
         self.db.merge(ledger)
+
+    def read_notices(self, business_id: int, now: datetime, plan_id: int | None = None) -> None:
+        """Отмечает прочитанными уведомления о прерванных запусках плана plan_id, а без него — всех планов бизнеса:
+        они уже неправда."""
+        theme = () if plan_id is None else (WorkerRun.log[0]["target_id"].astext == str(plan_id),)
+        ids = self.db.scalars(
+            select(WorkerRun.id).where(
+                *self.unread_filter(business_id), WorkerRun.log[0]["reason_code"].astext == "LAUNCH_INTERRUPTED", *theme
+            )
+        )
+        self.mark_read(business_id, list(ids), now)
 
 
 class LaunchService:
@@ -109,47 +164,100 @@ class LaunchService:
     async def launch(
         self, business_id: int, plan_id: int, medical_acknowledged: bool, now: datetime, today: date
     ) -> dict:
-        business = self.repository.business(business_id)
         plan = self.repository.get_plan(plan_id, business_id)
         if plan is None:
             raise NotFound("План не найден.")
         if plan.status == "launched":
             return self.result(plan)
-        reasons = launch_blockers(
-            business,
-            plan,
-            self.repository.accounts(business_id),
-            self.repository.marking(business_id),
-            self.repository.assets(business_id),
-            medical_acknowledged,
-        )
-        if reasons:
-            raise LaunchBlocked(reasons)
-        platforms = plan.payload["platforms"]
-        limits = budget_limits(business, platforms, today, self.domain)
-        adapters, geo = await self.check_platforms(business, platforms, limits, today)
-        entered = False
-        try:
-            with self.repository.business_lock(business_id):
-                # План прочитан до блокировки: второй запрос мог дождаться, пока первый создаст кампании.
-                self.repository.refresh(plan)
-                if plan.status == "launched":
-                    return self.result(plan)
-                started = plan.payload.get("launch", {}).get("started_at")
-                if started and now - datetime.fromisoformat(started) < LAUNCH_STALE:
-                    raise LaunchBlocked(["Запуск уже идёт. Подождите минуту и обновите страницу."])
-                self.save_launch(plan, started_at=now.isoformat())
-                entered = True
-                refs = await self.create_paused(business, plan, platforms, limits, adapters, geo)
-            await self.activate(business, plan, refs, adapters, limits, now)
-        except Exception as error:
-            if isinstance(error, ChangeConflict | LaunchBlocked) and not entered:
+        # Блокировка держится от проверки плана до перевода бизнеса в running или до записи неудачи: шаги мастера и
+        # перемотка демо получают 409, и бюджет со сведениями, по которым созданы кампании, не меняются, пока бизнес
+        # ещё черновик. Падение процесса снимает её вместе с соединением.
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(self.repository.business_lock(business_id))
+            except ServerBusy:
                 raise
-            await self.stop_created(plan, adapters)
-            self.save_launch(plan, error=self.explain(error), started_at=None)
-            raise LaunchFailed(self.explain(error)) from error
-        self.finish(business, plan, platforms, limits, now, today)
+            except ChangeConflict as error:
+                # Блокировку держит запуск, начатый соседним запросом, или воркер, шаг мастера, перемотка демо.
+                if business_id in LAUNCHING:
+                    raise LaunchBlocked([RUNNING]) from error
+                raise
+            LAUNCHING.add(business_id)
+            stack.callback(LAUNCHING.discard, business_id)
+            # План и бизнес прочитаны до блокировки: пока её ждали, их мог изменить мастер, соседний запуск или
+            # удаление аккаунта.
+            business = self.repository.fresh_business(business_id)
+            if business is None:
+                raise NotFound("Бизнес не найден.")
+            self.repository.refresh(plan)
+            if plan.status == "launched":
+                return self.result(plan)
+            # Запускается только последний план черновика: запуск плана из старой вкладки создал бы вторые кампании,
+            # и у бизнеса стало бы два действующих плана с двойными кэпами.
+            if business.status not in DRAFT_STATUSES:
+                raise LaunchBlocked([LAUNCHED_OTHER])
+            if self.repository.latest_plan(business_id).id != plan.id:
+                raise LaunchBlocked([OUTDATED])
+            await self.settle_pending(plan, now)
+            # Запуск держит блокировку до finish или записи неудачи: незавершённый запуск, видный под ней, брошен
+            # (упал процесс) или упал, не остановив созданное. Повтор продолжает его, как упавший, на тех же кампаниях:
+            # create_paused берёт их из плана, а включение уже включённой ничего не меняет.
+            unsettled = launch_unsettled(plan)
+            platforms = plan.payload["platforms"]
+            try:
+                reasons = launch_blockers(
+                    business,
+                    plan,
+                    self.repository.accounts(business_id),
+                    self.repository.marking(business_id),
+                    self.repository.assets(business_id),
+                    medical_acknowledged,
+                )
+                if reasons:
+                    raise LaunchBlocked(reasons)
+                limits = budget_limits(business, platforms, today, self.domain)
+                adapters, geo = await self.check_platforms(business, platforms, limits, today)
+            except LaunchBlocked:
+                # Повтора не будет: созданное прошлой попыткой останавливается сейчас, а не ждёт воркера.
+                if unsettled:
+                    await self.stop_failed(plan, plan.payload["launch"].get("reason"), self.adapters(plan), now)
+                raise
+            self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
+            try:
+                refs = await self.create_paused(business, plan, platforms, limits, adapters, geo)
+                await self.activate(business, plan, refs, adapters, limits, now)
+            except Exception as error:
+                await self.stop_failed(plan, failure_reason(error), adapters, now)
+                raise LaunchFailed(plan.payload["launch"]["error"]) from error
+            self.finish(business, plan, platforms, limits, now, today)
         return self.result(plan)
+
+    async def settle_pending(self, plan: Plan, now: datetime) -> None:
+        """Включение, оборванное посреди (упал процесс, площадка не ответила, включилась ли кампания), оставляет
+        изменение pending, и до сверки новое включение той же площадки запрещено. Под блокировкой запуска сверяем его
+        сразу, а не ждём воркера. Площадка не ответила и сейчас — запуск откладывается, план остаётся как был.
+        Площадки не из плана запуск не включает: их изменения сверит воркер."""
+        for change in self.repository.pending(plan.business_id):
+            if change.platform not in plan.payload["platforms"]:
+                continue
+            self.repository.commit()
+            try:
+                adapter = self.resolve_adapter(plan.business_id, change.platform)
+            except CLOSED_ACCOUNT as error:
+                raise closed_account(change.platform, error) from error
+            await self.changes._reconcile(change, adapter, now=now)
+            if change.status == "pending":
+                raise LaunchBlocked([SILENT.format(TITLES[change.platform])])
+
+    def adapters(self, plan: Plan) -> dict[str, AdPlatform]:
+        """Кабинеты кампаний плана; кабинет, который не открылся, пропускается: его кампанию остановит воркер."""
+        adapters = {}
+        for platform in plan.payload["launch"]["campaigns"]:
+            try:
+                adapters[platform] = self.resolve_adapter(plan.business_id, platform)
+            except CLOSED_ACCOUNT:
+                continue
+        return adapters
 
     async def check_platforms(
         self, business: Business, platforms: list[str], limits: dict[str, PlatformLimit], today: date
@@ -166,8 +274,8 @@ class LaunchService:
             try:
                 adapters[platform] = self.resolve_adapter(business.id, platform)
                 minimum = await adapters[platform].min_budgets()
-            except PlatformError as error:
-                raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
+            except CLOSED_ACCOUNT as error:
+                raise closed_account(platform, error) from error
             if reason := below_minimum(platform, limits[platform], minimum, today):
                 raise LaunchBlocked([reason])
             try:
@@ -176,19 +284,12 @@ class LaunchService:
                 raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
         return adapters, geo
 
-    def explain(self, error: Exception) -> str:
-        reason = str(error) if isinstance(error, PlatformError | ChangeConflict) else "Непредвиденная ошибка."
-        return (
-            f"Запуск не удался: {reason} Всё, что уже создано, остановлено и ничего не тратит. "
-            "Исправьте причину и нажмите «Запустить рекламу» ещё раз: повтор безопасен."
-        )
-
-    def save_launch(self, plan: Plan, **values: object) -> None:
+    def save_launch(self, plan: Plan, status: str | None = None, **values: object) -> None:
         payload = dict(plan.payload)
         payload["launch"] = payload.get("launch", {"campaigns": {}}) | values
         plan.payload = payload
-        if "error" in values:
-            plan.status = "failed"
+        if status is not None:
+            plan.status = status
         self.repository.commit()
 
     async def create_paused(
@@ -375,12 +476,13 @@ class LaunchService:
         limits: dict[str, PlatformLimit],
         now: datetime,
     ) -> None:
+        # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
         for platform, (campaign, refs) in created.items():
             operations = [
                 Operation("set_status", "ad", external_id, "status", "paused_auto", "active")
                 for external_id in refs.ads.values()
             ] + [Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")]
-            change = await self.changes.apply_change(
+            change = await self.changes._apply_change(
                 business_id=business.id,
                 adapter=adapters[platform],
                 refs=refs,
@@ -399,23 +501,45 @@ class LaunchService:
                 entity_id=refs.campaign_id,
                 now=now,
             )
+            if change.status == "pending":
+                raise PlatformError(f"Площадка «{TITLES[platform]}» не ответила, включилась ли реклама.")
             if change.status != "applied":
                 detail = change.evidence["_service"].get("error")
                 raise PlatformError(f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip())
 
-    async def stop_created(self, plan: Plan, adapters: dict[str, AdPlatform]) -> None:
+    async def stop_failed(self, plan: Plan, reason: str | None, adapters: dict[str, AdPlatform], now: datetime) -> None:
+        """Останавливает созданное неудавшимся запуском и записывает неудачу; reason — её причина, None — запуск
+        прервался."""
+        if await self.stop_created(plan, adapters):
+            self.save_launch(plan, "failed", error=failed_launch(reason), reason=reason, started_at=None)
+            # Созданное остановлено: прежнее «не удалось остановить» уже неправда.
+            self.repository.read_notices(plan.business_id, now, plan.id)
+        else:
+            # started_at остаётся: план не пересобирается, пока воркер не остановит созданное. Причину воркер
+            # сохранит в своём объяснении.
+            self.save_launch(plan, "failed", error=failed_launch(reason, stopped=False), reason=reason)
+
+    async def stop_created(self, plan: Plan, adapters: dict[str, AdPlatform]) -> bool:
+        """Останавливает кампании плана; False — площадка не подтвердила остановку хотя бы одной или её кабинет не
+        открылся."""
+        stopped = True
         for platform, campaign_id in plan.payload.get("launch", {}).get("campaigns", {}).items():
             campaign = self.repository.campaign(campaign_id)
             if campaign is None or not campaign.external_id:
+                continue
+            if platform not in adapters:
+                stopped = False
                 continue
             try:
                 await adapters[platform].apply(
                     Operation("set_status", "campaign", campaign.external_id, "status", "active", "paused_auto")
                 )
             except PlatformError:
+                stopped = False
                 continue
             campaign.status = "paused_auto"
         self.repository.commit()
+        return stopped
 
     def finish(
         self,
@@ -451,6 +575,8 @@ class LaunchService:
             "_worker": business.settings.get("_worker", {}) | {"started_on": today.isoformat()}
         }
         business.status = "running"
+        # Уведомления о прерванных попытках этого и прежних планов: реклама запущена, их тексты уже неправда.
+        self.repository.read_notices(business.id, now)
         self.repository.commit()
 
     def result(self, plan: Plan) -> dict:
@@ -461,3 +587,138 @@ class LaunchService:
             "launched_at": launch.get("launched_at"),
             "campaigns": launch["campaigns"],
         }
+
+
+def failure_reason(error: Exception) -> str:
+    return str(error) if isinstance(error, PlatformError | ChangeConflict) else "Непредвиденная ошибка."
+
+
+def failed_launch(reason: str | None, *, stopped: bool = True) -> str:
+    """reason — причина, по которой упал запуск; None — запуск прервался (упал процесс)."""
+    if reason is None:
+        return INTERRUPTED if stopped else f"Запуск рекламы не завершился. {NOT_STOPPED}"
+    if not stopped:
+        return f"Запуск не удался: {reason} {NOT_STOPPED}"
+    return (
+        f"Запуск не удался: {reason} Всё, что уже создано, остановлено и ничего не тратит. "
+        "Исправьте причину и нажмите «Запустить рекламу» ещё раз: повтор безопасен."
+    )
+
+
+def titles(platforms: list[str]) -> str:
+    return ", ".join(f"«{TITLES[platform]}»" for platform in platforms)
+
+
+def interrupted_unstopped(platforms: list[str], reason: str | None = None) -> str:
+    """reason — причина, по которой упал запуск; None — запуск прервался (упал процесс)."""
+    where = f"на площадке {titles(platforms)}" if len(platforms) == 1 else f"на площадках {titles(platforms)}"
+    head = f"Запуск не удался: {reason} Остановить" if reason else "Запуск рекламы не завершился, а остановить"
+    return (
+        f"{head} созданную им рекламу {where} пока не удалось. Если площадка просит войти в кабинет заново, войдите "
+        "снова. Если кабинет больше не нужен, остановите кампанию «Автопилот» в нём самом и отключите кабинет на шаге "
+        "«Кабинеты». Мы пробуем снова каждые полчаса."
+    )
+
+
+def interrupted_revoked(platforms: list[str], reason: str | None = None) -> str:
+    """Кабинет отключён владельцем: остановить созданную в нём кампанию уже нечем, и «деньги не тратятся» было бы
+    неправдой."""
+    head = f"Запуск не удался: {reason}" if reason else "Запуск рекламы не завершился."
+    where = (
+        f"Кабинет {titles(platforms)} отключён" if len(platforms) == 1 else f"Кабинеты {titles(platforms)} отключены"
+    )
+    return (
+        f"{head} {where}, и управлять созданной там кампанией «Автопилот» мы больше не можем: проверьте в самом "
+        "кабинете, что она остановлена. Всё, что запуск создал в подключённых кабинетах, остановлено. Чтобы запустить "
+        "рекламу, нажмите «Запустить рекламу» ещё раз."
+    )
+
+
+async def recover_launch(worker: Worker, business: Business) -> None:
+    """Запуск, который не дошёл до finish и не остановил созданное (упал процесс API, площадка не ответила на
+    остановку), оставляет кампании, за которыми никто не следит: бизнес ещё не running, и шаги воркера его не трогают.
+
+    Вызывается под блокировкой бизнеса. Запуск держит её от записи started_at до finish или до записи своей неудачи,
+    поэтому незавершённый запуск, который виден под ней, брошен, даже если начат минуту назад. Кампании плана
+    останавливаются, план становится failed с объяснением (причина упавшего запуска сохраняется), и повтор запуска
+    подхватывает те же кампании. Владелец, нажавший «Запустить» раньше воркера, продолжает брошенный запуск сам
+    (LaunchService.launch). Пока остановка не подтверждена, started_at остаётся:
+    план не пересобирается (PlanService.get_plan), а следующий ход воркера пробует снова.
+
+    Ключ уведомления — с попыткой запуска (started_at): повторные ходы одной попытки не дублируют уведомление (одно на
+    ключ), а следующая попытка того же плана, прерванная снова, даёт новое. Остановленное повторный ход не трогает:
+    остановка применяется, только если площадка показывает кампанию включённой."""
+    # Включение, оборванное посреди, оставило изменение pending: сверка узнаёт, включилась ли кампания. Оно остаётся и
+    # после запуска, который упал и сам остановил созданное, и до сверки запрещает повтор включения на той площадке.
+    if worker.repository.pending(business.id):
+        await worker.changes.recover_pending(worker.resolve_adapter, business_id=business.id, now=worker.clock.now)
+    for plan in worker.repository.rows(Plan, business.id):
+        # Планы могли быть прочитаны до блокировки (Worker.recover_launch): под ней — то, что записал запуск.
+        worker.repository.refresh(plan)
+        if not launch_unsettled(plan):
+            continue
+        attempt = plan.payload["launch"]["started_at"]
+        # Ключ остановки — ход, а не только попытка: кампанию, которую владелец включил в кабинете между ходами,
+        # следующий ход останавливает снова, а не находит прошлую остановку под тем же ключом.
+        worker.step_key = f"launch_recovery:{plan.id}:{attempt}:{worker.clock.now.isoformat()}"
+        stops = {
+            platform: await stop_interrupted(worker, business, campaign_id)
+            for platform, campaign_id in plan.payload["launch"]["campaigns"].items()
+        }
+        failed = [platform for platform, result in stops.items() if result == "failed"]
+        revoked = [platform for platform, result in stops.items() if result == "revoked"]
+        reason = plan.payload["launch"].get("reason")
+        if failed:
+            launch = {"error": interrupted_unstopped(failed, reason)}
+        elif revoked:
+            launch = {"error": interrupted_revoked(revoked, reason), "started_at": None}
+        else:
+            launch = {"error": failed_launch(reason), "started_at": None}
+        plan.payload = plan.payload | {"launch": plan.payload["launch"] | launch}
+        plan.status = "failed"
+        worker.repository.save(plan)
+        # Одна тема на план: на главной остаётся только последнее уведомление.
+        worker.notice(
+            business,
+            "LAUNCH_INTERRUPTED",
+            launch["error"],
+            key=f"launch_unstopped:{attempt}" if failed else f"launch_stopped:{attempt}",
+            target_id=plan.id,
+        )
+
+
+async def stop_interrupted(worker: Worker, business: Business, campaign_id: int) -> str:
+    """stopped — кампания запуска не тратит: остановлена сейчас или раньше. Кампания без external_id на площадке либо
+    не создана, либо создана остановленной (create_paused) и ещё не включалась. Кампании, которой на площадке нет
+    (владелец удалил её в кабинете), тратить нечего. failed — остановить не удалось, следующий ход попробует снова.
+
+    revoked — кабинет, который владелец отключил, больше не наш: перед отключением его кампании останавливаются, а
+    если площадка не подтвердила остановку, владелец узнаёт об этом сразу (api.auth.stop_user_ads). План не ждёт
+    кабинета, которого уже нет, иначе не пересобирался бы никогда, но проверить кампанию владелец может только сам."""
+    campaign = worker.repository.find(Campaign, business_id=business.id, id=campaign_id)
+    if campaign is None or not campaign.external_id:
+        return "stopped"
+    account = worker.repository.find(PlatformAccount, business_id=business.id, id=campaign.platform_account_id)
+    # Отключённый кабинет не спросить: остановку, которую площадка подтвердила раньше, знает строка кампании.
+    if account.status == "revoked":
+        return "stopped" if campaign.status in STOPPED else "revoked"
+    try:
+        adapter = worker.resolve_adapter(business.id, campaign.platform)
+        state = (await adapter.get_state(worker.refs(campaign))).get(campaign.external_id)
+        if state is None or state.status in STOPPED:
+            return "stopped"
+        # Защитное действие: выполняется и в пробном режиме, ведь включал кампанию настоящий запуск.
+        await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto")],
+            actor="system",
+            kind="pause",
+            reason_code="LAUNCH_INTERRUPTED",
+            reason_text=INTERRUPTED_STOP,
+            force=True,
+        )
+    except (*CLOSED_ACCOUNT, ChangeConflict):
+        # Кабинет требует входа заново, площадка не ответила или не подтвердила остановку: попробуем в следующий ход.
+        return "failed"
+    return "stopped"

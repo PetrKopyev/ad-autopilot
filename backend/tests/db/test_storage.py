@@ -1,3 +1,4 @@
+import asyncio
 import os
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, func, select, text
+from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
@@ -641,3 +642,364 @@ async def test_site_check_of_business_deleted_while_reading_is_not_found_on_post
     with pytest.raises(NotFound):
         await service.site_check(business_id, NOW, TODAY)
     assert llm.calls == []
+
+
+async def test_waiting_site_check_returns_connection_and_rereads_result_of_other_session_on_postgres(db_session):
+    from app.content.site_reader import SiteReadResult
+    from app.platforms.metrica import FakeMetrica
+    from app.services.onboarding import SITE_CHECKS, OnboardingService
+    from tests.services.test_onboarding import COUNTER, LIMITS, NOW, SITE, TODAY, ScriptedLLM, page_text
+
+    user = User(yandex_uid="wait-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    llm, reads = ScriptedLLM(), []
+
+    async def reader(url: str) -> SiteReadResult:
+        reads.append(url)
+        return SiteReadResult(page_text())
+
+    service = OnboardingService(
+        OnboardingRepository(db_session), llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader
+    )
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    running = SITE_CHECKS[business_id] = asyncio.Event()
+    try:
+        waiting = asyncio.create_task(service.site_check(business_id, NOW, TODAY))
+        await asyncio.sleep(0.05)
+        # Пока ждут ведущую проверку, транзакция закрыта: соединение возвращено в пул.
+        assert not waiting.done() and not db_session.in_transaction()
+        # Ведущая проверка пишет итог из другого соединения; ждавшая берёт его из базы, а не читает сайт снова.
+        check = {
+            "site_url": SITE,
+            "checked_at": NOW.isoformat(),
+            "pages_read": 3,
+            "services_found": 1,
+            "counter_ids": [COUNTER],
+            "block_reason": None,
+            "fresh": {},
+        }
+        db_session.get_bind().execute(
+            update(Business).where(Business.id == business_id).values(description={"check": check})
+        )
+        # Ведущая, закончив, ставит событие и снимает себя из SITE_CHECKS.
+        running.set()
+        del SITE_CHECKS[business_id]
+        result = await asyncio.wait_for(waiting, 5)
+    finally:
+        SITE_CHECKS.pop(business_id, None)
+    assert result["pages_read"] == 3 and result["counter_id"] == COUNTER
+    assert reads == [] and llm.calls == []
+
+
+async def test_site_check_returns_connection_while_ai_answers_on_postgres(db_session):
+    from app.content.site_reader import SiteReadResult
+    from app.platforms.metrica import FakeMetrica
+    from app.services.onboarding import OnboardingService
+    from tests.services.test_onboarding import LIMITS, NOW, SITE, TODAY, ScriptedLLM, page_text
+
+    class WatchingLLM(ScriptedLLM):
+        async def complete_json(self, system: str, user: str) -> str:
+            during.append(db_session.in_transaction())
+            return await super().complete_json(system, user)
+
+    user = User(yandex_uid="ai-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    during = []
+
+    async def reader(url: str) -> SiteReadResult:
+        return SiteReadResult(page_text())
+
+    service = OnboardingService(
+        OnboardingRepository(db_session), WatchingLLM(), lambda _: FakeMetrica([], {}), LIMITS, reader=reader
+    )
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    assert (await service.site_check(business_id, NOW, TODAY))["status"] == "ready"
+    # Ответ ИИ идёт десятки секунд: транзакция на это время закрыта.
+    assert during == [False]
+
+
+def test_wizard_does_not_change_business_launched_by_other_session_on_postgres(db_session):
+    from app.platforms.metrica import FakeMetrica
+    from app.services.onboarding import Blocked, OnboardingService
+    from tests.services.test_onboarding import LIMITS, SITE, ScriptedLLM
+
+    user = User(yandex_uid="launched-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    service = OnboardingService(OnboardingRepository(db_session), ScriptedLLM(), lambda _: FakeMetrica([], {}), LIMITS)
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    # Мастер прочитал черновик, и тут запуск завершил другой процесс: объект сессии ещё видит черновик.
+    stale = db_session.get(Business, business_id)
+    db_session.get_bind().execute(update(Business).where(Business.id == business_id).values(status="running"))
+    assert stale.status == "draft"
+    for site in (SITE, "https://other.example/"):
+        with pytest.raises(Blocked):
+            service.create_business(user.id, site, "Самара", 200_000, None)
+    stored = select(Business.site_url, Business.month_budget_kop, Business.status).where(Business.id == business_id)
+    assert db_session.get_bind().execute(stored).one() == (SITE, 100_000, "running")
+
+
+async def test_wizard_steps_read_business_changed_by_other_session_on_postgres(db_session):
+    from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
+    from app.services.onboarding import Blocked, NotFound, OnboardingService
+    from tests.services.test_onboarding import COUNTER, LIMITS, SITE, ScriptedLLM
+
+    user = User(yandex_uid="steps-" + uuid4().hex, login="owner", consent_at=NOW)
+    db_session.add(user)
+    db_session.commit()
+    metrica = FakeMetrica(
+        [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
+    )
+    service = OnboardingService(OnboardingRepository(db_session), ScriptedLLM(), lambda _: metrica, LIMITS)
+    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    stale = db_session.get(Business, business_id)
+    other = db_session.get_bind()
+    stored = select(Business.status, Business.metrica_counter_id, Business.description).where(
+        Business.id == business_id
+    )
+    # Мастер прочитал черновик, и тут запуск завершил другой процесс: объект сессии ещё видит черновик.
+    other.execute(update(Business).where(Business.id == business_id).values(status="running"))
+    assert stale.status == "draft"
+    with pytest.raises(Blocked, match="Метрики"):
+        await service.save_metrica(business_id, COUNTER, [1])
+    assert other.execute(stored).one()[:2] == ("running", None)
+    # Описание и маркировку меняют и после запуска (настройки). Цитату с сайта записал другой процесс: она не теряется.
+    fields = {"services": {"value": "Маникюр", "quote": "Маникюр — 1 500 ₽.", "verified": True}}
+    other.execute(update(Business).where(Business.id == business_id).values(description={"fields": fields}))
+    assert stale.description == {}
+    service.save_description(business_id, {"services": {"value": "Маникюр"}}, True, NOW)
+    saved = other.execute(stored).one().description["fields"]["services"]
+    assert (saved["quote"], saved["verified"]) == ("Маникюр — 1 500 ₽.", True)
+    service.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    # Бизнес удалён в другом процессе: маркировка не пишется в удалённый профиль.
+    other.execute(delete(Business).where(Business.id == business_id))
+    with pytest.raises(NotFound):
+        service.save_marking(business_id, "ooo", "7707083893", "ООО Ромашка", "89001234567", {"direct": True})
+
+
+async def test_launch_holds_business_lock_until_business_is_running_on_postgres(db_session, tmp_path, monkeypatch):
+    """Пока кампании включаются и бизнес ещё черновик, блокировку бизнеса не взять из другого соединения: шаги
+    мастера не меняют бюджет и Метрику посреди запуска."""
+    import itertools
+
+    from app.content.site_reader import SiteReadResult
+    from app.platforms.fake import FakeAdapter
+    from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
+    from app.services.launch import LaunchRepository, LaunchService
+    from app.services.onboarding import OnboardingService
+    from app.services.plan import PlanService
+    from tests.services.test_onboarding import (
+        BUDGET_KOP,
+        COUNTER,
+        LIMITS,
+        NOW,
+        SITE,
+        TODAY,
+        ScriptedLLM,
+        VariedArt,
+        font_path,
+        onboard,
+        page_text,
+    )
+
+    def free(business_id: int) -> bool:
+        with db_session.get_bind().engine.connect() as other:
+            taken = other.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": business_id})
+            if taken:
+                other.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": business_id})
+            return taken
+
+    class Watching(FakeAdapter):
+        async def apply(self, operation) -> None:
+            if operation.entity_type == "campaign" and operation.after == "active":
+                seen.append(("activate", free(business.id), business.status))
+            await super().apply(operation)
+
+    async def reader(url: str) -> SiteReadResult:
+        return SiteReadResult(page_text())
+
+    repository = LaunchRepository(db_session)
+    llm, adapter, seen = ScriptedLLM(), Watching(), []
+    user = User(yandex_uid="launch-lock-" + uuid4().hex, login="owner", consent_at=NOW)
+    repository.add(user)
+    metrica = FakeMetrica(
+        [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
+    )
+    onboarding = OnboardingService(repository, llm, lambda _: metrica, LIMITS, reader=reader)
+    business = db_session.get(Business, onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None)["id"])
+    repository.add(PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t"))
+    await onboard(SimpleNamespace(onboarding=onboarding, business=business), confirmed={"direct": True})
+    plans = PlanService(
+        repository,
+        llm,
+        lambda budget, record: VariedArt(b"", budget, record=record),
+        tmp_path,
+        LIMITS,
+        font_path=font_path(),
+        seeds=itertools.count(1).__next__,
+    )
+    plan = await plans.get_plan(business.id, NOW, TODAY)
+    launches = LaunchService(repository, lambda business_id, platform: adapter, tmp_path, font_path=font_path())
+    finish = launches.finish
+
+    def finish_watched(*args) -> None:
+        seen.append(("finish", free(business.id), business.status))
+        finish(*args)
+
+    monkeypatch.setattr(launches, "finish", finish_watched)
+    assert (await launches.launch(business.id, plan["id"], True, NOW, TODAY))["status"] == "launched"
+    assert seen == [("activate", False, "plan_ready"), ("finish", False, "plan_ready")]
+    assert business.status == "running" and free(business.id)
+
+
+def test_launch_reads_only_unread_interrupted_launch_notices_of_its_business_on_postgres(db_session):
+    """Запуск отмечает прочитанными уведомления о прерванных запусках: плана или, после запуска, всех планов
+    бизнеса. Прочитанное не отмечается второй раз, чужие бизнесы, другие темы и не уведомления не трогаются, а отметка
+    сохраняется сама, без commit вызывающего."""
+    from app.services.launch import LaunchRepository
+
+    own, other = make_tree(db_session, suffix="own"), make_tree(db_session, suffix="other")
+    earlier = (NOW - timedelta(hours=1)).isoformat()
+
+    def run(business, slot: str, *, kind: str = "notification", code: str = "LAUNCH_INTERRUPTED", target=1, read=None):
+        log = [{"key": slot, "reason_code": code, "text": "Запуск рекламы не завершился.", "target_id": target}]
+        row = WorkerRun(
+            kind=kind,
+            business_id=business.business.id,
+            slot_key=slot,
+            status="ok",
+            started_at=NOW,
+            finished_at=NOW,
+            units_spent=0,
+            log=log + ([{"read_at": read}] if read else []),
+        )
+        db_session.add(row)
+        return row
+
+    rows = {
+        "plan": run(own, "plan"),
+        "read": run(own, "read", read=earlier),
+        "other_plan": run(own, "other_plan", target=2),
+        "other_code": run(own, "other_code", code="MODERATION_REJECTED"),
+        "not_notice": run(own, "not_notice", kind="budget_guard"),
+        "other_business": run(other, "other_business"),
+    }
+    db_session.commit()
+    repository = LaunchRepository(db_session)
+    now = NOW + timedelta(minutes=5)
+
+    def read_at() -> dict[str, list[str]]:
+        stored = db_session.execute(select(WorkerRun.slot_key, WorkerRun.log).execution_options(populate_existing=True))
+        found = {slot: [entry["read_at"] for entry in log if "read_at" in entry] for slot, log in stored}
+        return {name: found[row.slot_key] for name, row in rows.items()}
+
+    repository.read_notices(own.business.id, now, 1)
+    db_session.rollback()
+    assert read_at() == {
+        "plan": [now.isoformat()],
+        "read": [earlier],
+        "other_plan": [],
+        "other_code": [],
+        "not_notice": [],
+        "other_business": [],
+    }
+    later = now + timedelta(minutes=5)
+    repository.read_notices(own.business.id, later)
+    db_session.rollback()
+    assert read_at() == {
+        "plan": [now.isoformat()],
+        "read": [earlier],
+        "other_plan": [later.isoformat()],
+        "other_code": [],
+        "not_notice": [],
+        "other_business": [],
+    }
+    worker = WorkerRepository(db_session)
+    assert not worker.unread_notifications(own.business.id, {"LAUNCH_INTERRUPTED"}, 5, later)
+    assert worker.unread_notifications(other.business.id, {"LAUNCH_INTERRUPTED"}, 5, later)
+    # Отметка по id сама проверяет бизнес: id уведомления чужого бизнеса не помечается.
+    repository.mark_read(own.business.id, [rows["other_business"].id], later)
+    db_session.rollback()
+    assert read_at()["other_business"] == []
+
+
+async def test_recovery_rereads_plan_settled_while_waiting_for_lock_on_postgres(db_session):
+    """Воркер увидел брошенный запуск до блокировки, а запуск тем временем записал неудачу и остановил созданное: под
+    блокировкой план перечитывается, и ни его объяснение, ни кампании не трогаются."""
+    from contextlib import contextmanager
+
+    from app.platforms.fake import VirtualClock
+    from app.worker.jobs import Worker
+
+    tree = make_tree(db_session)
+    launch = {"campaigns": {"direct": tree.campaign.id}, "started_at": NOW.isoformat(), "error": None}
+    plan = Plan(business_id=tree.business.id, version=1, status="draft", payload={"launch": launch})
+    db_session.add(plan)
+    db_session.commit()
+    touched = []
+
+    class Platform:
+        async def get_state(self, refs) -> dict:
+            touched.append(refs.campaign_id)
+            return {}
+
+    worker = Worker(WorkerRepository(db_session), lambda business_id, platform: Platform(), clock=VirtualClock(NOW))
+    lock = worker.repository.business_lock
+    settled = launch | {"started_at": None, "error": "Запуск не удался: площадка отказала."}
+
+    @contextmanager
+    def launch_failed_meanwhile(business_id: int):
+        db_session.get_bind().execute(
+            update(Plan).where(Plan.id == plan.id).values(status="failed", payload={"launch": settled})
+        )
+        with lock(business_id):
+            yield
+
+    worker.repository.business_lock = launch_failed_meanwhile
+    await worker.recover_launch(tree.business.id)
+    stored = db_session.scalar(select(Plan).where(Plan.id == plan.id).execution_options(populate_existing=True))
+    assert stored.status == "failed" and stored.payload == {"launch": settled}
+    notices = select(WorkerRun).where(WorkerRun.business_id == tree.business.id, WorkerRun.kind == "notification")
+    assert touched == [] and not db_session.scalars(notices).all()
+
+
+def test_replaced_entities_are_campaigns_of_plans_other_than_last_launched_on_postgres(db_session):
+    """Кампании прежних планов на площадках: та, что так и не создана (без external_id), кампании действующего плана и
+    чужого бизнеса в них не попадают."""
+    from app.services.changes import ChangesRepository
+
+    world, other = make_tree(db_session, suffix="new"), make_tree(db_session, suffix="foreign")
+    business_id = world.business.id
+
+    def campaign(external_id: str | None) -> Campaign:
+        row = Campaign(
+            business_id=business_id,
+            platform_account_id=world.account.id,
+            platform="direct",
+            external_id=external_id,
+            type="unified",
+            name="Тест",
+            status="paused_auto",
+            daily_limit_kop=1_000,
+            period_cap_kop=10_000,
+        )
+        db_session.add(row)
+        db_session.flush()
+        return row
+
+    old, unborn = campaign("c-old"), campaign(None)
+    plans = [
+        (1, "failed", {"direct": old.id}),
+        (2, "failed", {"direct": unborn.id, "vk": other.campaign.id}),
+        (3, "launched", {"direct": world.campaign.id}),
+    ]
+    for version, status, launched in plans:
+        db_session.add(
+            Plan(business_id=business_id, version=version, status=status, payload={"launch": {"campaigns": launched}})
+        )
+    foreign = {"launch": {"campaigns": {"direct": other.campaign.id}}}
+    db_session.add(Plan(business_id=other.business.id, version=9, status="launched", payload=foreign))
+    db_session.flush()
+    assert ChangesRepository(db_session).replaced_entities(business_id) == {("direct", "c-old")}

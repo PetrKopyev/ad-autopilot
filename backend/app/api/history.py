@@ -36,7 +36,7 @@ CurrentUser = Annotated[User, Depends(current_user)]
 Adapters = Annotated[AdapterResolver, Depends(get_adapter_resolver)]
 
 
-def history_item(change: ChangeLog, business=None, reverts=()) -> dict:
+def history_item(change: ChangeLog, business=None, reverts=(), replaced=()) -> dict:
     metadata = (change.evidence or {}).get("_service", {})
     return {
         "id": change.id,
@@ -55,7 +55,7 @@ def history_item(change: ChangeLog, business=None, reverts=()) -> dict:
         "status": "proposed" if metadata.get("dry_run") else change.status,
         "error": metadata.get("error"),
         "reverts_id": change.reverts_id,
-        "can_revert": can_revert(change, business, reverts=reverts),
+        "can_revert": can_revert(change, business, reverts=reverts, replaced=replaced),
         "revert_warning": "Созданное объявление будет остановлено и убрано в архив."
         if any(not op.get("invertible", True) for op in change.operations)
         else None,
@@ -76,8 +76,12 @@ def history(
         user.id, business_id=business_id, platform=platform, actor=actor, page=page, page_size=page_size
     )
     businesses = {business_id: repository.business(business_id) for business_id in {item.business_id for item in items}}
+    replaced = {business_id: repository.replaced_entities(business_id) for business_id in businesses}
     return {
-        "items": [history_item(item, businesses[item.business_id], repository.reverts(item.id)) for item in items],
+        "items": [
+            history_item(item, businesses[item.business_id], repository.reverts(item.id), replaced[item.business_id])
+            for item in items
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,

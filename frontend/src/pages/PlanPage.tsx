@@ -28,6 +28,15 @@ export function PlanPage() {
   async function updateImages(action: () => Promise<Plan>) {
     await saveAssets(selected); setEdited(await action());
   }
+  async function launch(current: Plan) {
+    await saveAssets(selected);
+    try { await launchPlan(current.id, acknowledged); }
+    catch (reason) {
+      // Объяснение прошлой попытки уже неправда: о новой неудаче говорит сообщение об ошибке.
+      setEdited({ ...current, launch_error: null }); throw reason;
+    }
+    setEdited({ ...current, status: 'launched' });
+  }
   return <div className="page-stack launch-flow">
     <h1>{plan?.status === 'launched' ? copy.launchFlow.launched : copy.plan.title}</h1>
     {resource.loading && <p role="status">{copy.launchFlow.loading}</p>}
@@ -36,6 +45,7 @@ export function PlanPage() {
     {plan && <>
       <p>{copy.plan.summary(formatMoney(plan.month_budget_kop), formatMoney(plan.direct_budget_kop), formatMoney(plan.vk_budget_kop))}</p>
       {plan.status === 'launched' ? <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card> : <>
+        {plan.launch_error && <div className="notice" role="status"><p>{plan.launch_error}</p></div>}
         {(!plan.marking_confirmed || !plan.ready_to_launch) && <div className="notice"><p>{copy.plan.marking}</p><p>{copy.launchFlow.notReady}</p><Link to="/setup">{copy.common.start}</Link></div>}
         {medical && <><MedicalNotice /><label className="check"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} />{copy.launchFlow.understand}</label></>}
         {plan.groups.map((group) => <Card key={group.id} className="page-stack">
@@ -61,9 +71,7 @@ export function PlanPage() {
         {!imagesReady && <p role="status">{copy.launchFlow.chooseImages}</p>}
         <Card className="page-stack"><div className="actions">
           <Link to="/setup/5" className="button button--secondary">{copy.common.back}</Link>
-          <Button disabled={busy || !imagesReady || !plan.ready_to_launch || !plan.marking_confirmed || medical && !acknowledged} onClick={() => void act(async () => {
-            await saveAssets(selected); await launchPlan(plan.id, acknowledged); setEdited({ ...plan, status: 'launched' });
-          })}>{busy ? copy.launchFlow.saving : copy.plan.launch}</Button>
+          <Button disabled={busy || !imagesReady || !plan.ready_to_launch || !plan.marking_confirmed || medical && !acknowledged} onClick={() => void act(() => launch(plan))}>{busy ? copy.launchFlow.saving : copy.plan.launch}</Button>
         </div><p>{copy.plan.promise}</p></Card>
       </>}
     </>}

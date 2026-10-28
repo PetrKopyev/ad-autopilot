@@ -19,6 +19,7 @@ from app.db.models import (
     Experiment,
     LeadsSurvey,
     OAuthState,
+    Plan,
     Session,
     StatsDaily,
     Target,
@@ -28,7 +29,15 @@ from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
 from app.platforms.base import AdPlatform, ExternalRefs, Operation
 from app.platforms.fake import FakeAdapter, VirtualClock
-from app.services.changes import CLOSED_ACCOUNT, PENDING, ChangeConflict, ChangesRepository, ChangesService
+from app.services.changes import (
+    CLOSED_ACCOUNT,
+    PENDING,
+    ChangeConflict,
+    ChangesRepository,
+    ChangesService,
+    replaced_campaigns,
+)
+from app.services.onboarding import DRAFT_STATUSES
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
 from app.worker.locks import business_lock
 
@@ -59,7 +68,27 @@ def sql_theme():
     return func.coalesce(WorkerRun.log[0]["target_id"].astext, WorkerRun.log[0]["text"].astext, "")
 
 
-class WorkerRepository(ChangesRepository):
+class NoticesRepository:
+    """Непрочитанные уведомления: их читают воркер, экран уведомлений и запуск рекламы (services.launch)."""
+
+    def unread_filter(self, business_id: int):
+        return (
+            WorkerRun.business_id == business_id,
+            WorkerRun.kind == "notification",
+            WorkerRun.status == "ok",
+            ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
+        )
+
+    def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
+        self.db.execute(
+            update(WorkerRun)
+            .where(WorkerRun.business_id == business_id, WorkerRun.kind == "notification", WorkerRun.id.in_(ids))
+            .values(log=WorkerRun.log.op("||")(cast([{"read_at": now.isoformat()}], JSONB)))
+        )
+        self.db.commit()
+
+
+class WorkerRepository(NoticesRepository, ChangesRepository):
     """Хранилище воркера; тот же журнал и та же блокировка, что у ChangesService."""
 
     def rows(self, model, business_id: int | None = None, **filters) -> list:
@@ -149,14 +178,6 @@ class WorkerRepository(ChangesRepository):
         self.db.execute(insert(WorkerRun).values(values).on_conflict_do_nothing(index_elements=RUN_SLOT))
         self.db.commit()
 
-    def unread_filter(self, business_id: int):
-        return (
-            WorkerRun.business_id == business_id,
-            WorkerRun.kind == "notification",
-            WorkerRun.status == "ok",
-            ~func.jsonb_path_exists(WorkerRun.log, literal_column("'$[*].read_at'::jsonpath")),
-        )
-
     def unread_notifications(
         self, business_id: int, codes: Collection[str], limit: int, now: datetime
     ) -> list[WorkerRun]:
@@ -179,14 +200,6 @@ class WorkerRepository(ChangesRepository):
         )
         row = aliased(WorkerRun, latest)
         return list(self.db.scalars(select(row).order_by(row.started_at.desc(), row.id.desc()).limit(limit)))
-
-    def mark_read(self, business_id: int, ids: Collection[int], now: datetime) -> None:
-        self.db.execute(
-            update(WorkerRun)
-            .where(WorkerRun.business_id == business_id, WorkerRun.kind == "notification", WorkerRun.id.in_(ids))
-            .values(log=WorkerRun.log.op("||")(cast([{"read_at": now.isoformat()}], JSONB)))
-        )
-        self.db.commit()
 
     def same_theme(self, run: WorkerRun) -> list[int]:
         """Непрочитанные уведомления той же темы, что и run: «Понятно» убирает их вместе."""
@@ -333,6 +346,11 @@ class MemoryWorkerRepository(WorkerRepository):
 
     def change_by_key(self, business_id: int, key: str) -> ChangeLog | None:
         return self.find(ChangeLog, business_id=business_id, idempotency_key=key)
+
+    def replaced_entities(self, business_id: int) -> set[tuple[str, str]]:
+        ids = replaced_campaigns(self.rows(Plan, business_id))
+        campaigns = self.rows(Campaign, business_id, id=ids)
+        return {(item.platform, item.external_id) for item in campaigns if item.external_id}
 
     def local_entities(self, business_id: int, platform: str | None) -> dict:
         campaigns = self.rows(Campaign, business_id, platform=platform)
@@ -599,7 +617,20 @@ class Worker:
             self.clock = base
 
     def campaigns(self, business: Business) -> list[Campaign]:
+        """Все кампании бизнеса на площадках: их видят остановка, расход и сверка."""
         return [item for item in self.repository.rows(Campaign, business.id) if item.external_id]
+
+    def current_campaigns(self, business: Business) -> list[Campaign]:
+        """Кампании действующего плана: их шаги воркера включают, перераспределяют им бюджет и меняют, а экран
+        «Реклама» показывает их объявления.
+
+        Действующий план один — последний запущенный: запускается только последний план черновика
+        (services.launch). Кампании плана, который так и не запустился и был заменён новым, остановлены до его сборки
+        (PlanService.get_plan ждёт services.launch.recover_launch). Они показывают объявления устаревшего плана: их
+        не включают и не дают им долю бюджета, но расход и остановка (campaigns) их по-прежнему видят. Признак берётся
+        из плана, а не из статуса кампании: статус переписывает любое применённое изменение."""
+        replaced = replaced_campaigns(self.repository.rows(Plan, business.id))
+        return [item for item in self.campaigns(business) if item.id not in replaced]
 
     async def apply(
         self,
@@ -686,6 +717,7 @@ class Worker:
 
     async def startup(self) -> None:
         from app.services.budget_guard import budget_guard
+        from app.services.launch import recover_launch
 
         for business in self.repository.rows(Business):
             try:
@@ -697,6 +729,9 @@ class Worker:
                     await self.changes.recover_pending(
                         self.resolve_adapter, business_id=business.id, now=self.clock.now
                     )
+                    # Бизнес до запуска: шаги воркера его не трогают, но брошенный запуск мог оставить кампании.
+                    if business.status in DRAFT_STATUSES:
+                        await recover_launch(self, business)
                     if business.status in {"running", "budget_stop"}:
                         self.step_key = f"startup:{self.clock.now.isoformat()}"
                         await budget_guard(self, business, reconcile=True)
@@ -756,6 +791,26 @@ class Worker:
                 run.finished_at = self.clock.now
                 self.repository.save(run)
 
+    async def recover_launch(self, business_id: int) -> None:
+        """Брошенный запуск черновика: см. services.launch.recover_launch. Блокировка занята — запуск или шаг мастера
+        ещё идёт: проверим в следующий ход."""
+        from app.services.launch import recover_launch
+        from app.services.plan import launch_unsettled
+
+        business = self.repository.business(business_id)
+        # Блокировку ждут шаги мастера: без брошенного запуска или несверенного включения её не берём.
+        if business.status not in DRAFT_STATUSES or not (
+            any(map(launch_unsettled, self.repository.rows(Plan, business.id))) or self.pending(business.id)
+        ):
+            return
+        try:
+            with self.repository.business_lock(business.id):
+                self.repository.refresh(business)
+                if business.status in DRAFT_STATUSES and self.demo_available(business):
+                    await recover_launch(self, business)
+        except ChangeConflict:
+            return
+
     def prune(self) -> None:
         """Раз в сутки: пульс хранится сутки, прогоны шагов — 90 дней, уведомления не удаляются;
         просроченные сессии и запросы входа удаляются."""
@@ -773,6 +828,12 @@ class Worker:
         """Шаги одного бизнеса в текущем слоте. Перемотка демо зовёт только их: пульс по её часам показал бы
         остальным бизнесам проверку из будущего."""
         self._contexts.clear()
+        # Перемотка демо идёт только у запущенного бизнеса: брошенного запуска у него нет.
+        if self._rewound is None:
+            try:
+                await self.recover_launch(business_id)
+            except Exception:
+                logger.error("Launch recovery failed for business %s", business_id)
         now = self.clock.now.astimezone(MOSCOW)
         kinds = ["budget_guard"]
         if now.minute < 30:

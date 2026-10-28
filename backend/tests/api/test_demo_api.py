@@ -506,6 +506,29 @@ def test_advance_reports_progress_by_day(demo, monkeypatch):
     assert advance_jobs.get(world.business.id).done == 3
 
 
+def test_advance_checks_demo_data_before_rewinding_and_asks_base_only_for_new_slots(demo, monkeypatch):
+    """Демо-данные проверяются только до перемотки (запрос и check под блокировкой), а пройденные слоты перемотка
+    помнит: каждые полчаса базу о них не спрашивает."""
+    client, world, worker = demo
+    launch(client)
+    checks, slots = [], []
+    demo_available, start_run = Worker.demo_available, type(worker.repository).start_run
+
+    def counted_check(self, business):
+        checks.append(business.id)
+        return demo_available(self, business)
+
+    def counted_start(self, business_id, kind, key, now):
+        slots.append((kind, key))
+        return start_run(self, business_id, kind, key, now)
+
+    monkeypatch.setattr(Worker, "demo_available", counted_check)
+    monkeypatch.setattr(type(worker.repository), "start_run", counted_start)
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
+    assert checks == [world.business.id] * 2
+    assert slots and len(slots) == len(set(slots))
+
+
 ADVANCE_FAILED = "Перемотка прервалась. Попробуйте ещё раз."
 
 

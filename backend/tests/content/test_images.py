@@ -116,6 +116,13 @@ def test_webp_has_lower_pixel_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         accept_upload(webp)
 
 
+@pytest.mark.parametrize(("size", "fmt"), [((4000, 2500), "WEBP"), ((4000, 4000), "PNG")])
+def test_image_of_exactly_pixel_limit_passes(size: tuple[int, int], fmt: str) -> None:
+    assert size[0] * size[1] == (images.MAX_PIXELS_WEBP if fmt == "WEBP" else images.MAX_PIXELS)
+    with pytest.raises(ImageRejected, match="uniform"):
+        accept_upload(encoded(Image.new("RGB", size), fmt))
+
+
 @pytest.mark.parametrize("fmt", ["JPEG", "PNG"])
 def test_large_photo_is_stored_reduced(photo: Image.Image, fmt: str) -> None:
     result = accept_upload(encoded(photo.resize((4032, 3024)), fmt))
@@ -176,6 +183,21 @@ async def test_waiting_for_decode_slot_does_not_hold_pool_threads(photo: Image.I
         images.DECODE_SLOTS.release()
     assert len(await asyncio.gather(*uploads)) == 6
     assert len(started) == 6
+
+
+def test_each_event_loop_has_its_own_decode_queue() -> None:
+    """Перемотка демо и шаги демо-воркера идут каждый в своём asyncio.run: очередь прошлого цикла в новом упала бы с
+    RuntimeError у третьего разбора, которому пришлось ждать слот."""
+
+    def work() -> str:
+        time.sleep(0.05)
+        return "decoded"
+
+    async def decode_three() -> list[str]:
+        return await asyncio.gather(*(images.run_decoding(work) for _ in range(3)))
+
+    assert asyncio.run(decode_three()) == ["decoded"] * 3
+    assert asyncio.run(decode_three()) == ["decoded"] * 3
 
 
 async def blocked_uploads(count: int, release: threading.Event, started: list) -> list[asyncio.Task]:

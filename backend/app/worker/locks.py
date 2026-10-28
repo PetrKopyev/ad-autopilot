@@ -1,13 +1,12 @@
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
-from time import monotonic, sleep
 
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from app.demo_flags import ADVANCING, advance_jobs
-from app.services.changes import ChangeConflict, ServerBusy
+from app.services.changes import ChangeConflict, ServerBusy, waiting
 
 _held: ContextVar[frozenset[tuple[int, int]]] = ContextVar("worker_business_locks", default=frozenset())
 
@@ -19,16 +18,7 @@ def busy(business_id: int) -> ChangeConflict:
 @contextmanager
 def business_lock(bind, business_id: int, wait: float = 0) -> Iterator[None]:
     """wait — сколько секунд ждать, пока блокировку отпустят; ждёт поток, поэтому только вне цикла событий."""
-    deadline = monotonic() + wait
-    with ExitStack() as stack:
-        while True:
-            try:
-                stack.enter_context(acquire(bind, business_id))
-                break
-            except ChangeConflict:
-                if monotonic() >= deadline:
-                    raise
-            sleep(0.5)
+    with waiting(lambda: acquire(bind, business_id), wait):
         yield
 
 

@@ -190,3 +190,23 @@ async def test_closed_vk_account_does_not_switch_off_direct_budget_guard(closed)
     assert status(world.adapter, world.refs.campaign_id) == "paused_auto"
     assert status(vk, campaign.external_id) == "active" and world.business.status == "running"
     assert worker.metadata(world.business)["pending_stop"]["budget_stop"] is True
+
+
+async def test_guard_margin_counts_only_campaigns_of_current_plan(monkeypatch) -> None:
+    """Кампания прежнего плана остановлена: её дневной лимит не тратится и не раздувает запас стража, иначе он
+    останавливал бы рекламу раньше времени."""
+    from app.config import get_domain_settings
+    from app.db.models import Plan
+
+    world = await make_world()
+    vk, campaign = await with_vk(world)
+    campaign.status = "paused_auto"
+    world.repository.save(
+        Plan(business_id=1, version=0, status="failed", payload={"launch": {"campaigns": {"vk": campaign.id}}})
+    )
+    margin = stop_margin(world.campaign.daily_limit_kop, get_domain_settings())
+    spent = BUDGET_KOP - margin - 1
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": spent}, {})))
+    await worker_for(world, vk).run("budget_guard", 1)
+    assert world.business.status == "running"
+    assert status(world.adapter, world.refs.campaign_id) == "active"

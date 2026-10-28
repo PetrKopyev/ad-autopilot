@@ -269,7 +269,22 @@ async def test_stop_user_ads_reports_account_that_needs_reauth_with_live_campaig
     assert await stop_user_ads(db, None, user.id, None, "Стоп.", later()) == []
     business("direct", "needs_reauth", "c-1")
     business("vk", "needs_reauth", "c-2", campaign_status="paused_owner")
-    business("vk", "needs_reauth", None)
+    staged = business("vk", "needs_reauth", None)
+    # Отключённый кабинет уже отозван, а кампания без id на площадке там не создана: останавливать нечего.
+    business("direct", "revoked", "c-3")
+    db.add(
+        Campaign(
+            business_id=staged.business_id,
+            platform_account_id=staged.id,
+            platform="vk",
+            type="vk_plan",
+            name="Автопилот",
+            status="active",
+            daily_limit_kop=1000,
+            period_cap_kop=10_000,
+        )
+    )
+    db.commit()
     problems = await stop_user_ads(db, None, user.id, None, "Стоп.", later())
     assert problems == ["Яндекс Директ: кабинет требует входа заново, без него мы не можем остановить кампании"]
 
@@ -401,3 +416,61 @@ async def test_ad_stopper_does_not_cancel_stop_that_outlives_the_minute(monkeypa
         app=SimpleNamespace(state=SimpleNamespace(platform_adapters=SimpleNamespace(resolve=None)))
     )
     assert await auth.get_ad_stopper(request)(1, None, "Стоп.") == ["ВКонтакте: остановка не закончилась за минуту"]
+
+
+@pytest.mark.db
+async def test_stop_user_ads_sees_campaign_of_replaced_plan(owner):
+    """Кампания плана, который заменили новым, не действующая, но владелец мог включить её в кабинете: перед отзывом
+    доступа её останавливают, а если срок вышел — о ней говорят."""
+    from sqlalchemy import select
+
+    from app.api.auth import stop_user_ads
+    from app.db.models import Plan
+
+    db, user, business = owner
+    account = business("direct", "ok", "c-1")
+    campaign = db.scalar(select(Campaign).where(Campaign.platform_account_id == account.id))
+    db.add_all(
+        [
+            Plan(
+                business_id=account.business_id,
+                version=1,
+                status="failed",
+                payload={"launch": {"campaigns": {"direct": campaign.id}}},
+            ),
+            Plan(business_id=account.business_id, version=2, status="launched", payload={"launch": {"campaigns": {}}}),
+        ]
+    )
+    db.commit()
+    adapter = StubAdapter({"c-1": "active"})
+    problems = await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", monotonic() - 1)
+    assert problems == ["Яндекс Директ: остановка не закончилась за минуту"] and adapter.statuses == {"c-1": "active"}
+    assert await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", later()) == []
+    assert adapter.statuses == {"c-1": "paused_owner"}
+
+
+@pytest.mark.db
+async def test_stop_user_ads_of_busy_business_refuses_revoke(owner, monkeypatch):
+    """Бизнес занят шагом воркера, и срок ещё не вышел: отзывать доступ, не попытавшись остановить его рекламу, нельзя
+    — ChangeConflict (409 «повторите через минуту»), а не «площадка не подтвердила остановку»."""
+    from sqlalchemy import text
+
+    from app.api.auth import stop_user_ads
+    from app.services import budget_guard
+
+    wait_for_lock = budget_guard.wait_for_lock
+    monkeypatch.setattr(
+        budget_guard,
+        "wait_for_lock",
+        lambda stack, repository, business_id, seconds: wait_for_lock(stack, repository, business_id, 0.6),
+    )
+    db, user, business = owner
+    business("direct", "ok", "c-1")
+    busy = business("vk", "ok", "c-2")
+    adapter = StubAdapter({"c-1": "active", "c-2": "active"})
+    with db.get_bind().engine.connect() as step:
+        step.execute(text("SELECT pg_advisory_lock(:id)"), {"id": busy.business_id})
+        with pytest.raises(ChangeConflict):
+            await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", later())
+        step.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": busy.business_id})
+    assert adapter.statuses == {"c-1": "paused_owner", "c-2": "active"}

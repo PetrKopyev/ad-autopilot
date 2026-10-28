@@ -47,7 +47,7 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         worker.repository.save(business)
     # Новые кэпы выставляются до возобновления кампаний.
     await rebalance_budget(worker, business)
-    for campaign in worker.campaigns(business):
+    for campaign in worker.current_campaigns(business):
         if campaign.owner_paused or not campaign.daily_limit_kop:
             continue
         states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))

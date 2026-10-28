@@ -30,12 +30,15 @@ from app.db.models import (
     Plan,
     PlatformAccount,
     Target,
+    WorkerRun,
 )
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
 from app.services.changes import ChangeConflict
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
+    LOCK_WAITERS,
+    SAVING,
     SITE_CHECKS,
     AiLimits,
     Blocked,
@@ -216,6 +219,16 @@ class MemoryRepository(LaunchRepository):
 
     def save_ledger(self, ledger) -> None:
         self.put(ledger)
+
+    def read_notices(self, business_id: int, now: datetime, plan_id: int | None = None) -> None:
+        for row in self.rows(WorkerRun, business_id=business_id, kind="notification", status="ok"):
+            entry = row.log[0]
+            if (
+                entry.get("reason_code") == "LAUNCH_INTERRUPTED"
+                and plan_id in (None, entry.get("target_id"))
+                and not any("read_at" in item for item in row.log)
+            ):
+                row.log = row.log + [{"read_at": now.isoformat()}]
 
     def local_entities(self, business_id: int, platform: str | None) -> dict:
         campaigns = [item for item in self.rows(Campaign, business_id=business_id) if item.platform == platform]
@@ -431,6 +444,17 @@ def test_launched_business_cannot_be_recreated(world: World) -> None:
     world.business.status = "running"
     with pytest.raises(Blocked):
         world.onboarding.create_business(1, "salon.example", "Самара", 100, None)
+    # Повторное «Далее» без правок отвечает без блокировки только черновику: запущенный бизнес так не пересоздать.
+    with pytest.raises(Blocked):
+        world.onboarding.create_business(1, SITE, "Самара", BUDGET_KOP, None)
+
+
+@pytest.mark.parametrize(("city", "avg_check"), [("Казань", None), ("Самара", 250_000)])
+def test_draft_saves_city_or_average_check_changed_alone(world: World, city: str, avg_check: int | None) -> None:
+    """Повторное «Далее» без правок ничего не пишет, но правка одного города или одного среднего чека — правка."""
+    view = world.onboarding.create_business(1, SITE, city, BUDGET_KOP, avg_check)
+    assert (view["city"], view["avg_check_kop"]) == (city, avg_check)
+    assert (world.business.city, world.business.avg_check_kop) == (city, avg_check)
 
 
 async def test_site_check_builds_verified_draft(world: World) -> None:
@@ -484,9 +508,13 @@ async def test_parallel_site_check_waits_for_running_one_and_takes_its_result(wo
 
     world.onboarding.llm = world.llm = SlowLLM()
     world.onboarding.reader = slow_reader
-    first, second = await asyncio.gather(
-        world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first")),
-        world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("second")),
+    # Ждущая проверка без события ведущей висела бы вечно: срок превращает такую поломку в падение теста.
+    first, second = await asyncio.wait_for(
+        asyncio.gather(
+            world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first")),
+            world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("second")),
+        ),
+        5,
     )
     assert first == second and first["services_found"] == 1
     assert reads == [SITE] and world.llm.calls == ["description"] and misses == ["first"]
@@ -505,16 +533,51 @@ async def test_after_failed_site_check_one_waiting_check_reads_site_and_others_w
         return await original(url)
 
     world.onboarding.reader = failing_once
-    results = await asyncio.gather(
-        *(
-            world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda name=name: misses.append(name))
-            for name in ("first", "second", "third", "fourth")
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                world.onboarding.site_check(
+                    world.business.id, NOW, TODAY, on_miss=lambda name=name: misses.append(name)
+                )
+                for name in ("first", "second", "third", "fourth")
+            ),
+            return_exceptions=True,
         ),
-        return_exceptions=True,
+        5,
     )
     assert isinstance(results[0], RuntimeError)
     assert results[1] == results[2] == results[3] and results[1]["services_found"] == 1
     assert reads == [SITE, SITE] and misses == ["first", "second"] and world.llm.calls == ["description"]
+    assert SITE_CHECKS == {}
+
+
+async def test_finished_site_check_does_not_remove_running_check_with_owner_text(world: World) -> None:
+    """Проверка с текстом владельца не ждёт идущую и ставит своё событие: закончившаяся раньше обычная проверка его не
+    снимает, и следующая обычная ждёт проверку с текстом владельца, а не читает сайт рядом с ней."""
+    reads, gates = [], [asyncio.Event(), asyncio.Event()]
+    original = world.onboarding.reader
+
+    async def reader(url: str) -> SiteReadResult:
+        gate = gates[len(reads)]
+        reads.append(url)
+        await gate.wait()
+        return await original(url)
+
+    world.onboarding.reader = reader
+    business_id = world.business.id
+    ordinary = asyncio.create_task(world.onboarding.site_check(business_id, NOW, TODAY))
+    await asyncio.sleep(0.01)
+    owner = asyncio.create_task(world.onboarding.site_check(business_id, NOW, TODAY, owner_text="Маникюр и педикюр"))
+    await asyncio.sleep(0.01)
+    gates[0].set()
+    await asyncio.wait_for(ordinary, 5)
+    assert business_id in SITE_CHECKS
+    following = asyncio.create_task(world.onboarding.site_check(business_id, NOW, TODAY))
+    await asyncio.sleep(0.01)
+    assert not following.done()
+    gates[1].set()
+    assert await asyncio.wait_for(following, 5) == await owner
+    assert reads == [SITE, SITE] and world.llm.calls == ["description", "description"]
     assert SITE_CHECKS == {}
 
 
@@ -585,19 +648,42 @@ async def test_business_deleted_during_site_check_is_not_found(world: World) -> 
     assert world.llm.calls == []
 
 
-def test_site_is_not_changed_while_business_is_locked(world: World) -> None:
+def test_business_is_not_changed_while_it_is_locked(world: World, monkeypatch) -> None:
+    """Блокировку держат проверка сайта (ответ ИИ) и запуск (лимиты кампаний по бюджету): пока они идут — 409, и для
+    того же сайта тоже."""
+    monkeypatch.setattr("app.services.onboarding.LOCK_WAIT_SECONDS", 0)
     world.repository.locked = True
     with pytest.raises(ChangeConflict):
         world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
-    assert world.business.site_url == SITE
+    with pytest.raises(ChangeConflict):
+        world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    assert (world.business.site_url, world.business.month_budget_kop) == (SITE, BUDGET_KOP)
+    world.repository.locked = False
     same_site = world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
     assert same_site["month_budget_kop"] == 2 * BUDGET_KOP
-    world.repository.locked = False
     world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
     assert world.business.site_url == "https://other.example/"
 
 
-def test_site_is_not_changed_when_launch_finished_before_lock(world: World, monkeypatch) -> None:
+def test_unchanged_business_is_not_locked(world: World) -> None:
+    """Повторное «Далее» без правок ничего не пишет: пока проверка сайта держит блокировку, оно не получает 409."""
+    world.repository.locked = True
+    view = world.onboarding.create_business(1, "salon.example", " Самара ", BUDGET_KOP, None)
+    assert view["id"] == world.business.id and view["month_budget_kop"] == BUDGET_KOP
+
+
+async def test_same_site_keeps_description_and_other_site_resets_it(world: World) -> None:
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    description = world.business.description
+    assert description["fields"]
+    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    assert world.business.description == description and world.business.month_budget_kop == 2 * BUDGET_KOP
+    world.onboarding.create_business(1, "other.example", "Самара", 2 * BUDGET_KOP, None)
+    assert world.business.description == {} and world.business.description_approved_at is None
+
+
+@pytest.mark.parametrize("site", ["other.example", SITE])
+def test_business_is_not_changed_when_launch_finished_before_lock(world: World, monkeypatch, site: str) -> None:
     lock = world.repository.business_lock
 
     @contextmanager
@@ -608,8 +694,199 @@ def test_site_is_not_changed_when_launch_finished_before_lock(world: World, monk
 
     monkeypatch.setattr(world.repository, "business_lock", launched_meanwhile)
     with pytest.raises(Blocked, match="уже запущена"):
-        world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
-    assert world.business.site_url == SITE
+        world.onboarding.create_business(1, site, "Самара", 2 * BUDGET_KOP, None)
+    assert (world.business.site_url, world.business.month_budget_kop) == (SITE, BUDGET_KOP)
+
+
+async def test_metrica_is_not_changed_when_launch_finished_before_lock(world: World, monkeypatch) -> None:
+    """По целям считаются заявки в статистике и автопилоте: запуск, завершившийся, пока спрашивали Метрику, их уже не
+    меняет, а в настройках их не поменять."""
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    lock = world.repository.business_lock
+
+    @contextmanager
+    def launched_meanwhile(business_id: int):
+        world.business.status = "running"
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", launched_meanwhile)
+    with pytest.raises(Blocked, match="Метрики после запуска не меняются"):
+        await world.onboarding.save_metrica(world.business.id, COUNTER, [1])
+    assert world.business.metrica_counter_id is None and world.business.lead_goal_ids == []
+
+
+async def test_wizard_steps_are_not_saved_while_business_is_locked(world: World, monkeypatch) -> None:
+    """Блокировку держат проверка сайта, запуск и шаг автопилота: пока они идут — 409, и ничего не записано."""
+    monkeypatch.setattr("app.services.onboarding.LOCK_WAIT_SECONDS", 0)
+    business_id = world.business.id
+    await world.onboarding.site_check(business_id, NOW, TODAY)
+    fields = world.business.description["fields"]
+    world.repository.locked = True
+    with pytest.raises(ChangeConflict):
+        world.onboarding.save_description(business_id, {"services": {"value": "Педикюр"}}, True, NOW)
+    with pytest.raises(ChangeConflict):
+        await world.onboarding.save_metrica(business_id, COUNTER, [1])
+    with pytest.raises(ChangeConflict):
+        world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    assert world.business.description["fields"] == fields and world.business.description_approved_at is None
+    assert world.business.metrica_counter_id is None and world.repository.marking(business_id) is None
+
+
+async def test_description_and_marking_wait_for_lock(world: World, monkeypatch) -> None:
+    """Блокировку на секунды держат шаг автопилота и перемотка демо: сохранение из настроек ждёт её, а не отвечает
+    409."""
+    business_id = world.business.id
+    await world.onboarding.site_check(business_id, NOW, TODAY)
+    lock, attempts = world.repository.business_lock, []
+
+    @contextmanager
+    def released_on_second_try(business_id: int):
+        attempts.append(business_id)
+        if len(attempts) % 2:
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
+    world.onboarding.save_description(business_id, {"services": {"value": "Педикюр"}}, True, NOW)
+    world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    assert len(attempts) == 4 and world.business.description["fields"]["services"]["value"] == "Педикюр"
+    assert world.repository.marking(business_id).name == "ИП Иванов"
+
+
+def test_business_step_waits_for_lock_like_description(world: World, monkeypatch) -> None:
+    """Сведения о бизнесе ждут блокировку, как описание: короткий шаг автопилота или проверки сайта не даёт 409."""
+    lock, attempts = world.repository.business_lock, []
+
+    @contextmanager
+    def released_on_second_try(business_id: int):
+        attempts.append(business_id)
+        if len(attempts) == 1:
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
+    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    assert len(attempts) == 2 and world.business.month_budget_kop == 2 * BUDGET_KOP
+
+
+def test_metrica_goals_are_stored_once_and_in_order(world: World) -> None:
+    world.onboarding.write_metrica(world.business.id, COUNTER, [3, 1, 3])
+    assert world.business.lead_goal_ids == [1, 3]
+
+
+async def test_metrica_waits_for_lock_like_description(world: World, monkeypatch) -> None:
+    """Описание, маркировка и Метрика ждут блокировку одинаково: короткий шаг автопилота не даёт 409."""
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    lock, attempts = world.repository.business_lock, []
+
+    @contextmanager
+    def released_on_second_try(business_id: int):
+        attempts.append(business_id)
+        if len(attempts) == 1:
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
+    await world.onboarding.save_metrica(world.business.id, COUNTER, [1])
+    assert len(attempts) == 2 and world.business.metrica_counter_id == COUNTER
+
+
+async def test_lock_is_awaited_off_the_event_loop(world: World, monkeypatch) -> None:
+    """Ожидание блокировки спит, а запросы к базе синхронные: запись Метрики идёт в пуле потоков, а не в цикле
+    событий, который обслуживает всех пользователей."""
+    import threading
+
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    lock, threads = world.repository.business_lock, []
+
+    @contextmanager
+    def watched(business_id: int):
+        threads.append(threading.get_ident())
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", watched)
+    await world.onboarding.save_metrica(world.business.id, COUNTER, [1])
+    assert threads and threading.get_ident() not in threads
+
+
+async def test_one_save_waits_for_lock_per_business_and_others_get_409(world: World, monkeypatch) -> None:
+    """Ждёт поток из пула запросов: пока одно сохранение бизнеса ждёт блокировку, остальные сразу получают 409, а не
+    занимают пул. Дождавшееся сохраняет, и следующее снова может ждать."""
+    import threading
+
+    business_id = world.business.id
+    await world.onboarding.site_check(business_id, NOW, TODAY)
+    lock, release, waiting = world.repository.business_lock, threading.Event(), threading.Event()
+
+    @contextmanager
+    def held_by_step(business_id: int):
+        if not release.is_set():
+            waiting.set()
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        with lock(business_id):
+            yield
+
+    monkeypatch.setattr(world.repository, "business_lock", held_by_step)
+    first = asyncio.create_task(
+        asyncio.to_thread(world.onboarding.save_description, business_id, {"services": {"value": "Педикюр"}}, True, NOW)
+    )
+    await asyncio.to_thread(waiting.wait, 5)
+    for save in (
+        lambda: world.onboarding.save_description(business_id, {"services": {"value": "Стрижка"}}, True, NOW),
+        lambda: world.onboarding.save_marking(
+            business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True}
+        ),
+    ):
+        with pytest.raises(ChangeConflict, match=SAVING):
+            save()
+    with pytest.raises(ChangeConflict, match=SAVING):
+        await world.onboarding.save_metrica(business_id, COUNTER, [1])
+    release.set()
+    await asyncio.wait_for(first, 5)
+    assert world.business.description["fields"]["services"]["value"] == "Педикюр" and LOCK_WAITERS == set()
+    assert world.repository.marking(business_id) is None and world.business.metrica_counter_id is None
+    world.onboarding.save_description(business_id, {"services": {"value": "Стрижка"}}, True, NOW)
+    assert world.business.description["fields"]["services"]["value"] == "Стрижка"
+
+
+def test_save_that_did_not_get_lock_frees_its_turn(world: World, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.onboarding.LOCK_WAIT_SECONDS", 0)
+    world.repository.locked = True
+    with pytest.raises(ChangeConflict, match="уже выполняется"):
+        world.onboarding.save_description(world.business.id, {"services": {"value": "Педикюр"}}, True, NOW)
+    assert LOCK_WAITERS == set()
+    world.repository.locked = False
+    world.onboarding.save_description(world.business.id, {"services": {"value": "Педикюр"}}, True, NOW)
+    assert world.business.description["fields"]["services"]["value"] == "Педикюр"
+
+
+async def test_description_and_marking_are_changed_after_launch_as_in_settings(world: World) -> None:
+    """Настройки сохраняют описание и маркировку теми же шагами: после запуска они не запрещены."""
+    business_id = world.business.id
+    await onboard(world)
+    world.business.status = "running"
+    world.onboarding.save_description(business_id, {"services": {"value": "Педикюр"}}, True, NOW)
+    world.onboarding.save_marking(business_id, "ooo", "7707083893", "ООО Ромашка", "89001234567", {"direct": True})
+    assert world.business.description["fields"]["services"]["value"] == "Педикюр"
+    assert world.repository.marking(business_id).name == "ООО Ромашка"
+
+
+async def test_wizard_steps_of_deleted_business_are_not_found(world: World) -> None:
+    business_id = world.business.id
+    await world.onboarding.site_check(business_id, NOW, TODAY)
+    world.repository.tables[Business].remove(world.business)
+    with pytest.raises(NotFound):
+        world.onboarding.save_description(business_id, {"services": {"value": "Педикюр"}}, True, NOW)
+    with pytest.raises(NotFound):
+        await world.onboarding.save_metrica(business_id, COUNTER, [1])
+    with pytest.raises(NotFound):
+        world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    assert world.repository.marking(business_id) is None
 
 
 async def test_no_counter_means_stop_with_reason(tmp_path: Path) -> None:
@@ -715,13 +992,13 @@ async def test_site_counter_must_match_selected_one(world: World) -> None:
         ("company", "526317984689", "ИП Иванов", "89001234567"),
     ],
 )
-def test_invalid_marking_is_rejected(world: World, subject: str, inn: str, name: str, phone: str) -> None:
+async def test_invalid_marking_is_rejected(world: World, subject: str, inn: str, name: str, phone: str) -> None:
     with pytest.raises(OnboardingError):
         world.onboarding.save_marking(world.business.id, subject, inn, name, phone, {})
     assert world.repository.marking(world.business.id) is None
 
 
-def test_marking_is_saved_with_strict_confirmations(world: World) -> None:
+async def test_marking_is_saved_with_strict_confirmations(world: World) -> None:
     world.onboarding.save_marking(
         world.business.id, "ooo", "7707083893", "ООО Ромашка", "+7 900 123-45-67", {"direct": True, "vk": "yes"}
     )

@@ -568,3 +568,41 @@ async def test_history_hides_dry_run_and_pending_reverts(client, repository, tre
     original.evidence["_service"]["dry_run"] = False
     repository.save(ChangeLog(kind="revert", reverts_id=original.id, status="pending", evidence={}))
     assert http.get("/api/history").json()["items"][0]["can_revert"] is False
+
+
+async def test_history_does_not_offer_to_turn_on_campaign_of_replaced_plan(client, repository, tree):
+    """Остановку кампании прежнего плана не вернуть: откат включил бы рекламу, за которой никто не следит. Остановку
+    действующей кампании вернуть можно."""
+    from app.services.rollback import REPLACED
+
+    http, resolver, _ = client
+    adapter, refs = tree
+    stop = Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_owner")
+    original = await applied(repository, adapter, refs, operations=[stop])
+    repository.history.return_value = ([original], 1)
+    repository.get_owned.return_value = original
+    resolver.return_value = adapter
+    repository.replaced_entities.return_value = {("fake", refs.campaign_id)}
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is False
+    response = http.post(f"/api/history/{original.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 409 and response.json()["detail"] == REPLACED
+    repository.replaced_entities.return_value = {("vk", refs.campaign_id)}
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is True
+
+
+async def test_history_lets_stop_launch_of_replaced_plan_campaign(client, repository, tree):
+    """Включение кампании прежнего плана (запуск, который потом упал) откатывается к остановленной: реклама не
+    включается, и REPLACED здесь был бы неправдой."""
+    http, resolver, _ = client
+    adapter, refs = tree
+    await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto"))
+    start = Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")
+    original = await applied(repository, adapter, refs, operations=[start])
+    repository.history.return_value = ([original], 1)
+    repository.get_owned.return_value = original
+    resolver.return_value = adapter
+    repository.replaced_entities.return_value = {("fake", refs.campaign_id)}
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is True
+    response = http.post(f"/api/history/{original.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 200
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_auto"

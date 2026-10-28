@@ -38,7 +38,7 @@ async def snapshot(
     worker: Worker, business: Business, *, include_paused_campaigns: bool = False
 ) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
     repository = worker.repository
-    campaigns = worker.campaigns(business)
+    campaigns = worker.current_campaigns(business)
     states = {}
     for campaign in campaigns:
         states.update(await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))
@@ -269,7 +269,8 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     spent, lifetime = await read_spend(worker, business)
     for ledger in worker.repository.rows(BudgetLedger, business.id, month=month):
         spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
-    campaigns = worker.campaigns(business)
+    # Расход — по всем кампаниям (read_spend), а лимиты получают только кампании действующего плана.
+    campaigns = worker.current_campaigns(business)
     platforms = sorted({campaign.platform for campaign in campaigns})
     if not platforms:
         return
