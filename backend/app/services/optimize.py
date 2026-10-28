@@ -7,7 +7,16 @@ from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, BudgetLedger, Business, Campaign, ChangeLog, Experiment, StatsDaily
 from app.db.query import Window
-from app.domain.budget import allocate, plan_budget, platform_shares, rebalance_platform_shares
+from app.domain.budget import (
+    CAP_MULTIPLIER,
+    allocate,
+    campaign_limits,
+    meets_minimum,
+    plan_budget,
+    platform_shares,
+    rebalance_platform_shares,
+    share_floors,
+)
 from app.domain.experiments import design_experiment, evaluate_experiment, select_borderline
 from app.domain.explain import explain_decision, explain_experiment, rubles
 from app.domain.rules import decide, ref_cpl, settled_days
@@ -19,6 +28,7 @@ from app.domain.types import (
     ExperimentDesign,
     ExperimentResult,
     GroupSnapshot,
+    PlatformLimit,
     Verdict,
     total_metrics,
 )
@@ -26,7 +36,6 @@ from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend
 from app.services.changes import budget_operations
 from app.services.experiments import completed_hypotheses, group_available
-from app.services.plan import CAP_MULTIPLIER, campaign_limits
 from app.services.sync import approved_at, shared_ids
 from app.worker.clock import MOSCOW, today
 
@@ -239,15 +248,20 @@ async def optimize(worker: Worker, business: Business) -> None:
 
 
 async def below_platform_minimum(
-    worker: Worker, business: Business, campaign: Campaign, operations: list[Operation]
+    worker: Worker, business: Business, campaign: Campaign, operations: list[Operation], daily: int, cap: int
 ) -> int | None:
-    """Минимальный недельный бюджет Директа, если новые лимиты его не набирают; иначе None.
+    """Минимум площадки, который новые лимиты не набирают: недельный у Директа, дневной у остальных; иначе None.
 
-    Недельный лимит считается так же, как перед Campaigns.update (budget_operations): с расходом этой недели."""
+    Недельный лимит Директа считается так же, как перед Campaigns.update (budget_operations): с расходом этой недели."""
     from app.platforms.direct import DirectAdapter
 
     adapter = worker.resolve_adapter(business.id, campaign.platform)
-    if not isinstance(adapter, DirectAdapter) or not any(op.kind == "set_budget" for op in operations):
+    if not isinstance(adapter, DirectAdapter):
+        limits = await adapter.min_budgets()
+        if meets_minimum(PlatformLimit(campaign.platform, cap, daily, cap), limits):
+            return None
+        return limits.get("daily_limit_kop", limits.get("day", 0))
+    if not any(op.kind == "set_budget" for op in operations):
         return None
     minimum = (await adapter.min_budgets()).get("weekly_limit_kop", 0)
     _, prepared = await budget_operations(
@@ -284,21 +298,27 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         )
         prices[platform] = metrics.cpl
     previous = datetime.fromisoformat(meta.get("shares_at", worker.clock.now.isoformat()))
-    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain)
     change = meta.get("budget_change", {})
     budget = business.month_budget_kop
     if not force and change.get("effective_on", "") > day.isoformat():
         # Увеличение начнёт работать завтра; снижение ограничивает расход сразу для безопасности.
         budget = min(budget, change["before"])
-    plan = plan_budget(
-        budget,
-        sum(spent.values()),
-        day,
-        platforms,
-        started_on=day.fromisoformat(meta.get("started_on", month.isoformat())),
-        shares=shares,
-        settings=domain,
-    )
+
+    def budget_plan(shares: dict[str, Decimal]):
+        return plan_budget(
+            budget,
+            sum(spent.values()),
+            day,
+            platforms,
+            started_on=day.fromisoformat(meta.get("started_on", month.isoformat())),
+            shares=shares,
+            settings=domain,
+        )
+
+    # Перенос между площадками не опускает кампанию ниже минимума площадки.
+    floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), platforms)
+    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
+    plan = budget_plan(shares)
     group_limits = {group.id: group.daily_limit for group in groups}
     local_groups = worker.repository.rows(AdGroup, business.id)
     held = set(meta.get("below_minimum", []))
@@ -332,7 +352,11 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 )
                 if before != after
             ]
-            minimum = await below_platform_minimum(worker, business, campaign, operations) if desired_daily else None
+            minimum = (
+                await below_platform_minimum(worker, business, campaign, operations, desired_daily, total_cap)
+                if desired_daily
+                else None
+            )
             if not desired_daily or minimum:
                 await worker.apply(
                     business,
@@ -346,6 +370,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     reason_text="Доступного дневного бюджета нет: кампанию остановили."
                     if not desired_daily
                     else f"До конца недели остаток бюджета меньше минимума площадки ({rubles(minimum)} ₽): "
+                    "кампанию остановили. Возобновим, когда бюджета снова хватит."
+                    if campaign.platform == "direct"
+                    else f"Дневной бюджет кампании меньше минимума площадки ({rubles(minimum)} ₽ в день): "
                     "кампанию остановили. Возобновим, когда бюджета снова хватит.",
                 )
                 if not worker.proposed(business):

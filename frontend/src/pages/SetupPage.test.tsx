@@ -356,3 +356,43 @@ it('после отключения кабинета прежний итог п�
   await waitFor(() => expect(screen.queryByText('Директ отвечает.', { exact: false })).toBeNull());
   expect(calls()).toContain('DELETE /api/accounts/1');
 });
+
+function budgetHint(hint: unknown) {
+  fetchMock.mockImplementation(async (url) => {
+    const path = new URL(String(url)).pathname;
+    const answers: Record<string, unknown> = {
+      '/api/auth/config': { demo: false },
+      '/api/me': { id: 1, login: 'owner', email: null, has_business: false,
+        accounts: [{ id: 2, business_id: 7, platform: 'vk', external_login: 'owner', status: 'ok', scopes: [] }] },
+      '/api/business/budget-hint': hint,
+    };
+    return new Response(JSON.stringify(answers[path]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+}
+const plain = (text: string) => (_: string, element: Element | null) => element?.tagName === 'P' && element.textContent?.replace(/ /g, ' ') === text;
+const vkOff = [{ platform: 'vk', from_kop: 4220000, min_daily_kop: 30000 }];
+
+it('под бюджетом — расчёт сервера: сколько придётся на Директ в день и с какого бюджета подключится ВКонтакте', async () => {
+  budgetHint({ minimum_kop: 190000, low_kop: 1000000, daily_kop: { direct: 71225 }, off: vkOff });
+  renderStep(1);
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.budget), { target: { value: '30000' } });
+  expect(await screen.findByText(plain('На Директ придётся около 712 ₽ в день.'))).toBeTruthy();
+  expect(screen.getByText(plain('ВКонтакте подключится от 42 200 ₽ в месяц: ей нужно минимум 300 ₽ в день.'))).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(calls()).toContain('GET /api/business/budget-hint');
+  expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/business/budget-hint?month_budget_kop=3000000&vk=true'))).toBe(true);
+});
+
+it('бюджет ниже минимума называет минимум, бюджет меньше 10 000 ₽ только предупреждает', async () => {
+  budgetHint({ minimum_kop: 190000, low_kop: 1000000, daily_kop: { direct: 11870 }, off: vkOff });
+  renderStep(1);
+  const input = await screen.findByLabelText(copy.setup.business.budget);
+  fireEvent.change(input, { target: { value: '1500' } });
+  expect((await screen.findByRole('alert')).textContent?.replace(/ /g, ' '))
+    .toBe('Минимальный бюджет — 1 900 ₽ в месяц: с меньшим Яндекс Директ не запустит рекламу.');
+  fireEvent.change(input, { target: { value: '5000' } });
+  expect(await screen.findByText(plain('Бюджет меньше 10 000 ₽ в месяц сохранить можно, но автопилоту будет мало данных: '
+    + 'реклама будет работать, а улучшать её он сможет реже.'))).toBeTruthy();
+  expect(screen.getByText(plain('На Директ придётся около 119 ₽ в день.'))).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+});

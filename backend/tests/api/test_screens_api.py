@@ -410,17 +410,18 @@ def test_budget_bounds_are_validated_before_platform_calls(setup, monkeypatch, a
     limits.assert_not_awaited()
 
 
-def test_budget_cannot_be_lower_than_sum_of_connected_platform_minimums(setup, monkeypatch):
-    from unittest.mock import AsyncMock
-
+def test_budget_below_direct_minimum_is_rejected_with_the_minimum(setup):
+    """Директ обязателен: ниже его минимума бюджет не сохраняется. VK к минимуму не прибавляется — её доля, не
+    набирающая минимум площадки, уходит в Директ (план), поэтому кабинет VK минимум не меняет."""
     from app.db.models import PlatformAccount
 
     client, world = setup
     world.repository.save(PlatformAccount(business_id=world.business.id, platform="vk", status="ok"))
-    monkeypatch.setattr(world.adapter, "min_budgets", AsyncMock(return_value={"period_cap_kop": 100_000}))
-    response = client.put("/api/business/budget", json={"month_budget_kop": 199_999})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 189_999})
     assert response.status_code == 422
-    assert "суммы минимумов" in response.json()["detail"]
+    assert response.json()["detail"] == (
+        "Минимальный бюджет — 1 900 ₽ в месяц: с меньшим Яндекс Директ не запустит рекламу."
+    )
     assert world.business.month_budget_kop == 10_000_000
 
 

@@ -5,15 +5,14 @@ from unittest.mock import AsyncMock
 import pytest
 from integration.harness import BUDGET_KOP, make_world
 
-from app.db.models import Ad, AdGroup, Campaign, ChangeLog, WorkerRun
-from app.domain.budget import plan_budget
+from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, WorkerRun
+from app.domain.budget import campaign_limits, plan_budget
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import rebalance_budget, snapshot
-from app.services.plan import campaign_limits
 from app.services.rollback import RollbackService
 from app.worker.clock import today
 
@@ -365,9 +364,39 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
     operations = [Operation("set_budget", "campaign", "1", "daily_limit_kop", 10_000, 20_000)]
     # Понедельник и последний день месяца: уйдёт 200 ₽ при минимуме 300 ₽, хотя 7 дневных — 1400 ₽.
     adapter.get_stats = AsyncMock(return_value=[])
-    assert await below_platform_minimum(worker, repository.current_business, campaign, operations) == 30_000
+    assert (
+        await below_platform_minimum(worker, repository.current_business, campaign, operations, 20_000, 500_000)
+        == 30_000
+    )
     adapter.get_stats = AsyncMock(
         return_value=[StatRow("1", "1", date(2026, 11, 30), "campaign", 1, 1, 10_000, {}, now, False)]
     )
-    assert await below_platform_minimum(worker, repository.current_business, campaign, operations) is None
+    assert (
+        await below_platform_minimum(worker, repository.current_business, campaign, operations, 20_000, 500_000) is None
+    )
     await adapter.aclose()
+
+
+async def test_vk_minimum_check_holds_daily_and_campaign_limits_at_platform_minimum():
+    from types import SimpleNamespace
+
+    from app.services.optimize import below_platform_minimum
+
+    adapter = FakeAdapter()
+    adapter.min_budgets = AsyncMock(return_value={"daily_limit_kop": 30_000, "period_cap_kop": 30_000})
+    worker = SimpleNamespace(resolve_adapter=lambda *_: adapter)
+    campaign = Campaign(id=1, external_id="1", platform="vk", daily_limit_kop=40_000, period_cap_kop=500_000)
+    operations = [Operation("set_budget", "campaign", "1", "daily_limit_kop", 40_000, 29_999)]
+    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 29_999, 500_000) == 30_000
+    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 30_000, 500_000) is None
+
+
+async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch):
+    world = await make_world()
+    world.campaign.platform = "vk"
+    world.adapter.min_budgets = AsyncMock(return_value={"daily_limit_kop": 10**8, "period_cap_kop": 0})
+    world.clock.advance(days=2)
+    await rebalance_budget(world.worker(), world.business)
+    (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
+    assert "Дневной бюджет кампании меньше минимума площадки (1 000 000 ₽ в день)" in pause.reason_text
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]

@@ -20,7 +20,7 @@ from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
-from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError
+from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget
 from app.worker.clock import MOSCOW, today
@@ -353,17 +353,7 @@ class ScreensService:
         with self.repository.business_lock(business.id):
             if type(amount) is not int or not 0 < amount <= MAX_BUDGET_KOP:
                 raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {rubles(MAX_BUDGET_KOP)} ₽.")
-            minimum = 0
-            platforms = {row.platform for row in self.repository.rows(PlatformAccount, business.id)}
-            for platform in sorted(platforms):
-                limits = await self.worker.resolve_adapter(business.id, platform).min_budgets()
-                minimum += max(
-                    limits.get("period_cap_kop", limits.get("period", 0)),
-                    limits.get("weekly_limit_kop", 0),
-                    limits.get("daily_limit_kop", limits.get("day", 0)),
-                )
-            if amount < minimum:
-                raise OnboardingError(f"Бюджет ниже суммы минимумов подключённых площадок: {rubles(minimum)} ₽.")
+            check_budget(amount, today(self.worker.clock))
             spent, _ = await read_spend(self.worker, business)
             if amount <= max(sum(spent.values()), self.budget(business)["spent_kop"]):
                 raise ChangeConflict("Этот бюджет уже потрачен. Укажите сумму больше расхода за месяц.")

@@ -428,6 +428,43 @@ async def test_budget_at_platform_minimums_launches(tmp_path: Path) -> None:
     assert world.adapters["direct"]._trees
 
 
+REAL_MINIMUMS = {"direct": {"weekly_limit_kop": 30_000}, "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}}
+
+
+@pytest.mark.parametrize(
+    "budget,platforms",
+    [(3_000_000, {"direct"}), (4_210_000, {"direct"}), (4_220_000, {"direct", "vk"})],
+)
+async def test_plan_and_launch_agree_on_platforms_with_real_minimums(tmp_path: Path, budget, platforms) -> None:
+    """План решает, хватает ли доли VK на её минимум; запуск сверяет те же лимиты с минимумами площадок и пропускает."""
+    adapters = {platform: Minimums(minimum) for platform, minimum in REAL_MINIMUMS.items()}
+    world = make_world(tmp_path, adapters=adapters)
+    world.business.month_budget_kop = budget
+    await onboard(world)
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert {group["platform"] for group in plan["groups"]} == platforms
+    assert (await launch(world, plan))["status"] == "launched"
+    assert {item.platform for item in campaigns(world)} == platforms
+    assert all(item.daily_limit_kop >= 30_000 for item in campaigns(world) if item.platform == "vk")
+
+
+def test_budget_at_direct_minimum_on_sunday_is_advised_to_start_on_monday() -> None:
+    from app.domain.budget import budget_minimum, launch_limits
+    from app.services.launch import below_minimum
+
+    sunday, monday = date(2026, 4, 5), date(2026, 4, 6)
+    minimum = budget_minimum(("direct",), sunday)
+    assert minimum == budget_minimum(("direct",), monday) == 180_000
+    text = below_minimum(
+        "direct", launch_limits(minimum, ("direct",), sunday)["direct"], REAL_MINIMUMS["direct"], sunday
+    )
+    assert text.startswith("До конца недели осталось мало дней") and "Запустите рекламу с понедельника" in text
+    assert (
+        below_minimum("direct", launch_limits(minimum, ("direct",), monday)["direct"], REAL_MINIMUMS["direct"], monday)
+        is None
+    )
+
+
 async def test_direct_minimum_is_checked_against_the_weekly_limit_actually_sent(tmp_path: Path) -> None:
     """В четверг уходит лимит на 4 дня: минимум между 4 и 7 дневными раньше пропускался, а Директ его отклонял."""
     world, plan = await ready(tmp_path)
@@ -647,7 +684,7 @@ async def test_launch_holds_lock_until_business_is_running(tmp_path: Path, monke
     async def activate_watched(*args) -> None:
         seen.append(("activate", set(held), world.business.status))
         try:
-            world.onboarding.create_business(world.business.user_id, SITE, "Самара", BUDGET_KOP * 2, None)
+            world.onboarding.create_business(world.business.user_id, SITE, "Самара", BUDGET_KOP * 2, None, TODAY)
             seen.append("budget saved")
         except ChangeConflict:
             seen.append("budget 409")

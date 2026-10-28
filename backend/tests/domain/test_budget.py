@@ -10,9 +10,14 @@ from app.domain.budget import (
     allocate,
     authorized_budget,
     budget_guard,
+    budget_minimum,
+    budget_platforms,
+    launch_limits,
+    meets_minimum,
     plan_budget,
     platform_shares,
     rebalance_platform_shares,
+    share_floors,
     split_group_limits,
     stop_margin,
 )
@@ -183,3 +188,94 @@ def test_odd_kopecks_split_without_loss_in_months_of_any_length(month_start):
         spent += sum(limit.daily_limit for limit in plan.limits)
         today += timedelta(days=1)
     assert plan.authorized - days < spent <= plan.authorized
+
+
+MONDAY = date(2026, 4, 6)  # апрель — 30 дней
+
+
+@pytest.mark.parametrize(
+    "monthly,connected,platforms,off",
+    [
+        (500_000, ("direct",), ["direct"], {}),
+        (500_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
+        (1_400_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
+        (3_000_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
+        (4_070_000, ("direct", "vk"), ["direct"], {"vk": 4_080_000}),
+        (4_080_000, ("direct", "vk"), ["direct", "vk"], {}),
+        (4_080_000, ("direct",), ["direct"], {}),
+    ],
+)
+def test_vk_joins_plan_only_when_its_share_reaches_platform_minimum(monthly, connected, platforms, off):
+    assert budget_platforms(monthly, connected, MONDAY) == (platforms, off)
+    limits = launch_limits(monthly, platforms, MONDAY)
+    assert set(limits) == set(platforms)
+    assert all(limits[platform].daily_limit * 7 >= 30_000 for platform in platforms)
+    if "vk" in platforms:
+        assert limits["vk"].daily_limit >= 30_000 and limits["vk"].remaining_cap >= 30_000
+
+
+def test_vk_share_one_step_below_threshold_misses_its_daily_minimum():
+    assert launch_limits(4_070_000, ("direct", "vk"), MONDAY)["vk"].daily_limit < 30_000
+    # Весь бюджет уходит в Директ: его дневной лимит больше, чем у Директа при двух площадках.
+    alone = launch_limits(4_070_000, ("direct",), MONDAY)["direct"].daily_limit
+    assert alone > launch_limits(4_080_000, ("direct", "vk"), MONDAY)["direct"].daily_limit
+
+
+@pytest.mark.parametrize(
+    "today,direct,both",
+    [
+        (date(2026, 2, 2), 170_000, 3_810_000),  # февраль — 28 дней
+        (MONDAY, 180_000, 4_080_000),
+        (date(2026, 3, 2), 190_000, 4_220_000),  # март — 31 день
+        (date(2026, 4, 5), 180_000, 4_080_000),  # воскресенье: минимум считается на полную неделю
+    ],
+)
+def test_budget_minimum_follows_month_length(today, direct, both):
+    assert budget_minimum(("direct",), today) == direct
+    assert budget_minimum(("direct", "vk"), today) == both
+    weekly = {"weekly_limit_kop": 30_000}
+    assert meets_minimum(launch_limits(direct, ("direct",), today)["direct"], weekly)
+    assert not meets_minimum(launch_limits(direct - 10_000, ("direct",), today)["direct"], weekly)
+
+
+def test_short_month_lets_vk_in_with_the_budget_a_long_month_does_not():
+    assert budget_platforms(4_000_000, ("direct", "vk"), date(2026, 2, 2)) == (["direct", "vk"], {})
+    assert budget_platforms(4_000_000, ("direct", "vk"), date(2026, 3, 2)) == (["direct"], {"vk": 4_220_000})
+
+
+VK_MINIMUM = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
+
+
+@pytest.mark.parametrize(
+    "limit,minimum,expected",
+    [
+        (PlatformLimit("vk", 30_000, 29_900, 30_000), VK_MINIMUM, False),
+        (PlatformLimit("vk", 30_000, 30_000, 30_000), VK_MINIMUM, True),
+        (PlatformLimit("direct", 4_285, 4_285, 4_285), {"weekly_limit_kop": 30_000}, False),
+        (PlatformLimit("direct", 4_286, 4_286, 4_286), {"weekly_limit_kop": 30_000}, True),
+        (PlatformLimit("direct", 0, 0, 0), {"day": 0, "period": 0}, True),
+    ],
+)
+def test_minimum_is_inclusive_and_checks_a_full_week(limit, minimum, expected):
+    assert meets_minimum(limit, minimum) is expected
+
+
+def test_share_floors_keep_each_campaign_at_its_minimum():
+    assert share_floors(100_000, ("direct", "vk")) == {"direct": Decimal("0.053575"), "vk": Decimal("0.375")}
+    assert share_floors(0, ("direct", "vk")) == {}
+
+
+def test_rebalance_does_not_push_platform_below_its_floor():
+    current = platform_shares(("direct", "vk"))
+    cheap_direct = {"direct": 100, "vk": 10_000}
+    assert rebalance_platform_shares(current, cheap_direct, 14)["direct"] == Decimal("0.8")
+    vk_floor = {"vk": Decimal("0.3")}
+    assert rebalance_platform_shares(current, cheap_direct, 14, floors=vk_floor)["direct"] == Decimal("0.7")
+    assert rebalance_platform_shares(current, cheap_direct, 14, floors={"vk": Decimal("0.25")})["direct"] == Decimal(
+        "0.75"
+    )
+    # Доля уже ниже минимума (бюджет уменьшили): перенос не опускает её дальше, а к минимуму ведёт обычным шагом.
+    low = {"direct": Decimal("0.8"), "vk": Decimal("0.2")}
+    assert rebalance_platform_shares(low, cheap_direct, 14, floors=vk_floor) == low
+    expected = {"direct": Decimal("0.7"), "vk": Decimal("0.3")}
+    assert rebalance_platform_shares(low, {"direct": 10_000, "vk": 100}, 14, floors=vk_floor) == expected

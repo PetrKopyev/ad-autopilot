@@ -82,7 +82,13 @@ export function PlanPage() {
     {resource.error && <ErrorBanner message={resource.error} onRetry={resource.reload} />}
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {plan && <>
-      <p>{copy.plan.summary(formatMoney(plan.month_budget_kop), formatMoney(plan.direct_budget_kop), formatMoney(plan.vk_budget_kop))}</p>
+      <p>{copy.plan.summary(formatMoney(plan.month_budget_kop))}</p>
+      {(['direct', 'vk'] as const).map((platform) => { const daily = plan.daily_kop[platform]; return daily !== undefined && <p key={platform}>
+        {copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(platform === 'direct' ? plan.direct_budget_kop : plan.vk_budget_kop), formatMoney(daily))}
+      </p>; })}
+      {plan.off.map((item) => <div key={item.platform} className="notice" role="status">
+        <p>{copy.plan.platformOff(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>
+      </div>)}
       {plan.status === 'launched' ? <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card> : <>
         {plan.launch_error && <div className="notice" role="status"><p>{plan.launch_error}</p></div>}
         {plan.blockers.length > 0 && <div className="notice"><p>{copy.launchFlow.blockers}</p><ul>{plan.blockers.map((text) => <li key={text}>{text}</li>)}</ul><Link to="/setup">{copy.common.start}</Link></div>}
@@ -90,7 +96,6 @@ export function PlanPage() {
         {plan.groups.map((group) => { const generating = jobState(group.id, 'generate'); const uploading = jobState(group.id, 'upload'); return <Card key={group.id} className="page-stack">
           <h2>{group.name}</h2><p className="muted">{copy.setup.accounts[group.platform]}</p>
           <div><h2>{copy.plan.audience}</h2><p>{group.audience}</p></div>
-          <p>{copy.plan.dailySpend}: {formatMoney(group.daily_limit_kop)}</p>
           <h2>{copy.plan.texts}</h2>{group.ads.map((ad, index) => <div key={index}><strong>{ad.title}</strong><p>{ad.text}</p></div>)}
           <fieldset disabled={busy || jobs[0]?.group === group.id} className="page-stack"><legend>{copy.plan.images}</legend>
             <div className="image-grid">{group.assets.map((asset) => <div key={asset.id} className="image-choice">

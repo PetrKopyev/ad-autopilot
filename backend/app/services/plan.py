@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from textwrap import shorten
@@ -23,7 +23,16 @@ from app.content.llm import LLMClient
 from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, Asset, Business, MarkingProfile, Plan, PlatformAccount
-from app.domain.budget import allocate, plan_budget, platform_shares, split_group_limits
+from app.domain.budget import (
+    LOW_BUDGET_KOP,
+    PLATFORM_MINIMUMS,
+    allocate,
+    budget_minimum,
+    budget_platforms,
+    launch_limits,
+    platform_shares,
+    split_group_limits,
+)
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
 from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict
@@ -42,17 +51,6 @@ from app.services.onboarding import (
 )
 
 logger = logging.getLogger(__name__)
-CAP_MULTIPLIER = Decimal("1.25")
-
-
-def campaign_limits(daily: int, remaining: int, today: date, lifetime: int = 0) -> tuple[int, int]:
-    """Кэп накопленный; запас применяется только к новым разрешённым тратам."""
-    next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
-    days = min(7 - today.weekday(), (next_month - today).days)
-    additional = min(remaining, daily * days)
-    return int(Decimal(daily) / CAP_MULTIPLIER), lifetime + int(Decimal(additional) / CAP_MULTIPLIER)
-
-
 PLATFORMS = ("direct", "vk")
 ANGLES_PER_GROUP = 2
 IMAGE_CANDIDATES = 8
@@ -128,7 +126,13 @@ def connected_platforms(accounts: list[PlatformAccount]) -> list[str]:
     return [platform for platform in PLATFORMS if platform in ready] or ["direct"]
 
 
-def inputs_hash(business: Business, platforms: list[str]) -> str:
+def plan_platforms(
+    business: Business, accounts: list[PlatformAccount], today: date, domain: DomainSettings
+) -> tuple[list[str], dict[str, int]]:
+    return budget_platforms(business.month_budget_kop, connected_platforms(accounts), today, domain)
+
+
+def inputs_hash(business: Business, platforms: list[str], off: dict[str, int]) -> str:
     fields = business.description.get("fields", {})
     data = {
         "fields": {key: fields.get(key, {}).get("value", "") for key in DESCRIPTION_KEYS},
@@ -139,6 +143,8 @@ def inputs_hash(business: Business, platforms: list[str]) -> str:
         "niche": business.niche_class,
         "medical": business.medical_level,
     }
+    if off:
+        data["off"] = sorted(off)
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -150,12 +156,26 @@ def budget_limits(
         from app.config import get_domain_settings
 
         domain = get_domain_settings()
-    budget = plan_budget(business.month_budget_kop, 0, today, tuple(platforms), started_on=today, settings=domain)
-    result = {}
-    for limit in budget.limits:
-        daily, cap = campaign_limits(limit.daily_limit, limit.remaining_cap, today)
-        result[limit.platform] = PlatformLimit(limit.platform, cap, daily, cap)
-    return result
+    return launch_limits(business.month_budget_kop, platforms, today, domain)
+
+
+def off_view(off: dict[str, int]) -> list[dict]:
+    return [
+        {"platform": platform, "from_kop": amount, "min_daily_kop": PLATFORM_MINIMUMS[platform]["daily_limit_kop"]}
+        for platform, amount in off.items()
+    ]
+
+
+def budget_view(monthly_budget: int, connected: list[str], today: date, domain: DomainSettings) -> dict:
+    """Подсказка мастера к бюджету: те же площадки и лимиты, что у плана и запуска."""
+    platforms, off = budget_platforms(monthly_budget, connected, today, domain)
+    limits = launch_limits(monthly_budget, platforms, today, domain)
+    return {
+        "minimum_kop": budget_minimum(("direct",), today, domain),
+        "low_kop": LOW_BUDGET_KOP,
+        "daily_kop": {platform: limits[platform].daily_limit for platform in platforms},
+        "off": off_view(off),
+    }
 
 
 def phrases(business: Business) -> list[str]:
@@ -170,6 +190,8 @@ def launch_blockers(
     accounts: list[PlatformAccount],
     marking: MarkingProfile | None,
     assets: list[Asset],
+    today: date,
+    domain: DomainSettings,
     medical_acknowledged: bool | None = None,
 ) -> list[str]:
     """Почему запускать нельзя; пустой список — можно. None в medical_acknowledged — подтверждение ещё не спрашивали."""
@@ -188,7 +210,7 @@ def launch_blockers(
         )
     if marking is None or not all(marking.confirmed_in_platform.get(platform) is True for platform in platforms):
         result.append("Заполните данные рекламодателя и подтвердите маркировку на подключённых площадках.")
-    if payload["inputs_hash"] != inputs_hash(business, connected_platforms(accounts)):
+    if payload["inputs_hash"] != inputs_hash(business, *plan_platforms(business, accounts, today, domain)):
         result.append("Сведения о бизнесе изменились после подготовки плана. Обновите план.")
     if any(not selected & set(payload["assets"].get(group_key(group), ())) for group in payload["groups"]):
         result.append("В каждой группе отметьте хотя бы одну картинку.")
@@ -377,24 +399,25 @@ class PlanService:
         self.domain = domain
 
     async def get_plan(self, business_id: int, now: datetime, today: date) -> dict:
-        business, platforms, digest, plan = self.inputs(self.repository.business(business_id))
+        business, platforms, off, digest, plan = self.inputs(self.repository.business(business_id), today)
         if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
             with self.repository.business_lock(business_id):
                 # Пока ждали блокировку, план мог собрать соседний запрос, а бизнес — измениться или удалиться.
-                business, platforms, digest, plan = self.inputs(self.locked_business(business_id))
+                business, platforms, off, digest, plan = self.inputs(self.locked_business(business_id), today)
                 if plan is None or (plan.status != "launched" and plan.payload["inputs_hash"] != digest):
                     # Новый план — новые кампании: кампании незавершённого запуска остались бы без плана и без
                     # присмотра. Сначала их останавливает воркер (services.launch.recover_launch).
                     if plan is not None and launch_unsettled(plan):
                         raise Blocked(UNSETTLED)
-                    plan = await self.build(business, platforms, digest, plan, now, today)
+                    plan = await self.build(business, platforms, off, digest, plan, now, today)
         return self.view(business, plan, today)
 
-    def inputs(self, business: Business) -> tuple[Business, list[str], str, Plan | None]:
+    def inputs(self, business: Business, today: date) -> tuple[Business, list[str], dict[str, int], str, Plan | None]:
         if business.description_approved_at is None:
             raise Blocked("Подтвердите описание бизнеса: без него мы не готовим план.")
-        platforms = connected_platforms(self.repository.accounts(business.id))
-        return business, platforms, inputs_hash(business, platforms), self.repository.latest_plan(business.id)
+        platforms, off = plan_platforms(business, self.repository.accounts(business.id), today, self.domain)
+        digest = inputs_hash(business, platforms, off)
+        return business, platforms, off, digest, self.repository.latest_plan(business.id)
 
     def locked_business(self, business_id: int) -> Business:
         """Под блокировкой: удалённому бизнесу ИИ не генерирует и файлы не пишутся (удаление тоже идёт под ней)."""
@@ -404,7 +427,14 @@ class PlanService:
         return business
 
     async def build(
-        self, business: Business, platforms: list[str], digest: str, previous: Plan | None, now: datetime, today: date
+        self,
+        business: Business,
+        platforms: list[str],
+        off: dict[str, int],
+        digest: str,
+        previous: Plan | None,
+        now: datetime,
+        today: date,
     ) -> Plan:
         budget = ai_budget(self.repository, business, self.limits, today)
         llm = SpendLLM(self.llm, self.repository, business.id, budget, "ad_text")
@@ -485,6 +515,7 @@ class PlanService:
             "built_at": now.isoformat(),
             "month_budget_kop": business.month_budget_kop,
             "platforms": platforms,
+            "off": off,
             "niche": niche,
             "segments": segments,
             "groups": groups,
@@ -698,7 +729,8 @@ class PlanService:
         shares = allocate(business.month_budget_kop, platform_shares(platforms, self.domain))
         accounts = self.repository.accounts(business.id)
         marking = self.repository.marking(business.id)
-        blockers = launch_blockers(business, plan, accounts, marking, assets)
+        blockers = launch_blockers(business, plan, accounts, marking, assets, today, self.domain)
+        limits = launch_limits(payload["month_budget_kop"], platforms, today, self.domain)
         groups = [
             {
                 "id": group["id"],
@@ -727,6 +759,8 @@ class PlanService:
             "month_budget_kop": payload["month_budget_kop"],
             "direct_budget_kop": shares.get("direct", 0),
             "vk_budget_kop": shares.get("vk", 0),
+            "daily_kop": {platform: limit.daily_limit for platform, limit in limits.items()},
+            "off": off_view(payload.get("off", {})),
             "groups": groups,
             "generations_remaining": self.generations_remaining(
                 ai_budget(self.repository, business, self.limits, today)

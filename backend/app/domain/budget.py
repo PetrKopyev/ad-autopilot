@@ -1,10 +1,20 @@
 from calendar import monthrange
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_CEILING, Decimal
 
 from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.types import BudgetPlan, GroupLimit, GuardResult, PlatformLimit, nonnegative_int
+
+CAP_MULTIPLIER = Decimal("1.25")
+# Минимумы площадок для расчёта без сети: Директ — недельный бюджет стратегии, VK — дневной и общий лимит кампании.
+# Запуск сверяет лимиты с минимумами, которые площадка отдаёт живьём (min_budgets адаптера).
+PLATFORM_MINIMUMS = {
+    "direct": {"weekly_limit_kop": 30_000},
+    "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000},
+}
+MINIMUM_STEP_KOP = 10_000
+LOW_BUDGET_KOP = 1_000_000
 
 
 def allocate(amount: int, weights: Mapping[str, Decimal]) -> dict[str, int]:
@@ -54,7 +64,10 @@ def rebalance_platform_shares(
     cpl: Mapping[str, int | None],
     days_since_rebalance: int,
     settings: DomainSettings = DEFAULT_SETTINGS,
+    floors: Mapping[str, Decimal] | None = None,
 ) -> dict[str, Decimal]:
+    """floors — доли, ниже которых кампания площадки не наберёт её минимум (share_floors): перенос не опускает долю
+    ниже неё, а долю, которая уже ниже, не опускает дальше."""
     if any(value < 0 for value in current.values()) or sum(current.values()) != 1:
         raise ValueError("Platform shares must sum to 1")
     if len(current) != 2 or days_since_rebalance < settings.platform_rebalance_days:
@@ -66,6 +79,9 @@ def rebalance_platform_shares(
     desired = Decimal(b) / (a + b)
     step = settings.platform_share_step
     share = min(current[first] + step, max(current[first] - step, desired))
+    floors = floors or {}
+    share = max(share, min(current[first], floors.get(first, Decimal(0))))
+    share = min(share, max(current[first], 1 - floors.get(second, Decimal(0))))
     share = min(Decimal(1), max(Decimal(0), share))
     return {first: share, second: 1 - share}
 
@@ -106,6 +122,82 @@ def plan_budget(
         for platform in platforms
     )
     return BudgetPlan(allowed, spent, remaining, limits)
+
+
+def campaign_limits(daily: int, remaining: int, today: date, lifetime: int = 0) -> tuple[int, int]:
+    """Кэп накопленный; запас применяется только к новым разрешённым тратам."""
+    next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days = min(7 - today.weekday(), (next_month - today).days)
+    additional = min(remaining, daily * days)
+    return int(Decimal(daily) / CAP_MULTIPLIER), lifetime + int(Decimal(additional) / CAP_MULTIPLIER)
+
+
+def launch_limits(
+    monthly_budget: int, platforms: Sequence[str], today: date, settings: DomainSettings = DEFAULT_SETTINGS
+) -> dict[str, PlatformLimit]:
+    """Лимиты кампаний при запуске сегодня: дневной и кэп до конца недели, сумма кэпов не превышает бюджет месяца."""
+    budget = plan_budget(monthly_budget, 0, today, tuple(platforms), started_on=today, settings=settings)
+    result = {}
+    for limit in budget.limits:
+        daily, cap = campaign_limits(limit.daily_limit, limit.remaining_cap, today)
+        result[limit.platform] = PlatformLimit(limit.platform, cap, daily, cap)
+    return result
+
+
+def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int]) -> bool:
+    """Лимиты кампании на полную неделю не ниже минимумов площадки: Директ — недельный, VK — дневной и на кампанию,
+    симулятор — day/period. Неполную неделю запуска проверяет launch.below_minimum."""
+    daily = minimum.get("daily_limit_kop", minimum.get("day", 0))
+    period = minimum.get("period_cap_kop", minimum.get("period", 0))
+    weekly = minimum.get("weekly_limit_kop", 0)
+    return limit.daily_limit >= daily and limit.remaining_cap >= period and limit.daily_limit * 7 >= weekly
+
+
+def budget_minimum(
+    platforms: Sequence[str],
+    today: date,
+    settings: DomainSettings = DEFAULT_SETTINGS,
+    minimums: Mapping[str, Mapping[str, int]] = PLATFORM_MINIMUMS,
+) -> int:
+    """Наименьший бюджет месяца, кратный 100 ₽, с которым лимиты каждой площадки при запуске сегодня не ниже её
+    минимума."""
+
+    def enough(steps: int) -> bool:
+        limits = launch_limits(steps * MINIMUM_STEP_KOP, platforms, today, settings)
+        return all(meets_minimum(limits[platform], minimums.get(platform, {})) for platform in platforms)
+
+    low, high = 0, 1
+    while not enough(high):
+        low, high = high, high * 2
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (low, middle) if enough(middle) else (middle, high)
+    return high * MINIMUM_STEP_KOP
+
+
+def budget_platforms(
+    monthly_budget: int, connected: Sequence[str], today: date, settings: DomainSettings = DEFAULT_SETTINGS
+) -> tuple[list[str], dict[str, int]]:
+    """Площадки плана и бюджет месяца, с которого подключится выключенная. Доля VK, не набирающая её минимум, уходит в
+    Директ: Директ обязателен, его минимум не даёт сохранить меньший бюджет."""
+    if len(connected) < 2:
+        return list(connected), {}
+    needed = budget_minimum(connected, today, settings)
+    if monthly_budget >= needed:
+        return list(connected), {}
+    return [platform for platform in connected if platform != "vk"], {"vk": needed}
+
+
+def share_floors(total_daily: int, platforms: Sequence[str]) -> dict[str, Decimal]:
+    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум."""
+    if not total_daily:
+        return {}
+    result = {}
+    for platform in platforms:
+        minimum = PLATFORM_MINIMUMS[platform]
+        daily = max(minimum.get("daily_limit_kop", 0), -(-minimum.get("weekly_limit_kop", 0) // 7))
+        result[platform] = Decimal(daily) * CAP_MULTIPLIER / total_daily
+    return result
 
 
 def stop_margin(total_daily_limit: int, settings: DomainSettings = DEFAULT_SETTINGS) -> int:

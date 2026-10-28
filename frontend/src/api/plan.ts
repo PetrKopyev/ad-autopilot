@@ -1,6 +1,7 @@
 import { api, ApiError } from './client';
 import { mockEnabled } from './screens';
 import { setupGet } from './setup';
+import type { PlatformOff } from './setup';
 import { copy } from '../copy';
 
 export interface PlanAsset { id: number; url: string; kind: 'image' | 'upload'; alt: string; label: string; selected: boolean }
@@ -10,7 +11,7 @@ export interface PlanGroup {
 }
 export interface Plan {
   id: number; month_budget_kop: number; direct_budget_kop: number; vk_budget_kop: number;
-  groups: PlanGroup[]; generations_remaining: number; medical_level: 'none' | 'maybe' | 'required';
+  daily_kop: { direct?: number; vk?: number }; off: PlatformOff[]; groups: PlanGroup[]; generations_remaining: number; medical_level: 'none' | 'maybe' | 'required';
   marking_confirmed: boolean; ready_to_launch: boolean; blockers: string[]; launch_error?: string | null; status: 'draft' | 'launched';
 }
 export async function getPlan(signal?: AbortSignal): Promise<Plan> {
