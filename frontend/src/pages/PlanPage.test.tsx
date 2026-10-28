@@ -7,7 +7,7 @@ import { PlanPage } from './PlanPage';
 
 vi.mock('../api/plan', () => ({ getPlan: vi.fn(), launchPlan: vi.fn(), regenerateImages: vi.fn(), saveAssets: vi.fn(), uploadPhoto: vi.fn() }));
 
-afterEach(() => { cleanup(); vi.mocked(getPlan).mockReset(); vi.mocked(launchPlan).mockReset(); vi.mocked(regenerateImages).mockReset(); vi.mocked(saveAssets).mockReset(); vi.mocked(uploadPhoto).mockReset(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getPlan).mockReset(); vi.mocked(launchPlan).mockReset(); vi.mocked(regenerateImages).mockReset(); vi.mocked(saveAssets).mockReset(); vi.mocked(uploadPhoto).mockReset(); });
 
 const interrupted = 'Запуск рекламы не завершился. Всё, что он успел создать на площадках, мы остановили: деньги не тратятся.';
 function plan(launch_error: string | null): Plan {
@@ -202,9 +202,12 @@ it('без причин плашки перед запуском нет', async 
 const plain = (text: string) => (_: string, element: Element | null) => element?.tagName === 'P' && element.textContent?.replace(/ /g, ' ') === text;
 
 it('бюджет показан суммой на площадку, а выключенная из-за бюджета площадка — с суммой, с которой она подключится', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-28T12:00:00+03:00'));
   vi.mocked(getPlan).mockResolvedValue({ ...plan(null), off: [{ platform: 'vk', from_kop: 4850000, min_daily_kop: 30000 }] });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
-  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, около 712 ₽ в день.'))).toBeTruthy();
+  // В день — бюджет площадки на дни месяца (30 000 ₽ / 31), а не дневной лимит кампании из daily_kop.
+  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, в среднем 968 ₽ в день.'))).toBeTruthy();
   expect(screen.getByText(plain('Площадка ВКонтакте выключена из-за бюджета: ей нужно минимум 300 ₽ в день, это бюджет от 48 500 ₽ в месяц. '
     + 'Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и площадка ВКонтакте появится в новом плане до запуска.'))).toBeTruthy();
   expect(screen.queryByText(/Дневной расход/)).toBeNull();

@@ -171,6 +171,7 @@ def budget_view(monthly_budget: int, connected: list[str], today: date, domain: 
     limits = launch_limits(monthly_budget, platforms, today, domain)
     return {
         "minimum_kop": budget_minimum(("direct",), domain),
+        "month_kop": allocate(monthly_budget, platform_shares(platforms, domain)),
         "daily_kop": {platform: limits[platform].daily_limit for platform in platforms},
         "off": off_view(off),
     }

@@ -5,6 +5,7 @@ import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
   getMe, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
 import type { Account, AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
+import { dailyAverage } from '../api/period';
 import { getBusiness } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { formatMoney } from '../components/Money';
@@ -355,10 +356,10 @@ const connectedAs = ({ platform, external_login }: Account) => platform === 'vk'
   ? copy.setup.accounts.vkCabinet(external_login) : copy.setup.accounts.connected(external_login);
 
 function BudgetNotes({ hint, amount }: { hint: BudgetHint; amount: number }) {
-  const { direct, vk } = hint.daily_kop;
+  const { direct, vk } = hint.month_kop;
   if (amount < hint.minimum_kop) return <div className="notice" role="alert"><p>{copy.setup.business.budgetMinimum(formatMoney(hint.minimum_kop))}</p></div>;
   return <>
-    {direct !== undefined && <p>{copy.setup.business.budgetDaily(formatMoney(direct), vk === undefined ? undefined : formatMoney(vk))}</p>}
+    {direct !== undefined && <p>{copy.setup.business.budgetDaily(formatMoney(dailyAverage(direct)), vk === undefined ? undefined : formatMoney(dailyAverage(vk)))}</p>}
     {hint.off.map((item) => <p key={item.platform}>{copy.setup.business.budgetVkOff(formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>)}
   </>;
 }

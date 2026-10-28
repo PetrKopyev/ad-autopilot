@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
 import { formatMoney } from '../components/Money';
+import { dailyAverage } from '../api/period';
 import { getPlan, launchPlan, regenerateImages, saveAssets, uploadPhoto } from '../api/plan';
 import type { Plan } from '../api/plan';
 import { useResource } from '../api/useResource';
@@ -83,8 +84,8 @@ export function PlanPage() {
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {plan && <>
       <p>{copy.plan.summary(formatMoney(plan.month_budget_kop))}</p>
-      {(['direct', 'vk'] as const).map((platform) => { const month = platform === 'direct' ? plan.direct_budget_kop : plan.vk_budget_kop; const daily = plan.daily_kop[platform]; return month > 0 && <p key={platform}>
-        {daily === undefined ? copy.plan.platformMonth(copy.setup.accounts[platform], formatMoney(month)) : copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(month), formatMoney(daily))}
+      {(['direct', 'vk'] as const).map((platform) => { const month = platform === 'direct' ? plan.direct_budget_kop : plan.vk_budget_kop; return month > 0 && <p key={platform}>
+        {plan.daily_kop[platform] === undefined ? copy.plan.platformMonth(copy.setup.accounts[platform], formatMoney(month)) : copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(month), formatMoney(dailyAverage(month)))}
       </p>; })}
       {plan.off.map((item) => <div key={item.platform} className="notice" role="status">
         <p>{(plan.status === 'launched' ? copy.plan.platformOffLaunched : copy.plan.platformOff)(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>

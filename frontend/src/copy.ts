@@ -146,8 +146,8 @@ export const copy = {
       budget: 'Сколько готовы тратить на рекламу в месяц, ₽',
       budgetHint: 'Этот потолок мы не превысим. Рекламный кабинет вы пополняете сами.',
       budgetDaily: (direct: string, vk?: string) => vk
-        ? `На Директ придётся около ${direct} в день, на ВКонтакте — около ${vk}.`
-        : `На Директ придётся около ${direct} в день.`,
+        ? `На Директ придётся в среднем ${direct} в день, на ВКонтакте — ${vk}.`
+        : `На Директ придётся в среднем ${direct} в день.`,
       budgetVkOff: (from: string, daily: string) => `Площадка ВКонтакте подключится от ${from} в месяц: ей нужно минимум ${daily} в день, мы считаем с запасом.`,
       budgetMinimum: (minimum: string) => `Минимальный бюджет — ${minimum} в месяц. Яндекс Директ требует не меньше 300 ₽ на кампанию в неделю, а мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца.`,
       visitPrice: 'Сколько в среднем стоит визит клиента, ₽',
@@ -201,7 +201,7 @@ export const copy = {
   plan: {
     title: 'Ваш план',
     summary: (total: string) => `Мы подготовили рекламу на ${total} в месяц.`,
-    platformBudget: (platform: string, month: string, daily: string) => `${platform} — ${month} в месяц, около ${daily} в день.`,
+    platformBudget: (platform: string, month: string, daily: string) => `${platform} — ${month} в месяц, в среднем ${daily} в день.`,
     platformMonth: (platform: string, month: string) => `${platform} — ${month} в месяц.`,
     platformOff: (platform: string, from: string, daily: string) => `Площадка ${platform} выключена из-за бюджета: ей нужно минимум ${daily} в день, это бюджет от ${from} в месяц. Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и площадка ${platform} появится в новом плане до запуска.`,
     platformOffLaunched: (platform: string, from: string, daily: string) => `Площадка ${platform} выключена из-за бюджета: ей нужно минимум ${daily} в день, это бюджет от ${from} в месяц. Весь бюджет идёт в Яндекс Директ.`,

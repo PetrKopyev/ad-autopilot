@@ -88,3 +88,11 @@ it('периоды экранов не длиннее 31 дня в любой д
     expect(length(lastDays(14, isoDate(day)))).toBe(14);
   }
 });
+
+it('среднее за день считается по дням месяца по Москве, а не по часам браузера', async () => {
+  const { dailyAverage } = await import('./period');
+  // 30 сентября 22:00 UTC — в Москве уже 1 октября: 31 день, а не 30.
+  expect(dailyAverage(3_100_000, new Date('2026-09-30T22:00:00Z'))).toBe(100_000);
+  expect(dailyAverage(3_000_000, new Date('2026-09-30T20:00:00Z'))).toBe(100_000);
+  expect(dailyAverage(2_800_000, new Date('2026-02-10T12:00:00+03:00'))).toBe(100_000);
+});

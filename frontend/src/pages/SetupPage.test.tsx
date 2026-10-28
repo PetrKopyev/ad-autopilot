@@ -24,7 +24,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(answers[path]), { status: 200, headers: { 'Content-Type': 'application/json' } });
   });
 });
-afterEach(() => { cleanup(); directStatus = 'ok'; vi.restoreAllMocks(); vi.unstubAllGlobals(); fetchMock.mockReset(); sessionStorage.clear(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); directStatus = 'ok'; vi.restoreAllMocks(); vi.unstubAllGlobals(); fetchMock.mockReset(); sessionStorage.clear(); });
 
 function Probe() {
   return <><p data-testid="path">{useLocation().pathname}</p><p data-testid="business">{String(useSession().data?.has_business)}</p></>;
@@ -395,10 +395,13 @@ const plain = (text: string) => (_: string, element: Element | null) => element?
 const vkOff = [{ platform: 'vk', from_kop: 4850000, min_daily_kop: 30000 }];
 
 it('под бюджетом — расчёт сервера: сколько придётся на Директ в день и с какого бюджета подключится ВКонтакте', async () => {
-  budgetHint({ minimum_kop: 1270000, daily_kop: { direct: 71225 }, off: vkOff });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-28T12:00:00+03:00'));
+  budgetHint({ minimum_kop: 1270000, month_kop: { direct: 3000000 }, daily_kop: { direct: 71225 }, off: vkOff });
   renderStep(1);
   fireEvent.change(await screen.findByLabelText(copy.setup.business.budget), { target: { value: '30000' } });
-  expect(await screen.findByText(plain('На Директ придётся около 712 ₽ в день.'))).toBeTruthy();
+  // В день — доля площадки на дни месяца (30 000 ₽ / 31), а не дневной лимит кампании из daily_kop.
+  expect(await screen.findByText(plain('На Директ придётся в среднем 968 ₽ в день.'))).toBeTruthy();
   expect(screen.getByText(plain('Площадка ВКонтакте подключится от 48 500 ₽ в месяц: ей нужно минимум 300 ₽ в день, мы считаем с запасом.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(calls()).toContain('GET /api/business/budget-hint');
@@ -406,14 +409,16 @@ it('под бюджетом — расчёт сервера: сколько пр
 });
 
 it('бюджет ниже минимума называет минимум и почему он такой, бюджет от минимума — только расчёт', async () => {
-  budgetHint({ minimum_kop: 1270000, daily_kop: { direct: 30100 }, off: vkOff });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-28T12:00:00+03:00'));
+  budgetHint({ minimum_kop: 1270000, month_kop: { direct: 1270000 }, daily_kop: { direct: 30100 }, off: vkOff });
   renderStep(1);
   const input = await screen.findByLabelText(copy.setup.business.budget);
   fireEvent.change(input, { target: { value: '12600' } });
   expect((await screen.findByRole('alert')).textContent?.replace(/ /g, ' ')).toBe('Минимальный бюджет — 12 700 ₽ в месяц. '
     + 'Яндекс Директ требует не меньше 300 ₽ на кампанию в неделю, а мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца.');
   fireEvent.change(input, { target: { value: '12700' } });
-  expect(await screen.findByText(plain('На Директ придётся около 301 ₽ в день.'))).toBeTruthy();
+  expect(await screen.findByText(plain('На Директ придётся в среднем 410 ₽ в день.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByRole('status')).toBeNull();
 });

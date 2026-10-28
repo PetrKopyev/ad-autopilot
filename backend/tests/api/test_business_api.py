@@ -34,12 +34,23 @@ def test_budget_below_direct_minimum_is_rejected_with_the_minimum(api) -> None:
         (
             "month_budget_kop=3000000&vk=true",
             {
+                "month_kop": {"direct": 3_000_000},
                 "daily_kop": {"direct": 71_225},
                 "off": [{"platform": "vk", "from_kop": 4_850_000, "min_daily_kop": 30_000}],
             },
         ),
-        ("month_budget_kop=3000000&vk=false", {"daily_kop": {"direct": 71_225}, "off": []}),
-        ("month_budget_kop=4850000&vk=true", {"daily_kop": {"direct": 80_604, "vk": 34_544}, "off": []}),
+        (
+            "month_budget_kop=3000000&vk=false",
+            {"month_kop": {"direct": 3_000_000}, "daily_kop": {"direct": 71_225}, "off": []},
+        ),
+        (
+            "month_budget_kop=4850000&vk=true",
+            {
+                "month_kop": {"direct": 3_395_000, "vk": 1_455_000},
+                "daily_kop": {"direct": 80_604, "vk": 34_544},
+                "off": [],
+            },
+        ),
     ],
 )
 def test_budget_hint_uses_plan_rules(api, query, expected) -> None:
