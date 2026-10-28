@@ -14,7 +14,7 @@ from app.db.models import (
     StatsDaily,
 )
 from app.db.query import Window
-from app.domain.budget import budget_minimum, daily_minimum, stop_margin
+from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum, daily_minimum, stop_margin
 from app.domain.explain import PLURALS, explain_experiment, plural, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
@@ -128,9 +128,10 @@ class ScreensService:
                 raise ChangeConflict("Площадки ещё подтверждают остановку. Повторите попытку после проверки.")
             await rebalance_budget(self.worker, business, force=True)
             stopped = set(meta.get("kill_switch_campaigns", []))
+            held = set(self.worker.metadata(business).get("below_minimum", []))
             active = False
             for campaign in self.worker.current_campaigns(business):
-                if campaign.owner_paused or not campaign.daily_limit_kop:
+                if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
                     continue
                 last = self.repository.last_status_change(
                     business.id, campaign.platform, "campaign", campaign.external_id
@@ -395,7 +396,7 @@ class ScreensService:
                 )
             )
             try:
-                await rebalance_budget(self.worker, business)
+                minimums = await rebalance_budget(self.worker, business)
             except (ChangeConflict, PlatformError):
                 if amount < old:
                     await stop_all(business, worker=self.worker, budget_stop=True, reason_code="BUDGET_UPDATE_FAILED")
@@ -407,9 +408,9 @@ class ScreensService:
             )
             warning = None
             if vk_held and amount < budget_minimum(("direct", "vk"), get_domain_settings()):
-                minimum = daily_minimum(await self.worker.resolve_adapter(business.id, "vk").min_budgets())
+                minimum = daily_minimum(minimums.get("vk", PLATFORM_MINIMUMS["vk"]))
                 warning = (
-                    f"Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума {rubles(minimum)} ₽ "
+                    f"Площадка ВКонтакте остановлена: при таком бюджете ей не хватает минимума {rubles(minimum)} ₽ "
                     "в день."
                 )
         return self.business(business) | {"warning": warning}

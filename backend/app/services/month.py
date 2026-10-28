@@ -47,8 +47,9 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         worker.repository.save(business)
     # Новые кэпы выставляются до возобновления кампаний.
     await rebalance_budget(worker, business)
+    held = set(worker.metadata(business).get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
-        if campaign.owner_paused or not campaign.daily_limit_kop:
+        if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
             continue
         states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
         state = states[campaign.external_id]

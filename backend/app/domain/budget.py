@@ -201,11 +201,15 @@ def daily_minimum(minimum: Mapping[str, int]) -> int:
 
 
 def share_floors(total_daily: int, minimums: Mapping[str, Mapping[str, int]]) -> dict[str, Decimal]:
-    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум."""
+    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум. Дневному минимуму VK нужен запас
+    MINIMUM_MARGIN, как при возобновлении: иначе доля у порога держала бы кампанию на паузе."""
     if not total_daily:
         return {}
     return {
-        platform: Decimal(daily_minimum(minimum)) * CAP_MULTIPLIER / total_daily
+        platform: Decimal(daily_minimum(minimum))
+        * CAP_MULTIPLIER
+        * (MINIMUM_MARGIN if "daily_limit_kop" in minimum else 1)
+        / total_daily
         for platform, minimum in minimums.items()
     }
 

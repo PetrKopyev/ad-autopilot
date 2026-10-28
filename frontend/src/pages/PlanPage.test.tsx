@@ -218,3 +218,11 @@ it('у запущенного плана нет оценки дневного л
     + 'Весь бюджет идёт в Яндекс Директ.'))).toBeTruthy();
   expect(screen.queryByText(/в день\./)).toBeNull();
 });
+
+it('у запущенного плана с несколькими площадками нет нулевых лимитов', async () => {
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), status: 'launched', direct_budget_kop: 2000000, vk_budget_kop: 1000000, daily_kop: {} });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText(plain('Яндекс Директ — 20 000 ₽ в месяц.'))).toBeTruthy();
+  expect(screen.getByText(plain('ВКонтакте — 10 000 ₽ в месяц.'))).toBeTruthy();
+  expect(screen.queryByText(/около|в день/)).toBeNull();
+});

@@ -7,7 +7,7 @@ import pytest
 from integration.harness import BUDGET_KOP, make_world
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, WorkerRun
-from app.domain.budget import campaign_limits, plan_budget
+from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import read_spend, stop_all
@@ -471,4 +471,100 @@ async def test_vk_near_its_minimum_pauses_once_and_resumes_only_with_margin():
     assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
     await rebalance_next_day(world, Decimal("0.86"))
     assert len(world.changes(reason_code="BUDGET_REBALANCE", kind="resume")) == 1
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+
+
+async def test_vk_held_by_minimum_waits_through_new_month_and_resumes_only_with_new_limits():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    held_limit = world.campaign.daily_limit_kop
+    worker = world.worker()
+    await stop_all(world.business, worker=worker, budget_stop=True, reason_code="BUDGET_STOP")
+    assert world.business.status == "budget_stop"
+    report_pauses_as_owner(world.adapter)
+    world.clock.advance(days=32)
+    await worker.run("month_rollover", 1)
+    assert not world.changes(reason_code="BUDGET_RESUME")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+    await rebalance_next_day(world, 30_000)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    state = world.adapter._states[world.refs.campaign_id]
+    assert state.status == "active" and state.daily_limit_kop == world.campaign.daily_limit_kop
+    assert world.campaign.daily_limit_kop != held_limit and world.campaign.daily_limit_kop >= 30_000 * MINIMUM_MARGIN
+    assert not world.changes(reason_code="BUDGET_RESUME")
+
+
+async def test_rebalance_falls_back_to_known_minimums_when_platform_dictionary_fails(caplog):
+    world = await make_world()
+    world.campaign.platform = "direct"
+    world.adapter.min_budgets = AsyncMock(side_effect=PlatformError("Справочник недоступен", status_code=503))
+    world.clock.advance(days=2)
+    world.business.month_budget_kop -= 100_000
+    await rebalance_budget(world.worker(), world.business)
+    (change,) = world.changes(reason_code="BUDGET_REBALANCE")
+    assert change.kind == "budget" and change.status == "applied"
+    assert world.campaign.daily_limit_kop == world.adapter._states[world.refs.campaign_id].daily_limit_kop
+    assert "Минимумы площадки direct не прочитаны" in caplog.text
+
+
+@pytest.mark.parametrize("owner", ["interface", "platform"])
+async def test_vk_held_by_minimum_keeps_owner_pause(owner):
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    report_pauses_as_owner(world.adapter)
+    if owner == "interface":
+        world.campaign.owner_paused = True
+    else:
+        world.repository.save(
+            ChangeLog(
+                business_id=world.business.id,
+                actor="external",
+                kind="pause",
+                platform=world.campaign.platform,
+                entity_type="campaign",
+                entity_id=world.refs.campaign_id,
+                operations=[
+                    asdict(
+                        Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_owner")
+                    )
+                ],
+                reason_code="EXTERNAL_CHANGE",
+                reason_params={"object": "кампании"},
+                reason_text="Настройки кампании изменились в кабинете площадки.",
+                evidence={},
+                status="applied",
+                created_at=world.clock.now,
+            )
+        )
+    await rebalance_next_day(world, 30_000)
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert world.campaign.status == "paused_auto"
+
+
+async def test_vk_held_by_minimum_resumes_after_owner_stop_was_lifted():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    report_pauses_as_owner(world.adapter)
+    world.repository.save(
+        ChangeLog(
+            business_id=world.business.id,
+            actor="owner",
+            kind="pause",
+            platform=world.campaign.platform,
+            entity_type="campaign",
+            entity_id=world.refs.campaign_id,
+            operations=[
+                asdict(Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_owner"))
+            ],
+            reason_code="OWNER_STOP",
+            reason_text="Остановили рекламу на всех площадках.",
+            evidence={},
+            status="applied",
+            created_at=world.clock.now,
+        )
+    )
+    await rebalance_next_day(world, 30_000)
+    assert world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
     assert world.adapter._states[world.refs.campaign_id].status == "active"

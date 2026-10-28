@@ -267,7 +267,7 @@ def test_minimum_is_inclusive_checks_a_full_week_and_margin_only_for_daily(limit
 
 def test_share_floors_keep_each_campaign_at_its_live_minimum():
     minimums = {"direct": DIRECT_MINIMUM, "vk": VK_MINIMUM}
-    assert share_floors(100_000, minimums) == {"direct": Decimal("0.053575"), "vk": Decimal("0.375")}
+    assert share_floors(100_000, minimums) == {"direct": Decimal("0.053575"), "vk": Decimal("0.43125")}
     assert share_floors(100_000, {"direct": {"weekly_limit_kop": 70_000}})["direct"] == Decimal("0.125")
     assert share_floors(100_000, {"direct": {"day": 0, "period": 0}}) == {"direct": Decimal(0)}
     assert share_floors(0, minimums) == {}

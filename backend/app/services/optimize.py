@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -10,6 +11,7 @@ from app.db.query import Window
 from app.domain.budget import (
     CAP_MULTIPLIER,
     MINIMUM_MARGIN,
+    PLATFORM_MINIMUMS,
     allocate,
     campaign_limits,
     meets_minimum,
@@ -42,6 +44,8 @@ from app.worker.clock import MOSCOW, today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
+
+logger = logging.getLogger(__name__)
 
 
 async def snapshot(
@@ -277,12 +281,20 @@ async def below_platform_minimum(
     return minimum if weekly < minimum else None
 
 
-async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> None:
+async def platform_minimums(worker: Worker, business: Business, platform: str) -> dict[str, int]:
+    try:
+        return await worker.resolve_adapter(business.id, platform).min_budgets()
+    except PlatformError:
+        logger.warning("Минимумы площадки %s не прочитаны, берём запасные", platform, exc_info=True)
+        return dict(PLATFORM_MINIMUMS.get(platform, {}))
+
+
+async def rebalance_budget(worker: Worker, business: Business, *, force: bool = False) -> dict[str, dict[str, int]]:
     from app.config import get_domain_settings
 
     domain = get_domain_settings()
     if not force and (business.status != "running" or worker.metadata(business).get("kill_switch")):
-        return
+        return {}
     day = today(worker.clock)
     month = day.replace(day=1)
     meta = worker.metadata(business)
@@ -293,7 +305,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     campaigns = worker.current_campaigns(business)
     platforms = sorted({campaign.platform for campaign in campaigns})
     if not platforms:
-        return
+        return {}
     shares = {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
     shares = shares if set(shares) == set(platforms) else platform_shares(platforms, domain)
     ads, groups = await snapshot(worker, business, include_paused_campaigns=True)
@@ -321,7 +333,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             settings=domain,
         )
 
-    minimums = {platform: await worker.resolve_adapter(business.id, platform).min_budgets() for platform in platforms}
+    minimums = {platform: await platform_minimums(worker, business, platform) for platform in platforms}
     # Перенос между площадками не опускает кампанию ниже минимума площадки.
     floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), minimums)
     shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
@@ -391,10 +403,17 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                         campaign.daily_limit_kop = 0
                         worker.repository.save(campaign)
                 continue
+            last = worker.repository.last_status_change(
+                business.id, campaign.platform, "campaign", campaign.external_id
+            )
             resume = (
                 campaign.id in held
                 and campaign.status == "paused_auto"
+                and not campaign.owner_paused
                 and state.status in {"paused_auto", "paused_owner"}
+                and last is not None
+                and last.kind == "pause"
+                and (last.actor == "system" or last.reason_code == "OWNER_STOP" and not meta.get("kill_switch"))
             )
             if (
                 resume
@@ -456,6 +475,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             group_limits=group_limits,
             below_minimum=sorted(held),
         )
+    return minimums
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:

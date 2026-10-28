@@ -474,7 +474,7 @@ def test_budget_below_vk_minimum_is_saved_with_warning_and_vk_resumes_after_rais
     response = client.put("/api/business/budget", json={"month_budget_kop": 3_000_000})
     assert response.status_code == 200, response.text
     assert response.json()["warning"] == (
-        "Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума 1 000 ₽ в день."
+        "Площадка ВКонтакте остановлена: при таком бюджете ей не хватает минимума 1 000 ₽ в день."
     )
     assert world.business.month_budget_kop == 3_000_000
     assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"

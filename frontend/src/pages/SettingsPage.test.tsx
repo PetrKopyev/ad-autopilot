@@ -70,7 +70,7 @@ it('без сохранённой маркировки сразу показыв
 });
 
 it('бюджет ниже порога ВКонтакте сохраняется, а предупреждение сервера видно под формой', async () => {
-  const warning = 'Площадка ВКонтакте остановится: при таком бюджете ей не хватает минимума 300 ₽ в день.';
+  const warning = 'Площадка ВКонтакте остановлена: при таком бюджете ей не хватает минимума 300 ₽ в день.';
   vi.mocked(saveBudget).mockResolvedValue(warning);
   vi.mocked(saveBusinessSettings).mockResolvedValue();
   vi.mocked(getBusiness).mockResolvedValue(business);
