@@ -57,7 +57,7 @@ async def test_business_plan_launch_worker_and_rollback_on_postgres(db_session, 
         [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
     )
     onboarding = OnboardingService(repository, llm, lambda business_id: metrica, LIMITS, reader=reader)
-    created = onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None)
+    created = onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None, TODAY)
     business = db.get(Business, created["id"])
     repository.add(PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t"))
     await onboard(SimpleNamespace(onboarding=onboarding, business=business), confirmed={"direct": True})
@@ -154,7 +154,7 @@ async def test_abandoned_launch_is_stopped_by_worker_on_postgres(db_session, tmp
         [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
     )
     onboarding = OnboardingService(repository, llm, lambda business_id: metrica, LIMITS, reader=reader)
-    business = db.get(Business, onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None)["id"])
+    business = db.get(Business, onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None, TODAY)["id"])
     repository.add(PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t"))
     await onboard(SimpleNamespace(onboarding=onboarding, business=business), confirmed={"direct": True})
     plans = PlanService(

@@ -101,7 +101,7 @@ export function mockHistory() {
 }
 
 // Onboarding and running screens share the business budget and account state.
-import type { Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
+import type { BudgetHint, Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
 import type { Plan, PlanAsset } from './plan';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
 import type { ClientQuestion, ClientQuestions } from './clients';
@@ -172,16 +172,28 @@ function mockAsset(id: number, selected = false): PlanAsset {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="600" height="400" fill="${color}"/><circle cx="180" cy="180" r="110" fill="#fff" opacity=".4"/><path d="M320 340Q200 200 370 60Q520 190 420 340" fill="#245e4c" opacity=".5"/></svg>`;
   return { id, url: `data:image/svg+xml,${encodeURIComponent(svg)}`, kind: 'image', alt: copy.launchFlow.mockImage(id), label: copy.launchFlow.mockImage(id), selected };
 }
+// Пороги демо-данных близки к серверным для месяца в 31 день; настоящие считает сервер.
+const mockVkFrom = 4_220_000;
+function mockPlatformDaily(amount: number, vk: boolean) {
+  const daily = amount * 0.92 / 31 / 1.25;
+  return vk ? { direct: Math.floor(daily * 0.7), vk: Math.floor(daily * 0.3) } : { direct: Math.floor(daily) };
+}
+export function mockBudgetHint(amount: number, vk: boolean): BudgetHint {
+  const on = vk && amount >= mockVkFrom;
+  return { minimum_kop: 190_000, low_kop: 1_000_000, daily_kop: mockPlatformDaily(amount, on),
+    off: vk && !on ? [{ platform: 'vk', from_kop: mockVkFrom, min_daily_kop: 30_000 }] : [] };
+}
 export function mockSetupPlan(): Plan {
   const direct = setupMock.me.accounts.some((item) => item.platform === 'direct' && item.status === 'ok');
-  const vk = setupMock.me.accounts.some((item) => item.platform === 'vk' && item.status === 'ok');
   const budget = mockMonthBudget();
-  const vkBudget = vk ? Math.floor(budget / 2) : 0;
+  const hint = mockBudgetHint(budget, setupMock.me.accounts.some((item) => item.platform === 'vk' && item.status === 'ok'));
+  const vk = hint.daily_kop.vk !== undefined;
+  const vkBudget = vk ? Math.floor(budget * 0.3) : 0;
   const marking = !!setupMock.marking?.direct && (!vk || !!setupMock.marking?.vk);
   const ready = !!(setupMock.business && direct && setupMock.description && setupMock.counter && setupMock.goals?.length && marking);
   if (setupMock.plan?.month_budget_kop !== budget) setupMock.plan = undefined;
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
-    vk_budget_kop: vkBudget, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
+    vk_budget_kop: vkBudget, daily_kop: hint.daily_kop, off: hint.off, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
     marking_confirmed: marking, ready_to_launch: ready, status: 'draft',
     groups: (vk ? ['direct', 'vk'] as const : ['direct'] as const).map((platform, index) => ({
       id: index + 1, name: copy.plan.groupExample, platform, audience: copy.launchFlow.mockAudience,

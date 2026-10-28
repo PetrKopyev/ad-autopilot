@@ -126,6 +126,12 @@ export const copy = {
       city: 'Город',
       budget: 'Сколько готовы тратить на рекламу в месяц, ₽',
       budgetHint: 'Этот потолок мы не превысим. Рекламный кабинет вы пополняете сами.',
+      budgetDaily: (direct: string, vk?: string) => vk
+        ? `На Директ придётся около ${direct} в день, на ВКонтакте — около ${vk}.`
+        : `На Директ придётся около ${direct} в день.`,
+      budgetVkOff: (from: string, daily: string) => `ВКонтакте подключится от ${from} в месяц: ей нужно минимум ${daily} в день.`,
+      budgetMinimum: (minimum: string) => `Минимальный бюджет — ${minimum} в месяц: с меньшим Яндекс Директ не запустит рекламу.`,
+      budgetLow: (low: string) => `Бюджет меньше ${low} в месяц сохранить можно, но автопилоту будет мало данных: реклама будет работать, а улучшать её он сможет реже.`,
       visitPrice: 'Сколько в среднем стоит визит клиента, ₽',
       visitPriceHint: 'Необязательно — чтобы понимать, сколько стоит приводить клиента.',
     },
@@ -174,12 +180,13 @@ export const copy = {
   },
   plan: {
     title: 'Ваш план',
-    summary: (total: string, direct: string, vk: string) => `Мы подготовили рекламу на ${total} в месяц: Директ — ${direct}, ВКонтакте — ${vk}.`,
+    summary: (total: string) => `Мы подготовили рекламу на ${total} в месяц.`,
+    platformBudget: (platform: string, month: string, daily: string) => `${platform} — ${month} в месяц, около ${daily} в день.`,
+    platformOff: (platform: string, from: string, daily: string) => `${platform} выключен из-за бюджета: площадке нужно минимум ${daily} в день, это бюджет от ${from} в месяц. Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и ${platform} появится в новом плане до запуска.`,
     groupExample: 'Для тех, кто ищет маникюр рядом',
     images: 'Картинки',
     texts: 'Тексты объявлений',
     audience: 'Кому покажем рекламу',
-    dailySpend: 'Дневной расход',
     generate: 'Попросить ещё варианты',
     generating: 'Рисуем картинки…',
     uploading: 'Загружаем фото…',

@@ -12,7 +12,7 @@ afterEach(() => { cleanup(); vi.mocked(getPlan).mockReset(); vi.mocked(launchPla
 const interrupted = 'Запуск рекламы не завершился. Всё, что он успел создать на площадках, мы остановили: деньги не тратятся.';
 function plan(launch_error: string | null): Plan {
   return {
-    id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, generations_remaining: 2, medical_level: 'none',
+    id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, daily_kop: { direct: 71225 }, off: [], generations_remaining: 2, medical_level: 'none',
     marking_confirmed: true, ready_to_launch: true, launch_error, status: 'draft',
     groups: [{ id: 1, name: 'Маникюр', platform: 'direct', audience: 'Рядом', daily_limit_kop: 100000, ads: [{ title: 'Маникюр', text: 'Запись онлайн' }],
       assets: [{ id: 1, url: '/api/plan/assets/1/file', kind: 'image', alt: 'Френч с золотой фольгой', label: 'Френч с золотой фольгой', selected: true }] }],
@@ -182,4 +182,15 @@ it('картинку можно скачать, и ссылка не перек�
   link.addEventListener('click', (event) => event.preventDefault());
   fireEvent.click(link);
   expect(screen.getByRole('checkbox')).toHaveProperty('checked', true);
+});
+
+const plain = (text: string) => (_: string, element: Element | null) => element?.tagName === 'P' && element.textContent?.replace(/ /g, ' ') === text;
+
+it('бюджет показан суммой на площадку, а выключенная из-за бюджета площадка — с суммой, с которой она подключится', async () => {
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), off: [{ platform: 'vk', from_kop: 4220000, min_daily_kop: 30000 }] });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, около 712 ₽ в день.'))).toBeTruthy();
+  expect(screen.getByText(plain('ВКонтакте выключен из-за бюджета: площадке нужно минимум 300 ₽ в день, это бюджет от 42 200 ₽ в месяц. '
+    + 'Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и ВКонтакте появится в новом плане до запуска.'))).toBeTruthy();
+  expect(screen.queryByText(/Дневной расход/)).toBeNull();
 });

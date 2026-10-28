@@ -35,8 +35,8 @@ API_FORMAT = {
     "title_limit": 25,
     "text_limit": 90,
     "statuses": {"active": "active", "paused_owner": "blocked", "paused_auto": "blocked", "archived": "deleted"},
-    "min_daily_limit_kop": 10000,
-    "min_period_cap_kop": 10000,
+    "min_daily_limit_kop": 30000,
+    "min_period_cap_kop": 30000,
     "page": 250,
 }
 # Регионы VK со своими id (не Яндекса): GET /api/v2/regions.json, см. https://ads.vk.com/doc/api/object/Region

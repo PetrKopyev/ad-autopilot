@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.db.models import AdGroup, BudgetLedger, Campaign, WorkerRun
-from app.domain.budget import plan_budget
+from app.domain.budget import campaign_limits, plan_budget
 from app.domain.types import GroupSnapshot
 from app.platforms.base import PlatformError
 from app.platforms.fake import FakeAdapter
@@ -15,7 +15,6 @@ from app.services.budget_guard import budget_guard, stop_all
 from app.services.changes import ChangeConflict
 from app.services.month import month_rollover
 from app.services.optimize import experiments_tick, rebalance_budget, snapshot
-from app.services.plan import campaign_limits
 from app.services.registry import AccountInfo, AdapterRegistry
 from app.services.screens import ScreensService
 from app.worker.clock import today

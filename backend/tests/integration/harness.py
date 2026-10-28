@@ -155,7 +155,7 @@ async def make_world(
         status="approved",
         payload={
             "platforms": ["direct"],
-            "inputs_hash": inputs_hash(business, ["direct"]),
+            "inputs_hash": inputs_hash(business, ["direct"], {}),
             "groups": [
                 {
                     "id": group.id,

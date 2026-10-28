@@ -345,7 +345,7 @@ def test_launch_returns_connection_while_platform_uploads_and_creates(small_pool
         user_id = db.get(Business, asset.business_id).user_id
         db.delete(asset)
         db.commit()
-        created = onboarding.create_business(user_id, SITE, "Самара", BUDGET_KOP, None)
+        created = onboarding.create_business(user_id, SITE, "Самара", BUDGET_KOP, None, TODAY)
         business = db.get(Business, created["id"])
         repository.add(
             PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t")

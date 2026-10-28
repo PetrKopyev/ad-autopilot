@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { Button, Card, ErrorBanner, Stepper } from '../components';
 import { copy } from '../copy';
-import { checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getCounters, getGoals, getMe,
+import { checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCounters, getGoals, getMe,
   rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
-import type { Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
+import type { BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { getBusiness } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
+import { formatMoney } from '../components/Money';
 import { useSession } from '../api/session';
 import { NotFoundPage } from './PlaceholderPage';
 import { MedicalNotice, SiteInstructions, StopNotice } from './SetupShared';
@@ -50,6 +51,7 @@ export function SetupPage() {
   const [budget, setBudget] = useState(draft.business ? String(draft.business.month_budget_kop / 100) : '');
   const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(draft.business.avg_check_kop / 100) : '');
   const [noSite, setNoSite] = useState(false);
+  const [budgetHint, setBudgetHint] = useState<BudgetHint>();
   const session = useSession();
   const me = session.data;
   const [counters, setCounters] = useState<Counter[]>([]);
@@ -122,6 +124,17 @@ export function SetupPage() {
     });
     return () => controller.abort();
   }, [userId, attempt]);
+  // Расчёт к бюджету — с сервера, по тем же правилам, что план и запуск; пока сумму вводят, запрос ждёт паузы.
+  const hintAmount = current === 1 ? rublesToKopecks(budget) : null;
+  useEffect(() => {
+    setBudgetHint(undefined);
+    if (!hintAmount) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      getBudgetHint(hintAmount, !!vk, controller.signal).then((value) => { if (!controller.signal.aborted) setBudgetHint(value); }).catch(() => {});
+    }, 300);
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [hintAmount, vk]);
   useEffect(() => {
     if (restoring) return;
     try { sessionStorage.setItem(storageKey, JSON.stringify(draft)); } catch { /* Keep the current form usable. */ }
@@ -236,7 +249,10 @@ export function SetupPage() {
           <label className="field">{copy.setup.business.website}<input type="url" required value={website} onChange={(event) => setWebsite(event.target.value)} /></label>
           <label className="field">{copy.setup.business.city}<input required value={city} onChange={(event) => setCity(event.target.value)} /></label>
           <label className="field">{copy.setup.business.budget}<input required inputMode="decimal" value={budget} aria-describedby="budget-hint" onChange={(event) => setBudget(event.target.value)} /></label>
-          <p id="budget-hint" className="muted">{copy.setup.business.budgetHint}</p>
+          <div id="budget-hint" className="page-stack">
+            <p className="muted">{copy.setup.business.budgetHint}</p>
+            {budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}
+          </div>
           <label className="field">{copy.setup.business.visitPrice}<input inputMode="decimal" value={average} aria-describedby="average-hint" onChange={(event) => setAverage(event.target.value)} /></label>
           <p id="average-hint" className="muted">{copy.setup.business.visitPriceHint}</p>
         </>}
@@ -299,4 +315,14 @@ export function SetupPage() {
       {current === 4 && !draft.approved && <p className="muted" id="approval-help">{copy.launchFlow.approvalHint}</p>}
     </form></Card>
   </div>;
+}
+
+function BudgetNotes({ hint, amount }: { hint: BudgetHint; amount: number }) {
+  const { direct, vk } = hint.daily_kop;
+  if (amount < hint.minimum_kop) return <div className="notice" role="alert"><p>{copy.setup.business.budgetMinimum(formatMoney(hint.minimum_kop))}</p></div>;
+  return <>
+    {direct !== undefined && <p>{copy.setup.business.budgetDaily(formatMoney(direct), vk === undefined ? undefined : formatMoney(vk))}</p>}
+    {hint.off.map((item) => <p key={item.platform}>{copy.setup.business.budgetVkOff(formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>)}
+    {amount < hint.low_kop && <div className="notice" role="status"><p>{copy.setup.business.budgetLow(formatMoney(hint.low_kop))}</p></div>}
+  </>;
 }

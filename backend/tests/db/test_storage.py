@@ -610,7 +610,7 @@ async def test_site_check_reads_site_before_lock_and_saves_under_it_on_postgres(
 
     repository = OnboardingRepository(db_session)
     service = OnboardingService(repository, llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader)
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     result = await service.site_check(business_id, NOW, TODAY)
     assert result["status"] == "ready" and free == [True] and llm.calls == ["description"]
     assert (await service.site_check(business_id, NOW, TODAY)) == result and llm.calls == ["description"]
@@ -638,7 +638,7 @@ async def test_site_check_of_business_deleted_while_reading_is_not_found_on_post
     service = OnboardingService(
         OnboardingRepository(db_session), llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader
     )
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     with pytest.raises(NotFound):
         await service.site_check(business_id, NOW, TODAY)
     assert llm.calls == []
@@ -662,7 +662,7 @@ async def test_waiting_site_check_returns_connection_and_rereads_result_of_other
     service = OnboardingService(
         OnboardingRepository(db_session), llm, lambda _: FakeMetrica([], {}), LIMITS, reader=reader
     )
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     running = SITE_CHECKS[business_id] = asyncio.Event()
     try:
         waiting = asyncio.create_task(service.site_check(business_id, NOW, TODAY))
@@ -714,7 +714,7 @@ async def test_site_check_returns_connection_while_ai_answers_on_postgres(db_ses
     service = OnboardingService(
         OnboardingRepository(db_session), WatchingLLM(), lambda _: FakeMetrica([], {}), LIMITS, reader=reader
     )
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     assert (await service.site_check(business_id, NOW, TODAY))["status"] == "ready"
     # Ответ ИИ идёт десятки секунд: транзакция на это время закрыта.
     assert during == [False]
@@ -723,28 +723,28 @@ async def test_site_check_returns_connection_while_ai_answers_on_postgres(db_ses
 def test_wizard_does_not_change_business_launched_by_other_session_on_postgres(db_session):
     from app.platforms.metrica import FakeMetrica
     from app.services.onboarding import Blocked, OnboardingService
-    from tests.services.test_onboarding import LIMITS, SITE, ScriptedLLM
+    from tests.services.test_onboarding import LIMITS, SITE, TODAY, ScriptedLLM
 
     user = User(yandex_uid="launched-" + uuid4().hex, login="owner", consent_at=NOW)
     db_session.add(user)
     db_session.commit()
     service = OnboardingService(OnboardingRepository(db_session), ScriptedLLM(), lambda _: FakeMetrica([], {}), LIMITS)
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     # Мастер прочитал черновик, и тут запуск завершил другой процесс: объект сессии ещё видит черновик.
     stale = db_session.get(Business, business_id)
     db_session.get_bind().execute(update(Business).where(Business.id == business_id).values(status="running"))
     assert stale.status == "draft"
     for site in (SITE, "https://other.example/"):
         with pytest.raises(Blocked):
-            service.create_business(user.id, site, "Самара", 200_000, None)
+            service.create_business(user.id, site, "Самара", 400_000, None, TODAY)
     stored = select(Business.site_url, Business.month_budget_kop, Business.status).where(Business.id == business_id)
-    assert db_session.get_bind().execute(stored).one() == (SITE, 100_000, "running")
+    assert db_session.get_bind().execute(stored).one() == (SITE, 300_000, "running")
 
 
 async def test_wizard_steps_read_business_changed_by_other_session_on_postgres(db_session):
     from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
     from app.services.onboarding import Blocked, NotFound, OnboardingService
-    from tests.services.test_onboarding import COUNTER, LIMITS, SITE, ScriptedLLM
+    from tests.services.test_onboarding import COUNTER, LIMITS, SITE, TODAY, ScriptedLLM
 
     user = User(yandex_uid="steps-" + uuid4().hex, login="owner", consent_at=NOW)
     db_session.add(user)
@@ -753,7 +753,7 @@ async def test_wizard_steps_read_business_changed_by_other_session_on_postgres(d
         [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
     )
     service = OnboardingService(OnboardingRepository(db_session), ScriptedLLM(), lambda _: metrica, LIMITS)
-    business_id = service.create_business(user.id, SITE, "Самара", 100_000, None)["id"]
+    business_id = service.create_business(user.id, SITE, "Самара", 300_000, None, TODAY)["id"]
     stale = db_session.get(Business, business_id)
     other = db_session.get_bind()
     stored = select(Business.status, Business.metrica_counter_id, Business.description).where(
@@ -828,7 +828,9 @@ async def test_launch_holds_business_lock_until_business_is_running_on_postgres(
         [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
     )
     onboarding = OnboardingService(repository, llm, lambda _: metrica, LIMITS, reader=reader)
-    business = db_session.get(Business, onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None)["id"])
+    business = db_session.get(
+        Business, onboarding.create_business(user.id, SITE, "Самара", BUDGET_KOP, None, TODAY)["id"]
+    )
     repository.add(PlatformAccount(business_id=business.id, platform="direct", auth_mode="oauth", access_token_enc="t"))
     await onboard(SimpleNamespace(onboarding=onboarding, business=business), confirmed={"direct": True})
     plans = PlanService(

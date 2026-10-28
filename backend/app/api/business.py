@@ -28,6 +28,7 @@ from app.services.onboarding import (
     OnboardingRepository,
     OnboardingService,
 )
+from app.services.plan import budget_view
 from app.services.registry import build_llm
 
 router = APIRouter(prefix="/api", route_class=ReleasingRoute)
@@ -97,12 +98,24 @@ CurrentUser = Annotated[User, Depends(current_user)]
 
 
 @router.post("/business", dependencies=[Depends(require_csrf)])
-def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> dict:
+def create_business(body: BusinessIn, user: CurrentUser, service: Service, today: Today) -> dict:
     with human_errors():
-        result = service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
+        result = service.create_business(
+            user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop, today
+        )
         if demo_enabled():
             prepare_business(service.repository, service.repository.business(result["id"]))
         return result
+
+
+@router.get("/business/budget-hint", dependencies=[Depends(current_user)])
+def budget_hint(
+    today: Today, month_budget_kop: Annotated[int, Query(gt=0, le=MAX_BUDGET_KOP)], vk: bool = False
+) -> dict:
+    """Подсказка мастера к бюджету до сохранения: бизнеса может ещё не быть, кабинет VK называет сам мастер."""
+    from app.config import get_domain_settings
+
+    return budget_view(month_budget_kop, ["direct", "vk"] if vk else ["direct"], today, get_domain_settings())
 
 
 @router.get("/business/site-check")

@@ -16,6 +16,7 @@ from app.content.art import ART_COST_KOP
 from app.content.ideas import subject
 from app.content.images import check_image, run_decoding
 from app.db.models import Ad, ArtCall, Asset, LLMCall, Plan
+from app.domain.settings import DEFAULT_SETTINGS
 from app.services import plan as plan_module
 from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, NotFound, OnboardingError
@@ -67,6 +68,35 @@ async def test_plan_groups_cover_segments_for_each_platform(world: World) -> Non
     assert all(group["ads"] and group["ads"][0]["text"] for group in plan["groups"])
 
 
+async def test_vk_is_off_when_its_share_misses_the_platform_minimum_and_joins_after_budget_raise(world: World) -> None:
+    world.business.month_budget_kop = 3_000_000
+    plan = await build(world)
+    assert {group["platform"] for group in plan["groups"]} == {"direct"}
+    assert (plan["direct_budget_kop"], plan["vk_budget_kop"]) == (3_000_000, 0)
+    # Январь — 31 день: весь бюджет за вычетом резерва делится на дни и запас кэпа (×1,25) у Директа.
+    assert plan["daily_kop"] == {"direct": 71_225}
+    assert plan["off"] == [{"platform": "vk", "from_kop": 4_220_000, "min_daily_kop": 30_000}]
+    first = plan["id"]
+    # Бюджет подняли: план пересобирается с VK, и владелец видит его до запуска.
+    world.business.month_budget_kop = 4_220_000
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert plan["id"] != first and plan["off"] == []
+    assert {group["platform"] for group in plan["groups"]} == {"direct", "vk"}
+    assert plan["daily_kop"]["vk"] >= 30_000
+    assert world.repository.latest_plan(world.business.id).payload["platforms"] == ["direct", "vk"]
+
+
+async def test_plan_with_vk_off_waits_for_new_plan_when_vk_is_disconnected(world: World) -> None:
+    world.business.month_budget_kop = 3_000_000
+    plan = await build(world)
+    assert plan["off"] and plan["ready_to_launch"]
+    for account in world.repository.accounts(world.business.id):
+        if account.platform == "vk":
+            account.status = "revoked"
+    # Площадки плана те же, но выключенной VK больше нет: подпись о ней устарела, план собирается заново.
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert plan["off"] == [] and {group["platform"] for group in plan["groups"]} == {"direct"}
+
 
 async def test_groups_take_services_in_turn_and_ads_of_group_differ(world: World) -> None:
     await onboard(world)
@@ -81,10 +111,15 @@ async def test_groups_take_services_in_turn_and_ads_of_group_differ(world: World
     assert [group["name"].split(" — ")[0] for group in groups] == services * 2
     assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
 
+
 async def test_images_follow_service_of_each_group(world: World) -> None:
     await onboard(world)
     services = [
-        "Маникюр с гель-лаком", "Маникюр без покрытия", "Педикюр с покрытием", "Наращивание ногтей", "Снятие покрытия",
+        "Маникюр с гель-лаком",
+        "Маникюр без покрытия",
+        "Педикюр с покрытием",
+        "Наращивание ногтей",
+        "Снятие покрытия",
     ]
     fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
     fields["services"] = {"value": "\n".join(services)}
@@ -765,6 +800,8 @@ async def test_blockers_cover_every_launch_rule(world: World) -> None:
             world.repository.accounts(business.id),
             world.repository.marking(business.id),
             world.repository.assets(business.id),
+            TODAY,
+            DEFAULT_SETTINGS,
             acknowledged,
         )
 

@@ -20,6 +20,42 @@ def test_budget_must_be_whole_positive_kopecks(api, budget) -> None:
     assert context.world.business.month_budget_kop != budget
 
 
+def test_budget_below_direct_minimum_is_rejected_with_the_minimum(api) -> None:
+    client, context = api
+    response = new_business(client, month_budget_kop=189_999)
+    assert response.status_code == 422
+    assert "Минимальный бюджет — 1 900 ₽ в месяц" in response.json()["detail"]
+    assert context.world.business.month_budget_kop != 189_999
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        (
+            "month_budget_kop=3000000&vk=true",
+            {
+                "daily_kop": {"direct": 71_225},
+                "off": [{"platform": "vk", "from_kop": 4_220_000, "min_daily_kop": 30_000}],
+            },
+        ),
+        ("month_budget_kop=3000000&vk=false", {"daily_kop": {"direct": 71_225}, "off": []}),
+        ("month_budget_kop=4220000&vk=true", {"daily_kop": {"direct": 70_133, "vk": 30_056}, "off": []}),
+    ],
+)
+def test_budget_hint_uses_plan_rules(api, query, expected) -> None:
+    client, _ = api
+    response = client.get(f"/api/business/budget-hint?{query}")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"minimum_kop": 190_000, "low_kop": 1_000_000} | expected
+
+
+def test_budget_hint_requires_login_and_positive_amount(api) -> None:
+    client, _ = api
+    assert client.get("/api/business/budget-hint?month_budget_kop=0").status_code == 422
+    client.cookies.clear()
+    assert client.get("/api/business/budget-hint?month_budget_kop=3000000").status_code == 401
+
+
 def test_budget_is_stored_in_kopecks(api) -> None:
     client, context = api
     response = new_business(client, month_budget_kop=1_234_567)

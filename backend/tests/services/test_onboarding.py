@@ -60,7 +60,7 @@ from app.services.plan import PlanService
 
 NOW = datetime(2026, 1, 1, 9, tzinfo=UTC)
 TODAY = date(2026, 1, 1)
-BUDGET_KOP = 3_000_000
+BUDGET_KOP = 5_000_000
 LIMITS = AiLimits(onboarding_kop=6000, weekly_kop=2500)
 COUNTER = 12345
 SITE = "https://salon.example/"
@@ -433,11 +433,22 @@ def test_niche_detection() -> None:
 
 
 def test_business_budget_is_stored_in_kopecks_and_draft_is_updated(world: World) -> None:
-    created = world.onboarding.create_business(2, "salon2.example", " Казань ", 1_500_000, None)
+    created = world.onboarding.create_business(2, "salon2.example", " Казань ", 1_500_000, None, TODAY)
     assert created["site_url"] == "https://salon2.example/"
     assert created["month_budget_kop"] == 1_500_000 and type(created["month_budget_kop"]) is int
-    again = world.onboarding.create_business(2, "https://salon2.example/", "Казань", 2_000_000, 300_000)
+    again = world.onboarding.create_business(2, "https://salon2.example/", "Казань", 2_000_000, 300_000, TODAY)
     assert again["id"] == created["id"] and again["avg_check_kop"] == 300_000
+
+
+def test_business_budget_below_direct_minimum_names_the_minimum(world: World) -> None:
+    # Январь — 31 день: с 1 900 ₽ в месяц кампания Директа набирает недельный минимум 300 ₽.
+    with pytest.raises(OnboardingError, match="Минимальный бюджет — 1 900 ₽ в месяц"):
+        world.onboarding.create_business(2, "salon2.example", "Казань", 189_999, None, TODAY)
+    assert world.repository.user_businesses(2) == []
+    assert world.onboarding.create_business(2, "salon2.example", "Казань", 190_000, None, TODAY)["month_budget_kop"]
+    # В феврале 28 дней: та же кампания набирает минимум с меньшего бюджета.
+    with pytest.raises(OnboardingError, match="1 700 ₽"):
+        world.onboarding.create_business(2, "salon2.example", "Казань", 169_999, None, date(2026, 2, 2))
 
 
 @pytest.mark.parametrize(
@@ -453,23 +464,23 @@ def test_business_budget_is_stored_in_kopecks_and_draft_is_updated(world: World)
 )
 def test_invalid_business_is_rejected(world: World, site: str, city: str, budget: object) -> None:
     with pytest.raises(OnboardingError):
-        world.onboarding.create_business(2, site, city, budget, None)
+        world.onboarding.create_business(2, site, city, budget, None, TODAY)
     assert len(world.repository.user_businesses(2)) == 0
 
 
 def test_launched_business_cannot_be_recreated(world: World) -> None:
     world.business.status = "running"
     with pytest.raises(Blocked):
-        world.onboarding.create_business(1, "salon.example", "Самара", 100, None)
+        world.onboarding.create_business(1, "salon.example", "Самара", BUDGET_KOP, None, TODAY)
     # Повторное «Далее» без правок отвечает без блокировки только черновику: запущенный бизнес так не пересоздать.
     with pytest.raises(Blocked):
-        world.onboarding.create_business(1, SITE, "Самара", BUDGET_KOP, None)
+        world.onboarding.create_business(1, SITE, "Самара", BUDGET_KOP, None, TODAY)
 
 
 @pytest.mark.parametrize(("city", "avg_check"), [("Казань", None), ("Самара", 250_000)])
 def test_draft_saves_city_or_average_check_changed_alone(world: World, city: str, avg_check: int | None) -> None:
     """Повторное «Далее» без правок ничего не пишет, но правка одного города или одного среднего чека — правка."""
-    view = world.onboarding.create_business(1, SITE, city, BUDGET_KOP, avg_check)
+    view = world.onboarding.create_business(1, SITE, city, BUDGET_KOP, avg_check, TODAY)
     assert (view["city"], view["avg_check_kop"]) == (city, avg_check)
     assert (world.business.city, world.business.avg_check_kop) == (city, avg_check)
 
@@ -744,21 +755,21 @@ def test_business_is_not_changed_while_it_is_locked(world: World, monkeypatch) -
     monkeypatch.setattr("app.services.onboarding.LOCK_WAIT_SECONDS", 0)
     world.repository.locked = True
     with pytest.raises(ChangeConflict):
-        world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
+        world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None, TODAY)
     with pytest.raises(ChangeConflict):
-        world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+        world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert (world.business.site_url, world.business.month_budget_kop) == (SITE, BUDGET_KOP)
     world.repository.locked = False
-    same_site = world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    same_site = world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert same_site["month_budget_kop"] == 2 * BUDGET_KOP
-    world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None)
+    world.onboarding.create_business(1, "other.example", "Самара", BUDGET_KOP, None, TODAY)
     assert world.business.site_url == "https://other.example/"
 
 
 def test_unchanged_business_is_not_locked(world: World) -> None:
     """Повторное «Далее» без правок ничего не пишет: пока проверка сайта держит блокировку, оно не получает 409."""
     world.repository.locked = True
-    view = world.onboarding.create_business(1, "salon.example", " Самара ", BUDGET_KOP, None)
+    view = world.onboarding.create_business(1, "salon.example", " Самара ", BUDGET_KOP, None, TODAY)
     assert view["id"] == world.business.id and view["month_budget_kop"] == BUDGET_KOP
 
 
@@ -766,9 +777,9 @@ async def test_same_site_keeps_description_and_other_site_resets_it(world: World
     await world.onboarding.site_check(world.business.id, NOW, TODAY)
     description = world.business.description
     assert description["fields"]
-    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert world.business.description == description and world.business.month_budget_kop == 2 * BUDGET_KOP
-    world.onboarding.create_business(1, "other.example", "Самара", 2 * BUDGET_KOP, None)
+    world.onboarding.create_business(1, "other.example", "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert world.business.description == {} and world.business.description_approved_at is None
 
 
@@ -784,7 +795,7 @@ def test_business_is_not_changed_when_launch_finished_before_lock(world: World, 
 
     monkeypatch.setattr(world.repository, "business_lock", launched_meanwhile)
     with pytest.raises(Blocked, match="уже запущена"):
-        world.onboarding.create_business(1, site, "Самара", 2 * BUDGET_KOP, None)
+        world.onboarding.create_business(1, site, "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert (world.business.site_url, world.business.month_budget_kop) == (SITE, BUDGET_KOP)
 
 
@@ -858,7 +869,7 @@ def test_business_step_waits_for_lock_like_description(world: World, monkeypatch
             yield
 
     monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
-    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None)
+    world.onboarding.create_business(1, SITE, "Самара", 2 * BUDGET_KOP, None, TODAY)
     assert len(attempts) == 2 and world.business.month_budget_kop == 2 * BUDGET_KOP
 
 

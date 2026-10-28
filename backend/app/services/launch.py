@@ -21,6 +21,7 @@ from app.db.models import (
     WorkerRun,
 )
 from app.demo_flags import demo_enabled
+from app.domain.budget import meets_minimum
 from app.domain.explain import rubles
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
@@ -77,14 +78,12 @@ INTERRUPTED_STOP = (
 def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
     """Почему площадка не примет лимиты кампании; None — примет.
 
-    Минимумы: Директ — недельный, VK — дневной и на кампанию, симулятор — day/period. Недельный лимит считается
-    той же функцией, что у адаптера Директа: в конце недели или месяца он меньше семи дневных."""
-    daily = minimum.get("daily_limit_kop", minimum.get("day", 0))
-    period = minimum.get("period_cap_kop", minimum.get("period", 0))
+    На полную неделю лимиты сверяет domain.budget.meets_minimum, та же функция, что выбирает площадки плана и
+    минимальный бюджет. Недельный лимит считается той же функцией, что у адаптера Директа: в конце недели или месяца
+    он меньше семи дневных."""
+    if not meets_minimum(limit, minimum):
+        return f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}». Увеличьте бюджет месяца."
     weekly = minimum.get("weekly_limit_kop", 0)
-    full_week = min(limit.daily_limit * 7, limit.remaining_cap)
-    if limit.daily_limit < daily or limit.remaining_cap < period or full_week < weekly:
-        return f"Бюджета не хватает для запуска на площадке «{TITLES[platform]}»."
     if weekly_limit(limit.daily_limit, limit.remaining_cap, today) < weekly:
         # Недельный лимит считается до воскресенья или до конца месяца, что раньше: советуем по тому, что обрезало.
         week_end = today + timedelta(days=6 - today.weekday())
@@ -218,6 +217,8 @@ class LaunchService:
                     self.repository.accounts(business_id),
                     self.repository.marking(business_id),
                     self.repository.assets(business_id),
+                    today,
+                    self.domain,
                     medical_acknowledged,
                 )
                 if reasons:
