@@ -15,6 +15,7 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [demo, setDemo] = useState(false);
+  const [agreed, setAgreed] = useState(false);
   // Куда вести после входа. Переходим, только когда сессия перечитана: иначе раздел ещё видит гостя и вернёт на вход.
   const [next, setNext] = useState('/');
   // После удаления данных сюда приходят ещё со старой сессией и перечитывают её уже здесь: перечитанная раньше, она
@@ -49,11 +50,20 @@ export function LoginPage() {
     <Card className="page-stack">
       <p>{copy.login.description}</p>
       {error && <ErrorBanner message={error} />}
-      <div className="actions">
-        <Button disabled={busy} onClick={() => void login()}>{copy.login.action}</Button>
-        {demo && <Button disabled={busy} onClick={() => void loginDemo()}>Войти в демо</Button>}
+      <label className="check consent-check">
+        <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />
+        <span>{copy.login.consent} <Link to="/policy" target="_blank" rel="noopener">{copy.login.policy}</Link></span>
+      </label>
+      <div className="actions login-actions">
+        <button type="button" className="yandex-id-button" disabled={busy || !agreed} onClick={() => void login()}>
+          <svg className="yandex-id-button__logo" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="12" fill="#fc3f1d" />
+            <path fill="#fff" d="M13.32 7.666h-.924c-1.694 0-2.585.858-2.585 2.123 0 1.43.616 2.1 1.881 2.959l1.045.704-3.003 4.487H7.49l2.695-4.014c-1.55-1.111-2.42-2.19-2.42-4.015 0-2.288 1.595-3.85 4.62-3.85h3.003v11.868H13.32V7.666z" />
+          </svg>
+          {copy.login.action}
+        </button>
+        {demo && <Button variant="secondary" disabled={busy || !agreed} onClick={() => void loginDemo()}>{copy.login.demo}</Button>}
       </div>
-      <p className="muted">{copy.login.consent} <Link className="tap-link" to="/policy">{copy.login.policy}</Link></p>
     </Card>
   </div>;
 }

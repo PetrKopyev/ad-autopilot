@@ -25,7 +25,9 @@ async function enterDemo(answer: () => void) {
   reply(200, { demo: true });
   answer();
   render(<MemoryRouter><SessionProvider><LoginPage /></SessionProvider></MemoryRouter>);
-  fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
+  const demo = await screen.findByRole('button', { name: copy.login.demo });
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(demo);
 }
 
 it('вход в демо показывает текст сервера, а не «не удалось связаться»', async () => {
@@ -65,5 +67,35 @@ it('вошедшего со страницы входа сразу уводит 
   </Route></Routes></SessionProvider></MemoryRouter>);
   expect(await screen.findByRole('heading', { name: 'главная' })).toBeTruthy();
   expect(screen.getByText('owner')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: copy.login.title })).toBeNull();
+});
+
+function renderGuestLogin() {
+  vi.stubGlobal('fetch', fetchMock);
+  fetchMock.mockImplementation(async (url) => new Response(JSON.stringify(new URL(String(url)).pathname === '/api/me'
+    ? { detail: 'unauthorized' } : { demo: true }), { status: new URL(String(url)).pathname === '/api/me' ? 401 : 200, headers: { 'Content-Type': 'application/json' } }));
+  render(<MemoryRouter initialEntries={['/login']}><SessionProvider><Routes><Route element={<Layout />}>
+    <Route path="login" element={<LoginPage />} />
+  </Route></Routes></SessionProvider></MemoryRouter>);
+}
+
+it('без согласия войти нельзя, с галочкой — можно', async () => {
+  renderGuestLogin();
+  const demo = await screen.findByRole('button', { name: copy.login.demo });
+  const yandex = screen.getByRole('button', { name: copy.login.action }) as HTMLButtonElement;
+  expect(yandex.disabled).toBe(true);
+  expect((demo as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByText(copy.login.consent, { exact: false }));
+  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+  expect(yandex.disabled).toBe(false);
+  expect((demo as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('на странице входа одна ссылка на политику и нет «Вход» в шапке', async () => {
+  renderGuestLogin();
+  await screen.findByRole('button', { name: copy.login.demo });
+  const links = screen.getAllByRole('link').filter((link) => link.getAttribute('href') === '/policy');
+  expect(links).toHaveLength(1);
+  expect(links[0].textContent).toBe(copy.login.policy);
   expect(screen.queryByRole('link', { name: copy.login.title })).toBeNull();
 });

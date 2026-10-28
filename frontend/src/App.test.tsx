@@ -41,7 +41,9 @@ const withBusiness = () => { answers['/api/me'] = { ...(answers['/api/me'] as ob
 
 it('после «Войти в демо» ведёт в мастер, а не на главную', async () => {
   app('/login');
-  fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
+  const demo = await screen.findByRole('button', { name: copy.login.demo });
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(demo);
   expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
   expect(screen.getByTestId('path').textContent).toBe('/setup');
   await waitFor(() => expect(opened.mock.calls).toEqual([['мастер']]));
@@ -103,13 +105,15 @@ it('после удаления данных вход показывает ит�
   expect((await screen.findByRole('alert')).textContent).toBe(message);
   expect(screen.getByTestId('path').textContent).toBe('/login');
   expect(screen.getByRole('heading', { name: copy.login.title })).toBeTruthy();
-  // Страница входа перечитывает сессию сама: в шапке — «Вход», а итог остановки остаётся на месте.
-  expect(await screen.findByRole('link', { name: copy.login.title })).toBeTruthy();
+  // Страница входа перечитывает сессию сама: из шапки уходит выход, а итог остановки остаётся на месте.
+  await waitFor(() => expect(screen.queryByRole('button', { name: copy.launchFlow.logout })).toBeNull());
   expect(screen.queryByText('demo')).toBeNull();
   expect(screen.getByRole('alert').textContent).toBe(message);
   expect(screen.getByTestId('path').textContent).toBe('/login');
   answers['/api/me'] = { id: 2, login: 'demo-2', email: null, has_business: false, accounts: [] };
-  fireEvent.click(await screen.findByRole('button', { name: 'Войти в демо' }));
+  const demo = await screen.findByRole('button', { name: copy.login.demo });
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(demo);
   expect(await screen.findByRole('heading', { name: 'мастер' })).toBeTruthy();
   expect(screen.getByTestId('path').textContent).toBe('/setup');
 });

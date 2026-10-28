@@ -32,5 +32,13 @@
   .launch-flow .account-grid { grid-template-columns: minmax(0, 1fr); }
   .launch-flow .stepper { grid-template-columns: minmax(0, 1fr); }
   .launch-flow .stepper li > a, .launch-flow .stepper li > span { flex-direction: row; align-items: center; }
-  .launch-flow .actions > .button { width: 100%; flex: 1 1 100%; }
+  .launch-flow .actions > .button, .launch-flow .actions > .yandex-id-button { width: 100%; flex: 1 1 100%; }
 }
+.launch-flow .consent-check { align-items: flex-start; min-height: 48px; font-size: 1rem; }
+.launch-flow .consent-check input[type=checkbox] { flex-basis: 24px; width: 24px; height: 24px; margin: 0; }
+.launch-flow .login-actions { align-items: center; }
+.yandex-id-button { display: inline-flex; justify-content: center; align-items: center; gap: var(--space-3); min-height: 52px; max-width: 100%; padding: var(--space-3) var(--space-5); border: 0; border-radius: var(--radius-small); color: #fff; background: #000; cursor: pointer; font-weight: 500; font-size: 1rem; line-height: 1.3; }
+.yandex-id-button:hover { background: #262626; }
+.yandex-id-button:disabled { opacity: 0.35; cursor: not-allowed; }
+.yandex-id-button:disabled:hover { background: #000; }
+.yandex-id-button__logo { flex: 0 0 auto; width: 26px; height: 26px; }
