@@ -10,18 +10,19 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from textwrap import shorten
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.content.ad_text import ANGLES, SEGMENTS, generate_ad_text
 from app.content.art import ART_COST_KOP, ArtBudget, ArtBudgetExceeded, ArtClient, ArtError
 from app.content.art import ArtCall as ArtRecord
-from app.content.ideas import generate_ideas
+from app.content.ideas import TITLE_LIMIT, generate_ideas
 from app.content.images import DEFAULT_FONT, ImageRejected, accept_upload, check_image, run_decoding
 from app.content.llm import LLMClient
 from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
-from app.db.models import Asset, Business, MarkingProfile, Plan, PlatformAccount
+from app.db.models import Ad, Asset, Business, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import allocate, plan_budget, platform_shares, split_group_limits
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
@@ -36,7 +37,7 @@ from app.services.onboarding import (
     SpendLLM,
     ai_budget,
     description_draft,
-    lines,
+    service_names,
     waited_lock,
 )
 
@@ -55,6 +56,7 @@ def campaign_limits(daily: int, remaining: int, today: date, lifetime: int = 0) 
 PLATFORMS = ("direct", "vk")
 ANGLES_PER_GROUP = 2
 IMAGE_CANDIDATES = 8
+IMAGES_PER_KEY = 2
 REGENERATE_COUNT = 2
 MAX_ASSETS = 40
 IMAGE_KINDS = ("image", "upload")
@@ -89,6 +91,24 @@ class PlanRepository(OnboardingRepository):
 
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return self.db.scalar(select(Asset).where(Asset.id == asset_id, Asset.business_id == business_id))
+
+    def used_assets(self, business_id: int) -> set[int]:
+        """Картинки и ролики, на которые ссылаются объявления (ads.asset_id, ads.video_id)."""
+        used = select(Ad.id).where(or_(Ad.asset_id == Asset.id, Ad.video_id == Asset.id)).exists()
+        return set(self.db.scalars(select(Asset.id).where(Asset.business_id == business_id, used)))
+
+    def remove(self, item: object) -> None:
+        self.db.delete(item)
+
+
+def assets_key(service: str, segment: str) -> str:
+    """Картинки плана делятся по паре (услуга, сегмент): группы одной пары на разных площадках делят картинки."""
+    return f"{service} — {segment}" if service else segment
+
+
+def group_key(group: dict) -> str:
+    # В планах до разбивки по услугам у групп нет поля service: их картинки лежат по сегменту.
+    return assets_key(group.get("service", ""), group["segment"])
 
 
 def launch_unsettled(plan: Plan) -> bool:
@@ -139,7 +159,7 @@ def budget_limits(
 
 
 def phrases(business: Business) -> list[str]:
-    names = lines(business.description.get("fields", {}).get("services", {}).get("value", ""))
+    names = service_names(business.description.get("fields", {}).get("services", {}).get("value", ""))
     result = [f"{' '.join(name.split()[:4])} {business.city}".lower() for name in names[:5]]
     return list(dict.fromkeys(result))
 
@@ -170,7 +190,7 @@ def launch_blockers(
         result.append("Заполните данные рекламодателя и подтвердите маркировку на подключённых площадках.")
     if payload["inputs_hash"] != inputs_hash(business, connected_platforms(accounts)):
         result.append("Сведения о бизнесе изменились после подготовки плана. Обновите план.")
-    if any(not selected & set(payload["assets"].get(group["segment"], ())) for group in payload["groups"]):
+    if any(not selected & set(payload["assets"].get(group_key(group), ())) for group in payload["groups"]):
         result.append("В каждой группе отметьте хотя бы одну картинку.")
     if business.medical_level != "none" and medical_acknowledged is False:
         result.append("Подтвердите, что понимаете: для такой рекламы могут потребовать лицензию.")
@@ -236,7 +256,7 @@ def build_videos(
     font_path: str = DEFAULT_FONT,
     built: Built | None = None,
 ) -> bool:
-    """Видео из 3–4 выбранных картинок сегмента; без ffmpeg пропускаем: ролик загружается вручную.
+    """Видео из 3–4 выбранных картинок пары (услуга, сегмент); без ffmpeg пропускаем: ролик загружается вручную.
 
     Ролик пересобирается, только если изменился его набор картинок; прежний файл удаляется. ffmpeg работает без
     блокировки бизнеса (до 180 секунд), а результат сохраняется под ней и только если выбор за это время не
@@ -249,24 +269,24 @@ def build_videos(
     plan = repository.latest_plan(business_id)
     # commit завершает чтение: ffmpeg работает без соединения с базой, а под блокировкой выбор перечитывается заново.
     repository.commit()
-    for segment, chosen, video in segments:
+    for key, chosen, video in segments:
         sources = [asset.id for asset in chosen]
         if (
             len(chosen) < 3
             or (video is not None and video.formats.get("sources") == sources)
-            or (segment in built and built[segment][0] == sources)
+            or (key in built and built[key][0] == sources)
         ):
             continue
-        group = next(item for item in plan.payload["groups"] if item["segment"] == segment)
+        group = next(item for item in plan.payload["groups"] if group_key(item) == key)
         try:
             images = [media_root / asset.file_path for asset in chosen]
-            built[segment] = (sources, build_video(images, group["ads"][0]["title"], font_path=font_path).data)
+            built[key] = (sources, build_video(images, group["ads"][0]["title"], font_path=font_path).data)
         except (VideoError, ValueError):
             continue
     replaced, stored = [], []
     try:
         with repository.business_lock(business_id):
-            for segment, chosen, video in video_segments(repository, business_id):
+            for key, chosen, video in video_segments(repository, business_id):
                 sources = [asset.id for asset in chosen]
                 if len(chosen) < 3:
                     if video is not None:
@@ -275,12 +295,12 @@ def build_videos(
                 if video is not None and video.formats.get("sources") == sources:
                     video.selected = True
                     continue
-                if segment not in built or built[segment][0] != sources:
+                if key not in built or built[key][0] != sources:
                     continue
-                path = store(media_root, business_id, f"video-{segment.replace(' ', '-')}", "mp4", built[segment][1])
+                path = store(media_root, business_id, "video", "mp4", built[key][1])
                 stored.append(path)
                 if video is None:
-                    video = Asset(business_id=business_id, kind="video", idea_text=segment, file_path=path)
+                    video = Asset(business_id=business_id, kind="video", idea_text=key, file_path=path)
                     repository.add(video)
                 else:
                     replaced.append(video.file_path)
@@ -308,11 +328,11 @@ def video_segments(repository: PlanRepository, business_id: int) -> list[tuple[s
     by_id = {asset.id: asset for asset in assets}
     return [
         (
-            segment,
+            key,
             [by_id[id_] for id_ in ids if id_ in by_id and by_id[id_].selected][:4],
-            next((asset for asset in assets if asset.kind == "video" and asset.idea_text == segment), None),
+            next((asset for asset in assets if asset.kind == "video" and asset.idea_text == key), None),
         )
-        for segment, ids in plan.payload["assets"].items()
+        for key, ids in plan.payload["assets"].items()
     ]
 
 
@@ -390,27 +410,39 @@ class PlanService:
         llm = SpendLLM(self.llm, self.repository, business.id, budget, "ad_text")
         niche = business.niche_class or "other"
         segments = list(SEGMENTS.get(niche, SEGMENTS["other"]))
-        assets = self.carry_assets(previous, segments)
-        if not self.repository.assets(business.id):
-            created = await self.generate_images(business, budget, IMAGE_CANDIDATES)
-            for index, asset in enumerate(created):
-                ids = assets.setdefault(segments[index % len(segments)], [])
-                asset.selected = len(ids) < 2
-                ids.append(asset.id)
+        draft = description_draft(business)
+        names = [service.name for service in draft.services] or [""]
+        # Площадка и пара (услуга, сегмент) каждой группы в её порядке: группы идут по площадкам, в каждой — по
+        # сегментам.
+        slots = [
+            (platforms[index // len(segments)], names[index % len(names)], segments[index % len(segments)])
+            for index in range(len(platforms) * len(segments))
+        ]
+        pairs = list(dict.fromkeys((service, segment) for _, service, segment in slots))
+        assets = self.carry_assets(previous, [assets_key(*pair) for pair in pairs])
         # Тексты пишет ИИ, по секундам на каждый: соединение на это время возвращается в пул.
         self.repository.commit()
-        draft = description_draft(business)
-        primary = (lines(business.description["fields"]["services"]["value"]) or ["Услуги"])[0]
         limits = budget_limits(business, platforms, today, self.domain)
         groups = []
         for platform in platforms:
             daily = split_group_limits(limits[platform], dict.fromkeys(segments, Decimal(1)))
             for segment, group_limit in zip(segments, daily, strict=True):
+                # Услуги идут по группам по кругу: каждая группа рекламирует одну услугу, разные группы — разные.
+                service = draft.services[len(groups) % len(draft.services)] if draft.services else None
+                ads = []
                 try:
-                    ads = [
-                        await generate_ad_text(llm, draft, platform=platform, angle=angle, segment=segment)
-                        for angle in ANGLES[:ANGLES_PER_GROUP]
-                    ]
+                    for angle in ANGLES[:ANGLES_PER_GROUP]:
+                        ads.append(
+                            await generate_ad_text(
+                                llm,
+                                draft,
+                                platform=platform,
+                                angle=angle,
+                                segment=segment,
+                                service=service,
+                                other=ads[-1].ad if ads else None,
+                            )
+                        )
                 except ValueError as error:
                     raise Blocked("Не удалось подготовить безопасные тексты. Уточните описание бизнеса.") from error
                 groups.append(
@@ -418,7 +450,8 @@ class PlanService:
                         "id": len(groups) + 1,
                         "platform": platform,
                         "segment": segment,
-                        "name": f"{primary} — {segment}",
+                        "service": service.name if service else "",
+                        "name": f"{service.name if service else 'Услуги'} — {segment}",
                         "audience": segment.capitalize(),
                         "daily_limit_kop": group_limit.daily_limit,
                         "phrases": phrases(business) if platform == "direct" else [],
@@ -434,6 +467,19 @@ class PlanService:
                         ],
                     }
                 )
+        # Картинки — после текстов: бюджет ИИ сначала идёт на тексты. Своих картинок нет у новых пар и у всех пар
+        # первого плана; первый план получает не меньше IMAGE_CANDIDATES картинок, новая пара — по IMAGES_PER_KEY.
+        # Пары идут по кругу: если бюджет кончится, картинку получит сначала каждая пара, остальные останутся без
+        # картинок до «Попросить ещё варианты» или своего фото.
+        missing = [pair for pair in pairs if assets_key(*pair) not in assets]
+        if missing:
+            count = IMAGES_PER_KEY * len(missing) if assets else max(IMAGE_CANDIDATES, IMAGES_PER_KEY * len(missing))
+            targets = [missing[index % len(missing)] for index in range(count)]
+            for key, asset in await self.generate_images(business, budget, targets):
+                ids = assets.setdefault(key, [])
+                asset.selected = len(ids) < 2
+                ids.append(asset.id)
+        self.carry_uploads(business.id, previous, slots, assets)
         payload = {
             "inputs_hash": digest,
             "built_at": now.isoformat(),
@@ -444,6 +490,9 @@ class PlanService:
             "groups": groups,
             "assets": assets,
         }
+        orphans = self.orphans(business.id, assets)
+        for asset in orphans:
+            self.repository.remove(asset)
         plan = Plan(
             business_id=business.id,
             version=previous.version + 1 if previous else 1,
@@ -453,23 +502,65 @@ class PlanService:
         self.repository.add(plan)
         business.status = "plan_ready"
         self.repository.commit()
+        # Файлы — после commit: откат не оставит строку без файла.
+        for asset in orphans:
+            remove_media(self.media_root, asset.file_path)
         return plan
 
-    def carry_assets(self, previous: Plan | None, segments: list[str]) -> dict[str, list[int]]:
+    def orphans(self, business_id: int, assets: dict[str, list[int]]) -> list[Asset]:
+        """Сгенерированные картинки прошлых планов, которых нет в новом, и ролики из них: их нигде не видно и не убрать,
+        а место в MAX_ASSETS картинки занимают. Загруженные пользователем и те, на которые ссылаются объявления,
+        остаются."""
+        kept = {id_ for ids in assets.values() for id_ in ids} | self.repository.used_assets(business_id)
+        rows = self.repository.assets(business_id)
+        images = [asset for asset in rows if asset.kind == "image" and asset.id not in kept]
+        gone = {asset.id for asset in images}
+        videos = [
+            asset
+            for asset in rows
+            if asset.kind == "video" and asset.id not in kept and gone & set(asset.formats.get("sources", ()))
+        ]
+        return images + videos
+
+    def carry_assets(self, previous: Plan | None, keys: list[str]) -> dict[str, list[int]]:
+        """Картинки переходят только к той же паре (услуга, сегмент): чужая услуга на картинке хуже новой генерации.
+        Картинки старых планов лежат по сегменту и к парам с услугой не переходят."""
         if previous is None:
             return {}
         old = previous.payload["assets"]
-        if previous.payload["segments"] == segments:
-            return deepcopy(old)
-        result: dict[str, list[int]] = {}
-        for index, asset_id in enumerate(sorted(id_ for ids in old.values() for id_ in ids)):
-            result.setdefault(segments[index % len(segments)], []).append(asset_id)
-        return result
+        return {key: list(old[key]) for key in keys if key in old}
+
+    def carry_uploads(
+        self, business_id: int, previous: Plan | None, slots: list[tuple[str, str, str]], assets: dict[str, list[int]]
+    ) -> None:
+        """Свои фото не теряются, когда пара сменилась: переходят к первой группе с тем же сегментом, иначе — к первой
+        группе той же площадки, иначе — к первой группе."""
+        if previous is None:
+            return
+        uploads = {asset.id for asset in self.repository.assets(business_id) if asset.kind == "upload"}
+        carried = {id_ for ids in assets.values() for id_ in ids}
+        for group in previous.payload["groups"]:
+            moved = [
+                id_
+                for id_ in previous.payload["assets"].get(group_key(group), ())
+                if id_ in uploads and id_ not in carried
+            ]
+            if not moved:
+                continue
+            _, service, segment = next(
+                (slot for slot in slots if slot[2] == group["segment"]),
+                next((slot for slot in slots if slot[0] == group["platform"]), slots[0]),
+            )
+            assets.setdefault(assets_key(service, segment), []).extend(moved)
+            carried.update(moved)
 
     async def record_art(self, record: ArtRecord) -> None:
         self.repository.save_art_call(record)
 
-    async def generate_images(self, business: Business, budget: ArtBudget, count: int) -> list[Asset]:
+    async def generate_images(
+        self, business: Business, budget: ArtBudget, targets: list[tuple[str, str]]
+    ) -> list[tuple[str, Asset]]:
+        """По картинке на каждую пару (услуга, сегмент) из targets; возвращает созданные с ключом их пары."""
         llm = SpendLLM(self.llm, self.repository, business.id, budget, "image_ideas")
         art = self.art_factory(budget, self.record_art)
         hashes = [asset.phash for asset in self.repository.assets(business.id) if asset.phash]
@@ -477,7 +568,7 @@ class PlanService:
         # (вызов ИИ, картинка) сама завершается commit.
         self.repository.commit()
         try:
-            ideas = await generate_ideas(llm, business.niche_class or "other", count=count)
+            ideas = await generate_ideas(llm, business.niche_class or "other", targets)
         except (YandexGPTError, ValueError):
             return []
         created = []
@@ -497,7 +588,7 @@ class PlanService:
             asset = Asset(
                 business_id=business.id,
                 kind="image",
-                idea_text=idea.visual,
+                idea_text=idea.label,
                 prompt=idea.prompt,
                 file_path=self.store(business.id, checked.phash, "jpg", checked.data),
                 phash=checked.phash,
@@ -505,7 +596,7 @@ class PlanService:
             )
             self.save_with_file(asset)
             hashes.append(checked.phash)
-            created.append(asset)
+            created.append((assets_key(idea.service, idea.segment), asset))
         return created
 
     def store(self, business_id: int, name: str, suffix: str, data: bytes) -> str:
@@ -528,9 +619,9 @@ class PlanService:
             raise Blocked("Реклама уже запущена. Картинки меняются в разделе «Реклама».")
         return plan, group
 
-    def attach(self, plan: Plan, segment: str, assets: list[Asset]) -> None:
+    def attach(self, plan: Plan, key: str, assets: list[Asset]) -> None:
         payload = deepcopy(plan.payload)
-        payload["assets"].setdefault(segment, []).extend(asset.id for asset in assets)
+        payload["assets"].setdefault(key, []).extend(asset.id for asset in assets)
         plan.payload = payload
         self.repository.commit()
 
@@ -542,16 +633,18 @@ class PlanService:
             budget = ai_budget(self.repository, business, self.limits, today)
             if self.generations_remaining(budget) == 0:
                 raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
-            created = await self.generate_images(business, budget, REGENERATE_COUNT)
+            pair = (group.get("service", ""), group["segment"])
+            created = await self.generate_images(business, budget, [pair] * REGENERATE_COUNT)
             if not created:
                 raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")
-            self.attach(plan, group["segment"], created)
+            self.attach(plan, group_key(group), [asset for _, asset in created])
         return self.view(business, plan, today)
 
     def upload_photo(self, business_id: int, group_id: int, data: bytes, today: date) -> dict:
         business = self.repository.business(business_id)
         self.draft_group(business_id, group_id)
-        assets = self.repository.assets(business_id)
+        # Ролики собираются из картинок, по одному на пару: в лимит идут только картинки.
+        assets = [asset for asset in self.repository.assets(business_id) if asset.kind in IMAGE_KINDS]
         if len(assets) >= MAX_ASSETS:
             raise Blocked("Загружено слишком много картинок. Уберите ненужные.")
         # Разбор может ждать слот, пока картинки разбирает сборка ролика: соединение на это время возвращается в пул.
@@ -573,7 +666,7 @@ class PlanService:
                 selected=True,
             )
             self.save_with_file(asset)
-            self.attach(plan, group["segment"], [asset])
+            self.attach(plan, group_key(group), [asset])
         return self.view(business, plan, today)
 
     def select_assets(self, business_id: int, asset_ids: list[int]) -> bool:
@@ -620,9 +713,11 @@ class PlanService:
                         "url": f"/api/plan/assets/{asset.id}/file",
                         "kind": asset.kind,
                         "alt": asset.idea_text or "Ваше фото",
+                        # Подпись — суть идеи картинки; у ранних картинок в idea_text лежит длинное описание кадра.
+                        "label": shorten(asset.idea_text, TITLE_LIMIT, placeholder="…") if asset.idea_text else "",
                         "selected": asset.selected,
                     }
-                    for asset in (by_id[id_] for id_ in payload["assets"].get(group["segment"], ()) if id_ in by_id)
+                    for asset in (by_id[id_] for id_ in payload["assets"].get(group_key(group), ()) if id_ in by_id)
                 ],
             }
             for group in payload["groups"]

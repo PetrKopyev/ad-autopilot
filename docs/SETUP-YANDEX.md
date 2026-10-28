@@ -60,17 +60,18 @@
 Нейросети используются только для текстов объявлений, черновика описания бизнеса и картинок. Решений о рекламе они не принимают ([ARCHITECTURE.md](ARCHITECTURE.md)).
 
 1. В консоли Yandex Cloud (https://console.yandex.cloud) создайте или выберите облако и каталог, подключите платёжный аккаунт. Идентификатор каталога возьмите на странице каталога, это `YC_FOLDER_ID`.
-2. Создайте сервисный аккаунт в этом каталоге и назначьте ему роли на вызов моделей: `ai.languageModels.user` (YandexGPT) и `ai.imageGeneration.user` (YandexART). Названия ролей приведены по документации Yandex Cloud, проверьте их в списке ролей консоли.
-3. Для сервисного аккаунта создайте API-ключ (в области действия — доступ к Foundation Models) и сохраните значение в `YC_API_KEY`. Ключ показывается один раз.
+2. Создайте сервисный аккаунт в этом каталоге и назначьте ему роли на вызов моделей: `ai.languageModels.user` (YandexGPT) и `ai.imageGeneration.user` (картинки Alice AI ART). Названия ролей приведены по документации Yandex Cloud, проверьте их в списке ролей консоли.
+3. Для сервисного аккаунта создайте API-ключ и сохраните значение в `YC_API_KEY`. Ключ показывается один раз. В области действия ключа отметьте обе: `yc.ai.foundationModels.execute` (тексты) и `yc.ai.imageGeneration.execute` (картинки). Без второй области и роли `ai.imageGeneration.user` картинки не создаются: API отвечает 403.
 4. В `.env`:
 
    ```
    YC_FOLDER_ID=<идентификатор каталога>
    YC_API_KEY=<API-ключ сервисного аккаунта>
    YANDEXGPT_MODEL=yandexgpt/latest
+   YANDEXART_MODEL=aliceai-image-art-3.0/latest
    ```
 
-   Сервис обращается к моделям `gpt://<YC_FOLDER_ID>/<YANDEXGPT_MODEL>` и `art://<YC_FOLDER_ID>/yandex-art/latest`, ключ передаётся заголовком `Authorization: Api-Key`.
+   Тексты сервис пишет моделью `gpt://<YC_FOLDER_ID>/<YANDEXGPT_MODEL>`, ключ передаётся заголовком `Authorization: Api-Key`. Картинки рисует `art://<YC_FOLDER_ID>/<YANDEXART_MODEL>` через OpenAI-совместимый API (`POST https://ai.api.cloud.yandex.net/v1/images/generations`, заголовки `Authorization: Bearer <YC_API_KEY>` и `OpenAI-Project: <YC_FOLDER_ID>`), квадрат 1024×1024 в JPEG, 10–15 секунд на картинку. Старые `yandex-art/latest` и `yandex-art-2.0/latest` не используются: первая отвечает 403, вторая на 28.10.2026 завершала операции ошибкой 13.
 5. Если `YC_API_KEY` или `YC_FOLDER_ID` пусты (а также при `PLATFORM_MODE=fake`), сервис работает с заглушками: шаблонные тексты и случайные картинки.
 
-Стоимость: по данным исследования на 26.10.2026 YandexART стоит 2,23 ₽ за запрос с НДС, YandexGPT Pro 5.1 — 0,8 ₽ за 1000 токенов. Расходы на нейросети считаются отдельно от рекламного бюджета и ограничены `AI_SPEND_ONBOARDING_LIMIT_RUB` (60 ₽ на подготовку плана) и `AI_SPEND_WEEKLY_LIMIT_RUB` (25 ₽ в неделю) на бизнес. Тариф в учёте трат зашит в коде для Pro 5.1: при смене модели в `YANDEXGPT_MODEL` учёт будет приблизительным.
+Стоимость: по данным исследования на 26.10.2026 YandexART стоит 2,23 ₽ за запрос с НДС; тариф Alice AI ART не сверен, в учёте трат картинка считается по той же цене (`ART_COST_KOP` в `backend/app/content/art.py`). Отклонённый запрос (ошибка 4xx или 5xx, сеть недоступна) в траты не идёт. YandexGPT Pro 5.1 стоит 0,8 ₽ за 1000 токенов. Расходы на нейросети считаются отдельно от рекламного бюджета и ограничены `AI_SPEND_ONBOARDING_LIMIT_RUB` (60 ₽ на подготовку плана) и `AI_SPEND_WEEKLY_LIMIT_RUB` (25 ₽ в неделю) на бизнес. Тариф в учёте трат зашит в коде для Pro 5.1: при смене модели в `YANDEXGPT_MODEL` учёт будет приблизительным.

@@ -44,7 +44,7 @@ export function ClientsPage() {
   return <div className="page-stack launch-flow">
     <h1>{copy.clients.title}</h1>
     <p className="muted">{labels.intro}</p>
-    {questions.loading && <p role="status">{copy.screens.loading}</p>}
+    {questions.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {questions.error && <ErrorBanner message={questions.error} onRetry={questions.reload} />}
     {questions.data && <>
       <Card className="page-stack"><h2>{labels.costPerClient}</h2>

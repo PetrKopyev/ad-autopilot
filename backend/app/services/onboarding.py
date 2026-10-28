@@ -25,6 +25,12 @@ from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
 SUBJECT_TYPES = ("ip", "ooo", "selfemployed", "person")
+INN_ERRORS = {
+    "ip": "Проверьте ИНН: у ИП в нём 12 цифр, без ошибок.",
+    "ooo": "Проверьте ИНН: у ООО в нём 10 цифр, без ошибок.",
+    "selfemployed": "Проверьте ИНН: у самозанятого в нём 12 цифр, без ошибок.",
+    "person": "Проверьте ИНН: у физлица в нём 12 цифр, без ошибок.",
+}
 MEDICAL_ORDER = ("none", "maybe", "required")
 MAX_BUDGET_KOP = 1_000_000_000
 DRAFT_STATUSES = ("draft", "plan_ready")
@@ -168,11 +174,11 @@ class SpendLLM:
         self.budget = budget
         self.purpose = purpose
 
-    async def complete_json(self, system: str, user: str) -> str:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if self.budget.spent_kop >= self.budget.limit_kop:
             raise YandexGPTError("Лимит трат на ИИ исчерпан.")
         try:
-            result = await self.inner.complete_json(system, user)
+            result = await self.inner.complete_json(system, user, temperature)
         except YandexGPTError as error:
             self.account(error.result)
             raise
@@ -270,6 +276,28 @@ def lines(value: str) -> list[str]:
     return [line.strip(" -•\t") for line in re.split(r"[\n;]", value) if line.strip(" -•\t")]
 
 
+def service_names(value: str) -> list[str]:
+    """Услуги владелец пишет и по строке, и через запятую; запятая в скобках название не делит. Повторы убираются."""
+    names: dict[str, str] = {}
+    for item in re.split(r"[\n;]|,(?![^()]*\))", value):
+        if name := item.strip(" -•\t"):
+            names.setdefault(name.casefold(), name)
+    return list(names.values())
+
+
+OWNER_PRICE = re.compile(
+    r"\s*[—–:-]?\s*(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[,.](\d{2}))?\s*(?:₽|руб\.?|р\.?)", re.IGNORECASE
+)
+
+
+def owner_price(name: str, prices: list[str]) -> int | None:
+    """Цена услуги из поля «Цены»: строка — название услуги и сумма, как её записывает проверка сайта."""
+    for line in prices:
+        if line.casefold().startswith(name.casefold()) and (match := OWNER_PRICE.fullmatch(line[len(name) :])):
+            return int(re.sub(r"\D", "", match[1])) * 100 + int(match[2] or 0) or None
+    return None
+
+
 def description_fields(draft: DescriptionDraft) -> dict[str, dict]:
     asked: dict[str, str] = {}
     for item in draft.questions:
@@ -298,7 +326,8 @@ def description_fields(draft: DescriptionDraft) -> dict[str, dict]:
         key: {
             "value": values[key],
             "quote": " … ".join(dict.fromkeys(quotes[key])) or None,
-            "verified": bool(values[key]) and key not in asked,
+            # В услугах только подтверждённые цитатой: вопрос об отброшенной услуге найденные не отменяет.
+            "verified": bool(values[key]) and (key not in asked or key == "services"),
             "question": asked.get(key, QUESTIONS[key]),
         }
         for key in DESCRIPTION_KEYS
@@ -311,11 +340,14 @@ def description_draft(business: Business) -> DescriptionDraft:
     value = {key: fields.get(key, {}).get("value", "") for key in DESCRIPTION_KEYS}
     draft = DescriptionDraft(source="owner_text", medical=classify(" ".join(value.values())))
     draft.medical.level = business.medical_level
-    draft.services = [Service(name, None, name, "owner") for name in lines(value["services"])]
+    prices = lines(value["prices"])
+    draft.services = [
+        Service(name, owner_price(name, prices), name, "owner") for name in service_names(value["services"])
+    ]
     if value["address"].strip():
         draft.address = Fact(value["address"].strip(), value["address"].strip(), "owner")
     # Цены входят в белый список чисел как факты; отдельного поля цен в проверке текстов нет.
-    draft.advantages = [Fact(line, line, "owner") for line in lines(value["prices"]) + lines(value["difference"])]
+    draft.advantages = [Fact(line, line, "owner") for line in prices + lines(value["difference"])]
     return draft
 
 
@@ -416,28 +448,33 @@ class OnboardingService:
         *,
         owner_text: str | None = None,
         on_miss: Callable[[], None] | None = None,
+        refresh: bool = False,
     ) -> dict:
         """on_miss вызывается перед настоящим чтением сайта: лимит частоты не тратится на ответ из кэша, в том числе на
         ответ, который принесла шедшая параллельно проверка того же бизнеса. Если та проверка сорвалась, сайт читает
-        первая из ждавших, остальные снова ждут её: чтение и лимит — по одному разу."""
+        первая из ждавших, остальные снова ждут её: чтение и лимит — по одному разу. refresh — явный повтор владельца:
+        кэш пропускается, но ответ параллельной проверки, которую он дождался, свежий и берётся без второго чтения."""
         business = self.current(business_id)
         while (running := SITE_CHECKS.get(business_id)) is not None and owner_text is None:
             self.repository.commit()
             await running.wait()
             business = self.current(business_id)
-        if cached := self.cached_check(business, now, owner_text):
+            refresh = False
+        if not refresh and (cached := self.cached_check(business, now, owner_text)):
             return self.check_view(business, cached)
         if on_miss is not None:
             on_miss()
         done = SITE_CHECKS[business_id] = asyncio.Event()
         try:
-            return await self.read_site(business_id, business.site_url, now, today, owner_text)
+            return await self.read_site(business_id, business.site_url, now, today, owner_text, refresh)
         finally:
             done.set()
             if SITE_CHECKS.get(business_id) is done:
                 del SITE_CHECKS[business_id]
 
-    async def read_site(self, business_id: int, url: str, now: datetime, today: date, owner_text: str | None) -> dict:
+    async def read_site(
+        self, business_id: int, url: str, now: datetime, today: date, owner_text: str | None, refresh: bool
+    ) -> dict:
         # Чтение сайта идёт до минуты: без блокировки бизнеса, соединение с базой на это время возвращается в пул.
         self.repository.commit()
         site = await self.reader(url)
@@ -446,7 +483,7 @@ class OnboardingService:
         with ExitStack() as stack:
             await wait_for_lock(stack, self.repository, business_id, LOCK_WAIT_SECONDS)
             business = self.checked_business(business_id, url)
-            if cached := self.cached_check(business, now, owner_text):
+            if not refresh and (cached := self.cached_check(business, now, owner_text)):
                 return self.check_view(business, cached)
             llm = SpendLLM(
                 self.llm, self.repository, business.id, ai_budget(self.repository, business, self.limits, today), "site"
@@ -471,6 +508,11 @@ class OnboardingService:
             description = dict(business.description)
             description["check"] = check
             description.setdefault("fields", fields)
+            # Новое чтение дополняет неподтверждённое описание: заполняются только пустые поля, введённое не трогаем.
+            if business.description_approved_at is None:
+                description["fields"] = {
+                    key: item if item.get("value") else fields[key] for key, item in description["fields"].items()
+                }
             description["site_medical"] = draft.medical.level
             business.description = description
             business.medical_level = worst_medical(draft.medical.level, business.medical_level)
@@ -584,10 +626,8 @@ class OnboardingService:
         name = name.strip()
         if subject_type not in SUBJECT_TYPES or not name or len(name) > 300:
             raise OnboardingError("Заполните данные рекламодателя.")
-        if not valid_inn(inn):
-            raise OnboardingError("Проверьте ИНН: нужны 10 или 12 цифр с верной контрольной суммой.")
-        if len(inn) != (10 if subject_type == "ooo" else 12):
-            raise OnboardingError("Для ООО укажите ИНН из 10 цифр, для ИП, самозанятого и физлица — из 12.")
+        if not valid_inn(inn) or len(inn) != (10 if subject_type == "ooo" else 12):
+            raise OnboardingError(INN_ERRORS[subject_type])
         phone = normalize_phone(phone)
         # Маркировку владелец меняет и после запуска — в настройках, поэтому статус не проверяется. Под блокировкой:
         # запись не идёт посреди запуска или шага автопилота, и удалённому бизнесу профиль не создаётся. Как и описание,

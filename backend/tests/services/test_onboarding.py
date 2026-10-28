@@ -16,6 +16,7 @@ from app.content.art import ArtBudget, FakeArt
 from app.content.art import ArtCall as ArtRecord
 from app.content.images import DEFAULT_FONT
 from app.content.site_reader import Page, SiteReadResult
+from app.content.verify import DescriptionDraft, OwnerQuestion, Service
 from app.content.yandexgpt import CompletionResult, YandexGPTError
 from app.db.models import (
     Ad,
@@ -47,9 +48,12 @@ from app.services.onboarding import (
     OnboardingService,
     SpendLLM,
     ai_budget,
+    description_draft,
+    description_fields,
     detect_niche,
     launch_time,
     normalize_phone,
+    service_names,
     valid_inn,
 )
 from app.services.plan import PlanService
@@ -103,7 +107,7 @@ class MemoryRepository(LaunchRepository):
                 arg = column.default.arg
                 setattr(item, column.key, arg(None) if column.default.is_callable else arg)
         if hasattr(item, "id") and item.id is None:
-            item.id = len(table) + 1
+            item.id = max((row.id for row in table), default=0) + 1
         if item not in table:
             table.append(item)
 
@@ -202,6 +206,13 @@ class MemoryRepository(LaunchRepository):
     def asset(self, business_id: int, asset_id: int) -> Asset | None:
         return next(iter(self.rows(Asset, id=asset_id, business_id=business_id)), None)
 
+    def used_assets(self, business_id: int) -> set[int]:
+        ids = {asset.id for asset in self.assets(business_id)}
+        return {id_ for ad in self.tables.get(Ad, []) for id_ in (ad.asset_id, ad.video_id) if id_ in ids}
+
+    def remove(self, item: object) -> None:
+        self.tables[type(item)].remove(item)
+
     def fresh_business(self, business_id: int) -> Business | None:
         return next(iter(self.rows(Business, id=business_id)), None)
 
@@ -255,14 +266,20 @@ class ScriptedLLM:
         self.cost_kop = cost_kop
         self.calls: list[str] = []
 
-    async def complete_json(self, system: str, user: str) -> str:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if "Извлеки" in system:
             kind, text = "description", self.description
         elif "визуальные идеи" in system:
             kind = "ideas"
-            text = json.dumps({"ideas": [f"Идея {number}" for number in range(len(json.loads(user)["segments"]))]})
+            items = json.loads(user)["items"]
+            text = json.dumps(
+                {"ideas": [{"title": f"Идея {number}", "visual": f"Кадр {number}"} for number in range(len(items))]}
+            )
         else:
             kind, text = "ad", self.ad
+            location = json.loads(user).get("location")
+            if location and text == AD:
+                text = json.dumps({**json.loads(AD), "text": location[0]}, ensure_ascii=False)
         self.calls.append(kind)
         if not self.cost_kop:
             return text
@@ -483,6 +500,55 @@ async def test_site_check_counts_rate_limit_only_for_real_reading(world: World) 
     assert misses == [0, 11]
 
 
+async def test_site_check_refresh_reads_site_past_fresh_cache(world: World) -> None:
+    misses = []
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first"))
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("cached"))
+    assert world.llm.calls == ["description"] and misses == ["first"]
+    later = NOW + timedelta(minutes=1)
+    await world.onboarding.site_check(
+        world.business.id, later, TODAY, on_miss=lambda: misses.append("refresh"), refresh=True
+    )
+    assert world.llm.calls == ["description", "description"] and misses == ["first", "refresh"]
+    assert world.business.description["check"]["checked_at"] == later.isoformat()
+
+
+EMPTY_DESCRIPTION = json.dumps({"services": [], "address": {"value": "", "quote": ""}, "advantages": []})
+
+
+async def test_site_check_refresh_fills_only_empty_fields_of_unapproved_description(world: World) -> None:
+    world.llm.description = EMPTY_DESCRIPTION
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    world.onboarding.save_description(world.business.id, {"address": {"value": "Самара, у вокзала"}}, False, NOW)
+    world.llm.description = DESCRIPTION
+    fields = (await world.onboarding.site_check(world.business.id, NOW, TODAY, refresh=True))["description"]
+    assert fields["services"]["value"] == "Маникюр классический" and fields["services"]["verified"]
+    assert fields["address"]["value"] == "Самара, у вокзала" and not fields["address"]["verified"]
+    assert world.business.description["fields"] == fields
+
+
+async def test_site_reread_after_cache_expiry_fills_empty_fields(world: World) -> None:
+    world.llm.description = EMPTY_DESCRIPTION
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    world.onboarding.save_description(world.business.id, {"address": {"value": "Самара, у вокзала"}}, False, NOW)
+    world.llm.description = DESCRIPTION
+    fields = (await world.onboarding.site_check(world.business.id, NOW + timedelta(minutes=11), TODAY))["description"]
+    assert world.llm.calls == ["description", "description"]
+    assert fields["services"]["value"] == "Маникюр классический" and fields["services"]["verified"]
+    assert fields["address"]["value"] == "Самара, у вокзала"
+
+
+async def test_site_check_refresh_keeps_approved_description(world: World) -> None:
+    world.llm.description = EMPTY_DESCRIPTION
+    await world.onboarding.site_check(world.business.id, NOW, TODAY)
+    world.onboarding.save_description(world.business.id, {"services": {"value": "Стрижки"}}, True, NOW)
+    approved = world.business.description["fields"]
+    world.llm.description = DESCRIPTION
+    result = await world.onboarding.site_check(world.business.id, NOW, TODAY, refresh=True)
+    assert result["services_found"] == 1
+    assert result["description"] == approved == world.business.description["fields"]
+
+
 class SlowLLM(ScriptedLLM):
     """Отдаёт управление циклу событий, как настоящий ИИ, пока готовит ответ."""
 
@@ -490,11 +556,11 @@ class SlowLLM(ScriptedLLM):
         super().__init__()
         self.during = during
 
-    async def complete_json(self, system: str, user: str) -> str:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         await asyncio.sleep(0.01)
         self.during()
         await asyncio.sleep(0.01)
-        return await super().complete_json(system, user)
+        return await super().complete_json(system, user, temperature)
 
 
 async def test_parallel_site_check_waits_for_running_one_and_takes_its_result(world: World) -> None:
@@ -518,6 +584,30 @@ async def test_parallel_site_check_waits_for_running_one_and_takes_its_result(wo
     )
     assert first == second and first["services_found"] == 1
     assert reads == [SITE] and world.llm.calls == ["description"] and misses == ["first"]
+    assert SITE_CHECKS == {}
+
+
+async def test_refresh_during_running_site_check_takes_its_result_without_second_read(world: World) -> None:
+    reads, misses = [], []
+    original = world.onboarding.reader
+
+    async def slow_reader(url: str) -> SiteReadResult:
+        reads.append(url)
+        await asyncio.sleep(0.01)
+        return await original(url)
+
+    world.onboarding.llm = world.llm = SlowLLM()
+    world.onboarding.reader = slow_reader
+    first, second = await asyncio.wait_for(
+        asyncio.gather(
+            world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first")),
+            world.onboarding.site_check(
+                world.business.id, NOW, TODAY, on_miss=lambda: misses.append("refresh"), refresh=True
+            ),
+        ),
+        5,
+    )
+    assert first == second and reads == [SITE] and world.llm.calls == ["description"] and misses == ["first"]
     assert SITE_CHECKS == {}
 
 
@@ -905,6 +995,41 @@ async def test_unfound_facts_become_questions(tmp_path: Path) -> None:
     assert fields["address"]["question"] == "По какому адресу вы принимаете клиентов?"
 
 
+def test_found_services_stay_verified_when_another_item_was_dropped() -> None:
+    draft = DescriptionDraft(
+        services=[
+            Service("Маникюр с покрытием гель-лаком", 220_000, "Маникюр с покрытием гель-лаком 2 200 ₽", SITE),
+            Service("Педикюр", 250_000, "Педикюр 2 500 ₽", SITE),
+        ],
+        questions=[OwnerQuestion("services.2", "Как называется услуга и сколько она стоит?")],
+    )
+    fields = description_fields(draft)
+    assert fields["services"]["value"] == "Маникюр с покрытием гель-лаком\nПедикюр" and fields["services"]["verified"]
+    assert fields["prices"]["value"] == "Маникюр с покрытием гель-лаком — 2 200 ₽\nПедикюр — 2 500 ₽"
+
+
+def test_owner_services_are_split_by_lines_commas_and_semicolons() -> None:
+    value = "Маникюр, педикюр, наращивание ногтей; снятие покрытия\nМаникюр\n\nУход (руки, ноги)"
+    assert service_names(value) == ["Маникюр", "педикюр", "наращивание ногтей", "снятие покрытия", "Уход (руки, ноги)"]
+
+
+def test_owner_services_take_price_from_prices_field() -> None:
+    fields = {
+        "services": {"value": "Маникюр, педикюр, Маникюр с покрытием, снятие покрытия"},
+        "prices": {
+            "value": "Маникюр с покрытием — 2 200 ₽\nМаникюр — 1 500 ₽\nПедикюр: 2000 руб.\nСнятие покрытия от 300 ₽"
+        },
+    }
+    business = Business(description={"fields": fields}, medical_level="none")
+    draft = description_draft(business)
+    assert [(item.name, item.price) for item in draft.services] == [
+        ("Маникюр", 150_000),
+        ("педикюр", 200_000),
+        ("Маникюр с покрытием", 220_000),
+        ("снятие покрытия", None),
+    ]
+
+
 async def test_medical_site_gets_warning_level(tmp_path: Path) -> None:
     world = make_world(tmp_path, pages=page_text("Услуги косметолога, ботокс и мезотерапия."))
     result = await world.onboarding.site_check(world.business.id, NOW, TODAY)
@@ -913,7 +1038,7 @@ async def test_medical_site_gets_warning_level(tmp_path: Path) -> None:
 
 async def test_llm_failure_degrades_to_owner_questions(tmp_path: Path) -> None:
     class Broken:
-        async def complete_json(self, system: str, user: str) -> str:
+        async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
             raise YandexGPTError("down")
 
     world = make_world(tmp_path)

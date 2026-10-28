@@ -166,6 +166,41 @@ def test_quote_search_tries_later_occurrences() -> None:
     assert find_quote(quote, [Page("a", text)]) == "a"
 
 
+CARDS = (
+    "Маникюр с покрытием гель-лаком\nКомбинированный маникюр, выравнивание, покрытие в один тон.\n2 200 ₽\n"
+    "Маникюр без покрытия\nГигиенический маникюр.\n1 500 ₽"
+)
+
+
+def test_service_card_quote_joins_name_and_price_with_ellipsis() -> None:
+    pages = [Page("prices", CARDS)]
+    item = {
+        "name": "Маникюр с покрытием гель-лаком",
+        "price": 220000,
+        "quote": "Маникюр с покрытием гель-лаком … 2 200 ₽",
+    }
+    draft = verify_description(description(services=[item]), pages)
+    assert [(service.name, service.price, service.source) for service in draft.services] == [
+        ("Маникюр с покрытием гель-лаком", 220000, "prices")
+    ]
+    glued = {**item, "quote": "Маникюр с покрытием гель-лаком 2 200 ₽"}
+    draft = verify_description(description(services=[glued]), pages)
+    assert draft.services == [] and draft.questions[0].field == "services.0"
+
+
+def test_price_of_neighbour_card_does_not_support_service() -> None:
+    pages = [Page("prices", CARDS)]
+    assert find_quote("Маникюр с покрытием гель-лаком … 1 500 ₽", pages) is None
+    far = "Маникюр с покрытием гель-лаком\n" + "описание " * (MAX_GAP // 9 + 1) + "\n2 200 ₽"
+    assert find_quote("Маникюр с покрытием гель-лаком … 2 200 ₽", [Page("a", far)]) is None
+
+
+def test_price_part_does_not_match_inside_other_number() -> None:
+    quote = "Маникюр с покрытием гель-лаком … 2 200 ₽"
+    assert find_quote(quote, [Page("a", "Маникюр с покрытием гель-лаком, 12 200 ₽")]) is None
+    assert find_quote("Маникюр с покрытием … в один тон", [Page("a", "Маникюр с покрытием, в один тон")]) is None
+
+
 @pytest.mark.parametrize(
     "quote, price, expected",
     [

@@ -15,7 +15,7 @@
 .stats-table th:first-child, .stats-table td:first-child { padding-left: 0; white-space: normal; min-width: 130px; }
 .stats-table caption { text-align: left; font-weight: 650; padding-bottom: 12px; }
 .stats-select { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-.stats-select select { min-height: 48px; max-width: 100%; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 10px; background: #fff; color: inherit; }
+.stats-select select { min-height: 48px; max-width: 100%; padding: 8px 44px 8px 12px; border: 1px solid var(--color-border); border-radius: 10px; background-color: #fff; color: inherit; }
 .stats-chart { display: block; width: 100%; height: auto; overflow: visible; }
 .stats-chart text { font-size: 13px; fill: var(--color-muted); }
 .stats-chart-key { display: flex; flex-wrap: wrap; gap: 24px; }

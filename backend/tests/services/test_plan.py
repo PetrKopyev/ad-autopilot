@@ -3,6 +3,7 @@ import json
 import shutil
 import threading
 from contextlib import contextmanager
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +13,13 @@ from PIL import Image
 
 from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
 from app.content.art import ART_COST_KOP
+from app.content.ideas import subject
 from app.content.images import check_image, run_decoding
-from app.db.models import ArtCall, Asset, LLMCall
+from app.db.models import Ad, ArtCall, Asset, LLMCall, Plan
 from app.services import plan as plan_module
 from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, NotFound, OnboardingError
-from app.services.plan import launch_blockers
+from app.services.plan import group_key, launch_blockers
 from tests.services.test_onboarding import (
     BUDGET_KOP,
     NOW,
@@ -63,6 +65,214 @@ async def test_plan_groups_cover_segments_for_each_platform(world: World) -> Non
     stored = world.repository.latest_plan(world.business.id)
     assert stored.version == 1 and stored.payload["groups"][0]["ads"][0]["title"] == "Маникюр классический"
     assert all(group["ads"] and group["ads"][0]["text"] for group in plan["groups"])
+
+
+
+async def test_groups_take_services_in_turn_and_ads_of_group_differ(world: World) -> None:
+    await onboard(world)
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "Маникюр классический\nПедикюр\nНаращивание ресниц"}
+    fields["prices"] = {"value": "Маникюр классический — 1 500 ₽\nПедикюр — 2 500 ₽\nНаращивание ресниц — 3 000 ₽"}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    groups = world.repository.latest_plan(world.business.id).payload["groups"]
+    services = ["Маникюр классический", "Педикюр", "Наращивание ресниц"]
+    assert [group["service"] for group in groups] == services * 2
+    assert [group["name"].split(" — ")[0] for group in groups] == services * 2
+    assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
+
+async def test_images_follow_service_of_each_group(world: World) -> None:
+    await onboard(world)
+    services = [
+        "Маникюр с гель-лаком", "Маникюр без покрытия", "Педикюр с покрытием", "Наращивание ногтей", "Снятие покрытия",
+    ]
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "\n".join(services)}
+    fields["prices"] = {"value": "\n".join(f"{name} — 1 500 ₽" for name in services)}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    stored = world.repository.latest_plan(world.business.id).payload["groups"]
+    assets = {asset.id: asset for asset in world.repository.assets(world.business.id)}
+    # Шесть групп — шесть разных пар (услуга, сегмент), по две картинки на пару одним вызовом идей.
+    assert len(assets) == 2 * len(stored) == 12 and world.llm.calls.count("ideas") == 1
+    seen: set[int] = set()
+    for group, shown in zip(stored, plan["groups"], strict=True):
+        ids = {asset["id"] for asset in shown["assets"]}
+        assert len(ids) == 2 and not ids & seen
+        seen |= ids
+        assert all(assets[id_].prompt.startswith(subject(group["service"], "nails")) for id_ in ids)
+        assert all(asset["label"].startswith("Идея ") for asset in shown["assets"])
+    pedicure = next(shown for group, shown in zip(stored, plan["groups"]) if group["service"] == "Педикюр с покрытием")
+    assert all(assets[asset["id"]].prompt.startswith("Женские ступни") for asset in pedicure["assets"])
+    assert all(asset.prompt.endswith("без текста и надписей.") for asset in assets.values())
+
+
+def add_service(world: World, name: str) -> None:
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": f"Маникюр классический\n{name}"}
+    fields["prices"] = {"value": f"Маникюр классический — 1 500 ₽\n{name} — 2 500 ₽"}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+
+
+def keyed_assets(world: World) -> dict[str, list[int]]:
+    return world.repository.latest_plan(world.business.id).payload["assets"]
+
+
+async def test_rebuild_keeps_images_of_same_pair_and_generates_for_new_pairs(world: World) -> None:
+    await build(world)
+    before = deepcopy(keyed_assets(world))
+    add_service(world, "Педикюр")
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    after = keyed_assets(world)
+    for key, ids in before.items():
+        assert after[key] == ids
+    old_ids = {id_ for ids in before.values() for id_ in ids}
+    new_keys = [key for key in after if key.startswith("Педикюр — ")]
+    assert len(new_keys) == 3
+    assert all(len(after[key]) == 2 and not set(after[key]) & old_ids for key in new_keys)
+    assets = {asset.id: asset for asset in world.repository.assets(world.business.id)}
+    assert all(assets[id_].prompt.startswith("Женские ступни") for key in new_keys for id_ in after[key])
+    assert world.llm.calls.count("ideas") == 2
+    assert all(any(asset["selected"] for asset in group["assets"]) for group in plan["groups"])
+
+
+async def test_old_plan_images_are_not_moved_to_service_pairs(world: World) -> None:
+    await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    # План до разбивки по услугам: картинки по сегменту, у групп нет service.
+    old = {group["segment"]: ids for group, ids in zip(stored.payload["groups"], stored.payload["assets"].values())}
+    groups = [{key: value for key, value in group.items() if key != "service"} for group in stored.payload["groups"]]
+    stored.payload = stored.payload | {"assets": old, "groups": groups, "inputs_hash": "old"}
+    old_ids = {id_ for ids in old.values() for id_ in ids}
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    after = keyed_assets(world)
+    assert set(after) == {f"Маникюр классический — {segment}" for segment in SEGMENTS["nails"]}
+    assert not {id_ for ids in after.values() for id_ in ids} & old_ids
+    assert sum(len(ids) for ids in after.values()) == 8
+
+
+async def test_rebuild_removes_generated_images_left_out_of_new_plan(world: World) -> None:
+    await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    old = {group["segment"]: ids for group, ids in zip(stored.payload["groups"], stored.payload["assets"].values())}
+    stored.payload = stored.payload | {"assets": old, "inputs_hash": "old"}
+    images = world.repository.assets(world.business.id)
+    assert any(asset.selected for asset in images)
+    in_ad = images[-1]
+    world.repository.add(Ad(ad_group_id=1, title="Т", text="Т", asset_id=in_ad.id))
+    upload = Asset(business_id=world.business.id, kind="upload", file_path=f"{world.business.id}/upload.jpg")
+    world.repository.add(upload)
+    (world.media / upload.file_path).write_bytes(picture(777))
+    gone = images[:-1]
+    assert all((world.media / asset.file_path).is_file() for asset in gone)
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    left = {asset.id for asset in world.repository.assets(world.business.id)}
+    # Выбранные картинки тоже уходят: к новым парам они не переходят, и убрать их в интерфейсе было бы нельзя.
+    assert {in_ad.id, upload.id} <= left
+    assert not left & {asset.id for asset in gone}
+    assert not any((world.media / asset.file_path).exists() for asset in gone)
+    assert (world.media / upload.file_path).is_file() and (world.media / in_ad.file_path).is_file()
+
+
+async def test_rebuild_removes_videos_of_removed_images_unless_ads_use_them(world: World) -> None:
+    await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    stored.payload = stored.payload | {"assets": {}, "inputs_hash": "old"}
+    images = world.repository.assets(world.business.id)
+    videos = []
+    for name in ("free", "in_ad"):
+        video = Asset(
+            business_id=world.business.id,
+            kind="video",
+            file_path=f"{world.business.id}/{name}.mp4",
+            formats={"sources": [asset.id for asset in images[:3]]},
+        )
+        world.repository.add(video)
+        (world.media / video.file_path).write_bytes(b"video")
+        videos.append(video)
+    free, in_ad = videos
+    world.repository.add(Ad(ad_group_id=1, title="Т", text="Т", video_id=in_ad.id))
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    left = {asset.id for asset in world.repository.assets(world.business.id)}
+    assert free.id not in left and not (world.media / free.file_path).exists()
+    assert in_ad.id in left and (world.media / in_ad.file_path).is_file()
+
+
+async def test_rebuild_moves_uploads_to_group_of_same_segment(world: World) -> None:
+    plan = await build(world)
+    for group, seed in zip(plan["groups"], (777, 778, 779), strict=False):
+        world.plans.upload_photo(world.business.id, group["id"], picture(seed), TODAY)
+    uploads = [asset for asset in world.repository.assets(world.business.id) if asset.kind == "upload"]
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "Педикюр"}
+    fields["prices"] = {"value": "Педикюр — 2 500 ₽"}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert all(group["name"].startswith("Педикюр — ") for group in plan["groups"])
+    for group, upload in zip(plan["groups"][: len(uploads)], uploads, strict=True):
+        assert upload.id in {asset["id"] for asset in group["assets"]}
+    assert all(upload.selected for upload in uploads)
+
+
+def test_uploads_without_their_segment_go_to_first_group_of_same_platform(world: World) -> None:
+    previous = Plan(
+        payload={
+            "groups": [{"platform": "vk", "segment": "старый", "service": "Маникюр"}],
+            "assets": {"Маникюр — старый": [1]},
+        }
+    )
+    world.repository.add(Asset(business_id=world.business.id, kind="upload", file_path="u.jpg"))
+    slots = [("direct", "Маникюр", "рядом"), ("vk", "Педикюр", "рядом"), ("vk", "Маникюр", "далеко")]
+    assets: dict[str, list[int]] = {}
+    world.plans.carry_uploads(world.business.id, previous, slots, assets)
+    assert assets == {"Педикюр — рядом": [1]}
+
+
+async def test_failed_rebuild_keeps_files_of_images_it_did_not_remove(world: World, monkeypatch) -> None:
+    await build(world)
+    stored = world.repository.latest_plan(world.business.id)
+    stored.payload = stored.payload | {"assets": {}, "inputs_hash": "old"}
+    unselected = [asset for asset in world.repository.assets(world.business.id) if not asset.selected]
+
+    add = world.repository.add
+
+    def fail(item: object) -> None:
+        if isinstance(item, Plan):
+            raise RuntimeError("commit failed")
+        add(item)
+
+    monkeypatch.setattr(world.repository, "add", fail)
+    with pytest.raises(RuntimeError):
+        await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert all((world.media / asset.file_path).is_file() for asset in unselected)
+
+
+async def test_upload_limit_counts_images_only(world: World, monkeypatch) -> None:
+    plan = await build(world)
+    images = len(world.repository.assets(world.business.id))
+    monkeypatch.setattr(plan_module, "MAX_ASSETS", images + 1)
+    world.repository.add(Asset(business_id=world.business.id, kind="video", file_path="v.mp4", selected=True))
+    world.plans.upload_photo(world.business.id, plan["groups"][0]["id"], picture(777), TODAY)
+    with pytest.raises(Blocked, match="слишком много"):
+        world.plans.upload_photo(world.business.id, plan["groups"][0]["id"], picture(778), TODAY)
+
+
+async def test_rebuild_without_ai_budget_leaves_new_pairs_without_images(tmp_path: Path) -> None:
+    world = make_world(tmp_path, limits=AiLimits(onboarding_kop=9 * ART_COST_KOP + 100, weekly_kop=2500))
+    await build(world)
+    add_service(world, "Педикюр")
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    after = keyed_assets(world)
+    assert sum(len(after.get(key, [])) for key in after if key.startswith("Педикюр — ")) == 1
+    assert any(not group["assets"] for group in plan["groups"])
+    assert "В каждой группе отметьте хотя бы одну картинку." in plan["blockers"]
+    assert world.repository.ai_spent(world.business.id) <= 9 * ART_COST_KOP + 100
+
+
+def test_old_plan_groups_keep_images_by_segment() -> None:
+    assert group_key({"segment": "рядом с домом"}) == "рядом с домом"
+    assert group_key({"segment": "рядом с домом", "service": ""}) == "рядом с домом"
+    assert group_key({"segment": "рядом с домом", "service": "Педикюр"}) == "Педикюр — рядом с домом"
 
 
 async def test_budget_split_follows_domain_rules(world: World) -> None:
@@ -343,7 +553,7 @@ async def test_video_built_for_old_selection_is_not_saved_when_selection_changed
     for seed in (701, 702):
         world.plans.upload_photo(world.business.id, group["id"], picture(seed), TODAY)
     plan = world.repository.latest_plan(world.business.id)
-    ids = plan.payload["assets"][plan.payload["groups"][0]["segment"]]
+    ids = plan.payload["assets"][group_key(plan.payload["groups"][0])]
     assert len(ids) >= 4
     world.plans.select_assets(world.business.id, ids[:3])
     monkeypatch.setattr(plan_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")

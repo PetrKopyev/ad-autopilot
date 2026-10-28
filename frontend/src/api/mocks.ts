@@ -170,7 +170,7 @@ export function mockSetupMarking(body: Marking) {
 function mockAsset(id: number, selected = false): PlanAsset {
   const color = id % 2 ? '#e7c2bb' : '#b8cfc3';
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="600" height="400" fill="${color}"/><circle cx="180" cy="180" r="110" fill="#fff" opacity=".4"/><path d="M320 340Q200 200 370 60Q520 190 420 340" fill="#245e4c" opacity=".5"/></svg>`;
-  return { id, url: `data:image/svg+xml,${encodeURIComponent(svg)}`, kind: 'image', alt: copy.launchFlow.mockImage(id), selected };
+  return { id, url: `data:image/svg+xml,${encodeURIComponent(svg)}`, kind: 'image', alt: copy.launchFlow.mockImage(id), label: copy.launchFlow.mockImage(id), selected };
 }
 export function mockSetupPlan(): Plan {
   const direct = setupMock.me.accounts.some((item) => item.platform === 'direct' && item.status === 'ok');
@@ -207,7 +207,7 @@ export async function mockPlanUpload(groupId: number, file: File): Promise<Plan>
   });
   mockSetupPlan(); const group = setupMock.plan!.groups.find((item) => item.id === groupId);
   if (!group) throw new Error(copy.errors.notFound);
-  group.assets.push({ id: Date.now(), url, kind: 'upload', alt: file.name, selected: true });
+  group.assets.push({ id: Date.now(), url, kind: 'upload', alt: file.name, label: '', selected: true });
   persistSetupMock(); return mockSetupPlan();
 }
 export function mockPlanAssets(ids: number[]) {
@@ -270,14 +270,15 @@ export function mockClientAnswer(id: string, clients: number | null) {
   question.clients_count = clients; question.answered_at = new Date().toISOString();
 }
 let businessSettings: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
-  auto_continue: true, marking: null,
+  auto_continue: true, marking: null, metrica_counter_id: null, lead_goal_ids: [], description_approved: false, medical_level: 'none',
   description: { fields: Object.fromEntries((['services', 'prices', 'address', 'difference'] as const).map((key) => [key,
     { value: { services: copy.launchFlow.mockServices, prices: copy.launchFlow.mockPrices, address: copy.launchFlow.mockAddress, difference: '' }[key],
       quote: null, verified: true, question: '' }])) as Description } };
 function mockMonthBudget() { return setupMock.business?.month_budget_kop ?? businessSettings.month_budget_kop; }
 export function mockBusinessSettings(): BusinessSettings {
   return structuredClone({ ...businessSettings, ...setupMock.business,
-    description: setupMock.description ? { fields: setupMock.description } : businessSettings.description });
+    description: setupMock.description ? { fields: setupMock.description } : businessSettings.description,
+    metrica_counter_id: setupMock.counter ?? null, lead_goal_ids: setupMock.goals ?? [], description_approved: !!setupMock.description });
 }
 export function mockSaveBudget(kopecks: number) {
   businessSettings.month_budget_kop = kopecks;

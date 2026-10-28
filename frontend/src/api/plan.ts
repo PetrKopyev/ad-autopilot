@@ -3,7 +3,7 @@ import { mockEnabled } from './screens';
 import { setupGet } from './setup';
 import { copy } from '../copy';
 
-export interface PlanAsset { id: number; url: string; kind: 'image' | 'upload'; alt: string; selected: boolean }
+export interface PlanAsset { id: number; url: string; kind: 'image' | 'upload'; alt: string; label: string; selected: boolean }
 export interface PlanGroup {
   id: number; name: string; platform: 'direct' | 'vk'; audience: string; daily_limit_kop: number;
   ads: { title: string; text: string }[]; assets: PlanAsset[];

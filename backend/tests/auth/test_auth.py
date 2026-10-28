@@ -164,7 +164,9 @@ def test_direct_uses_separate_account_and_encrypted_fields(
     assert params["scope"] == "direct:api metrika:read"
     assert params["force_confirm"] == "yes"
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
-    assert callback(client, params["state"]).status_code == 303
+    response = callback(client, params["state"])
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://testserver/setup/2"
     assert client.cookies["__Host-session"] == original_session
     assert repository.users[1].login == "owner"
     account = repository.accounts[1]

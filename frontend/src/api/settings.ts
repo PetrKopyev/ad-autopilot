@@ -1,7 +1,7 @@
 import { api } from './client';
 import { mockEnabled } from './screens';
 import { setupGet, setupMutation } from './setup';
-import type { Business, Description, Marking, StopResult } from './setup';
+import type { Business, Description, Marking, SiteCheck, StopResult } from './setup';
 
 // Описание сервер хранит вместе со служебными данными проверки сайта; форме нужны только поля.
 export interface StoredDescription { fields: Description }
@@ -11,6 +11,7 @@ export interface StoredMarking extends Omit<Marking, 'confirmed_in_platform'> {
 }
 export interface BusinessSettings extends Business {
   description: StoredDescription | null; auto_continue: boolean; marking: StoredMarking | null;
+  metrica_counter_id: number | null; lead_goal_ids: number[]; description_approved: boolean; medical_level: SiteCheck['medical_level'];
 }
 /** Сохранённые реквизиты так, как их показывает сервер: от ИНН и телефона — только последние цифры. */
 export function maskMarking(marking: Marking): StoredMarking {

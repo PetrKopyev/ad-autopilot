@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { Fragment, useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Card, ErrorBanner } from '../components';
@@ -58,8 +58,9 @@ function DescriptionBlock({ business }: { business: BusinessSettings }) {
   }
   return <Block title={copy.settings.business}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-      {descriptionKeys.map((key) => <label key={key} className="field">{labels.description[key]}
-        <textarea value={values[key]} onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></label>)}
+      {descriptionKeys.map((key) => <Fragment key={key}><label className="field">{labels.description[key]}
+        <textarea value={values[key]} aria-describedby={key === 'services' ? 'settings-services-hint' : undefined} onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></label>
+        {key === 'services' && <p className="muted" id="settings-services-hint">{copy.setup.draft.servicesHint}</p>}</Fragment>)}
       <Status section={section} /><SaveButton section={section} />
     </form>
   </Block>;
@@ -133,7 +134,7 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
   const showInnError = (innTouched || !!marking.inn) && !innOk;
-  const innError = validInn(marking.inn) ? copy.launchFlow.innTypeError : copy.launchFlow.innError;
+  const innError = copy.launchFlow.innError(marking.subject_type);
   const confirmed = stored ? (['direct', 'vk'] as const).filter((platform) => stored.confirmed_in_platform[platform]) : [];
   function edit() {
     section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setEditing(true);
@@ -215,7 +216,7 @@ export function SettingsPage() {
   return <div className="page-stack launch-flow">
     <h1>{copy.settings.title}</h1>
     <p className="muted">{labels.intro}</p>
-    {business.loading && <p role="status">{copy.screens.loading}</p>}
+    {business.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {business.error && <ErrorBanner message={business.error} onRetry={business.reload} />}
     {business.data && <>
       <BudgetBlock business={business.data} /><DescriptionBlock business={business.data} />

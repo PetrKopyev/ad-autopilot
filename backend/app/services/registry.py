@@ -125,16 +125,31 @@ class AdapterRegistry:
         return MetricaClient(info.token, client=self.http)
 
 
+# Повод сегмента для заголовка демо-объявления: «новый дизайн» без выдуманной услуги дизайна.
+DEMO_OCCASIONS = {"новый дизайн": "новый образ"}
+
+
 class DemoLLM:
     """Ответы для демо без ключей YandexGPT: хватает на описание, идеи картинок и тексты по шаблону."""
 
-    async def complete_json(self, system: str, user: str) -> str:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if "визуальные идеи" in system:
-            return json.dumps({"ideas": [f"Уютная сцена: {segment}" for segment in json.loads(user)["segments"]]})
+            titles = [(item["service"] or "Уютная сцена", item["segment"]) for item in json.loads(user)["items"]]
+            ideas = [{"title": title, "visual": f"{title}: {segment}"} for title, segment in titles]
+            return json.dumps({"ideas": ideas}, ensure_ascii=False)
         if "Напиши объявление" in system:
             data = json.loads(user)
-            title = next(iter(data.get("facts", [])), "Услуги и запись")
-            text = "Подробности и запись." if data.get("angle") == "цена" else "Выберите время для записи."
+            facts = data.get("facts", [])
+            # Два объявления группы — разные заходы: через цену с названием услуги и через повод сегмента.
+            occasion = DEMO_OCCASIONS.get(data.get("segment", ""), data.get("segment", "")).capitalize()
+            if data.get("angle", "цена") == "цена":
+                title = next(iter(facts), "Услуги и запись")
+                text = next((fact for fact in facts if "₽" in fact), "Подробности и запись.")
+            else:
+                title = occasion or "Услуги и запись"
+                text = "Выберите время для записи."
+            location = data.get("location")
+            text = f"{location[0]}. {text}" if location else text
             return json.dumps({"title": title, "title2": "", "text": text}, ensure_ascii=False)
         from app.services.demo import DEMO_DESCRIPTION
 
@@ -190,6 +205,7 @@ def build_art_factory(config: Any, http: httpx.AsyncClient) -> ArtFactory:
             folder_id=config.yc_folder_id,
             budget=budget,
             record_call=record_call,
+            model=config.yandexart_model,
         )
 
     return factory

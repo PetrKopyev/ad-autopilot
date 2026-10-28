@@ -112,11 +112,17 @@ async def site_check(
     business: CurrentBusiness,
     service: Service,
     today: Today,
+    refresh: bool = False,
 ) -> dict:
-    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта.
+    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта. refresh — кнопка
+    # повтора: сайт читается заново мимо кэша.
     with human_errors():
         return await service.site_check(
-            business.id, datetime.now(UTC), today, on_miss=lambda: site_check_limit(request, session)
+            business.id,
+            datetime.now(UTC),
+            today,
+            on_miss=lambda: site_check_limit(request, session),
+            refresh=refresh,
         )
 
 

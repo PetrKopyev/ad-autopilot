@@ -235,7 +235,9 @@ class VkClient:
         token = data.get("access_token")
         refresh = data.get("refresh_token", params.get("refresh_token"))
         expires = data.get("expires_in", TOKEN_TTL)
-        scope = data.get("scope", ",".join(SCOPES))
+        scope = data.get("scope", [])
+        if isinstance(scope, str):
+            scope = scope.replace(",", " ").split()
         if (
             not isinstance(token, str)
             or not token.strip()
@@ -243,8 +245,9 @@ class VkClient:
             or type(expires) is not int
             or expires <= 0
             or str(data.get("token_type", "bearer")).lower() != "bearer"
-            or not isinstance(scope, str)
-            or not set(SCOPES) <= set(scope.replace(",", " ").split())
+            or not isinstance(scope, list)
+            or not all(isinstance(item, str) for item in scope)
+            or (scope and not set(SCOPES) <= set(scope))
         ):
             raise invalid_response()
         try:

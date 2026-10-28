@@ -64,7 +64,7 @@ def test_site_check_is_rate_limited_per_user_and_ip(api, monkeypatch) -> None:
     monkeypatch.setattr(limits, "monotonic", lambda: now[0])
     calls = []
 
-    async def site_check(*args, on_miss):
+    async def site_check(*args, on_miss, refresh):
         on_miss()
         calls.append(args)
         return {}
@@ -99,11 +99,32 @@ def test_site_check_answered_from_cache_does_not_spend_the_limit(api, monkeypatc
     assert statuses == [200] * 10 and len(reads) <= 1
 
 
+def test_site_check_retry_reads_site_again_and_spends_the_limit(api, monkeypatch) -> None:
+    """Кнопка «Попробовать ещё раз» читает сайт мимо кэша, обычный вход на шаг берёт кэш."""
+    client, context = api
+    reads = []
+    reader = context.world.onboarding.reader
+
+    async def counting(url):
+        reads.append(url)
+        return await reader(url)
+
+    monkeypatch.setattr(context.world.onboarding, "reader", counting)
+    assert client.get("/api/business/site-check").status_code == 200
+    assert client.get("/api/business/site-check").status_code == 200
+    assert len(reads) == 1
+    assert client.get("/api/business/site-check", params={"refresh": 1}).status_code == 200
+    assert len(reads) == 2
+    from app.api import limits
+
+    assert len(limits.site_check_limit.hits["ip:testclient"]) == 2
+
+
 def test_site_check_limit_is_per_ip_too(api, monkeypatch) -> None:
     client, context = api
     from app.api import limits
 
-    async def site_check(*args, on_miss):
+    async def site_check(*args, on_miss, refresh):
         on_miss()
         return {}
 

@@ -18,7 +18,8 @@ afterEach(() => { cleanup(); vi.mocked(getBusiness).mockReset(); vi.mocked(saveM
 
 const business: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
   auto_continue: true, description: null, marking: { subject_type: 'ip', inn: '', name: 'Иванов Иван', phone: '', confirmed_in_platform: { direct: true },
-    saved: true, inn_masked: '•••2259', phone_masked: '+7•••1122' } };
+    saved: true, inn_masked: '•••2259', phone_masked: '+7•••1122' },
+  metrica_counter_id: 12345, lead_goal_ids: [1], description_approved: true, medical_level: 'none' };
 
 async function marking(settings = business) {
   vi.mocked(getBusiness).mockResolvedValue(settings);

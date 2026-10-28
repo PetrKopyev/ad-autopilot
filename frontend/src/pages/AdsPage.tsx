@@ -77,7 +77,7 @@ export function AdsPage() {
   return <div className="page-stack">
     <div className="page-heading"><h1>{copy.ads.title}</h1><p className="muted">{copy.screens.adIntro}</p></div>
     <DemoNotice />
-    {ads.loading && <p role="status">{copy.screens.loading}</p>}
+    {ads.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {ads.error && <ErrorBanner message={ads.error} onRetry={ads.reload} />}
     {ads.data && items.length === 0 && <Card><EmptyState title={copy.screens.noAds} description={copy.screens.noAdsHint}
       action={<Link className="button button--primary" to="/setup">{copy.common.start}</Link>} /></Card>}
@@ -100,7 +100,7 @@ export function AdsPage() {
       </Card>;
     })}
     <Card className="page-stack"><h2>{copy.ads.experiments}</h2><p className="muted">{copy.screens.experimentExplanation}</p>
-      {experiments.loading && <p role="status">{copy.screens.loading}</p>}
+      {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
       {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
       {experiments.data && (experiments.data.items.length ? experiments.data.items.map((experiment) => <article className="ads-ad page-stack" key={experiment.id}>
         <h3>{experiment.title}</h3><StatusBadge>{copy.screens.experimentStates[experiment.status]}</StatusBadge>

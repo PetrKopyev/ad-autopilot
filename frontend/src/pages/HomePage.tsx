@@ -74,7 +74,7 @@ export function HomePage() {
     {notifications.data && notifications.data.length > 0 && <Notifications items={notifications.data} changed={notifications.reload} />}
     {stopped && <p role="status">{copy.screens.stopped}</p>}
     <Card className="page-stack">
-      {autopilot.loading && <p role="status">{copy.screens.loading}</p>}
+      {autopilot.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
       {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
       {status && <StatusBadge tone={stale ? 'danger' : status.status === 'running' ? 'success' : 'warning'}>{statusText}</StatusBadge>}
       {status?.status === 'paused' && <Button disabled={resuming} onClick={() => {
@@ -89,7 +89,7 @@ export function HomePage() {
       {summary.data && summary.data.budget.spent_kop > summary.data.budget.reported_kop && <p className="muted">{copy.budget.fresher(formatMoney(summary.data.budget.reported_kop))}</p>}
     </Card>
     <PeriodPicker value={choice} onChange={setChoice} />
-    {summary.loading && <p role="status">{copy.screens.loading}</p>}
+    {summary.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {summary.error && <ErrorBanner message={summary.error} onRetry={summary.reload} />}
     {summary.data && <>
       <p className="muted">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</p>
@@ -100,13 +100,13 @@ export function HomePage() {
     </>}
     <div className="home-columns">
       <Card className="page-stack"><h2>{copy.home.needsAttention}</h2>
-        {autopilot.loading && <p role="status">{copy.screens.loading}</p>}
+        {autopilot.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
         {status && (status.needs_attention.length ? status.needs_attention.map((item) => <div className="home-list-item" key={item.id}>
           <h3>{item.title}</h3><p>{item.description}</p><Link to={`/${item.destination}`}>{copy.screens.open}</Link>
         </div>) : <EmptyState title={copy.screens.noAttention} description={copy.screens.noAttentionHint} />)}
       </Card>
       <Card className="page-stack"><h2>{copy.home.recent}</h2>
-        {history.loading && <p role="status">{copy.screens.loading}</p>}
+        {history.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
         {history.error && <ErrorBanner message={history.error} onRetry={history.reload} />}
         {history.data && (history.data.items.length ? history.data.items.slice(0, 3).map((item) => <div className="home-list-item" key={item.id}>
           <time className="muted" dateTime={item.created_at}>{justNow(item.created_at, now) ? copy.historyScreen.justNow : displayDateTime(item.created_at)}</time>

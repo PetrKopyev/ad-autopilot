@@ -66,21 +66,25 @@ def find_quote(quote: str, pages: Sequence[SourcePage]) -> str | None:
     parts = [part for part in parts if part]
     if not parts or sum(map(len, parts)) < MIN_QUOTE:
         return None
-    if len(parts) > 1 and any(len(part) < MIN_PART for part in parts):
+    # Короткий кусок допустим, только если это цена: «Маникюр … 2 200 ₽».
+    if len(parts) > 1 and any(len(part) < MIN_PART and not MONEY.search(part) for part in parts):
         return None
+    # Кусок с числа не начинается внутри другого числа: «2 200 ₽» не находится в «12 200 ₽».
+    patterns = [re.compile((r"(?<!\d)(?<!\d )" if part[0].isdigit() else "") + re.escape(part)) for part in parts]
     for page in pages:
         text = normalize(page.text)
-        start = text.find(parts[0])
-        while start >= 0:
-            position = start + len(parts[0])
-            for part in parts[1:]:
-                found = text.find(part, position, position + MAX_GAP + len(part))
-                if found < 0:
+        first = patterns[0].search(text)
+        while first:
+            position = first.end()
+            for part, pattern in zip(parts[1:], patterns[1:], strict=True):
+                found = pattern.search(text, position, position + MAX_GAP + len(part))
+                # Цена внутри пропуска — признак соседней карточки: её цена не подтверждает эту услугу.
+                if not found or MONEY.search(text, position, found.start()):
                     break
-                position = found + len(part)
+                position = found.end()
             else:
                 return page.url
-            start = text.find(parts[0], start + 1)
+            first = patterns[0].search(text, first.start() + 1)
     return None
 
 

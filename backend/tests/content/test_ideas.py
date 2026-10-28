@@ -2,59 +2,186 @@ import json
 
 import pytest
 
-from app.content.ideas import build_prompt, generate_ideas, segments_for
+from app.content.ideas import MAX_IDEAS, TITLE_LIMIT, build_prompt, generate_ideas
 from app.content.llm import FakeLLM
 
-
-@pytest.mark.parametrize("niche", ["nails", "yoga", "beauty", "barbershop", "fitness", "other"])
-def test_niche_segments(niche: str) -> None:
-    segments = segments_for(niche)
-    assert "рядом с домом" in segments
-    assert len(segments) >= 5
-    assert "до/после" not in segments
+NAILS = [
+    ("Маникюр с гель-лаком", "к празднику"),
+    ("Педикюр с покрытием", "рядом с домом"),
+    ("Наращивание ногтей", "новый дизайн"),
+]
 
 
-def test_aliases_and_fallback() -> None:
-    assert segments_for(" Маникюр ") == segments_for("nails")
-    assert segments_for("йога") == segments_for("yoga")
-    assert segments_for("салон") == segments_for("beauty")
-    assert segments_for("барбершоп") == segments_for("barbershop")
-    assert segments_for("фитнес") == segments_for("fitness")
-    assert segments_for("unknown") == segments_for("other")
-    assert "подарок подруге" in segments_for("nails")
-    assert "утренняя практика" in segments_for("yoga")
+def answer(count: int, title: str = "Френч с золотой фольгой") -> str:
+    return json.dumps({"ideas": [{"title": f"{title} {index}", "visual": f"Кадр {index}"} for index in range(count)]})
 
 
-def test_prompt_constraints_are_appended_by_code() -> None:
-    prompt = build_prompt("Набор инструментов на светлом фоне")
-    assert "Набор инструментов" in prompt
-    assert "Современная рекламная иллюстрация" in prompt
-    assert "без текста на изображении" in prompt
-    assert "без лиц крупным планом" in prompt
-    assert "без обещаний результата" in prompt
-    assert "не фотография реальной работы" in prompt
+def scenes(*pairs: tuple[str, str]) -> str:
+    return json.dumps({"ideas": [{"title": title, "visual": visual} for title, visual in pairs]}, ensure_ascii=False)
 
 
-async def test_eight_candidates_with_fixed_segments() -> None:
-    llm = FakeLLM(json.dumps({"ideas": [f"Визуальная идея {index}" for index in range(8)]}))
-    ideas = await generate_ideas(llm, "nails")
-    assert len(ideas) == 8
-    assert ideas[0].segment == "к празднику"
-    assert ideas[5].segment == ideas[0].segment
-    assert all(idea.label == "иллюстрация" for idea in ideas)
-    assert all("без текста на изображении" in idea.prompt for idea in ideas)
-    assert len(json.loads(llm.calls[0][1])["segments"]) == 8
+def test_pedicure_prompt_is_a_scene_starting_with_feet() -> None:
+    prompt = build_prompt(
+        "вид сверху, гель-лак цвета пыльной розы, без коробок и надписей, на белом полотенце", "Педикюр с покрытием",
+        "nails",
+    )
+    assert prompt.startswith("Женские ступни крупным планом, пальцы ног с педикюром, вид сверху, гель-лак")
+    assert "Реалистичная рекламная фотография" in prompt and prompt.endswith("без текста и надписей.")
+    assert prompt.count("без") == 1 and "коробок" not in prompt and "Требования" not in prompt
+    assert "услуги «Педикюр с покрытием»" not in prompt
 
 
-@pytest.mark.parametrize("response", ["not json", "[]", "{}", '{"ideas": [null]}', '{"ideas": [""]}'])
+@pytest.mark.parametrize(
+    "service,start",
+    [
+        ("Маникюр без покрытия", "Женские руки с маникюром"),
+        ("Наращивание ногтей", "Женские руки с длинными наращёнными ногтями"),
+        ("Снятие покрытия", "Женские руки с короткими натуральными ногтями без покрытия"),
+        ("Парафинотерапия", "Женские руки с ухоженными ногтями"),
+    ],
+)
+def test_subject_follows_service_of_the_niche(service: str, start: str) -> None:
+    assert build_prompt("вид сбоку, нюдовый лак", service, "nails").startswith(start)
+
+
+def test_other_niches_get_default_subject() -> None:
+    assert build_prompt("утренний свет", "Хатха-йога", "yoga").startswith("Человек в спокойной позе йоги")
+    assert build_prompt("светлый фон", "Химчистка штор", "other").startswith(
+        "Крупным планом результат услуги: Химчистка штор"
+    )
+    assert build_prompt("светлый фон", "", "other").startswith("Светлый уютный интерьер студии")
+
+
+async def test_ideas_follow_service_and_segment_of_each_group() -> None:
+    llm = FakeLLM(answer(len(NAILS)))
+    ideas = await generate_ideas(llm, "nails", NAILS)
+    system, user = llm.calls[0]
+    items = json.loads(user)["items"]
+    assert [(item["service"], item["segment"]) for item in items] == NAILS
+    assert items[1]["subject"].startswith("Женские ступни") and "уют" in items[1]["mood"]
+    assert "праздничная обстановка" in items[0]["mood"]
+    for rule in (
+        "Нельзя предлагать", "надписи", "карты, улицы, дома и транспорт", "товары в упаковке и коробки",
+        "лица крупным планом", "до/после", "парикмахерские кресла", "косметику для макияжа", "«у дома»",
+    ):
+        assert rule in system
+    assert [(idea.service, idea.segment) for idea in ideas] == NAILS
+    assert ideas[1].visual == "Кадр 1" and ideas[1].prompt.startswith("Женские ступни")
+    assert all(idea.prompt.count("без") == 1 for idea in ideas)
+
+
+async def test_two_ideas_of_a_pair_differ() -> None:
+    pair = ("Педикюр с покрытием", "новый дизайн")
+    llm = FakeLLM(
+        scenes(
+            ("Руки с аккуратными ногтями", "руки с аккуратными ногтями на нейтральном фоне"),
+            ("Руки с ухоженными ногтями", "руки с ухоженными ногтями на нейтральном фоне"),
+            ("Руки с красивыми ногтями", "руки с красивыми ногтями на нейтральном фоне"),
+        )
+    )
+    ideas = await generate_ideas(llm, "nails", [pair] * 3)
+    assert len({idea.label for idea in ideas}) == len({idea.prompt for idea in ideas}) == 3
+    assert ideas[0].label == "Руки с аккуратными ногтями"
+    assert all(idea.prompt.startswith("Женские ступни") for idea in ideas)
+
+
+async def test_ideas_of_a_pair_alternate_close_up_and_scene() -> None:
+    pair = ("Маникюр с гель-лаком", "к празднику")
+    llm = FakeLLM(answer(4))
+    await generate_ideas(llm, "nails", [pair, NAILS[1], pair, pair])
+    system, user = llm.calls[0]
+    roles = [item["role"] for item in json.loads(user)["items"]]
+    assert roles[0].startswith("крупный план") and roles[1].startswith("крупный план")
+    assert roles[2].startswith("сцена из жизни") and roles[3].startswith("крупный план")
+    assert "role" in system and "во второй не повторяются" in system
+
+
+@pytest.mark.parametrize(
+    "niche,service",
+    [
+        ("barbershop", "Мужская стрижка"),
+        ("fitness", "Персональная тренировка"),
+        ("yoga", "Хатха-йога"),
+        ("medical", "Приём терапевта"),
+        ("other", "Химчистка штор"),
+    ],
+)
+async def test_close_up_role_does_not_mention_nails_in_other_niches(niche: str, service: str) -> None:
+    llm = FakeLLM(answer(2))
+    ideas = await generate_ideas(llm, niche, [(service, "время для себя")] * 2)
+    system, user = llm.calls[0]
+    assert json.loads(user)["items"][0]["role"].startswith("крупный план результата услуги")
+    assert not any("ногт" in text.lower() for text in (system, user, *(idea.prompt for idea in ideas)))
+
+
+async def test_second_idea_with_props_of_the_first_is_replaced() -> None:
+    pair = ("Наращивание ногтей", "к празднику")
+    llm = FakeLLM(
+        scenes(
+            ("Миндальная форма в золоте", "золотые миндальные ногти, рядом бокал шампанского, тёмный бархат"),
+            ("Золотые блики на миндале", "вечеринка, блики огней, рука держит бокалы игристого у окна"),
+        )
+    )
+    first, second = await generate_ideas(llm, "nails", [pair] * 2)
+    assert first.label == "Миндальная форма в золоте"
+    assert "бокал" not in second.visual and second.label != "Золотые блики на миндале"
+
+
+async def test_scene_without_props_of_the_first_is_kept() -> None:
+    pair = ("Маникюр с гель-лаком", "рядом с домом")
+    llm = FakeLLM(
+        scenes(
+            ("Нюд на светлом льне", "вид сверху, нюдовый гель-лак, светлый лён, мягкий свет"),
+            ("Чай у окна", "руки держат чашку чая у окна, на подоконнике плед, тёплый вечерний свет"),
+        )
+    )
+    _, second = await generate_ideas(llm, "nails", [pair] * 2)
+    assert second.label == "Чай у окна"
+
+
+def test_style_has_no_plain_band_at_the_bottom() -> None:
+    prompt = build_prompt("вид сверху, нюдовый лак", "Маникюр", "nails")
+    assert "фон в нижней части" not in prompt and "однотонный" not in prompt
+
+
+async def test_same_scene_for_different_pairs_is_kept() -> None:
+    llm = FakeLLM(scenes(("Бордовый лак", "вид сверху, бордовый лак"), ("Бордовый лак", "вид сверху, бордовый лак")))
+    ideas = await generate_ideas(llm, "nails", NAILS[:2])
+    assert [idea.label for idea in ideas] == ["Бордовый лак", "Бордовый лак"]
+
+
+@pytest.mark.parametrize(
+    "title", ["Педикюр с покрытием новый дизайн", "Педикюр у дома", "Маникюр на дому", "Выезд мастера"]
+)
+async def test_title_is_a_scene_not_service_and_segment(title: str) -> None:
+    llm = FakeLLM(scenes((title, "вид сверху, лак цвета пыльной розы на белом полотенце")))
+    (idea,) = await generate_ideas(llm, "nails", [("Педикюр с покрытием", "новый дизайн")])
+    assert idea.label == "Вид сверху, лак цвета пыльной розы на…"
+
+
+async def test_label_is_short_idea_title() -> None:
+    ideas = await generate_ideas(FakeLLM(answer(1)), "nails", NAILS[:1])
+    assert ideas[0].label == "Френч с золотой фольгой 0"
+    long = "Нежный френч с золотой фольгой и блёстками на коротких ногтях"
+    (idea,) = await generate_ideas(FakeLLM(scenes((long, "Кадр"))), "nails", NAILS[:1])
+    assert len(idea.label) <= TITLE_LIMIT and idea.label.endswith("…")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not json", "[]", "{}", '{"ideas": [null]}', '{"ideas": [""]}', '{"ideas": [{"title": "Френч"}]}',
+        '{"ideas": [{"title": " ", "visual": "Кадр"}]}',
+    ],
+)
 async def test_invalid_llm_response(response: str) -> None:
     with pytest.raises(ValueError):
-        await generate_ideas(FakeLLM(response), "yoga", count=1)
+        await generate_ideas(FakeLLM(response), "yoga", [("Хатха-йога", "первое занятие")])
 
 
-@pytest.mark.parametrize("count", [0, 9, True])
+@pytest.mark.parametrize("count", [0, MAX_IDEAS + 1])
 async def test_candidate_limits(count: int) -> None:
     llm = FakeLLM()
     with pytest.raises(ValueError):
-        await generate_ideas(llm, "yoga", count=count)
+        await generate_ideas(llm, "yoga", [("Хатха-йога", "первое занятие")] * count)
     assert not llm.calls

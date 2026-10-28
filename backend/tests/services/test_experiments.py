@@ -411,8 +411,8 @@ async def test_restart_during_paid_generation_does_not_pay_again(experiment_worl
     content = wire_content(world, tmp_path, monkeypatch)
     complete = content.llm.complete_json
 
-    async def crash(*args):
-        await complete(*args)
+    async def crash(*args, **kwargs):
+        await complete(*args, **kwargs)
         raise Crash
 
     monkeypatch.setattr(content.llm, "complete_json", crash)

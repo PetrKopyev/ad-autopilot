@@ -29,7 +29,7 @@ class VkKey(BaseModel):
 
 def _redirect() -> RedirectResponse:
     return RedirectResponse(
-        vk.redirect_uri().removesuffix("api/auth/vk/callback"),
+        vk.redirect_uri().removesuffix("api/auth/vk/callback") + "setup/2",
         status_code=303,
         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )

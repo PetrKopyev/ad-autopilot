@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     yc_folder_id: str = ""
     yc_api_key: SecretStr = SecretStr("")
     yandexgpt_model: str = "yandexgpt/latest"
+    yandexart_model: str = "aliceai-image-art-3.0/latest"
     budget_reserve_pct: int = Field(default=8, ge=0, le=100)
     ai_spend_onboarding_limit_rub: Decimal = Field(default=Decimal("60"), ge=0)
     ai_spend_weekly_limit_rub: Decimal = Field(default=Decimal("25"), ge=0)

@@ -195,9 +195,9 @@ def demo_login(
     return response
 
 
-def _redirect() -> RedirectResponse:
+def _redirect(path: str = "/") -> RedirectResponse:
     return RedirectResponse(
-        yandex.settings.app_base_url.rstrip("/") + "/",
+        yandex.settings.app_base_url.rstrip("/") + path,
         status_code=303,
         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )
@@ -270,7 +270,7 @@ async def yandex_callback(
         profile = await yandex.get_profile(tokens["access_token"])
     except yandex.YandexError as failure:
         raise HTTPException(400, str(failure)) from None
-    response = _redirect()
+    response = _redirect("/setup/2" if oauth_state.purpose == "direct" else "/")
     if oauth_state.purpose == "login":
         user = repository.save_user(profile["id"], profile["login"], profile.get("default_email"))
         new_session = create_session(user.id)

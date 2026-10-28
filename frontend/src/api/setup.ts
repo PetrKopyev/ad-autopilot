@@ -74,9 +74,9 @@ export async function createBusiness(body: BusinessInput): Promise<Business> {
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
-export async function checkSite(signal?: AbortSignal): Promise<SiteCheck> {
+export async function checkSite(signal?: AbortSignal, refresh = false): Promise<SiteCheck> {
   if (mockEnabled) return (await import('./mocks')).mockSetupSite();
-  return setupGet('/api/business/site-check', signal);
+  return setupGet(`/api/business/site-check${refresh ? '?refresh=1' : ''}`, signal);
 }
 export async function saveDescription(description: Description) {
   if (mockEnabled) { (await import('./mocks')).mockSetupDescription(description); return; }

@@ -223,16 +223,18 @@ async def prepare_variant(worker: Worker, business: Business, campaign, group, c
 async def generate_variant(worker, business, campaign, control, source, hypothesis, service, budget) -> dict:
     creative = source.creative
     asset_id = control.asset_id
+    matrix = offer_matrix(business.niche_class or "other")
+    original_angle = matrix[0][0]
+    segment = matrix[0][1]
+    service_name = ""
+    for plan in worker.repository.rows(Plan, business.id):
+        for planned_group in plan.payload.get("groups", []):
+            for planned_ad in planned_group.get("ads", []):
+                if (planned_ad["title"], planned_ad["text"]) == (control.title, control.text):
+                    original_angle = planned_ad.get("angle", original_angle)
+                    segment = planned_group["segment"]
+                    service_name = planned_group.get("service", "")
     if hypothesis == "text":
-        matrix = offer_matrix(business.niche_class or "other")
-        original_angle = matrix[0][0]
-        segment = matrix[0][1]
-        for plan in worker.repository.rows(Plan, business.id):
-            for planned_group in plan.payload.get("groups", []):
-                for planned_ad in planned_group.get("ads", []):
-                    if (planned_ad["title"], planned_ad["text"]) == (control.title, control.text):
-                        original_angle = planned_ad.get("angle", original_angle)
-                        segment = planned_group["segment"]
         angle = next(angle for angle, _ in matrix if angle != original_angle)
         draft = description_draft(business)
         variant = await generate_ad_text(
@@ -241,6 +243,7 @@ async def generate_variant(worker, business, campaign, control, source, hypothes
             platform=campaign.platform,
             angle=angle,
             segment=segment,
+            service=next((item for item in draft.services if item.name == service_name), None),
         )
         if variant.used_fallback or validate_ad_text(variant.ad, draft, platform=campaign.platform):
             raise Blocked("Не удалось проверить новый текст.")
@@ -250,10 +253,11 @@ async def generate_variant(worker, business, campaign, control, source, hypothes
     else:
         if budget.limit_kop - budget.spent_kop < ART_COST_KOP:
             raise Blocked("Лимит генерации картинок исчерпан.")
-        assets = await service.generate_images(business, budget, 1)
+        # Картинка варианта — про ту же услугу и сегмент, что и группа исходного объявления.
+        assets = await service.generate_images(business, budget, [(service_name, segment)])
         if not assets:
             raise Blocked("Не удалось получить проверенную картинку в пределах лимита ИИ.")
-        asset = assets[0]
+        _, asset = assets[0]
         asset_id = asset.id
         # Файл и id сохраняем до загрузки на площадку: повтор не вызывает ART заново.
         return {"creative": creative, "asset_id": asset_id, "image_path": str(service.media_root / asset.file_path)}

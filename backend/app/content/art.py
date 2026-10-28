@@ -1,17 +1,21 @@
 import asyncio
 import base64
 import binascii
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import quote
 
 import httpx
 
+# Цена одной картинки. Тариф Alice AI ART в публичных тарифах Yandex AI Studio проверить не удалось (страница цен
+# закрыта капчей): берём цену YandexART по исследованию 26.10.2026 — 2,23 ₽ за запрос с НДС. Новая модель может стоить
+# дороже: сверить с yandex.cloud/ru/docs/ai-studio/pricing и поднять.
 ART_COST_KOP = 223
-GENERATE_URL = "https://ai.api.cloud.yandex.net/foundationModels/v1/imageGenerationAsync"
-OPERATIONS_URL = "https://operation.api.cloud.yandex.net/operations"
-
+IMAGES_URL = "https://ai.api.cloud.yandex.net/v1/images/generations"
+DEFAULT_ART_MODEL = "aliceai-image-art-3.0/latest"
+# Квадрат подходит обеим площадкам: ВКонтакте берёт image_600x600, Директ — картинку от 1:1 до 4:3.
+ART_SIZE = "1024x1024"
 
 class ArtError(Exception):
     pass
@@ -39,6 +43,10 @@ class ArtBudget:
                 raise ArtBudgetExceeded("YandexART budget exhausted")
             self.spent_kop += ART_COST_KOP
 
+    async def release(self) -> None:
+        async with self._lock:
+            self.spent_kop -= ART_COST_KOP
+
 
 @dataclass
 class ArtCall:
@@ -55,7 +63,7 @@ class ArtCall:
 class ArtResult:
     image: bytes
     seed: int
-    operation_id: str
+    operation_id: str | None
     cost_kop: int = ART_COST_KOP
     label: str = "иллюстрация"
     selected: bool = False
@@ -73,8 +81,9 @@ def validate_request(prompt: str, seed: int) -> None:
 
 
 class YandexArt:
-    """record_call must durably upsert the call, assigning id on initial reservation.
+    """Картинки Alice AI ART через OpenAI-совместимый синхронный API Yandex AI Studio.
 
+    record_call must durably upsert the call, assigning id on initial reservation.
     Share the budget across ART clients and initialize it from the AI spending ledger.
     Credentials are supplied by the caller from YC_API_KEY and YC_FOLDER_ID.
     """
@@ -87,93 +96,77 @@ class YandexArt:
         folder_id: str,
         budget: ArtBudget,
         record_call: Callable[[ArtCall], Awaitable[None]],
-        poll_interval: float = 1,
-        max_polls: int = 120,
-        connect_retries: int = 1,
+        model: str = DEFAULT_ART_MODEL,
+        timeout: float = 90,
+        max_retries: int = 2,
+        retry_delay: float = 1,
     ) -> None:
-        if not api_key or not folder_id:
-            raise ValueError("YC_API_KEY and YC_FOLDER_ID are required")
-        if poll_interval < 0 or max_polls < 1 or not 0 <= connect_retries <= 3:
-            raise ValueError("Invalid polling or retry limits")
+        if not api_key or not folder_id or not model:
+            raise ValueError("YC_API_KEY, YC_FOLDER_ID and YANDEXART_MODEL are required")
+        if not math.isfinite(timeout) or timeout <= 0 or not 0 <= max_retries <= 3 or retry_delay < 0:
+            raise ValueError("Invalid timeout or retry limits")
         self.client = client
-        self._headers = {"Authorization": f"Api-Key {api_key}"}
-        self.model_uri = f"art://{folder_id}/yandex-art/latest"
+        self._headers = {"Authorization": f"Bearer {api_key}", "OpenAI-Project": folder_id}
+        self.model_uri = f"art://{folder_id}/{model}"
         self.budget = budget
         self.record_call = record_call
-        self.poll_interval = poll_interval
-        self.max_polls = max_polls
-        self.connect_retries = connect_retries
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     async def generate(self, prompt: str, *, seed: int, business_id: int) -> ArtResult:
         validate_request(prompt, seed)
         await self.budget.reserve()
         call = ArtCall(business_id, seed=seed)
         try:
-            # Persist the reservation before a non-idempotent paid request.
+            # Persist the reservation before a paid request.
             await self.record_call(call)
-            payload = {
-                "modelUri": self.model_uri,
-                "messages": [{"text": prompt, "weight": "1"}],
-                "generationOptions": {"mimeType": "image/jpeg", "seed": str(seed)},
-            }
-            for attempt in range(self.connect_retries + 1):
-                try:
-                    response = await self.client.post(
-                        GENERATE_URL, headers=self._headers, json=payload, timeout=30,
-                    )
-                    break
-                except (httpx.ConnectError, httpx.ConnectTimeout):
-                    if attempt == self.connect_retries:
-                        raise
-            response.raise_for_status()
-            operation = response.json()
-            if not isinstance(operation, dict):
-                raise ValueError("Invalid operation")
-            call.operation_id = operation["id"]
-            if not isinstance(call.operation_id, str) or not call.operation_id:
-                raise ValueError("Missing operation ID")
-            await self.record_call(call)
-            for poll in range(self.max_polls + 1):
-                if operation.get("error"):
-                    call.status = "rejected"
-                    error = operation["error"]
-                    code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
-                    call.rejection_reason = f"operation_error:{code}"
-                    raise ArtError("YandexART rejected generation")
-                if operation.get("done"):
-                    image = base64.b64decode(operation["response"]["image"], validate=True)
-                    if not image:
-                        raise ValueError("Empty generated image")
-                    call.status = "succeeded"
-                    return ArtResult(image, seed, call.operation_id)
-                if poll == self.max_polls:
-                    break
-                await asyncio.sleep(self.poll_interval)
-                response = await self.client.get(
-                    f"{OPERATIONS_URL}/{quote(call.operation_id, safe='')}",
-                    headers=self._headers,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                operation = response.json()
-                if not isinstance(operation, dict):
-                    raise ValueError("Invalid operation")
-            raise ArtError("YandexART polling limit reached; operation may still be running")
+            response = await self.post({"model": self.model_uri, "prompt": prompt, "size": ART_SIZE})
+            if response is None or not response.is_success:
+                # Запрос не дошёл или отклонён: картинка не создана, и платить за неё не за что.
+                call.status = "rejected"
+                call.rejection_reason = f"http_{response.status_code}" if response is not None else "connect_error"
+                call.cost_kop = 0
+                await self.budget.release()
+                raise ArtError("YandexART rejected generation")
+            image = base64.b64decode(response.json()["data"][0]["b64_json"], validate=True)
+            if not image:
+                raise ValueError("Empty generated image")
+            call.status = "succeeded"
+            return ArtResult(image, seed, None)
         except asyncio.CancelledError:
             call.status = "unknown"
             call.rejection_reason = "cancelled"
             raise
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, binascii.Error) as exc:
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, binascii.Error) as exc:
             call.status = "unknown"
             call.rejection_reason = type(exc).__name__
             raise ArtError("YandexART request failed; paid requests are not replayed") from None
-        except ArtError:
-            if call.status == "pending":
-                call.status = "unknown"
-                call.rejection_reason = "polling_limit"
-            raise
         finally:
             await self.record_call(call)
+
+    async def post(self, payload: dict) -> httpx.Response | None:
+        """Повторяет только то, за что не платят: неотправленный запрос, 429 и 5xx. Обрыв после отправки (таймаут
+        чтения) не повторяется: картинка могла быть создана. None — запрос так и не ушёл."""
+        for attempt in range(self.max_retries + 1):
+            delay = min(self.retry_delay * 2**attempt, 30)
+            try:
+                response = await self.client.post(
+                    IMAGES_URL, headers=self._headers, json=payload, timeout=self.timeout, follow_redirects=False
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if attempt == self.max_retries:
+                    return None
+                await asyncio.sleep(delay)
+                continue
+            if (response.status_code == 429 or response.status_code >= 500) and attempt < self.max_retries:
+                retry_after = response.headers.get("Retry-After", "")
+                if retry_after.isascii() and retry_after.isdecimal():
+                    delay = min(max(delay, int(retry_after)), 30)
+                await asyncio.sleep(delay)
+                continue
+            return response
+        raise AssertionError("Unreachable retry state")
 
 
 @dataclass

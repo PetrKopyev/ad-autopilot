@@ -150,9 +150,9 @@ def test_plan_ai_calls_do_not_hold_a_connection(small_pool, monkeypatch, tmp_pat
     held = []
 
     class WatchingLLM(ScriptedLLM):
-        async def complete_json(self, system: str, user: str):
+        async def complete_json(self, system: str, user: str, temperature: float = 0.2):
             held.append(engine.pool.checkedout())
-            return await super().complete_json(system, user)
+            return await super().complete_json(system, user, temperature)
 
     class WatchingArt(VariedArt):
         async def generate(self, prompt: str, *, seed: int, business_id: int):

@@ -40,7 +40,14 @@ from app.services.budget_guard import STOPPED
 from app.services.changes import CLOSED_ACCOUNT, AdapterResolver, ChangeConflict, ChangesService, ServerBusy
 from app.services.demo import configure_adapter
 from app.services.onboarding import DRAFT_STATUSES, NotFound
-from app.services.plan import IMAGE_KINDS, PlanRepository, budget_limits, launch_blockers, launch_unsettled
+from app.services.plan import (
+    IMAGE_KINDS,
+    PlanRepository,
+    budget_limits,
+    group_key,
+    launch_blockers,
+    launch_unsettled,
+)
 from app.worker.jobs import NoticesRepository
 
 if TYPE_CHECKING:
@@ -337,7 +344,7 @@ class LaunchService:
         for group in groups:
             chosen[str(group["id"])] = [
                 assets[id_]
-                for id_ in plan.payload["assets"].get(group["segment"], ())
+                for id_ in plan.payload["assets"].get(group_key(group), ())
                 if id_ in assets and assets[id_].selected and assets[id_].kind in IMAGE_KINDS
             ]
             for asset in chosen[str(group["id"])]:

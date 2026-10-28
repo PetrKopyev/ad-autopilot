@@ -699,9 +699,9 @@ async def test_site_check_returns_connection_while_ai_answers_on_postgres(db_ses
     from tests.services.test_onboarding import LIMITS, NOW, SITE, TODAY, ScriptedLLM, page_text
 
     class WatchingLLM(ScriptedLLM):
-        async def complete_json(self, system: str, user: str) -> str:
+        async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
             during.append(db_session.in_transaction())
-            return await super().complete_json(system, user)
+            return await super().complete_json(system, user, temperature)
 
     user = User(yandex_uid="ai-" + uuid4().hex, login="owner", consent_at=NOW)
     db_session.add(user)
@@ -1003,3 +1003,24 @@ def test_replaced_entities_are_campaigns_of_plans_other_than_last_launched_on_po
     db_session.add(Plan(business_id=other.business.id, version=9, status="launched", payload=foreign))
     db_session.flush()
     assert ChangesRepository(db_session).replaced_entities(business_id) == {("direct", "c-old")}
+
+
+def test_used_assets_are_those_ads_point_to_within_business_on_postgres(db_session):
+    from app.services.plan import PlanRepository
+
+    own, other = make_tree(db_session, suffix="own"), make_tree(db_session, suffix="other")
+
+    def asset(business, kind: str = "image") -> Asset:
+        row = Asset(business_id=business.business.id, kind=kind, file_path="x.jpg")
+        db_session.add(row)
+        db_session.flush()
+        return row
+
+    image, video, free, foreign = asset(own), asset(own, "video"), asset(own), asset(other)
+    own.ads[0].asset_id, own.ads[1].video_id, other.ads[0].asset_id = image.id, video.id, foreign.id
+    db_session.flush()
+    repository = PlanRepository(db_session)
+    assert repository.used_assets(own.business.id) == {image.id, video.id}
+    repository.remove(free)
+    db_session.flush()
+    assert db_session.get(Asset, free.id) is None

@@ -87,14 +87,14 @@ export function StatsPage() {
   }
   return <div className="page-stack">
     <h1>{copy.statistics.title}</h1><DemoNotice /><PeriodPicker value={choice} onChange={setChoice} />
-    {summary.loading && <p role="status">{copy.screens.loading}</p>}
+    {summary.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {summary.error && <ErrorBanner message={summary.error} onRetry={summary.reload} />}
     {summary.data && <>
       <h2>{copy.screens.total}</h2><p className="muted">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</p>
       <SummaryFigures summary={summary.data} /><ClientsSummary summary={summary.data} />
     </>}
     <Card className="page-stack"><h2>{copy.statistics.chart}</h2>
-      {daily.loading && <p role="status">{copy.screens.loading}</p>}
+      {daily.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
       {daily.error && <ErrorBanner message={daily.error} onRetry={daily.reload} />}
       {daily.data && <DailyChart daily={daily.data.data} today={daily.data.today} />}
     </Card>
@@ -102,7 +102,7 @@ export function StatsPage() {
       <label className="stats-select">{copy.screens.level}<select value={level} onChange={(event) => setLevel(event.target.value as StatsLevel)}>
         {(Object.keys(copy.screens.levels) as StatsLevel[]).map((key) => <option key={key} value={key}>{copy.screens.levels[key]}</option>)}
       </select></label>
-      {breakdown.loading && <p role="status">{copy.screens.loading}</p>}
+      {breakdown.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
       {breakdown.error && <ErrorBanner message={breakdown.error} onRetry={breakdown.reload} />}
       {breakdown.data && (breakdown.data.items.length ? <>
         <p className="muted stats-scroll-hint" id="stats-scroll-help">{copy.screens.scrollHint}</p>

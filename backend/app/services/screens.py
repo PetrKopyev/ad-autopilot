@@ -341,6 +341,11 @@ class ScreensService:
             "description": {"fields": business.description["fields"]} if business.description.get("fields") else None,
             "auto_continue": business.auto_continue,
             "marking": safe_marking,
+            # Мастер настройки восстанавливает по ним пройденные шаги в новой вкладке и на другом устройстве.
+            "metrica_counter_id": business.metrica_counter_id,
+            "lead_goal_ids": business.lead_goal_ids,
+            "description_approved": business.description_approved_at is not None,
+            "medical_level": business.medical_level,
         }
 
     async def save_budget(self, business: Business, amount: int) -> dict:

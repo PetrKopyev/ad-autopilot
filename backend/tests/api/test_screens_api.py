@@ -451,3 +451,14 @@ def test_autopilot_stop_reason_does_not_repeat_status_label(setup):
     assert row["status"] == "paused_auto"
     assert history.endswith("слишком дорого при ориентире 100 ₽ за обращение. Остановили объявление.")
     assert row["reason"] == history.removesuffix(" Остановили объявление.")
+
+
+def test_business_returns_saved_setup_steps(setup):
+    client, world = setup
+    result = client.get("/api/business").json()
+    assert result["metrica_counter_id"] == 12345
+    assert result["lead_goal_ids"] == [1]
+    assert result["description_approved"] is True
+    assert result["medical_level"] == "none"
+    world.business.description_approved_at = None
+    assert client.get("/api/business").json()["description_approved"] is False

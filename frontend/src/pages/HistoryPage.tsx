@@ -76,7 +76,7 @@ export function HistoryPage() {
     </div>
     {filter.actor === '' && <p className="muted">{labels.routineHint}</p>}
     {error && <ErrorBanner message={error} onDismiss={() => setError(undefined)} />}
-    {history.loading && <p role="status">{copy.screens.loading}</p>}
+    {history.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {history.error && <ErrorBanner message={history.error} onRetry={history.reload} />}
     {history.data && !items.length && (filter.platform || filter.actor
       ? <EmptyState title={labels.emptyFiltered} description={labels.emptyFilteredHint} />

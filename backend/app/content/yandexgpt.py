@@ -114,12 +114,12 @@ class YandexGPTClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
-    async def complete_json(self, system: str, user: str) -> CompletionResult:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> CompletionResult:
         if not system.strip() or not user.strip():
             raise ValueError("System and user messages must not be empty")
         payload = {
             "modelUri": self.model_uri,
-            "completionOptions": {"stream": False, "temperature": 0.2, "maxTokens": str(self.max_tokens)},
+            "completionOptions": {"stream": False, "temperature": temperature, "maxTokens": str(self.max_tokens)},
             "messages": [
                 {"role": "system", "text": f"{system}\nВерни только JSON-объект."},
                 {"role": "user", "text": user},

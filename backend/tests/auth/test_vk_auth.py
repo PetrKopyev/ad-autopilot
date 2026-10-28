@@ -129,7 +129,7 @@ def test_callback_exchanges_code_and_stores_tokens_encrypted(client, repository,
     state = start(client)["state"]
     response = client.get("/api/auth/vk/callback", params={"state": state, "code": "vk-code"})
     assert response.status_code == 303
-    assert response.headers["location"] == "https://testserver/"
+    assert response.headers["location"] == "https://testserver/setup/2"
     form = parse_qs(vk_api.calls[0].request.content.decode())
     assert form["grant_type"] == ["authorization_code"] and form["code"] == ["vk-code"]
     assert form["redirect_uri"] == ["https://testserver/api/auth/vk/callback"]
@@ -192,6 +192,43 @@ def test_callback_rejects_token_without_required_scope(client, repository, vk_ap
     state = start(client)["state"]
     assert client.get("/api/auth/vk/callback", params={"state": state, "code": "c"}).status_code == 400
     assert not repository.accounts
+
+
+@pytest.mark.parametrize("scope", [["read_ads"], "read_ads create_ads", ["read_ads", 1], 7])
+def test_callback_rejects_scope_without_rights_or_broken_scope(client, repository, vk_api, scope) -> None:
+    vk_api.post(TOKEN).respond(json=token_reply(scope=scope))
+    sign_in(client, repository)
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "c"}).status_code == 400
+    assert not repository.accounts
+
+
+@pytest.mark.parametrize(
+    "scope", [["read_ads", "create_ads", "read_payments"], "read_ads create_ads read_payments", [], ""]
+)
+def test_callback_accepts_scope_list_string_or_empty(client, repository, vk_api, scope) -> None:
+    vk_api.post(TOKEN).respond(json=token_reply(scope=scope))
+    sign_in(client, repository)
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "c"}).status_code == 303
+    assert repository.accounts[1].scopes == ["read_ads", "create_ads", "read_payments"]
+
+
+def test_manual_key_accepts_real_client_credentials_reply(client, repository, vk_api) -> None:
+    reply = {
+        "access_token": "key-access",
+        "expires_in": 86400,
+        "refresh_token": "key-refresh",
+        "scope": [],
+        "token_type": "Bearer",
+        "tokens_left": 3,
+    }
+    vk_api.post(TOKEN).respond(json=reply)
+    vk_api.get(USER).respond(json={"id": 777, "username": "vk-owner", "firstname": "Имя", "lastname": "Фамилия"})
+    sign_in(client, repository)
+    assert key_request(client, repository).status_code == 200
+    account = repository.accounts[1]
+    assert account.auth_mode == "manual_key" and account.status == "ok" and account.access_token_enc == "key-access"
 
 
 def test_reconnect_updates_same_account(client, repository, vk_api) -> None:

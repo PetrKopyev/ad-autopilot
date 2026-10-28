@@ -53,7 +53,7 @@ class SequenceLLM:
     responses: list[str]
     calls: list[tuple[str, str]] = field(default_factory=list)
 
-    async def complete_json(self, system: str, user: str) -> str:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         self.calls.append((system, user))
         return self.responses[len(self.calls) - 1]
 
@@ -182,14 +182,14 @@ def test_medical_disclaimer_validation(description: DescriptionDraft) -> None:
 
 async def test_two_retries_with_validation_feedback(description: DescriptionDraft) -> None:
     llm = SequenceLLM([response(text="Цена 999 ₽"), response(text="Лучший маникюр"), response()])
-    variant = await generate_ad_text(llm, description, platform="direct", angle="цена", segment="рядом с домом")
+    variant = await generate_ad_text(llm, description, platform="direct", angle="цена", segment="к празднику")
     assert variant.ad == AdText("Маникюр", "Работаем ежедневно")
     assert variant.attempts == len(llm.calls) == 3
     assert not variant.used_fallback
-    assert "unapproved_number" in json.loads(llm.calls[1][1])["previous_errors"]
-    assert "stop_words" in json.loads(llm.calls[2][1])["previous_errors"]
+    assert json.loads(llm.calls[1][1])["previous_errors"] == ["число 999 не из фактов — бери числа только из фактов"]
+    assert json.loads(llm.calls[2][1])["previous_errors"] == ["слово «лучший» запрещено — убери его"]
     facts = json.loads(llm.calls[0][1])["facts"]
-    assert "Маникюр 1500,50 ₽" in facts
+    assert "Маникюр — 1 500,50 ₽" in facts
     assert not any("source.example" in fact or "25%" in fact for fact in facts)
 
 
@@ -202,8 +202,7 @@ async def test_invalid_responses_fall_back_after_three_calls(description: Descri
     variant = await generate_ad_text(llm, description, platform="vk", angle="акция", segment="к празднику")
     assert variant.used_fallback
     assert variant.attempts == len(llm.calls) == 3
-    assert variant.ad.title == description.services[0].name
-    assert variant.ad.text == description.advantages[0].value
+    assert variant.ad == AdText(description.services[0].name, "Маникюр — 1 500,50 ₽. Работаем ежедневно.")
     assert not errors(variant.ad, description, "vk")
 
 
@@ -269,7 +268,7 @@ def test_matrix_assigns_each_angle_and_segment(niche: str) -> None:
 
 
 async def test_generate_matrix_preserves_ab_angle_and_segment(description: DescriptionDraft) -> None:
-    llm = FakeLLM(response())
+    llm = FakeLLM(response(text="Самара, ул. Полевая, д. 7"))
     variants = await generate_matrix(llm, description, platform="direct", niche_class="nails")
     assert [(variant.angle, variant.segment) for variant in variants] == offer_matrix("nails")
     assert len(llm.calls) == len(variants)
@@ -302,7 +301,7 @@ async def test_every_paid_generation_is_returned_for_caller_accounting(descripti
         llm = YandexGPTClient(
             http, api_key="test", folder_id="test", model="yandexgpt/latest", tariff=TokenTariff(20, 40)
         )
-        variant = await generate_ad_text(llm, description, platform="vk", angle="цена", segment="рядом с домом")
+        variant = await generate_ad_text(llm, description, platform="vk", angle="цена", segment="к празднику")
     assert len(variant.llm_calls) == 3
     assert sum(call.cost_kop for call in variant.llm_calls) == 3
     assert sum(call.tokens_in for call in variant.llm_calls) == 30
@@ -330,3 +329,317 @@ async def test_content_filter_fallback_keeps_usage(description: DescriptionDraft
     assert len(variant.llm_calls) == 1
     assert variant.llm_calls[0].cost_kop == 1
     assert variant.llm_calls[0].status == "ALTERNATIVE_STATUS_CONTENT_FILTER"
+
+
+@pytest.fixture
+def salon() -> DescriptionDraft:
+    """Как в живом прогоне: пять услуг с ценами, адрес и отличия."""
+    names = ["Маникюр с покрытием гель-лаком", "Педикюр", "Наращивание ресниц", "Окрашивание бровей", "Маникюр"]
+    return DescriptionDraft(
+        services=[Service(name, None, name, "owner") for name in names],
+        address=Fact("Самара, ул. Полевая, д. 7", "", "owner"),
+        advantages=[
+            Fact("Маникюр с покрытием гель-лаком — 2 000 ₽", "", "owner"),
+            Fact("Педикюр — 2 500 ₽", "", "owner"),
+            Fact("Наращивание ресниц — 3 000 ₽", "", "owner"),
+            Fact("Окрашивание бровей — 800 ₽", "", "owner"),
+            Fact("Маникюр — 1 200 ₽", "", "owner"),
+            Fact("Стерильные инструменты", "", "owner"),
+            Fact("Гарантия на покрытие 7 дней", "", "owner"),
+        ],
+    )
+
+
+async def test_long_text_gets_explained_in_words_and_next_attempt_passes(salon: DescriptionDraft) -> None:
+    listing = ", ".join(fact.value for fact in salon.advantages[:5])
+    llm = SequenceLLM([response("Маникюр", listing), response("Педикюр", "Педикюр — 2 500 ₽. Стерильные инструменты")])
+    variant = await generate_ad_text(
+        llm, salon, platform="vk", angle="цена", segment="к празднику", service=salon.services[1]
+    )
+    assert not variant.used_fallback and variant.attempts == 2
+    assert json.loads(llm.calls[1][1])["previous_errors"] == [
+        f"текст {len(listing)} символов, нужно не больше {VK_TEXT_LIMIT} — оставь одну услугу и одно отличие"
+    ]
+    system = llm.calls[0][0]
+    assert f"не длиннее {VK_TITLE_LIMIT} символов" in system and f"не длиннее {VK_TEXT_LIMIT} символов" in system
+    assert "title2 оставь пустым" in system
+
+
+async def test_focus_facts_hold_one_service_and_its_price(salon: DescriptionDraft) -> None:
+    llm = FakeLLM(response("Педикюр", "Стерильные инструменты"))
+    await generate_ad_text(
+        llm, salon, platform="direct", angle="цена", segment="к празднику", service=salon.services[1]
+    )
+    facts = json.loads(llm.calls[0][1])["facts"]
+    assert facts == ["Педикюр", "Самара, ул. Полевая, д. 7", "Педикюр — 2 500 ₽", "Стерильные инструменты",
+                     "Гарантия на покрытие 7 дней"]
+    llm = FakeLLM(response("Маникюр", "Стерильные инструменты"))
+    await generate_ad_text(
+        llm, salon, platform="direct", angle="цена", segment="к празднику", service=salon.services[4]
+    )
+    assert "Маникюр — 1 200 ₽" in json.loads(llm.calls[0][1])["facts"]
+    assert "Маникюр с покрытием гель-лаком — 2 000 ₽" not in json.loads(llm.calls[0][1])["facts"]
+    assert f"не длиннее {DIRECT_TITLE2_LIMIT} символов" in llm.calls[0][0]
+
+
+async def test_fact_check_still_rejects_invented_price_for_focused_service(salon: DescriptionDraft) -> None:
+    llm = FakeLLM(response("Педикюр", "Педикюр — 1 990 ₽"))
+    variant = await generate_ad_text(llm, salon, platform="vk", angle="цена", segment="к празднику",
+                                     service=salon.services[1])
+    assert variant.used_fallback and len(llm.calls) == 3
+    assert json.loads(llm.calls[1][1])["previous_errors"] == ["число 1990 не из фактов — бери числа только из фактов"]
+
+
+async def test_temperature_rises_on_retry(description: DescriptionDraft) -> None:
+    llm = FakeLLM(response(text="я" * 200))
+    await generate_ad_text(llm, description, platform="vk", angle="цена", segment="к празднику")
+    assert llm.temperatures[0] == 0.2 and 0.5 <= llm.temperatures[1] <= llm.temperatures[2] <= 0.7
+
+
+async def test_second_ad_of_group_differs_from_first(salon: DescriptionDraft) -> None:
+    first = AdText("Педикюр", "Стерильные инструменты")
+    llm = SequenceLLM(
+        [
+            response("Педикюр рядом", " стерильные  инструменты"),
+            response("Педикюр", "Педикюр — 2 500 ₽"),
+            response("Педикюр к празднику", "Педикюр — 2 500 ₽"),
+        ]
+    )
+    variant = await generate_ad_text(
+        llm, salon, platform="vk", angle="результат", segment="к празднику", service=salon.services[1], other=first
+    )
+    assert variant.ad.text == "Педикюр — 2 500 ₽" and variant.attempts == 3
+    assert json.loads(llm.calls[0][1])["other_ad"] == {"title": "Педикюр", "text": "Стерильные инструменты"}
+    assert "текст « стерильные  инструменты» совпал" in json.loads(llm.calls[1][1])["previous_errors"][0]
+    assert "заголовок «Педикюр» совпал" in json.loads(llm.calls[2][1])["previous_errors"][0]
+
+
+async def test_fallback_takes_group_service_and_differs_from_other(salon: DescriptionDraft) -> None:
+    llm = FakeLLM("{}")
+    first = await generate_ad_text(llm, salon, platform="vk", angle="цена", segment="к празднику",
+                                   service=salon.services[2])
+    second = await generate_ad_text(llm, salon, platform="vk", angle="результат", segment="к празднику",
+                                    service=salon.services[2], other=first.ad)
+    assert first.used_fallback and second.used_fallback
+    assert first.ad == AdText("Наращивание ресниц", "Наращивание ресниц — 3 000 ₽. Стерильные инструменты.")
+    assert second.ad == AdText("К празднику", "Наращивание ресниц — 3 000 ₽")
+    assert all("Гарантия" not in variant.ad.text for variant in (first, second))
+    assert not errors(first.ad, salon, "vk") and not errors(second.ad, salon, "vk")
+
+
+async def test_near_home_ad_names_location_from_facts(salon: DescriptionDraft) -> None:
+    salon.advantages.append(Fact("5 минут от метро Сокольники", "", "owner"))
+    llm = SequenceLLM(
+        [
+            response("Педикюр рядом с домом", "Стерильные инструменты"),
+            response("Педикюр", "Самара, ул. Сокольническая, д. 7"),
+            response("Педикюр рядом", "5 минут от метро Сокольники"),
+        ]
+    )
+    variant = await generate_ad_text(
+        llm, salon, platform="vk", angle="удобство", segment="рядом с домом", service=salon.services[1]
+    )
+    assert variant.ad.text == "5 минут от метро Сокольники" and variant.attempts == 3
+    data = json.loads(llm.calls[0][1])
+    assert data["location"] == ["Самара, ул. Полевая, д. 7", "5 минут от метро Сокольники"]
+    assert "адрес" in data["segment_hint"] and "удобство" in data["angle_hint"]
+    assert "нет адреса" in json.loads(llm.calls[1][1])["previous_errors"][0]
+    assert "адрес не из фактов" in " ".join(json.loads(llm.calls[2][1])["previous_errors"])
+
+
+async def test_near_home_fallback_leads_with_address(salon: DescriptionDraft) -> None:
+    llm = FakeLLM(response("Педикюр", "Стерильные инструменты"))
+    first = await generate_ad_text(llm, salon, platform="vk", angle="цена", segment="рядом с домом",
+                                   service=salon.services[1])
+    assert first.used_fallback and first.ad.text == "Самара, ул. Полевая, д. 7. Педикюр — 2 500 ₽."
+    assert not errors(first.ad, salon, "vk")
+
+
+@pytest.fixture
+def sokolniki() -> DescriptionDraft:
+    """Как на стенде: адрес — город и район, у второго объявления группы был запасной шаблон с голым адресом."""
+    return DescriptionDraft(
+        services=[
+            Service("Снятие покрытия", 50000, "", "owner"),
+            Service("Маникюр без покрытия", 150000, "", "owner"),
+            Service("Маникюр с покрытием гель-лаком", None, "", "owner"),
+        ],
+        address=Fact("Москва, Сокольники", "", "owner"),
+        advantages=[
+            Fact("Маникюр с покрытием гель-лаком — 2 200 ₽", "", "owner"),
+            Fact("Мастера со стажем от 4 лет", "", "owner"),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Бережно снимем гель-лак в Сокольниках.", "Снятие покрытия в Москве, Сокольники.", "Москва, Сокольники. Запись."],
+)
+async def test_location_counts_in_declined_form(sokolniki: DescriptionDraft, text: str) -> None:
+    llm = FakeLLM(response("Ногти отдохнут", text))
+    variant = await generate_ad_text(llm, sokolniki, platform="vk", angle="результат", segment="рядом с домом",
+                                     service=sokolniki.services[0])
+    assert not variant.used_fallback and variant.attempts == 1
+    assert "«Москва, Сокольники. …»" in json.loads(llm.calls[0][1])["segment_hint"]
+
+
+@pytest.mark.parametrize("text", ["Бережно снимем гель-лак в Москве.", "Мастера со стажем от 4 лет."])
+async def test_city_alone_is_not_a_location(sokolniki: DescriptionDraft, text: str) -> None:
+    llm = FakeLLM(response("Ногти отдохнут", text))
+    variant = await generate_ad_text(llm, sokolniki, platform="vk", angle="результат", segment="рядом с домом",
+                                     service=sokolniki.services[0])
+    assert variant.used_fallback
+    assert "нет адреса" in json.loads(llm.calls[1][1])["previous_errors"][0]
+
+
+@pytest.mark.parametrize("service_index", [0, 1])
+async def test_near_home_fallback_is_not_bare_address_and_keeps_title_apart(
+    sokolniki: DescriptionDraft, service_index: int
+) -> None:
+    service = sokolniki.services[service_index]
+    first = AdText(service.name, f"{service.name} в Москве, Сокольники")
+    variant = await generate_ad_text(FakeLLM("{}"), sokolniki, platform="vk", angle="результат",
+                                     segment="рядом с домом", service=service, other=first)
+    assert variant.used_fallback
+    assert variant.ad.title != service.name and variant.ad.title == "Рядом с домом"
+    assert variant.ad.text.startswith("Москва, Сокольники. ") and variant.ad.text != "Москва, Сокольники"
+    assert not errors(variant.ad, sokolniki, "vk")
+
+
+async def test_fallback_with_long_service_name_adds_advantage_to_price(sokolniki: DescriptionDraft) -> None:
+    service = sokolniki.services[2]
+    first = AdText("Маникюр гель-лаком", "Маникюр с покрытием гель-лаком — 2 200 ₽")
+    variant = await generate_ad_text(FakeLLM("{}"), sokolniki, platform="vk", angle="результат",
+                                     segment="к празднику", service=service, other=first)
+    assert variant.ad == AdText(
+        "К празднику", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет."
+    )
+    assert len(variant.ad.text) <= VK_TEXT_LIMIT and not errors(variant.ad, sokolniki, "vk")
+
+
+async def test_holiday_is_an_allowed_occasion_not_a_fact(salon: DescriptionDraft) -> None:
+    ad = AdText("Педикюр к празднику", "Педикюр — 2 500 ₽. На праздники")
+    assert not errors(ad, salon, "vk")
+    llm = FakeLLM(response("Педикюр к празднику", "Педикюр к 8 Марта со скидкой"))
+    variant = await generate_ad_text(llm, salon, platform="vk", angle="акция", segment="к празднику",
+                                     service=salon.services[1])
+    assert variant.used_fallback
+    system, user = llm.calls[0]
+    assert "повод сегмента — не факт" in system and "праздник" in json.loads(user)["segment_hint"]
+
+
+async def test_new_design_does_not_invent_design_service(salon: DescriptionDraft) -> None:
+    llm = FakeLLM(response("Маникюр: новый образ", "Стерильные инструменты"))
+    variant = await generate_ad_text(llm, salon, platform="vk", angle="результат", segment="новый дизайн",
+                                     service=salon.services[4])
+    assert not variant.used_fallback
+    hint = json.loads(llm.calls[0][1])["segment_hint"]
+    assert "новый образ" in hint and "только если она есть в фактах" in hint
+
+
+@pytest.fixture
+def owner() -> DescriptionDraft:
+    """Как описание владельца на стенде: цены услуг ещё и строками отличий, отличия — одной строкой."""
+    prices = {"Маникюр с покрытием гель-лаком": 220000, "Снятие покрытия": 40000}
+    return DescriptionDraft(
+        services=[Service(name, price, name, "owner") for name, price in prices.items()],
+        address=Fact("Москва, Сокольники", "", "owner"),
+        advantages=[
+            Fact("Маникюр с покрытием гель-лаком — 2 200 ₽", "", "owner"),
+            Fact("Снятие покрытия — 400 ₽", "", "owner"),
+            Fact(
+                "Мастера со стажем от 4 лет, работаем по записи без очередей. Гарантия на покрытие 7 дней.", "", "owner"
+            ),
+        ],
+    )
+
+
+async def test_price_is_written_with_thousands_like_owner_facts(owner: DescriptionDraft) -> None:
+    llm = FakeLLM("{}")
+    variant = await generate_ad_text(llm, owner, platform="vk", angle="цена", segment="к празднику",
+                                     service=owner.services[0])
+    facts = json.loads(llm.calls[0][1])["facts"]
+    assert facts.count("Маникюр с покрытием гель-лаком — 2 200 ₽") == 1 and not any("2200" in fact for fact in facts)
+    assert "2 200 ₽" in variant.ad.text and "2200" not in variant.ad.text
+
+
+async def test_price_with_kopecks_from_owner_facts_is_not_repeated(owner: DescriptionDraft) -> None:
+    service = replace(owner.services[0], price=150050)
+    owner = replace(
+        owner, services=[service], advantages=[Fact("Маникюр с покрытием гель-лаком — 1 500,50 ₽", "", "owner")]
+    )
+    llm = FakeLLM("{}")
+    await generate_ad_text(llm, owner, platform="vk", angle="цена", segment="к празднику", service=service)
+    facts = json.loads(llm.calls[0][1])["facts"]
+    assert sum("1 500,50 ₽" in fact for fact in facts) == 1
+
+
+async def test_fallback_does_not_repeat_price_from_owner_facts(owner: DescriptionDraft) -> None:
+    first = AdText("Маникюр с гель-лаком", "Маникюр с покрытием гель-лаком — 2 200 ₽")
+    variant = await generate_ad_text(FakeLLM("{}"), owner, platform="vk", angle="результат", segment="новый дизайн",
+                                     service=owner.services[0], other=first)
+    assert variant.used_fallback
+    assert variant.ad == AdText("Новый дизайн", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет.")
+    assert not errors(variant.ad, owner, "vk")
+
+
+async def test_near_home_fallback_differs_from_first_beyond_punctuation(owner: DescriptionDraft) -> None:
+    first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
+    variant = await generate_ad_text(FakeLLM("{}"), owner, platform="vk", angle="результат", segment="рядом с домом",
+                                     service=owner.services[1], other=first)
+    assert variant.used_fallback and variant.ad.title == "Рядом с домом"
+    assert variant.ad.text == "Москва, Сокольники. Мастера со стажем от 4 лет, работаем по записи без очередей."
+
+
+@pytest.mark.parametrize(
+    "text", ["москва сокольники: снятие покрытия 400 ₽!", "Москва, Сокольники. Снятие покрытия — 400₽."]
+)
+async def test_duplicate_ignores_punctuation_and_case(owner: DescriptionDraft, text: str) -> None:
+    first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
+    llm = FakeLLM(response("Ногти отдохнут", text))
+    variant = await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="рядом с домом",
+                                     service=owner.services[1], other=first)
+    assert variant.used_fallback
+    assert "совпал с первым объявлением" in json.loads(llm.calls[1][1])["previous_errors"][0]
+
+
+async def test_second_ad_takes_title_and_text_from_different_attempts(owner: DescriptionDraft) -> None:
+    """Как на стенде: модель чинит названную ошибку и переписывает остальное — каждая попытка проваливается
+    по-своему, хотя годный заголовок и годный текст у неё уже есть."""
+    first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
+    llm = SequenceLLM(
+        [
+            response("Снятие покрытия", "Москва, Сокольники. Лёгкая смена образа — снятие покрытия за 400 ₽"),
+            response("Быстрое снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽"),
+            response("Снятие покрытия в Сокольниках", "Москва, Сокольники. После процедуры покрытие будет удалено"),
+        ]
+    )
+    variant = await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="рядом с домом",
+                                     service=owner.services[1], other=first)
+    assert not variant.used_fallback and variant.attempts == 3
+    assert variant.ad == AdText(
+        "Быстрое снятие покрытия", "Москва, Сокольники. Лёгкая смена образа — снятие покрытия за 400 ₽"
+    )
+    second = json.loads(llm.calls[1][1])
+    assert second["previous_ad"]["title"] == "Снятие покрытия"
+    assert "заголовок «Снятие покрытия» совпал" in second["previous_errors"][0]
+
+
+async def test_duplicate_and_same_title_are_reported_together(owner: DescriptionDraft) -> None:
+    first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
+    llm = FakeLLM(response("Снятие покрытия.", "Москва, Сокольники. Снятие покрытия — 400 ₽"))
+    await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="рядом с домом",
+                           service=owner.services[1], other=first)
+    previous_errors = json.loads(llm.calls[1][1])["previous_errors"]
+    assert len(previous_errors) == 2 and "текст «" in previous_errors[0] and "заголовок «" in previous_errors[1]
+
+
+async def test_title_length_names_the_title_and_the_excess(owner: DescriptionDraft) -> None:
+    llm = FakeLLM(response("Гель-лак для обновления образа", "Мастера со стажем от 4 лет"))
+    await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="новый дизайн",
+                           service=owner.services[0])
+    assert json.loads(llm.calls[1][1])["previous_errors"] == [
+        "заголовок «Гель-лак для обновления образа» — 30 символов, нужно не больше 25: убери или замени слово, "
+        "чтобы стало хотя бы на 5 символов короче"
+    ]
