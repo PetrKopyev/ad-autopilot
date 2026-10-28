@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.content.ideas import MAX_IDEAS, TITLE_LIMIT, build_prompt, generate_ideas
+from app.content.ideas import MAX_IDEAS, MOODS, SUBJECTS, TITLE_LIMIT, build_prompt, generate_ideas
 from app.content.llm import FakeLLM
 
 NAILS = [
@@ -25,7 +25,8 @@ def test_pedicure_prompt_is_a_scene_starting_with_feet() -> None:
         "вид сверху, гель-лак цвета пыльной розы, без коробок и надписей, на белом полотенце", "Педикюр с покрытием",
         "nails",
     )
-    assert prompt.startswith("Женские ступни крупным планом, пальцы ног с педикюром, вид сверху, гель-лак")
+    assert prompt.startswith("Женские ступни с педикюром крупным планом ровно стоят рядом")
+    assert "пальцы видны, вид сверху, гель-лак" in prompt
     assert "Реалистичная рекламная фотография" in prompt and prompt.endswith("без текста и надписей.")
     assert prompt.count("без") == 1 and "коробок" not in prompt and "Требования" not in prompt
     assert "услуги «Педикюр с покрытием»" not in prompt
@@ -34,14 +35,27 @@ def test_pedicure_prompt_is_a_scene_starting_with_feet() -> None:
 @pytest.mark.parametrize(
     "service,start",
     [
-        ("Маникюр без покрытия", "Женские руки с маникюром"),
-        ("Наращивание ногтей", "Женские руки с длинными наращёнными ногтями"),
-        ("Снятие покрытия", "Женские руки с короткими натуральными ногтями без покрытия"),
-        ("Парафинотерапия", "Женские руки с ухоженными ногтями"),
+        ("Маникюр без покрытия", "Женская кисть руки с маникюром"),
+        ("Наращивание ногтей", "Женская кисть руки с длинными наращёнными ногтями"),
+        ("Снятие покрытия", "Женская кисть руки с короткими натуральными ногтями"),
+        ("Парафинотерапия", "Женская кисть руки с ухоженными ногтями"),
     ],
 )
 def test_subject_follows_service_of_the_niche(service: str, start: str) -> None:
     assert build_prompt("вид сбоку, нюдовый лак", service, "nails").startswith(start)
+
+
+@pytest.mark.parametrize("service", ["Маникюр", "Снятие покрытия", "Наращивание ногтей", "Парафинотерапия"])
+def test_hand_is_one_relaxed_hand_with_nothing_in_it(service: str) -> None:
+    prompt = build_prompt("вид сбоку, нюдовый лак", service, "nails")
+    assert "лежит ладонью вниз на ровной поверхности, пальцы прямые" in prompt
+    assert "Женские руки" not in prompt
+    assert "держ" not in prompt
+
+
+def test_subjects_and_moods_have_no_negations_or_alcohol() -> None:
+    texts = [scene for scenes in SUBJECTS.values() for _, scene in scenes] + list(MOODS.values())
+    assert not any(word in text.lower() for text in texts for word in ("без ", "не ", "бокал", "игрист", "шампанск"))
 
 
 def test_other_niches_get_default_subject() -> None:
@@ -63,8 +77,11 @@ async def test_ideas_follow_service_and_segment_of_each_group() -> None:
     for rule in (
         "Нельзя предлагать", "надписи", "карты, улицы, дома и транспорт", "товары в упаковке и коробки",
         "лица крупным планом", "до/после", "парикмахерские кресла", "косметику для макияжа", "«у дома»",
+        "алкоголь и бокалы", "руки, держащие предметы", "переплетённые или сложенные пальцы",
+        "Руки в кадре ничего не держат",
     ):
         assert rule in system
+    assert "игрист" not in system and "игрист" not in user
     assert [(idea.service, idea.segment) for idea in ideas] == NAILS
     assert ideas[1].visual == "Кадр 1" and ideas[1].prompt.startswith("Женские ступни")
     assert all(idea.prompt.count("без") == 1 for idea in ideas)
@@ -132,11 +149,27 @@ async def test_scene_without_props_of_the_first_is_kept() -> None:
     llm = FakeLLM(
         scenes(
             ("Нюд на светлом льне", "вид сверху, нюдовый гель-лак, светлый лён, мягкий свет"),
-            ("Чай у окна", "руки держат чашку чая у окна, на подоконнике плед, тёплый вечерний свет"),
+            ("Чай у окна", "у окна, рядом на подоконнике чашка чая и плед, тёплый вечерний свет"),
         )
     )
     _, second = await generate_ideas(llm, "nails", [pair] * 2)
     assert second.label == "Чай у окна"
+
+
+@pytest.mark.parametrize(
+    "visual",
+    [
+        "руки держат чашку чая у окна, тёплый свет",
+        "бокал в руке на фоне гирлянды",
+        "чашка в руках у окна",
+        "пальцы сжимают кружку какао",
+        "ладони обхватывают чашку, плед",
+    ],
+)
+async def test_scene_with_something_in_hands_is_replaced(visual: str) -> None:
+    (idea,) = await generate_ideas(FakeLLM(scenes(("Чай у окна", visual))), "nails", NAILS[:1])
+    assert idea.label != "Чай у окна" and idea.visual != visual
+    assert not any(word in idea.prompt for word in ("держ", "в руке", "в руках", "сжима", "обхват"))
 
 
 def test_style_has_no_plain_band_at_the_bottom() -> None:
