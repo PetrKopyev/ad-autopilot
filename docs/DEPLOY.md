@@ -109,7 +109,7 @@ dc ps                                  # db, api, worker, caddy в состоя�
 curl https://<домен>/api/health        # {"ok":true,"db":true,"mode":"live"}
 ```
 
-`db: false` значит, что API не достучался до PostgreSQL. `mode` показывает `PLATFORM_MODE`. Откройте `https://<домен>` и нажмите «Войти через Яндекс». Если Яндекс отвечает ошибкой redirect URI, проверьте [SETUP-YANDEX.md](SETUP-YANDEX.md).
+`db: false` значит, что API не достучался до PostgreSQL. `mode` показывает `PLATFORM_MODE`. Откройте `https://<домен>`, отметьте согласие на обработку данных и нажмите «Войти с Яндекс ID». Если Яндекс отвечает ошибкой redirect URI, проверьте [SETUP-YANDEX.md](SETUP-YANDEX.md).
 
 Воркер жив, если в таблице `worker_runs` каждую минуту появляется запись `heartbeat`:
 
