@@ -398,4 +398,8 @@ async def check_accounts(
     }
     registry = request.app.state.platform_adapters
     response.headers["Cache-Control"] = "no-store"
-    return {"items": await check_connections(business.id, statuses, registry.resolve, registry.metrica)}
+    return {
+        "items": await check_connections(
+            business.id, statuses, registry.resolve, registry.metrica, repository.expire_account
+        )
+    }

@@ -589,6 +589,24 @@ def test_revocations_skip_vk_account_connected_in_another_business(db_session):
     assert repository.revocations(theirs.user.id, theirs.account.id)[0].access_token == "t"
 
 
+def test_expire_account_marks_only_working_account_of_that_platform(db_session):
+    from app.auth.sessions import AuthRepository
+
+    mine, theirs = make_tree(db_session, suffix="mine"), make_tree(db_session, suffix="theirs")
+    vk = PlatformAccount(business_id=mine.business.id, platform="vk", auth_mode="oauth", access_token_enc="v")
+    db_session.add(vk)
+    db_session.flush()
+    AuthRepository(db_session).expire_account(mine.business.id, "direct")
+    for account in (mine.account, vk, theirs.account):
+        db_session.refresh(account)
+    assert (mine.account.status, vk.status, theirs.account.status) == ("needs_reauth", "ok", "ok")
+    mine.account.status = "revoked"
+    db_session.flush()
+    AuthRepository(db_session).expire_account(mine.business.id, "direct")
+    db_session.refresh(mine.account)
+    assert mine.account.status == "revoked"
+
+
 async def test_site_check_reads_site_before_lock_and_saves_under_it_on_postgres(db_session):
     from app.content.site_reader import SiteReadResult
     from app.platforms.metrica import FakeMetrica

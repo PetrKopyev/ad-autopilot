@@ -529,7 +529,7 @@ class OnboardingService:
             cached
             and owner_text is None
             and cached["site_url"] == business.site_url
-            and cached.get("ai_mode", "") == self.ai_mode
+            and cached.get("ai_mode", self.ai_mode) == self.ai_mode
             and now - datetime.fromisoformat(cached["checked_at"]) < CHECK_TTL
         ):
             return cached

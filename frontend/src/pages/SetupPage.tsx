@@ -96,7 +96,7 @@ export function SetupPage() {
     setDraft(value);
     setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(business.month_budget_kop / 100) : '');
     setAverage(business?.avg_check_kop ? String(business.avg_check_kop / 100) : '');
-    setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false);
+    setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false); setChecks(undefined);
   }
   // Сессия пропадает на время перечитывания: сохранённое спрашиваем один раз на пользователя.
   const loadedFor = useRef<number>();
@@ -180,6 +180,7 @@ export function SetupPage() {
     try {
       const { items } = await checkAccounts(draft.business?.id);
       setChecks(items);
+      if (items.some((item) => !item.ok)) session.update(await getMe());
       if (items.some((item) => item.platform === 'metrica' && item.ok)) {
         setCounters((await getCounters()).items); setCountersLoaded(true);
         if (draft.counter) setGoals((await getGoals(draft.counter)).items);
@@ -201,7 +202,7 @@ export function SetupPage() {
       const input = { site_url: url.href, city: city.trim(), month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }
       const business = await createBusiness(input);
-      session.reload();
+      session.reload(); setChecks(undefined);
       setDraft({ user: draft.user, business, counter: 0, goals: [], approved: false, maxStep: 2 }); navigate('/setup/2');
     } else if (current === 2) {
       const fresh = await getMe();
@@ -265,9 +266,9 @@ export function SetupPage() {
             <h2>{copy.setup.accounts[platform]}</h2><p className="muted">{platform === 'direct' ? copy.setup.accounts.required : copy.setup.accounts.optional}</p>
             <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
             {platform === 'direct' ? account?.status === 'ok' ? <p role="status">{copy.setup.accounts.directConnected}</p>
-              : <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
+              : <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setChecks(undefined); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
               : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
-            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(account.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
+            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(account.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); setChecks(undefined); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
             <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
           </Card>;
         })}</div>

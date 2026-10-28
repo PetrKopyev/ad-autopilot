@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
@@ -144,6 +144,18 @@ class AuthRepository:
                 account.status = "needs_reauth"
         self.db.commit()
         return accounts
+
+    def expire_account(self, business_id: int, platform: str) -> None:
+        self.db.execute(
+            update(PlatformAccount)
+            .where(
+                PlatformAccount.business_id == business_id,
+                PlatformAccount.platform == platform,
+                PlatformAccount.status == "ok",
+            )
+            .values(status="needs_reauth")
+        )
+        self.db.commit()
 
     def revocations(self, user_id: int, account_id: int | None = None) -> list[Revocation]:
         """Токены, которые нужно отозвать при удалении пользователя или отключении кабинета.

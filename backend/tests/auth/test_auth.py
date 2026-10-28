@@ -687,6 +687,7 @@ def test_accounts_check_asks_each_connected_platform_in_fake_mode(
         {"platform": "direct", "ok": False, "message": "Доступ истёк — подключите кабинет заново."},
         {"platform": "vk", "ok": False, "message": "Доступ истёк — подключите кабинет заново."},
     ]
+    assert repository.accounts[2].status == "needs_reauth"
 
 
 def test_accounts_check_is_rate_limited(

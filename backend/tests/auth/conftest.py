@@ -136,6 +136,11 @@ class FakeRepository:
             account for account in self.accounts.values() if self.businesses[account.business_id].user_id == user_id
         ]
 
+    def expire_account(self, business_id: int, platform: str) -> None:
+        for account in self.accounts.values():
+            if account.business_id == business_id and account.platform == platform and account.status == "ok":
+                account.status = "needs_reauth"
+
     def revocations(self, user_id: int, account_id: int | None = None) -> list:
         from app.auth.revoke import revocation, same_vk_access
 

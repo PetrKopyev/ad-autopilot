@@ -524,6 +524,15 @@ async def test_site_check_cache_is_dropped_when_ai_mode_changes(world: World) ->
     assert world.business.description["check"]["ai_mode"] == "yandexgpt/latest"
 
 
+async def test_site_check_cache_written_before_ai_mode_is_reused(world: World) -> None:
+    misses = []
+    world.onboarding.ai_mode = "yandexgpt/latest"
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("first"))
+    del world.business.description["check"]["ai_mode"]
+    await world.onboarding.site_check(world.business.id, NOW, TODAY, on_miss=lambda: misses.append("cached"))
+    assert misses == ["first"] and world.llm.calls == ["description"]
+
+
 EMPTY_DESCRIPTION = json.dumps({"services": [], "address": {"value": "", "quote": ""}, "advantages": []})
 
 

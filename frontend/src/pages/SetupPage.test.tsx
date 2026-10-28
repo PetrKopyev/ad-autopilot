@@ -267,7 +267,9 @@ it('под полем услуг подсказка, что их можно пе
   expect(document.getElementById('services-hint')!.textContent).toBe(copy.setup.draft.servicesHint);
 });
 
+let directStatus = 'ok';
 function accountsStep(counters: { id: number; name: string }[], check: unknown) {
+  directStatus = 'ok';
   sessionStorage.setItem('ad-autopilot-setup-draft', JSON.stringify({
     user: 1, business: { id: 7, site_url: 'https://salon.example/', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null },
     counter: 0, goals: [], approved: false, maxStep: 2,
@@ -277,10 +279,11 @@ function accountsStep(counters: { id: number; name: string }[], check: unknown) 
     const answers: Record<string, unknown> = {
       '/api/auth/config': { demo: false, vk_oauth: false },
       '/api/me': { id: 1, login: 'owner', email: null, has_business: true,
-        accounts: [{ id: 1, business_id: 7, platform: 'direct', external_login: 'owner', status: 'ok', scopes: [] }] },
+        accounts: [{ id: 1, business_id: 7, platform: 'direct', external_login: 'owner', status: directStatus, scopes: [] }] },
       '/api/metrica/counters': { items: counters },
       '/api/metrica/goals': { items: [{ id: 1, name: 'Заявка' }] },
       '/api/accounts/check': check,
+      '/api/accounts/1': { stopped: true, message: 'Кабинет отключён.' },
     };
     return new Response(JSON.stringify(answers[path] ?? {}), { status: 200, headers: { 'Content-Type': 'application/json' } });
   });
@@ -316,5 +319,40 @@ it('«Проверить подключение» спрашивает площ�
   expect(screen.getByText(copy.setup.accounts.directConnected)).not.toBeNull();
   const requests = calls();
   expect(requests).toContain('POST /api/accounts/check');
-  expect(requests.filter((call) => call === 'GET /api/me')).toHaveLength(1);
+  expect(requests.filter((call) => call === 'GET /api/me')).toHaveLength(2);
+});
+
+it('истёкший доступ после проверки виден на карточке кабинета, а карточка не пропадает на время запроса', async () => {
+  let answer!: (value: Response) => void;
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [{ platform: 'direct', ok: false, message: 'Доступ истёк — подключите кабинет заново.' }] });
+  const button = await screen.findByRole('button', { name: copy.launchFlow.refresh });
+  await screen.findByText(copy.setup.accounts.directConnected);
+  const base = fetchMock.getMockImplementation()!;
+  directStatus = 'needs_reauth';
+  fetchMock.mockImplementation((url, init) => new URL(String(url)).pathname === '/api/me'
+    ? new Promise<Response>((resolve) => { answer = resolve; }) : base(url, init));
+  fireEvent.click(button);
+  await screen.findByText('Доступ истёк — подключите кабинет заново.', { exact: false });
+  await waitFor(() => expect(calls().filter((call) => call === 'GET /api/me')).toHaveLength(2));
+  expect(screen.getByText(copy.setup.accounts.connected('owner'))).not.toBeNull();
+  answer(await base('http://localhost/api/me'));
+  expect(await screen.findByText(copy.setup.accounts.expired)).not.toBeNull();
+  expect(screen.getByText('Доступ истёк — подключите кабинет заново.', { exact: false })).not.toBeNull();
+});
+
+it('все площадки ответили — сессию заново не спрашиваем', async () => {
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [{ platform: 'direct', ok: true, message: 'Директ отвечает.' }] });
+  fireEvent.click(await screen.findByRole('button', { name: copy.launchFlow.refresh }));
+  await screen.findByText('Директ отвечает.', { exact: false });
+  expect(calls().filter((call) => call === 'GET /api/me')).toHaveLength(1);
+});
+
+it('после отключения кабинета прежний итог проверки не показывается', async () => {
+  accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [{ platform: 'direct', ok: true, message: 'Директ отвечает.' }] });
+  fireEvent.click(await screen.findByRole('button', { name: copy.launchFlow.refresh }));
+  await screen.findByText('Директ отвечает.', { exact: false });
+  directStatus = 'revoked';
+  fireEvent.click(screen.getByRole('button', { name: copy.launchFlow.disconnect }));
+  await waitFor(() => expect(screen.queryByText('Директ отвечает.', { exact: false })).toBeNull());
+  expect(calls()).toContain('DELETE /api/accounts/1');
 });

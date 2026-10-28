@@ -18,5 +18,5 @@ export function useResource<T>(load: (signal: AbortSignal) => Promise<T>) {
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [load, revision]);
-  return { data, error, loading, reload: () => setRevision((value) => value + 1) };
+  return { data, error, loading, reload: () => setRevision((value) => value + 1), update: setData };
 }
