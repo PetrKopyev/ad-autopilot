@@ -130,7 +130,8 @@ class ScreensService:
             stopped = set(meta.get("kill_switch_campaigns", []))
             held = set(self.worker.metadata(business).get("below_minimum", []))
             active = False
-            for campaign in self.worker.current_campaigns(business):
+            campaigns = self.worker.current_campaigns(business)
+            for campaign in campaigns:
                 if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
                     continue
                 last = self.repository.last_status_change(
@@ -172,7 +173,13 @@ class ScreensService:
             if active and not self.worker.proposed(business):
                 business.status = "running"
                 self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
-        return self.status(business)
+        warning = None
+        if not active and any(campaign.id in held for campaign in campaigns):
+            warning = (
+                "Реклама не включилась: при текущем бюджете площадкам не хватает минимума. "
+                "Увеличьте бюджет в настройках."
+            )
+        return self.status(business) | {"warning": warning}
 
     def ads(self, business: Business, start: date, end: date) -> dict:
         # Только объявления действующего плана: у прежних планов статусы навсегда остались такими, какими их оставил

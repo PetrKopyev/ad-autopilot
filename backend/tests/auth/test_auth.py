@@ -646,9 +646,12 @@ def test_delete_me_waits_for_business_lock_and_reports_busy(
     assert waits == [15] and 1 in repository.users
 
 
-@pytest.mark.parametrize("client_id,shown", [("", False), ("vk-app", True)])
-def test_auth_config_tells_whether_vk_login_is_set_up(client, monkeypatch, client_id, shown):
+@pytest.mark.parametrize(
+    "client_id,enabled,shown", [("", True, False), ("vk-app", False, False), ("vk-app", True, True)]
+)
+def test_auth_config_tells_whether_vk_login_is_set_up(client, monkeypatch, client_id, enabled, shown):
     monkeypatch.setattr("app.config.settings.vk_client_id", client_id)
+    monkeypatch.setattr("app.config.settings.vk_oauth_enabled", enabled)
     assert client.get("/api/auth/config").json()["vk_oauth"] is shown
 
 

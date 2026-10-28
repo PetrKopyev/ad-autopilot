@@ -1,16 +1,17 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getSummary } from '../api/screens';
+import { getAutopilotStatus, getSummary } from '../api/screens';
+import { resumeAutopilot } from '../api/settings';
 import type { Summary } from '../api/types';
 import { formatMoney } from '../components/Money';
 import { HomePage } from './HomePage';
 
 vi.mock('../api/screens', () => ({
   mockEnabled: false, getSummary: vi.fn(), stopAllAds: vi.fn(),
-  getAutopilotStatus: async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] }),
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] })),
   getHistory: async () => ({ items: [], total: 0, page: 1, page_size: 3 }),
 }));
 vi.mock('../api/period', () => ({ getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-27' }) }));
@@ -41,4 +42,13 @@ it('объясняет, почему потрачено больше, чем в 
 it('без расхождения пояснения нет', async () => {
   await show(2_020_500, 2_020_500);
   expect(screen.queryByText(copy.budget.fresher(formatMoney(2_020_500)), raw)).toBeNull();
+});
+
+it('объясняет, почему реклама не включилась после «Возобновить»', async () => {
+  const warning = 'Реклама не включилась: при текущем бюджете площадкам не хватает минимума. Увеличьте бюджет в настройках.';
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'paused', last_check_at: null, auto_continue: true, needs_attention: [] });
+  vi.mocked(resumeAutopilot).mockResolvedValue(warning);
+  await show(0, 0);
+  fireEvent.click(screen.getByRole('button', { name: copy.settings.resume }));
+  expect(await screen.findByText(warning)).toBeTruthy();
 });

@@ -15,6 +15,7 @@ from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import rebalance_budget, snapshot
 from app.services.rollback import RollbackService
+from app.services.screens import ScreensService
 from app.worker.clock import today
 
 
@@ -508,39 +509,89 @@ async def test_rebalance_falls_back_to_known_minimums_when_platform_dictionary_f
     assert "Минимумы площадки direct не прочитаны" in caplog.text
 
 
-@pytest.mark.parametrize("owner", ["interface", "platform"])
-async def test_vk_held_by_minimum_keeps_owner_pause(owner):
+async def set_campaign_status(world, before: str, after: str) -> None:
+    await world.adapter.apply(Operation("set_status", "campaign", world.refs.campaign_id, "status", before, after))
+
+
+async def test_pause_in_platform_cabinet_is_recorded_once_and_kept_by_rebalance_and_month():
+    world = await make_world()
+    worker = world.worker()
+    await set_campaign_status(world, "active", "paused_owner")
+    world.clock.advance(days=2)
+    await rebalance_budget(worker, world.business)
+    (pause,) = world.changes(reason_code="EXTERNAL_PAUSE")
+    assert (pause.actor, pause.kind, pause.status) == ("external", "pause", "applied")
+    assert pause.reason_text == "Вы остановили кампанию в кабинете площадки — автопилот её не включает."
+    assert world.campaign.owner_paused and world.campaign.status == "paused_owner"
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:next"
+    await rebalance_budget(worker, world.business)
+    world.clock.advance(days=32)
+    await worker.run("month_rollover", 1)
+    assert len(world.changes(reason_code="EXTERNAL_PAUSE")) == 1
+    assert not world.changes(kind="resume")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_owner"
+
+
+async def test_owner_reverting_pause_from_platform_cabinet_lets_autopilot_manage_campaign_again():
+    world = await make_world()
+    worker = world.worker()
+    await set_campaign_status(world, "active", "paused_owner")
+    world.clock.advance(days=2)
+    await rebalance_budget(worker, world.business)
+    (pause,) = world.changes(reason_code="EXTERNAL_PAUSE")
+    await RollbackService(world.repository, dry_run=False).revert(
+        pause.id, business_id=1, adapter=world.adapter, now=world.clock.now
+    )
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:next"
+    await rebalance_budget(worker, world.business)
+    assert world.campaign.status == "active" and not world.campaign.owner_paused
+    assert not world.changes(reason_code="EXTERNAL_RESUME")
+
+
+async def test_vk_held_by_minimum_keeps_pause_after_owner_toggled_it_in_platform_cabinet():
     world = await vk_world(10**8)
     await rebalance_next_day(world, 10**8)
     report_pauses_as_owner(world.adapter)
-    if owner == "interface":
-        world.campaign.owner_paused = True
-    else:
-        world.repository.save(
-            ChangeLog(
-                business_id=world.business.id,
-                actor="external",
-                kind="pause",
-                platform=world.campaign.platform,
-                entity_type="campaign",
-                entity_id=world.refs.campaign_id,
-                operations=[
-                    asdict(
-                        Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_owner")
-                    )
-                ],
-                reason_code="EXTERNAL_CHANGE",
-                reason_params={"object": "кампании"},
-                reason_text="Настройки кампании изменились в кабинете площадки.",
-                evidence={},
-                status="applied",
-                created_at=world.clock.now,
-            )
-        )
+    await set_campaign_status(world, "paused_auto", "active")
+    await rebalance_next_day(world, 10**8)
+    await set_campaign_status(world, "active", "paused_owner")
     await rebalance_next_day(world, 30_000)
+    assert len(world.changes(reason_code="EXTERNAL_RESUME")) == 1
+    assert len(world.changes(reason_code="EXTERNAL_PAUSE")) == 1
     assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_owner"
+    assert world.campaign.owner_paused and world.campaign.status == "paused_owner"
+
+
+async def test_resume_in_platform_cabinet_is_recorded_and_not_stopped_for_a_day():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    await set_campaign_status(world, "paused_auto", "active")
+    await rebalance_next_day(world, 10**8)
+    (resume,) = world.changes(reason_code="EXTERNAL_RESUME")
+    assert (resume.actor, resume.kind, resume.status) == ("external", "resume", "applied")
+    assert world.campaign.status == "active" and not world.campaign.owner_paused
+    assert world.campaign.frozen_until == world.clock.now + timedelta(hours=24)
+    assert world.business.settings["_worker"]["below_minimum"] == []
+    assert len(world.changes(reason_code="BUDGET_REBALANCE", kind="pause")) == 1
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    await rebalance_next_day(world, 10**8)
+    assert len(world.changes(reason_code="BUDGET_REBALANCE", kind="pause")) == 2
+    assert len(world.changes(reason_code="EXTERNAL_RESUME")) == 1
     assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
-    assert world.campaign.status == "paused_auto"
+
+
+async def test_resume_explains_when_every_campaign_stays_below_platform_minimum():
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    await ScreensService(world.worker()).pause(world.business)
+    status = await ScreensService(world.worker()).resume(world.business)
+    assert status["status"] == "paused"
+    assert status["warning"] == (
+        "Реклама не включилась: при текущем бюджете площадкам не хватает минимума. Увеличьте бюджет в настройках."
+    )
 
 
 async def test_vk_held_by_minimum_resumes_after_owner_stop_was_lifted():

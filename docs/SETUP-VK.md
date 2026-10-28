@@ -29,9 +29,12 @@ VK подключать необязательно: сервис работае�
    ```
    VK_CLIENT_ID=<client_id приложения>
    VK_CLIENT_SECRET=<client_secret приложения>
+   VK_OAUTH_ENABLED=true
    ```
 
    и перезапустите `api` и `worker`: `docker compose --env-file .env -f deploy/docker-compose.yml up -d`. Секрет нужен и для обновления токенов: access-токен VK живёт 24 часа.
+
+`VK_OAUTH_ENABLED=true` ставьте, только когда VK разрешил приложению режим `authorization_code`: VK включает его не всем приложениям, и без него кнопка ведёт на ошибку VK. По умолчанию флаг выключен: кнопки «Войти через VK» нет, а `/api/auth/vk/start` отвечает 404, VK подключается ключом API. `VK_CLIENT_ID` и `VK_CLIENT_SECRET` при этом всё равно нужны для обновления токенов кабинетов, подключённых через вход VK раньше.
 
 Без `VK_CLIENT_ID` кнопка входа через VK отвечает «Подключение VK пока не настроено. Используйте ключ API».
 

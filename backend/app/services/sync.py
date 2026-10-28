@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
 from app.db.query import Window
+from app.platforms.base import Operation
 from app.platforms.fake import FakeAdapter
 from app.services.changes import CLOSED_ACCOUNT
 from app.worker.clock import today
@@ -184,3 +185,43 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                 worker.remember(business, *polled, approvals=approvals, rewritten=rewritten)
     if failure is not None:
         raise failure
+
+
+async def sync_campaign_status(worker: Worker, business: Business) -> None:
+    """Пауза и включение кампании в кабинете площадки. Площадка не говорит, кто остановил кампанию: что меняли мы,
+    помнит локальный статус — его переписывает каждое применённое изменение."""
+    from app.config import get_domain_settings
+
+    held = set(worker.metadata(business).get("below_minimum", []))
+    pending = {change.platform for change in worker.repository.pending(business.id)}
+    for campaign in worker.current_campaigns(business):
+        if campaign.platform in pending:
+            continue
+        adapter = worker.resolve_adapter(business.id, campaign.platform)
+        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        paused_outside = (
+            state.status in {"paused_auto", "paused_owner"}
+            and campaign.status == "active"
+            and not campaign.owner_paused
+            and campaign.id not in held
+        )
+        resumed_outside = state.status == "active" and campaign.status in {"paused_auto", "paused_owner"}
+        if not (paused_outside or resumed_outside):
+            if campaign.owner_paused and state.status == "active":
+                campaign.owner_paused = False
+                worker.repository.save(campaign)
+            continue
+        await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "campaign", campaign.external_id, "status", campaign.status, state.status)],
+            actor="external",
+            kind="pause" if paused_outside else "resume",
+            reason_code="EXTERNAL_PAUSE" if paused_outside else "EXTERNAL_RESUME",
+            suffix=f"external:{worker.clock.now.isoformat()}",
+        )
+        campaign.owner_paused = paused_outside
+        if resumed_outside:
+            campaign.frozen_until = worker.clock.now + timedelta(hours=get_domain_settings().owner_cooldown_hours)
+            held.discard(campaign.id)
+        worker.remember(business, campaign, below_minimum=sorted(held))

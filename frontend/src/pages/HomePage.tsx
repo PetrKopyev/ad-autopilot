@@ -47,6 +47,7 @@ export function HomePage() {
   const [stopped, setStopped] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState('');
+  const [resumeWarning, setResumeWarning] = useState<string | null>(null);
   const now = useBusinessNow();
   const status = autopilot.data;
   // Пока время бизнеса неизвестно, показываем время проверки, а не «N минут назад», и не судим о давности.
@@ -78,12 +79,13 @@ export function HomePage() {
       {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
       {status && <StatusBadge tone={stale ? 'danger' : status.status === 'running' ? 'success' : 'warning'}>{statusText}</StatusBadge>}
       {status?.status === 'paused' && <Button disabled={resuming} onClick={() => {
-        setResuming(true); setResumeError('');
-        void resumeAutopilot().then(() => { setStopped(false); autopilot.reload(); history.reload(); })
+        setResuming(true); setResumeError(''); setResumeWarning(null);
+        void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); autopilot.reload(); history.reload(); })
           .catch((reason: unknown) => setResumeError(reason instanceof Error ? reason.message : copy.errors.generic))
           .finally(() => setResuming(false));
       }}>{copy.settings.resume}</Button>}
       {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
+      {resumeWarning && <div className="notice" role="status"><p>{resumeWarning}</p></div>}
       {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
       {summary.data && <BudgetRing spentKopecks={summary.data.budget.spent_kop} budgetKopecks={summary.data.budget.budget_kop} daysRemaining={summary.data.budget.days_remaining} />}
       {summary.data && summary.data.budget.spent_kop > summary.data.budget.reported_kop && <p className="muted">{copy.budget.fresher(formatMoney(summary.data.budget.reported_kop))}</p>}

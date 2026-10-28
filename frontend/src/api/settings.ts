@@ -30,9 +30,9 @@ export async function saveBusinessSettings(auto_continue: boolean, avg_check_kop
   if (mockEnabled) { (await import('./mocks')).mockSaveBusinessSettings(auto_continue, avg_check_kop); return; }
   await api('/api/business/settings', { method: 'PUT', body: { auto_continue, avg_check_kop } });
 }
-export async function resumeAutopilot() {
-  if (mockEnabled) { (await import('./mocks')).mockResumeAutopilot(); return; }
-  await api('/api/autopilot/resume', { method: 'POST' });
+export async function resumeAutopilot(): Promise<string | null> {
+  if (mockEnabled) { (await import('./mocks')).mockResumeAutopilot(); return null; }
+  return (await api<{ warning: string | null }>('/api/autopilot/resume', { method: 'POST' }))?.warning ?? null;
 }
 export async function pauseAutopilot() {
   if (mockEnabled) { (await import('./mocks')).mockPauseAutopilot(); return; }

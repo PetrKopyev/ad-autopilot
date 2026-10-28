@@ -183,12 +183,14 @@ function AutopilotBlock() {
   const status = useResource(useCallback((signal: AbortSignal) => getAutopilotStatus(signal), []));
   const state = status.data?.status;
   const paused = state === 'paused' || state === 'budget_stop';
+  const [warning, setWarning] = useState<string | null>(null);
   return <Block title={labels.autopilot}>
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
     {state && <p>{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
     <Status section={section} />
+    {warning && <div className="notice" role="status"><p>{warning}</p></div>}
     {state && state !== 'draft' && <div className="actions"><Button variant={paused ? 'primary' : 'secondary'} disabled={section.busy}
-      onClick={() => void section.run(async () => { await (paused ? resumeAutopilot() : pauseAutopilot()); status.reload(); })}>
+      onClick={() => void section.run(async () => { if (paused) setWarning(await resumeAutopilot()); else { setWarning(null); await pauseAutopilot(); } status.reload(); })}>
       {paused ? copy.settings.resume : labels.pause}</Button></div>}
   </Block>;
 }

@@ -39,7 +39,7 @@ from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import read_spend
 from app.services.changes import budget_operations
 from app.services.experiments import completed_hypotheses, group_available
-from app.services.sync import approved_at, shared_ids
+from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
 
 if TYPE_CHECKING:
@@ -295,6 +295,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     domain = get_domain_settings()
     if not force and (business.status != "running" or worker.metadata(business).get("kill_switch")):
         return {}
+    await sync_campaign_status(worker, business)
     day = today(worker.clock)
     month = day.replace(day=1)
     meta = worker.metadata(business)
@@ -379,6 +380,8 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 else None
             )
             if not desired_daily or minimum:
+                if campaign.frozen_until is not None and campaign.frozen_until > worker.clock.now:
+                    continue
                 await worker.apply(
                     business,
                     campaign,
@@ -406,14 +409,17 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             last = worker.repository.last_status_change(
                 business.id, campaign.platform, "campaign", campaign.external_id
             )
+            stopped_by_service = (
+                last is not None
+                and last.kind == "pause"
+                and (last.actor == "system" or last.reason_code == "OWNER_STOP" and not meta.get("kill_switch"))
+            )
             resume = (
                 campaign.id in held
                 and campaign.status == "paused_auto"
                 and not campaign.owner_paused
                 and state.status in {"paused_auto", "paused_owner"}
-                and last is not None
-                and last.kind == "pause"
-                and (last.actor == "system" or last.reason_code == "OWNER_STOP" and not meta.get("kill_switch"))
+                and stopped_by_service
             )
             if (
                 resume

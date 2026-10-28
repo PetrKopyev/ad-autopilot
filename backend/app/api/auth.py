@@ -145,7 +145,7 @@ def auth_config(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
     from app.config import settings
 
-    return {"demo": demo_enabled(), "vk_oauth": bool(settings.vk_client_id)}
+    return {"demo": demo_enabled(), "vk_oauth": bool(settings.vk_client_id) and settings.vk_oauth_enabled}
 
 
 def require_demo() -> None:

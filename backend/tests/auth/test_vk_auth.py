@@ -64,6 +64,7 @@ def vk_api(client: TestClient, repository: FakeRepository, monkeypatch: pytest.M
 
     monkeypatch.setattr(settings, "vk_client_id", "vk-app")
     monkeypatch.setattr(settings, "vk_client_secret", SecretStr("vk-app-secret"))
+    monkeypatch.setattr(settings, "vk_oauth_enabled", True)
     app.dependency_overrides[get_vk_accounts] = lambda: _accounts(repository)
     with respx.mock(assert_all_called=False) as router:
         router.post(TOKEN).respond(json=token_reply())
@@ -121,6 +122,16 @@ def test_start_without_configuration_is_unavailable(client, repository, vk_api, 
     monkeypatch.setattr(settings, "vk_client_id", "")
     sign_in(client, repository)
     assert client.get("/api/auth/vk/start").status_code == 503
+
+
+def test_start_is_not_found_while_vk_login_is_off(client, repository, vk_api, monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vk_oauth_enabled", False)
+    sign_in(client, repository)
+    response = client.get("/api/auth/vk/start")
+    assert response.status_code == 404 and "ключу API" in response.json()["detail"]
+    assert not repository.states
 
 
 def test_callback_exchanges_code_and_stores_tokens_encrypted(client, repository, vk_api, caplog) -> None:

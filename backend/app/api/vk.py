@@ -42,6 +42,10 @@ def vk_start(
     session: Annotated[Session, Depends(current_session)],
     business_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> Response:
+    from app.config import settings
+
+    if not settings.vk_oauth_enabled:
+        raise HTTPException(404, "Вход через VK выключен. Подключите кабинет по ключу API.")
     if limited := vk_start_limit.page(request, session):
         return limited
     business = repository.get_business(session.user_id, business_id)

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     vk_package_id: int | None = Field(default=None, gt=0)
     vk_client_id: str = ""
     vk_client_secret: SecretStr = SecretStr("")
+    vk_oauth_enabled: bool = False
     yc_folder_id: str = ""
     yc_api_key: SecretStr = SecretStr("")
     yandexgpt_model: str = "yandexgpt/latest"

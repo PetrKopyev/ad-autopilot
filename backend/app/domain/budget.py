@@ -148,10 +148,15 @@ def launch_limits(
 def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int], margin: Decimal = Decimal(1)) -> bool:
     """Лимиты кампании на полную неделю не ниже минимумов площадки: Директ — недельный, VK — дневной (с запасом
     margin) и на кампанию, симулятор — day/period. Неполную неделю запуска проверяет launch.below_minimum."""
-    daily = minimum.get("daily_limit_kop", minimum.get("day", 0)) * margin
     period = minimum.get("period_cap_kop", minimum.get("period", 0))
-    weekly = minimum.get("weekly_limit_kop", 0)
-    return limit.daily_limit >= daily and limit.remaining_cap >= period and limit.daily_limit * 7 >= weekly
+    return limit.daily_limit >= daily_floor(minimum, margin) and limit.remaining_cap >= period
+
+
+def daily_floor(minimum: Mapping[str, int], margin: Decimal = Decimal(1)) -> Decimal:
+    """Дневной лимит, с которым кампания набирает минимум площадки на полную неделю. Запас margin — только у дневного
+    минимума (VK — daily_limit_kop, симулятор — day): недельный минимум Директа его не получает."""
+    daily = minimum.get("daily_limit_kop", minimum.get("day", 0)) * margin
+    return max(Decimal(daily), Decimal(-(-minimum.get("weekly_limit_kop", 0) // 7)))
 
 
 def budget_minimum(
@@ -201,15 +206,12 @@ def daily_minimum(minimum: Mapping[str, int]) -> int:
 
 
 def share_floors(total_daily: int, minimums: Mapping[str, Mapping[str, int]]) -> dict[str, Decimal]:
-    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум. Дневному минимуму VK нужен запас
-    MINIMUM_MARGIN, как при возобновлении: иначе доля у порога держала бы кампанию на паузе."""
+    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум. Дневной минимум получает запас
+    MINIMUM_MARGIN по тому же правилу, что и при возобновлении: иначе доля у порога держала бы кампанию на паузе."""
     if not total_daily:
         return {}
     return {
-        platform: Decimal(daily_minimum(minimum))
-        * CAP_MULTIPLIER
-        * (MINIMUM_MARGIN if "daily_limit_kop" in minimum else 1)
-        / total_daily
+        platform: daily_floor(minimum, MINIMUM_MARGIN) * CAP_MULTIPLIER / total_daily
         for platform, minimum in minimums.items()
     }
 
