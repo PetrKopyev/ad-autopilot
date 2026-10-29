@@ -356,6 +356,7 @@ export const copy = {
     clientsHint: (answered: number, total: number) => answered === 0 ? 'Появятся после ваших ответов о клиентах.'
       : `По вашим ответам: ${answered} ${plural(answered, 'неделя', 'недели', 'недель')} из ${total}.`,
     needYou: 'Нужно от вас',
+    changeBudget: 'Изменить бюджет',
     clientsWhy: 'По ответам считаем цену клиента.',
     campaigns: 'Кампании',
     allAds: 'Вся реклама',

@@ -54,6 +54,7 @@
   .stats-figures > :first-child { grid-column: 1 / -1; }
   .stats-breakdown .panel__action { width: 100%; margin-left: 0; }
   .stats-breakdown .segmented { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .stats-page .segmented__option { min-height: 44px; }
   .stats-table.table--stack tbody th { grid-column: 1 / -1; display: block; padding: 0 0 4px; border: 0; min-width: 0; }
   .stats-table.table--stack tbody tr:hover th { background: none; }
   .stats-sources { padding: 10px 14px; }

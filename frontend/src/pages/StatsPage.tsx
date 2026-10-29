@@ -86,7 +86,7 @@ export function StatsPage() {
     return names.get(`${level}:${id}`) ?? copy.screens.entity(copy.screens.rowLabels[level], id);
   }
   const columns = [copy.home.spent, copy.ads.impressions, copy.ads.clicks, copy.home.leads, copy.home.leadPrice];
-  return <div className="page-stack">
+  return <div className="page-stack stats-page">
     <PageHeader title={copy.statistics.title} actions={<PeriodPicker value={choice} onChange={setChoice} />}
       description={summary.data && <span className="mono">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</span>} />
     <DemoNotice />

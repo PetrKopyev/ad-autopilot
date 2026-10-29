@@ -117,7 +117,7 @@ function campaignRows({ items: ads }: AdsResponse) {
 
 function Campaigns({ data }: { data: AdsResponse }) {
   if (!data.items.length) return <EmptyState title={copy.home.noCampaigns} description={copy.screens.noAdsHint} />;
-  return <div className="table-scroll"><table className="table table--stack home-campaigns">
+  return <div className="table-scroll home-campaigns-box"><table className="table table--stack home-campaigns">
     <thead><tr><th scope="col">{copy.screens.rowLabels.campaign}</th><th scope="col" className="text">{copy.screens.status}</th>
       <th scope="col" className="home-campaigns__trend">{copy.home.trend}</th>
       <th scope="col">{copy.home.spent}</th><th scope="col">{copy.home.leads}</th><th scope="col">{copy.home.leadPrice}</th></tr></thead>
@@ -270,7 +270,9 @@ export function HomePage() {
   const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at);
   const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' ? 'success' : 'warning';
   const question = questions.data?.items.find((item) => !item.answered_at);
-  const attention = status?.needs_attention.filter((item) => !(question && item.destination === 'clients')) ?? [];
+  // Строка о бюджете дублирует строку состояния и плитку бюджета; от владельца она нужна, только когда реклама стоит до его решения.
+  const waitsOwner = status?.status === 'draft' || (status?.status === 'budget_stop' && !status.auto_continue);
+  const attention = status?.needs_attention.filter((item) => !(question && item.destination === 'clients') && (item.id !== 'budget' || waitsOwner)) ?? [];
   const canSwitch = (status?.status === 'running' || status?.status === 'paused') && !stopping && !resuming;
   function reloadAll() { board.reload(); ads.reload(); autopilot.reload(); history.reload(); experiments.reload(); questions.reload(); notifications.reload(); }
   function askStop() { setStopError(undefined); dialog.current?.showModal(); }
@@ -326,7 +328,7 @@ export function HomePage() {
         {question && <ClientQuestionRow key={question.id} question={question} answered={() => { questions.reload(); board.reload(); autopilot.reload(); }} />}
         {attention.map((item) => <div className="home-need__row" key={item.id}>
           <p className="home-need__text">{item.title}<small>{item.description}</small></p>
-          <Link className="button button--secondary" to={`/${item.destination}`}>{copy.screens.open}</Link>
+          <Link className="button button--secondary" to={`/${item.destination}`}>{item.id === 'budget' && status?.status === 'budget_stop' ? copy.home.changeBudget : copy.screens.open}</Link>
         </div>)}
       </div>
     </section>}
