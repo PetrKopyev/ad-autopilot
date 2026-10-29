@@ -21,6 +21,7 @@ from app.platforms.base import (
     PlatformError,
     RateLimited,
     TargetSpec,
+    lead_count,
 )
 from app.platforms.vk import VkAdapter, _kop, _rub
 
@@ -329,8 +330,10 @@ async def test_get_stats_converts_rubles_to_kopecks_and_maps_campaign(adapter: V
     rows = await adapter.get_stats(date(2026, 10, 20), today, "ad")
     first, last = rows
     assert (first.entity_id, first.campaign_id, first.level) == ("30", "10", "ad")
-    assert (first.impressions, first.clicks, first.cost_kop, first.conversions) == (1000, 25, 1235, {"all": 3})
-    assert first.is_settled and not last.is_settled and last.conversions == {"all": 0}
+    assert (first.impressions, first.clicks, first.cost_kop, first.conversions) == (1000, 25, 1235, {"lead": 3})
+    assert first.is_settled and not last.is_settled and last.conversions == {"lead": 0}
+    # Цели пикселя VK — обращения при любых целях Метрики бизнеса.
+    assert lead_count(first.conversions, [34]) == 3
     query = parse_qs(route.calls[0].request.url.query.decode())
     assert query["date_from"] == ["2026-10-20"] and query["metrics"] == ["base"]
 

@@ -41,6 +41,8 @@ async def platform_errors(request: pytest.FixtureRequest):
         direct_api_url="https://api.direct.yandex.com/json/v5",
         direct_api_v501_url="https://api.direct.yandex.com/v501",
         direct_sandbox=False,
+        direct_amounts_include_vat=False,
+        vat_percent=22,
     )
     with respx.mock as router:
         async with DirectAdapter("test-only", config=config) as adapter:

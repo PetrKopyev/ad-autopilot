@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from app.content.ad_text import generate_ad_text, offer_matrix, validate_ad_text
+from app.content.ad_text import AdText, generate_ad_text, offer_matrix, validate_ad_text
 from app.content.art import ART_COST_KOP, ArtError
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, AdGroup, Asset, Business, ChangeLog, Experiment, Plan, Target
@@ -31,6 +32,8 @@ from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
+
+logger = logging.getLogger(__name__)
 
 VARIANT_UNCONFIRMED = "Площадка ещё не подтвердила новый вариант объявления. Проверим ещё раз в ближайшие минуты."
 
@@ -220,20 +223,54 @@ async def prepare_variant(worker: Worker, business: Business, campaign, group, c
             raise
 
 
+def planned_ad(worker: Worker, business: Business, ad: Ad) -> tuple[str, str, str]:
+    """Заход, сегмент и услуга объявления в плане; не нашлось — первая строка матрицы ниши без услуги."""
+    angle, segment = offer_matrix(business.niche_class or "other")[0]
+    service_name = ""
+    for plan in worker.repository.rows(Plan, business.id):
+        for planned_group in plan.payload.get("groups", []):
+            for item in planned_group.get("ads", []):
+                if (item["title"], item["text"]) == (ad.title, ad.text):
+                    angle = item.get("angle", angle)
+                    segment = planned_group["segment"]
+                    service_name = planned_group.get("service", "")
+    return angle, segment, service_name
+
+
+async def rewrite_rejected(worker: Worker, business: Business, campaign, ad: Ad, reason: str | None) -> list[Operation]:
+    """Новый текст объявления, отклонённого модерацией за текст: тот же заход, повод и услуга, проверенный и не похожий
+    на отклонённый. Не получилось (лимит ИИ, ответ не прошёл проверки) — пустой список: отказ остаётся в уведомлении."""
+    angle, segment, service_name = planned_ad(worker, business, ad)
+    draft = description_draft(business)
+    async with content_service(worker) as service:
+        budget = ai_budget(service.repository, business, service.limits, today(worker.clock))
+        try:
+            variant = await generate_ad_text(
+                SpendLLM(service.llm, service.repository, business.id, budget, "moderation_rewrite"),
+                draft,
+                platform=campaign.platform,
+                angle=angle,
+                segment=segment,
+                service=next((item for item in draft.services if item.name == service_name), None),
+                other=AdText(ad.title, ad.text),
+            )
+        except (Blocked, ValueError, YandexGPTError):
+            logger.warning("Отклонённое объявление %s не переписано", ad.id, exc_info=True)
+            return []
+    if variant.used_fallback or validate_ad_text(variant.ad, draft, platform=campaign.platform):
+        return []
+    return [
+        Operation("update_ad_text", "ad", ad.external_id, field, getattr(ad, field), getattr(variant.ad, field))
+        for field in ("title", "text")
+        if getattr(variant.ad, field) != getattr(ad, field)
+    ]
+
+
 async def generate_variant(worker, business, campaign, control, source, hypothesis, service, budget) -> dict:
     creative = source.creative
     asset_id = control.asset_id
     matrix = offer_matrix(business.niche_class or "other")
-    original_angle = matrix[0][0]
-    segment = matrix[0][1]
-    service_name = ""
-    for plan in worker.repository.rows(Plan, business.id):
-        for planned_group in plan.payload.get("groups", []):
-            for planned_ad in planned_group.get("ads", []):
-                if (planned_ad["title"], planned_ad["text"]) == (control.title, control.text):
-                    original_angle = planned_ad.get("angle", original_angle)
-                    segment = planned_group["segment"]
-                    service_name = planned_group.get("service", "")
+    original_angle, segment, service_name = planned_ad(worker, business, control)
     if hypothesis == "text":
         angle = next(angle for angle, _ in matrix if angle != original_angle)
         draft = description_draft(business)

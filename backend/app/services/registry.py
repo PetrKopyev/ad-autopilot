@@ -16,6 +16,7 @@ from app.content.llm import LLMClient
 from app.content.yandexgpt import TokenTariff, YandexGPTClient
 from app.db.models import Business, MarkingProfile, PlatformAccount
 from app.platforms.base import AdPlatform, PlatformError
+from app.platforms.direct import MAX_GOALS as DIRECT_MAX_GOALS
 from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, Metrica, MetricaClient, MetricaCounter, MetricaGoal
@@ -33,6 +34,8 @@ class AccountInfo:
     counter_id: int | None
     marking_confirmed: bool
     token: str = field(repr=False)
+    goal_ids: tuple[int, ...] = ()
+    goal_value_kop: int | None = None
 
 
 type Loader = Callable[[int, str], AccountInfo | None]
@@ -56,6 +59,8 @@ def db_loader(session_factory: Callable[[], Session]) -> Loader:
                 business.metrica_counter_id,
                 bool(marking and marking.confirmed_in_platform.get(platform) is True),
                 account.access_token_enc,
+                tuple(business.lead_goal_ids[:DIRECT_MAX_GOALS]),
+                business.avg_check_kop,
             )
 
     return load
@@ -110,6 +115,9 @@ class AdapterRegistry:
             config=self.config,
             client=self.http,
             counter_ids=(info.counter_id,) if info.counter_id else (),
+            goal_ids=info.goal_ids,
+            # Ключевые цели стратегии требуют ценности конверсии: берём средний чек, если владелец его указал.
+            priority_goals=dict.fromkeys(info.goal_ids, info.goal_value_kop) if info.goal_value_kop else None,
             href=info.href,
             marking_confirmed=info.marking_confirmed,
         )

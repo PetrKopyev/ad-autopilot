@@ -392,9 +392,26 @@ async def test_registry_builds_direct_for_any_city_region_is_resolved_at_launch(
         direct_api_url="https://api.direct.yandex.com/json/v5",
         direct_api_v501_url="https://api.direct.yandex.com/v501",
         direct_sandbox=True,
+        direct_amounts_include_vat=False,
+        vat_percent=22,
     )
     registry = AdapterRegistry(lambda *key: None, mode="live", http=http, config=config)
     assert isinstance(registry.build("direct", info()), DirectAdapter)
+
+
+async def test_registry_passes_business_goals_to_direct(http) -> None:
+    config = SimpleNamespace(
+        direct_api_url="https://api.direct.yandex.com/json/v5",
+        direct_api_v501_url="https://api.direct.yandex.com/v501",
+        direct_sandbox=False,
+        direct_amounts_include_vat=True,
+        vat_percent=22,
+    )
+    registry = AdapterRegistry(lambda *key: None, mode="live", http=http, config=config)
+    adapter = registry.build("direct", info(goal_ids=(34, 56)))
+    assert adapter._report_goals == (34, 56) and not adapter._goals
+    adapter = registry.build("direct", info(goal_ids=(34,), goal_value_kop=150000))
+    assert adapter._campaign_settings(1000)["PriorityGoals"] == {"Items": [{"GoalId": 34, "Value": 1500000000}]}
 
 
 class Minimums(FakeAdapter):
@@ -439,12 +456,12 @@ async def test_budget_at_platform_minimums_launches(tmp_path: Path) -> None:
     assert world.adapters["direct"]._trees
 
 
-REAL_MINIMUMS = {"direct": {"weekly_limit_kop": 30_000}, "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}}
+REAL_MINIMUMS = {"direct": {"weekly_limit_kop": 36_600}, "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}}
 
 
 @pytest.mark.parametrize(
     "budget,platforms",
-    [(1_270_000, {"direct"}), (4_840_000, {"direct"}), (4_850_000, {"direct", "vk"})],
+    [(1_550_000, {"direct"}), (4_840_000, {"direct"}), (4_850_000, {"direct", "vk"})],
 )
 @pytest.mark.parametrize(
     "day",
@@ -472,7 +489,7 @@ def test_budget_at_direct_minimum_launches_on_sunday_and_last_day_of_month(day) 
     from app.services.launch import below_minimum
 
     minimum = budget_minimum(("direct",))
-    assert minimum == 1_270_000
+    assert minimum == 1_550_000
     limits = launch_limits(minimum, ("direct",), day)["direct"]
     assert below_minimum("direct", limits, REAL_MINIMUMS["direct"], day) is None
 

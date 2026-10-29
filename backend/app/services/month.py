@@ -42,9 +42,8 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         worker.remember(business, month=month.isoformat())
         return
     was_stopped = business.status == "budget_stop"
-    if not worker.proposed(business):
-        business.status = "running"
-        worker.repository.save(business)
+    business.status = "running"
+    worker.repository.save(business)
     # Новые кэпы выставляются до возобновления кампаний.
     await rebalance_budget(worker, business)
     held = set(worker.metadata(business).get("below_minimum", []))

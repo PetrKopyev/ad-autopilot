@@ -333,7 +333,7 @@ async def test_rewrite_is_saved_at_once_and_not_repeated_after_step_failed_later
     rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", second.external_id, "text", second.text, "Ок")])
     world.clock.advance(hours=1)
     await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
-    assert [call.args[1] for call in rewrite.await_args_list] == [second]
+    assert [call.args[3] for call in rewrite.await_args_list] == [second]
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 2
 
 

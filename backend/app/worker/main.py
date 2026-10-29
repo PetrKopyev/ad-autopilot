@@ -11,7 +11,7 @@ from app.config import settings
 from app.db.session import SessionLocal
 from app.demo_flags import demo_enabled, demo_frozen
 from app.platforms.fake import FakeAdapter
-from app.services.experiments import create_experiment
+from app.services.experiments import create_experiment, rewrite_rejected
 from app.services.registry import AdapterRegistry, db_loader
 from app.worker.clock import SystemClock
 from app.worker.jobs import Worker, WorkerRepository
@@ -48,6 +48,7 @@ async def run_worker_tick(registry: AdapterRegistry, kind: str) -> None:
             registry.resolve,
             dry_run=settings.dry_run,
             experiment_factory=create_experiment,
+            rewrite_rejected=rewrite_rejected,
         )
         if kind == "startup":
             await worker.startup()

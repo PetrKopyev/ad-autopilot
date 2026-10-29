@@ -12,6 +12,7 @@ from random import Random
 from urllib.parse import urlencode
 
 from app.platforms.base import (
+    LEAD,
     AdGroupSpec,
     AdSpec,
     AuthExpired,
@@ -161,6 +162,8 @@ class FakeAdapter:
         self.moderation_delay = moderation_delay
         self.rejection_probability = rejection_probability
         self.failures = failures if failures is not None else FailureScenario()
+        # Остаток на счёте кабинета; None — площадка его не сообщает.
+        self.balance_kop: int | None = None
         self._truths = deepcopy(scenario.truths if truths is None else dict(truths))
         self._states: dict[str, EntityState] = {}
         self._trees: dict[str, ExternalRefs] = {}
@@ -479,7 +482,7 @@ class FakeAdapter:
                 counters.impressions,
                 counters.clicks,
                 counters.cost_kop,
-                {"lead": counters.conversions},
+                {LEAD: counters.conversions},
                 self.clock.now,
                 day <= today(self.clock) - timedelta(days=2) and (entity_id, day) not in unsettled,
             )
@@ -492,7 +495,7 @@ class FakeAdapter:
 
     async def get_balance_hint(self) -> int | None:
         self._request()
-        return None
+        return self.balance_kop
 
     async def set_marking(self, profile: Mapping[str, str]) -> None:
         self._request()

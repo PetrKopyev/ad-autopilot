@@ -200,8 +200,8 @@ VK_MINIMUM = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
 @pytest.mark.parametrize(
     "monthly,connected,platforms,off",
     [
-        (1_270_000, ("direct",), ["direct"], {}),
-        (1_270_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
+        (1_550_000, ("direct",), ["direct"], {}),
+        (1_550_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
         (3_000_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
         (4_840_000, ("direct", "vk"), ["direct"], {"vk": 4_850_000}),
         (4_850_000, ("direct", "vk"), ["direct", "vk"], {}),
@@ -237,16 +237,16 @@ def test_vk_share_one_step_below_threshold_misses_its_margin():
     ],
 )
 def test_budget_minimum_does_not_depend_on_month_or_weekday(today):
-    assert budget_minimum(("direct",)) == 1_270_000
+    assert budget_minimum(("direct",)) == 1_550_000
     assert budget_minimum(("direct", "vk")) == 4_850_000
-    direct = launch_limits(1_270_000, ("direct",), today)["direct"]
-    assert direct.daily_limit >= 30_000 and direct.remaining_cap >= 30_000
+    direct = launch_limits(1_550_000, ("direct",), today)["direct"]
+    assert direct.daily_limit >= 36_600 and direct.remaining_cap >= 36_600
     both = launch_limits(4_850_000, ("direct", "vk"), today)
-    assert both["direct"].remaining_cap >= 30_000 and both["vk"].daily_limit >= 34_500
+    assert both["direct"].remaining_cap >= 36_600 and both["vk"].daily_limit >= 34_500
 
 
 def test_one_step_below_direct_minimum_misses_it_on_the_worst_day():
-    assert launch_limits(1_260_000, ("direct",), WORST_DAY)["direct"].remaining_cap < 30_000
+    assert launch_limits(1_540_000, ("direct",), WORST_DAY)["direct"].remaining_cap < 36_600
 
 
 @pytest.mark.parametrize(

@@ -27,6 +27,7 @@ from app.platforms.base import (
     PlatformError,
     RateLimited,
     TargetSpec,
+    lead_count,
 )
 from app.platforms.direct import DirectAdapter
 
@@ -41,6 +42,9 @@ def configuration(**changes) -> SimpleNamespace:
             "direct_api_url": V5,
             "direct_api_v501_url": V501,
             "direct_sandbox": False,
+            # Суммы как есть: числа в тестах ниже — микроединицы API без пересчёта НДС.
+            "direct_amounts_include_vat": True,
+            "vat_percent": 22,
             "tz_default": "Europe/Moscow",
             "yandex_client_id": "test-app",
             "yandex_client_secret": "test-only",
@@ -600,6 +604,24 @@ async def test_offline_report(adapter, api, monkeypatch):
     assert (await adapter.limits()).remaining_units == 99
 
 
+async def test_report_counts_business_goals_without_priority_goals(api):
+    """Живой формат отчёта: по столбцу Conversions_<цель>_LSCCD на каждую цель обращений бизнеса."""
+    async with DirectAdapter(
+        "test-only", config=configuration(), counter_ids=(12,), goal_ids=(34, 56), href="https://salon.example"
+    ) as adapter:
+        adapter._today = lambda: TODAY
+        route = api.post(f"{V5}/reports").respond(
+            text="Date\tCampaignId\tAdGroupId\tAdId\tImpressions\tClicks\tCost\t"
+            "Conversions_34_LSCCD\tConversions_56_LSCCD\n"
+            "2026-10-23\t1\t2\t3\t100\t7\t123456789\t2\t--\n"
+        )
+        (row,) = await adapter.get_stats(date(2026, 10, 23), TODAY)
+        assert json.loads(route.calls.last.request.content)["params"]["Goals"] == ["34", "56"]
+        assert row.conversions == {"34": 2, "56": 0}
+        assert lead_count(row.conversions, [34, 56]) == 2
+        assert "PriorityGoals" not in adapter._campaign_settings(1000)
+
+
 @pytest.mark.parametrize("level,id_", [("campaign", "1"), ("group", "2"), ("ad", "3")])
 async def test_report_levels(adapter, api, level, id_):
     api.post(f"{V5}/reports").respond(text=tsv(level, day=TODAY.isoformat()))
@@ -650,6 +672,24 @@ async def test_report_queue_timeout(adapter, api):
     assert caught.value.retry_after == 4
 
 
+async def test_strategy_amounts_without_vat_keep_spend_with_vat_within_budget(api):
+    """По умолчанию суммы API считаются без НДС: лимит = бюджет / 1,22, обратно читается с НДС."""
+    async with DirectAdapter(
+        "test-only", config=configuration(direct_amounts_include_vat=False), counter_ids=(12,), href="https://x.ru"
+    ) as adapter:
+        weekly = adapter._campaign_settings(12_200)["BiddingStrategy"]["Search"]["WbMaximumClicks"]
+        assert weekly["WeeklySpendLimit"] == 100_000_000
+        assert adapter._to_api(12_201) == 100_000_000 and adapter._from_api(100_000_000) == 12_200
+        result(api, "clients", Clients=[{"Currency": "RUB"}])
+        result(
+            api,
+            "dictionaries",
+            Currencies=[{"Currency": "RUB", "Properties": [{"Name": "MinimumWeeklySpendLimit", "Value": "300000000"}]}],
+        )
+        # Минимум площадки переводится в те же единицы, что бюджет: 300 ₽ без НДС — 366 ₽ с НДС.
+        assert await adapter.min_budgets() == {"weekly_limit_kop": 36_600}
+
+
 async def test_spend_today_and_minimums(adapter, api):
     api.post(f"{V5}/reports").respond(text=tsv("campaign", day=TODAY.isoformat()))
     assert await adapter.get_spend_today() == 12346
@@ -673,7 +713,34 @@ async def test_spend_today_and_minimums(adapter, api):
     assert request_body(route) == {"method": "get", "params": {"DictionaryNames": ["Currencies"]}}
     assert await adapter.min_budgets() == {"weekly_limit_kop": 30001}
     assert route.call_count == 1
-    assert await adapter.get_balance_hint() is None
+
+
+@pytest.mark.parametrize(
+    "include_vat,accounts,expected",
+    [
+        (True, [{"AccountID": 1, "Amount": "1234.56", "Currency": "RUB"}], 123_456),
+        # Остаток без НДС переводится в те же единицы, что бюджет и расход.
+        (False, [{"AccountID": 1, "Amount": "1000", "Currency": "RUB"}], 122_000),
+        (True, [], None),
+    ],
+)
+async def test_balance_hint_reads_shared_account_from_live_api(api, include_vat, accounts, expected):
+    from app.platforms.direct_forecast import LIVE_URL
+
+    route = api.post(LIVE_URL).respond(json={"data": {"Accounts": accounts, "ActionsResult": []}})
+    async with DirectAdapter("test-only", config=configuration(direct_amounts_include_vat=include_vat)) as adapter:
+        assert await adapter.get_balance_hint() == expected
+    body = json.loads(route.calls.last.request.content)
+    assert (body["method"], body["param"], body["token"]) == ("AccountManagement", {"Action": "Get"}, "test-only")
+
+
+async def test_balance_hint_reports_live_api_errors(api):
+    from app.platforms.direct_forecast import LIVE_URL
+
+    api.post(LIVE_URL).respond(json={"error_code": 53, "error_str": "Ошибка авторизации"})
+    async with DirectAdapter("test-only", config=configuration()) as adapter:
+        with pytest.raises(AuthExpired):
+            await adapter.get_balance_hint()
 
 
 PROFILE = {"type": "ip", "inn": "123456789012", "name": "ИП Пример", "phone": "+79990000000"}
@@ -972,7 +1039,10 @@ async def test_service_confirms_direct_auto_pause_and_preserves_local_author(ada
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_owner"
 
 
-async def test_service_budget_update_after_restart_converts_lifetime_cap_and_extends_end_date(api):
+@pytest.mark.parametrize("include_vat,weekly_micros", [(True, 900_000 * 10_000), (False, 737_704 * 10_000)])
+async def test_service_budget_update_after_restart_converts_lifetime_cap_and_extends_end_date(
+    api, include_vat, weekly_micros
+):
     from app.db.models import Campaign
     from app.platforms.base import StatRow
     from app.services.changes import ChangesService, load_operations, load_refs
@@ -986,7 +1056,8 @@ async def test_service_budget_update_after_restart_converts_lifetime_cap_and_ext
     campaign = Campaign(id=1, external_id="1", daily_limit_kop=100_000, period_cap_kop=1_000_000)
     repository.entities = {("campaign", "1"): campaign}
     api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
-    async with DirectAdapter("test-only", config=configuration()) as restarted:
+    config = configuration(direct_amounts_include_vat=include_vat)
+    async with DirectAdapter("test-only", config=config) as restarted:
         restarted._today = lambda: day
         server.rows["campaigns"] = [
             {
@@ -1023,10 +1094,11 @@ async def test_service_budget_update_after_restart_converts_lifetime_cap_and_ext
     assert campaign.daily_limit_kop == 150_000 and campaign.period_cap_kop == 1_300_000
     assert server.rows["campaigns"][0]["EndDate"] == "2026-11-08"
     weekly = server.rows["campaigns"][0]["UnifiedCampaign"]["BiddingStrategy"]["Search"]["WbMaximumClicks"]
-    assert weekly["WeeklySpendLimit"] == 900_000 * 10_000
+    # Без НДС в API уходит 9 000 ₽ / 1,22; сверка состояния всё равно сходится.
+    assert weekly["WeeklySpendLimit"] == weekly_micros
     context = load_operations(change)[-1].budget_context
     assert context["spent_before_week_kop"] == 400_000 and context["spent_week_kop"] == 100_000
-    async with DirectAdapter("test-only", config=configuration()) as another:
+    async with DirectAdapter("test-only", config=config) as another:
         another._today = lambda: day
         refs = replace(load_refs(change), budget_context=context)
         state = (await another.get_state(refs))["1"]

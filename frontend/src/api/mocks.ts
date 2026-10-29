@@ -206,7 +206,7 @@ export function mockCities() {
 }
 export function mockBudgetHint(amount: number, vk: boolean): BudgetHint {
   const on = vk && amount >= mockVkFrom;
-  return { minimum_kop: 1_270_000, month_kop: on ? { direct: amount - Math.floor(amount * 0.3), vk: Math.floor(amount * 0.3) } : { direct: amount },
+  return { minimum_kop: 1_550_000, month_kop: on ? { direct: amount - Math.floor(amount * 0.3), vk: Math.floor(amount * 0.3) } : { direct: amount },
     daily_kop: mockPlatformDaily(amount, on),
     off: vk && !on ? [{ platform: 'vk', from_kop: mockVkFrom, min_daily_kop: 30_000 }] : [] };
 }

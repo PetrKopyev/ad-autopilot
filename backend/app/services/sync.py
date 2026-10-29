@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
 from app.db.query import Window
 from app.platforms.base import Operation
-from app.platforms.fake import FakeAdapter
 from app.services.changes import CLOSED_ACCOUNT
 from app.worker.clock import today
 
@@ -84,8 +83,6 @@ async def sync_stats(worker: Worker, business: Business) -> None:
             )
             for name in ("impressions", "clicks", "cost_kop", "conversions"):
                 setattr(stored, name, getattr(row, name))
-            if isinstance(adapter, FakeAdapter) and business.lead_goal_ids:
-                stored.conversions = {str(business.lead_goal_ids[0]): row.conversions.get("lead", 0)}
             stored.fetched_at = worker.clock.now
             stored.is_settled = row.is_settled and row.date <= end - timedelta(days=2)
             changed.append(stored)
@@ -160,7 +157,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                         and any(word in reason for word in ("текст", "заголов", "опечат"))
                         and not any(word in reason for word in ("медицин", "документ", "лиценз"))
                     ):
-                        operations = await worker.rewrite_rejected(business, ad, info.reason)
+                        operations = await worker.rewrite_rejected(worker, business, campaign, ad, info.reason)
                         rewritten = sorted(set(rewritten) | {key})
                         # Исправление стоило вызова ИИ: отметка сохраняется сразу, ни отказ площадки, ни сбой дальше
                         # по шагу его не повторят.
@@ -176,7 +173,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                             reason_params={"reason": info.reason or ""},
                             suffix=f"rewrite:{ad.id}",
                         )
-                        if not worker.proposed(business):
+                        if operations and not worker.proposed(business):
                             ad.status = "moderation"
         finally:
             # Статусы и отметки модерации кампании — одним commit, в том числе когда кампания опрошена не до конца:

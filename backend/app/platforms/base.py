@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -8,6 +8,15 @@ from typing import Any, Literal, Protocol, runtime_checkable
 type EntityType = Literal["campaign", "group", "ad", "target"]
 type StatLevel = Literal["campaign", "group", "ad"]
 type OperationKind = Literal["set_status", "set_budget", "update_ad_text", "swap_ad_image", "set_targeting", "add_ad"]
+
+# Ключ конверсий площадки, которая не знает целей Метрики (VK — цели пикселя кампании): тоже обращения.
+LEAD = "lead"
+
+
+def lead_count(conversions: Mapping[str, int], goal_ids: Iterable[int]) -> int:
+    """Обращения строки статистики: конверсии по целям бизнеса из Метрики и обращения площадки без целей Метрики."""
+    keys = {str(goal) for goal in goal_ids} | {LEAD}
+    return sum(value for key, value in conversions.items() if key in keys)
 
 
 def _money(value: int, name: str) -> None:

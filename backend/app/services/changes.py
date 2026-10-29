@@ -437,7 +437,9 @@ class ChangesService:
         now: datetime | None = None,
         force: bool = False,
     ) -> ChangeLog:
-        """force — защитное действие, которое выполняется и в пробном режиме (остановка перед отзывом доступа)."""
+        """Пробный режим (DRY_RUN) касается только решений автопилота: действия владельца, отката и служебные
+        (лимиты бюджета, продление кампании, страж бюджета) применяются всегда. force — защитное действие автопилота,
+        которое выполняется и в пробном режиме."""
         if not operations:
             raise ValueError("Нужна хотя бы одна операция.")
         business = self.repository.business(business_id)
@@ -446,7 +448,7 @@ class ChangesService:
             from app.config import settings
 
             dry_run = settings.dry_run
-        dry_run = (dry_run or business.settings.get("dry_run", False)) and actor != "external" and not force
+        dry_run = (dry_run or business.settings.get("dry_run", False)) and actor == "autopilot" and not force
         protective_stop = actor in {"system", "owner"} and all(
             op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )

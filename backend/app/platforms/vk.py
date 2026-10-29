@@ -12,6 +12,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.auth.vk import API_URL, VkClient, invalid_response
 from app.platforms.base import (
+    LEAD,
     CampaignTreeSpec,
     EntityState,
     ExternalRefs,
@@ -486,7 +487,7 @@ class VkAdapter(VkClient):
                             _integer(base["shows"]),
                             _integer(base["clicks"]),
                             _kop(base["spent"]),
-                            {"all": _integer(base.get("goals", 0))},
+                            {LEAD: _integer(base.get("goals", 0))},
                             fetched_at,
                             day < self._today(),
                         )

@@ -27,7 +27,7 @@ from app.db.models import (
 )
 from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
-from app.platforms.base import AdPlatform, ExternalRefs, Operation
+from app.platforms.base import AdPlatform, ExternalRefs, Operation, lead_count
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import (
     CLOSED_ACCOUNT,
@@ -651,7 +651,7 @@ class Worker:
     ):
         if not operations:
             return None
-        proposed = self.proposed(business) and not force
+        proposed = self.proposed(business) and actor == "autopilot" and not force
         key = f"{self.step_key}:{campaign.id}:{suffix}"
         existing = self.repository.change_by_key(business.id, key)
         if existing is not None:
@@ -694,11 +694,7 @@ class Worker:
         self.cache_context(change)
         return change
 
-    def notice(
-        self, business: Business, reason_code: str, text: str, *, key: str = "", proposal: bool = False, **details
-    ) -> None:
-        """proposal — уведомление о действии, которое в пробном режиме только предложено; о фактах (модерация,
-        продление, расход) владелец узнаёт и в пробном режиме."""
+    def notice(self, business: Business, reason_code: str, text: str, *, key: str = "", **details) -> None:
         notice_key = key or f"{self.step_key}:{reason_code}"
         if details.get("target_id") is not None:
             notice_key = f"{notice_key}:{details['target_id']}"
@@ -709,7 +705,7 @@ class Worker:
                 slot_key=notice_key,
                 started_at=self.clock.now,
                 finished_at=self.clock.now,
-                status="proposed" if proposal and self.proposed(business) else "ok",
+                status="ok",
                 units_spent=0,
                 log=[{"key": notice_key, "reason_code": reason_code, "text": text, **details}],
             )
@@ -871,9 +867,8 @@ async def clients_survey(worker: Worker, business: Business) -> None:
     week_start = today(worker.clock) - timedelta(days=today(worker.clock).weekday(), weeks=1)
     if worker.repository.find(LeadsSurvey, business_id=business.id, week_start=week_start):
         return
-    goals = {str(goal) for goal in business.lead_goal_ids} or {"lead"}
     leads = sum(
-        sum(value for goal, value in row.conversions.items() if goal in goals)
+        lead_count(row.conversions, business.lead_goal_ids)
         for row in worker.repository.rows(
             StatsDaily, business.id, date=Window(week_start, week_start + timedelta(days=6))
         )

@@ -442,3 +442,36 @@ async def test_exhausted_weekly_ai_limit_postpones_hypothesis_to_next_week(exper
     assert [item.status for item in world.repository.rows(Experiment)] == ["running"]
     notices = [row.log[0]["reason_code"] for row in world.repository.rows(WorkerRun)]
     assert notices == ["EXPERIMENT_AI_LIMIT"]
+
+
+async def test_rejected_ad_is_rewritten_by_the_worker_with_a_checked_text(experiment_world, tmp_path, monkeypatch):
+    from app.platforms.base import ModerationInfo
+    from app.services.experiments import rewrite_rejected
+
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    ad = world.ads["borderline-1"]
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    await sync_moderation(world.worker(rewrite_rejected=rewrite_rejected), world.business)
+    (change,) = world.changes(reason_code="REJECTED_REWRITE")
+    assert change.status == "applied"
+    state = (await world.adapter.get_state(world.refs))[ad.external_id]
+    assert (state.title, state.text) == ("Уход за волосами", "Выберите уход за волосами")
+    assert ad.status == "moderation"
+    assert any(call.purpose == "moderation_rewrite" for call in content.repository.rows(LLMCall))
+
+
+async def test_rewrite_without_a_checked_text_leaves_the_rejection_to_the_owner(
+    experiment_world, tmp_path, monkeypatch
+):
+    from app.services.experiments import rewrite_rejected
+
+    world = experiment_world
+    content = wire_content(world, tmp_path, monkeypatch)
+    content.llm.ad = json.dumps({"title": "Лучший салон №1", "text": "Гарантия 100%"})
+    ad = world.ads["borderline-1"]
+    assert await rewrite_rejected(world.worker(), world.business, world.campaign, ad, "Опечатка в тексте") == []

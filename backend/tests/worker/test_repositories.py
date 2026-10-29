@@ -665,15 +665,16 @@ def test_unread_notifications_show_one_latest_per_theme(repository) -> None:
     assert [row.slot_key for row in repository.unread_notifications(business_id, {"BUDGET_OPPORTUNITY"}, 10, NOW)] == []
 
 
-def test_facts_are_notified_in_trial_mode_and_only_proposals_wait(repository) -> None:
+def test_notices_are_facts_in_trial_mode(repository) -> None:
+    # Остановка стражем бюджета выполняется и в пробном режиме: уведомление о ней — факт, а не предложение.
     world = tree(repository)
     world.business.settings = {"dry_run": True}
     repository.save(world.business)
     trial = Worker(repository, lambda *_: None, clock=VirtualClock(NOW), dry_run=True)
     trial.notice(world.business, "MODERATION_REJECTED", "Объявление «Т1»: Нужна лицензия.", key="fact")
-    trial.notice(world.business, "BUDGET_STOP", "Реклама остановлена.", key="action", proposal=True)
+    trial.notice(world.business, "BUDGET_STOP", "Реклама остановлена.", key="action")
     statuses = {row.slot_key: row.status for row in repository.rows(WorkerRun, world.business.id, kind="notification")}
-    assert statuses == {"fact": "ok", "action": "proposed"}
+    assert statuses == {"fact": "ok", "action": "ok"}
 
 
 def test_notice_about_a_date_is_hidden_once_the_date_has_come(repository) -> None:

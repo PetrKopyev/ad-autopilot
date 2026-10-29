@@ -642,7 +642,8 @@ async def test_scheduler_start_warns_about_demo(monkeypatch, caplog):
         assert any(record.levelname == "WARNING" for record in caplog.records) is enabled
 
 
-def test_history_after_leaving_trial_mode_has_no_proposal_next_to_real_change(demo):
+def test_budget_limits_are_applied_in_trial_mode(demo):
+    """Пробный режим касается только решений автопилота: пересчёт лимитов и продление кампании идут в кабинет."""
     import asyncio
 
     from app.services.optimize import rebalance_budget
@@ -653,10 +654,6 @@ def test_history_after_leaving_trial_mode_has_no_proposal_next_to_real_change(de
     worker.step_key = "rebalance_budget:trial"
     world.business.settings = world.business.settings | {"dry_run": True}
     world.business.month_budget_kop = 2_000_000
-    asyncio.run(rebalance_budget(worker, world.business))
-    items = client.get("/api/history?page_size=100").json()["items"]
-    assert [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"] == ["proposed"]
-    world.business.settings = {key: value for key, value in world.business.settings.items() if key != "dry_run"}
     asyncio.run(rebalance_budget(worker, world.business))
     items = client.get("/api/history?page_size=100").json()["items"]
     assert [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"] == ["applied"]

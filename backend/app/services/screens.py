@@ -172,7 +172,7 @@ class ScreensService:
                     suffix="resume",
                 )
                 active = True
-            if active and not self.worker.proposed(business):
+            if active:
                 business.status = "running"
                 self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
         warning = None

@@ -184,8 +184,8 @@ def test_owner_can_change_frozen_ad_and_autopilot_waits(setup):
 def test_budget_stop_and_lower_than_spent(setup):
     client, world = setup
     ledger = world.ledger()[0]
-    ledger.spent_kop = 1_500_000
-    response = client.put("/api/business/budget", json={"month_budget_kop": 1_400_000})
+    ledger.spent_kop = 1_700_000
+    response = client.put("/api/business/budget", json={"month_budget_kop": 1_600_000})
     assert response.status_code == 409
     assert "потрачен" in response.json()["detail"]
     assert world.business.month_budget_kop == 10_000_000
@@ -477,9 +477,9 @@ def test_budget_below_direct_minimum_is_rejected_with_the_minimum(setup):
 
     client, world = setup
     world.repository.save(PlatformAccount(business_id=world.business.id, platform="vk", status="ok"))
-    response = client.put("/api/business/budget", json={"month_budget_kop": 1_269_999})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 1_549_999})
     assert response.status_code == 422
-    assert response.json()["detail"].startswith("Минимальный бюджет — 12 700 ₽ в месяц. Яндекс Директ требует")
+    assert response.json()["detail"].startswith("Минимальный бюджет — 15 500 ₽ в месяц. Яндекс Директ требует")
     assert world.business.month_budget_kop == 10_000_000
 
 

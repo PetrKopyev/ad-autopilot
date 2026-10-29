@@ -292,21 +292,25 @@ async def test_dry_run_proposes_without_touching_platform() -> None:
     )
     row.impressions, row.clicks, row.cost_kop, row.conversions = 20_000, 80, 200_000, {"1": 0}
     await world.advance(worker, days=8)
-    assert world.adapter._states[world.refs.campaign_id] == before
-    proposed = [change for change in world.changes() if change.kind != "launch"]
+    assert world.adapter._states[world.refs.campaign_id].status == before.status
+    assert all(world.adapter._states[ref].status == "active" for ref in world.refs.ads.values())
+    proposed = [change for change in world.changes() if change.actor == "autopilot"]
     assert proposed and all(item.evidence["_service"]["dry_run"] for item in proposed)
     assert {item.status for item in proposed} == {"pending"}
     assert any(item.kind == "pause" for item in proposed)
     assert not world.repository.pending()
     assert all(ad.status == "active" for ad in world.ads.values())
+    # Лимиты бюджета и продление кампании — не решения автопилота: они применяются и в пробном режиме.
+    service = [change for change in world.changes() if change.actor == "system"]
+    assert service and all(item.status == "applied" and not item.evidence["_service"]["dry_run"] for item in service)
 
 
 async def test_business_dry_run_setting() -> None:
     world = await make_world(business_settings={"dry_run": True})
     before = world.adapter._states[world.refs.campaign_id]
     await world.advance(world.worker(dry_run=False), days=3)
-    assert world.adapter._states[world.refs.campaign_id] == before
-    assert all(item.evidence["_service"]["dry_run"] for item in world.changes() if item.kind != "launch")
+    assert world.adapter._states[world.refs.campaign_id].status == before.status
+    assert all(item.evidence["_service"]["dry_run"] for item in world.changes() if item.actor == "autopilot")
 
 
 async def test_budget_guard_stops_everything_and_next_month_resumes() -> None:
@@ -360,11 +364,11 @@ async def test_kill_switch_stops_all_and_blocks_autopilot() -> None:
     assert len(world.changes()) == changes
 
 
-async def test_kill_switch_in_dry_run_only_proposes() -> None:
+async def test_kill_switch_stops_in_dry_run() -> None:
     world = await make_world()
     await stop_all(world.business, worker=world.worker(dry_run=True))
-    assert world.adapter._states[world.refs.campaign_id].status == "active"
-    assert world.business.status == "running"
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert world.business.status == "paused"
 
 
 async def test_ledger_is_not_lowered_by_stale_report() -> None:

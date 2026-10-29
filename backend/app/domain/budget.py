@@ -8,9 +8,10 @@ from app.domain.types import BudgetPlan, GroupLimit, GuardResult, PlatformLimit,
 
 CAP_MULTIPLIER = Decimal("1.25")
 # Минимумы площадок для расчёта без сети: Директ — недельный бюджет стратегии, VK — дневной и общий лимит кампании.
-# Запуск сверяет лимиты с минимумами, которые площадка отдаёт живьём (min_budgets адаптера).
+# Запуск сверяет лимиты с минимумами, которые площадка отдаёт живьём (min_budgets адаптера). Суммы — с НДС, как бюджет:
+# у Директа 300 ₽ без НДС (DIRECT_AMOUNTS_INCLUDE_VAT=false) это 366 ₽ с НДС 22%.
 PLATFORM_MINIMUMS = {
-    "direct": {"weekly_limit_kop": 30_000},
+    "direct": {"weekly_limit_kop": 36_600},
     "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000},
 }
 MINIMUM_MARGIN = Decimal("1.15")

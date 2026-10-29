@@ -440,22 +440,22 @@ def test_niche_detection() -> None:
 
 
 def test_business_budget_is_stored_in_kopecks_and_draft_is_updated(world: World) -> None:
-    created = world.onboarding.create_business(2, "salon2.example", " Казань ", 1_500_000, None)
+    created = world.onboarding.create_business(2, "salon2.example", " Казань ", 1_600_000, None)
     assert created["site_url"] == "https://salon2.example/"
-    assert created["month_budget_kop"] == 1_500_000 and type(created["month_budget_kop"]) is int
+    assert created["month_budget_kop"] == 1_600_000 and type(created["month_budget_kop"]) is int
     again = world.onboarding.create_business(2, "https://salon2.example/", "Казань", 2_000_000, 300_000)
     assert again["id"] == created["id"] and again["avg_check_kop"] == 300_000
 
 
 def test_business_budget_below_direct_minimum_names_the_minimum_and_why(world: World) -> None:
     with pytest.raises(OnboardingError) as error:
-        world.onboarding.create_business(2, "salon2.example", "Казань", 1_269_999, None)
+        world.onboarding.create_business(2, "salon2.example", "Казань", 1_549_999, None)
     assert str(error.value) == (
-        "Минимальный бюджет — 12 700 ₽ в месяц. Яндекс Директ требует не меньше 300 ₽ на кампанию в неделю, а мы "
-        "считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
+        "Минимальный бюджет — 15 500 ₽ в месяц. Яндекс Директ требует не меньше 366 ₽ с НДС на кампанию в неделю, а "
+        "мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
     )
     assert world.repository.user_businesses(2) == []
-    assert world.onboarding.create_business(2, "salon2.example", "Казань", 1_270_000, None)["month_budget_kop"]
+    assert world.onboarding.create_business(2, "salon2.example", "Казань", 1_550_000, None)["month_budget_kop"]
 
 
 @pytest.mark.parametrize(

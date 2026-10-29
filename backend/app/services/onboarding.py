@@ -438,7 +438,7 @@ def check_budget(amount: int) -> None:
     if amount < minimum:
         raise OnboardingError(
             f"Минимальный бюджет — {rubles(minimum)} ₽ в месяц. Яндекс Директ требует не меньше "
-            f"{rubles(PLATFORM_MINIMUMS['direct']['weekly_limit_kop'])} ₽ на кампанию в неделю, а мы считаем с "
+            f"{rubles(PLATFORM_MINIMUMS['direct']['weekly_limit_kop'])} ₽ с НДС на кампанию в неделю, а мы считаем с "
             "запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
         )
 

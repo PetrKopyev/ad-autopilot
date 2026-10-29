@@ -33,9 +33,12 @@ from app.platforms.base import (
     StatRow,
     _money,
 )
+from app.platforms.direct_forecast import DirectForecastClient
 from app.platforms.regions import CITY_IDS, Region, RegionCache, find_region, normalize, not_found
 
 MICROS_PER_KOP = 10_000
+# Цели в отчёте и ключевые цели стратегии: не больше десяти.
+MAX_GOALS = 10
 AUTH_URL = "https://oauth.yandex.ru/authorize"
 TOKEN_URL = "https://oauth.yandex.ru/token"
 STRATEGIES = {"WB_MAXIMUM_CLICKS": "WbMaximumClicks", "WB_MAXIMUM_CONVERSION_RATE": "WbMaximumConversionRate"}
@@ -63,11 +66,11 @@ def _integer(value: Any) -> int:
     return int(value)
 
 
-def _kop(value: Any, *, round_up: bool = False) -> int:
+def _kop(value: Any) -> int:
     micros = _integer(value)
     if micros < 0:
         raise ValueError("Сумма не может быть отрицательной.")
-    return (micros + (MICROS_PER_KOP - 1 if round_up else MICROS_PER_KOP // 2)) // MICROS_PER_KOP
+    return (micros + MICROS_PER_KOP // 2) // MICROS_PER_KOP
 
 
 def _named(name: str, key: str) -> str:
@@ -108,6 +111,7 @@ class DirectAdapter:
         client_login: str | None = None,
         counter_ids: tuple[int, ...] = (),
         priority_goals: Mapping[int, int] | None = None,
+        goal_ids: tuple[int, ...] = (),
         strategy: str = "WB_MAXIMUM_CLICKS",
         text_campaign: bool = False,
         href: str = "",
@@ -126,10 +130,12 @@ class DirectAdapter:
             raise ValueError("CounterIds должны быть положительными целыми числами.")
         goals = dict(priority_goals or {})
         for goal, value in goals.items():
-            if type(goal) is not int or goal <= 0:
-                raise ValueError("GoalId должен быть положительным целым числом.")
             _money(value, "priority_goal_value_kop")
-        if len(goals) > 10 or report_attempts < 1:
+        # Цели обращений бизнеса: по ним отчёт отдаёт конверсии (Goals), даже без ключевых целей стратегии.
+        report_goals = tuple(dict.fromkeys([*goals, *goal_ids]))
+        if any(type(goal) is not int or goal <= 0 for goal in report_goals):
+            raise ValueError("GoalId должен быть положительным целым числом.")
+        if len(report_goals) > MAX_GOALS or report_attempts < 1:
             raise ValueError("Допускается до десяти целей; число попыток отчёта должно быть положительным.")
         if strategy == "WB_MAXIMUM_CONVERSION_RATE" and not goals:
             raise ValueError("Для оптимизации конверсий нужны PriorityGoals.")
@@ -138,6 +144,7 @@ class DirectAdapter:
         self._base_url = config.direct_api_url.rstrip("/")
         self._v501_url = config.direct_api_v501_url.rstrip("/")
         self._sandbox = config.direct_sandbox
+        self._vat_percent = 0 if config.direct_amounts_include_vat else config.vat_percent
         if self._sandbox:
             self._base_url = self._sandbox_url(self._base_url)
             self._v501_url = self._sandbox_url(self._v501_url)
@@ -145,6 +152,7 @@ class DirectAdapter:
         self._login = client_login
         self._counter_ids = counter_ids
         self._goals = goals
+        self._report_goals = report_goals
         self._strategy = strategy
         self._text_campaign = text_campaign
         self._href = href
@@ -386,6 +394,19 @@ class DirectAdapter:
         except (KeyError, IndexError, TypeError, ValueError):
             raise _invalid() from None
 
+    def _to_api(self, kop: int) -> int:
+        """Сумма с НДС (как бюджет и расход в отчёте) в микроединицы API; без НДС — вниз, чтобы не превысить бюджет."""
+        return kop * 100 // (100 + self._vat_percent) * MICROS_PER_KOP
+
+    def _from_api(self, micros: Any, *, round_up: bool = False) -> int:
+        """Сумма API в копейки с НДС: в тех же единицах, что бюджет и расход."""
+        net = _integer(micros)
+        if net < 0:
+            raise ValueError("Сумма не может быть отрицательной.")
+        gross = net * (100 + self._vat_percent)
+        step = 100 * MICROS_PER_KOP
+        return (gross + (step - 1 if round_up else step // 2)) // step
+
     def _weekly_limit(self, daily_kop: int, period_kop: int) -> int:
         return weekly_limit(daily_kop, period_kop, self._today())
 
@@ -393,7 +414,7 @@ class DirectAdapter:
         return budget_end(self._today())
 
     def _campaign_settings(self, weekly_kop: int) -> dict:
-        strategy = {"WeeklySpendLimit": weekly_kop * MICROS_PER_KOP}
+        strategy = {"WeeklySpendLimit": self._to_api(weekly_kop)}
         if self._strategy == "WB_MAXIMUM_CONVERSION_RATE":
             strategy["GoalId"] = next(iter(self._goals)) if len(self._goals) == 1 else 13
         settings = {
@@ -797,13 +818,9 @@ class DirectAdapter:
             current = _integer(active[0]["WeeklySpendLimit"])
             if context:
                 values = context | {field: value}
-                weekly = self._context_weekly(values) * MICROS_PER_KOP
+                weekly = self._to_api(self._context_weekly(values))
             else:
-                weekly = (
-                    self._weekly_limit(value, value * 7) * MICROS_PER_KOP
-                    if field == "daily_limit_kop"
-                    else value * MICROS_PER_KOP
-                )
+                weekly = self._to_api(self._weekly_limit(value, value * 7) if field == "daily_limit_kop" else value)
                 if weekly > current:
                     raise PlatformError("Для повышения бюджета нужен план с дневным и накопленным лимитами.")
             if weekly <= 0:
@@ -887,14 +904,18 @@ class DirectAdapter:
         )
         states = {}
         for item in campaigns:
-            budgets = {}
+            limits = {}
             for placement, strategy in item.get(kind, {}).get("BiddingStrategy", {}).items():
                 key = STRATEGIES.get(strategy.get("BiddingStrategyType"))
                 if key and "WeeklySpendLimit" in strategy.get(key, {}):
-                    budgets[placement] = _kop(strategy[key]["WeeklySpendLimit"])
-            weekly = sum(budgets.values())
+                    limits[placement] = _integer(strategy[key]["WeeklySpendLimit"])
+            budgets = {placement: self._from_api(micros) for placement, micros in limits.items()}
+            weekly = self._from_api(sum(limits.values()))
             context = refs.budget_context
-            if context and weekly == context.get("weekly_limit_kop", self._context_weekly(context)):
+            # Сверка — в единицах API: пересчёт НДС туда и обратно может разойтись на копейку.
+            if context and sum(limits.values()) == self._to_api(
+                context.get("weekly_limit_kop", self._context_weekly(context))
+            ):
                 daily, period = context["daily_limit_kop"], context["period_cap_kop"]
             else:
                 days = (self._budget_end() - self._today()).days + 1
@@ -1045,8 +1066,8 @@ class DirectAdapter:
             "IncludeDiscount": "YES",
             "AttributionModels": ["LSCCD"],
         }
-        if self._goals:
-            params["Goals"] = [str(goal) for goal in self._goals]
+        if self._report_goals:
+            params["Goals"] = [str(goal) for goal in self._report_goals]
         if self._sandbox:
             campaigns = await self._get("campaigns", "Campaigns", {"SelectionCriteria": {}, "FieldNames": ["Id"]})
             reports = []
@@ -1066,7 +1087,9 @@ class DirectAdapter:
             content = await self._report(params)
         reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")), delimiter="\t")
         conversion_fields = (
-            {f"Conversions_{goal}_LSCCD": str(goal) for goal in self._goals} if self._goals else {"Conversions": "all"}
+            {f"Conversions_{goal}_LSCCD": str(goal) for goal in self._report_goals}
+            if self._report_goals
+            else {"Conversions": "all"}
         )
         required = {*dimensions, "Impressions", "Clicks", "Cost", *conversion_fields}
         if not reader.fieldnames or not required.issubset(reader.fieldnames):
@@ -1110,7 +1133,12 @@ class DirectAdapter:
         return sum(row.cost_kop for row in await self.get_stats(today, today, "campaign"))
 
     async def get_balance_hint(self) -> int | None:
-        return None
+        """Остаток общего счёта в копейках с НДС (API v4 Live); общего счёта нет — None."""
+        async with DirectForecastClient(
+            self._token, config=self._config, client=self._client, timeout=self._timeout
+        ) as live:
+            amount = await live.balance()
+        return None if amount is None else self._from_api(int(amount * 1_000_000))
 
     async def limits(self) -> PlatformLimits:
         return self._limits
@@ -1128,7 +1156,7 @@ class DirectAdapter:
             currency = clients["Clients"][0]["Currency"]
             properties = next(item["Properties"] for item in currencies["Currencies"] if item["Currency"] == currency)
             values = {item["Name"]: item["Value"] for item in properties}
-            self._minimums = {"weekly_limit_kop": _kop(values["MinimumWeeklySpendLimit"], round_up=True)}
+            self._minimums = {"weekly_limit_kop": self._from_api(values["MinimumWeeklySpendLimit"], round_up=True)}
         except (KeyError, IndexError, StopIteration, TypeError, ValueError):
             raise _invalid() from None
         return dict(self._minimums)

@@ -21,6 +21,7 @@ NOTICES = {
     "ANOMALY": ("Перестали приходить обращения", "warning"),
     "NOT_SHOWING": ("Объявление не показывается", "warning"),
     "CAMPAIGN_EXTEND_FAILED": ("Не получилось продлить кампанию в Директе", "warning"),
+    "BALANCE_LOW": ("На счёте площадки заканчиваются деньги", "danger"),
     "DEMO_STATE_LOST": ("Демо нужно начать заново", "warning"),
     "LAUNCH_INTERRUPTED": ("Запуск рекламы не завершился", "danger"),
     "EXPERIMENT_GENERATION_FAILED": ("Проверку двух вариантов не запустили", "warning"),

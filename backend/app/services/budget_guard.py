@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.budget import plan_budget
+from app.domain.explain import rubles
 from app.platforms.base import Operation
 from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
 from app.worker.clock import today
@@ -61,17 +62,16 @@ async def stop_all(
     actor: str = "system",
 ) -> None:
     with worker.repository.business_lock(business.id):
-        if not worker.proposed(business):
-            worker.remember(
-                business,
-                pending_stop={
-                    "reason_code": reason_code,
-                    "reason_params": reason_params,
-                    "budget_stop": budget_stop,
-                    "actor": actor,
-                },
-                **({"kill_switch": True} if not budget_stop else {}),
-            )
+        worker.remember(
+            business,
+            pending_stop={
+                "reason_code": reason_code,
+                "reason_params": reason_params,
+                "budget_stop": budget_stop,
+                "actor": actor,
+            },
+            **({"kill_switch": True} if not budget_stop else {}),
+        )
         failed = False
         for campaign in worker.campaigns(business):
             try:
@@ -79,7 +79,7 @@ async def stop_all(
                 state = states[campaign.external_id]
                 if state.status in {"paused_auto", "paused_owner", "archived"}:
                     continue
-                if actor == "owner" and not worker.proposed(business):
+                if actor == "owner":
                     stopped = worker.metadata(business).get("kill_switch_campaigns", [])
                     worker.remember(business, kill_switch_campaigns=sorted(set(stopped) | {campaign.id}))
                 await worker.apply(
@@ -107,12 +107,12 @@ async def stop_all(
                 failed = True
         if failed:
             raise ChangeConflict("Не все площадки подтвердили остановку. Повторим в следующем тике.")
-        if not worker.proposed(business):
-            business.status = "budget_stop" if budget_stop else "paused"
-            worker.remember(business, pending_stop=None)
+        business.status = "budget_stop" if budget_stop else "paused"
+        worker.remember(business, pending_stop=None)
 
 
 STOPPED = {"paused_auto", "paused_owner", "archived"}
+ACCOUNT_NAMES = {"direct": "Яндекс Директа", "vk": "ВКонтакте"}
 
 
 async def stop_platform(
@@ -238,6 +238,35 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             budget_stop=True,
             reason_params={"spent": result.spent, "budget": business.month_budget_kop, "margin": result.stop_margin},
         )
-        worker.notice(
-            business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.", proposal=True
-        )
+        worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
+    elif business.status == "running":
+        await balance_notice(worker, business)
+
+
+async def balance_notice(worker: Worker, business: Business) -> None:
+    """Денег на счёте площадки меньше дневного лимита её кампаний: одно уведомление, пока счёт не пополнят."""
+    low = worker.metadata(business).get("balance_low", {})
+    current = {}
+    campaigns = [item for item in worker.current_campaigns(business) if item.status == "active"]
+    for platform in sorted({item.platform for item in campaigns}):
+        daily = sum(item.daily_limit_kop for item in campaigns if item.platform == platform)
+        try:
+            balance = await worker.resolve_adapter(business.id, platform).get_balance_hint()
+        except CLOSED_ACCOUNT:
+            # Остаток — подсказка: площадка не ответила — прежнее состояние сохраняется до следующего опроса.
+            if platform in low:
+                current[platform] = low[platform]
+            continue
+        if balance is None or balance >= daily:
+            continue
+        current[platform] = low.get(platform, worker.clock.now.isoformat())
+        if platform not in low:
+            worker.notice(
+                business,
+                "BALANCE_LOW",
+                f"На счёте {ACCOUNT_NAMES[platform]} осталось {rubles(balance)} ₽ — меньше дневного лимита рекламы "
+                f"({rubles(daily)} ₽). Пополните счёт в кабинете площадки, иначе показы остановятся.",
+                key=f"balance_low:{platform}:{current[platform]}",
+            )
+    if current != low:
+        worker.remember(business, balance_low=current)

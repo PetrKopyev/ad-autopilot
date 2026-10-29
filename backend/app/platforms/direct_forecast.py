@@ -146,6 +146,21 @@ class DirectForecastClient:
             )
         return data["data"]
 
+    async def balance(self) -> Decimal | None:
+        """Остаток общего счёта (AccountManagement, Action Get) в валюте кабинета; общего счёта нет — None.
+
+        Get не требует финансового токена: он нужен только для операций с деньгами."""
+        data = await self._call("AccountManagement", {"Action": "Get"})
+        if not isinstance(data, dict) or not isinstance(data.get("Accounts"), list):
+            raise _invalid()
+        accounts = data["Accounts"]
+        if not accounts:
+            return None
+        try:
+            return sum((_price(item["Amount"]) for item in accounts), Decimal(0))
+        except (KeyError, TypeError):
+            raise _invalid() from None
+
     async def create(self, phrases: list[str], region_ids: list[int]) -> int:
         """Новый отчёт; при занятых пяти местах освобождает место от своих отчётов и пробует ещё раз."""
         param = {"Phrases": list(dict.fromkeys(phrases))[:MAX_PHRASES], "GeoID": region_ids, "Currency": CURRENCY}

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, BudgetLedger, Business, LeadsSurvey, StatsDaily
+from app.platforms.base import lead_count
 from app.worker.clock import MOSCOW
 
 Level = Literal["business", "platform", "campaign", "group", "ad"]
@@ -38,12 +39,11 @@ def aggregate(rows: Iterable[StatsRow], goal_ids: Sequence[int], today: date) ->
     cost_kop = impressions = clicks = leads = 0
     incomplete_days: set[date] = set()
     sources: dict[str, datetime] = {}
-    goals = {str(goal_id) for goal_id in goal_ids}
     for row in rows:
         cost_kop += row.cost_kop
         impressions += row.impressions
         clicks += row.clicks
-        leads += sum(row.conversions.get(goal, 0) for goal in goals)
+        leads += lead_count(row.conversions, goal_ids)
         if not row.is_settled or row.date > today - timedelta(days=2):
             incomplete_days.add(row.date)
         sources[row.platform] = max(sources.get(row.platform, row.fetched_at), row.fetched_at)

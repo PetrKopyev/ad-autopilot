@@ -206,7 +206,9 @@ async def test_worker_apply_reuses_slot_change_but_never_trusts_unreconciled_pen
     if outcome != "applied":
         world.adapter.apply = AsyncMock(side_effect=AssertionError("platform write"))
     operations = [Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_auto")]
-    options = {"reason_code": "CUSTOM", "reason_text": "Тест.", "kind": "pause", "suffix": "stop", "actor": "system"}
+    # Пробный режим касается только решений автопилота.
+    actor = "autopilot" if dry_run else "system"
+    options = {"reason_code": "CUSTOM", "reason_text": "Тест.", "kind": "pause", "suffix": "stop", "actor": actor}
     if outcome == "conflict":
         # Неподтверждённая остановка не должна считаться выполненной: страж повторит её после сверки.
         with pytest.raises(ChangeConflict):
@@ -619,3 +621,44 @@ async def test_vk_held_by_minimum_resumes_after_owner_stop_was_lifted():
     await rebalance_next_day(world, 30_000)
     assert world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
     assert world.adapter._states[world.refs.campaign_id].status == "active"
+
+
+async def test_low_balance_is_notified_once_until_the_account_is_topped_up():
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    worker = world.worker()
+    world.adapter.balance_kop = world.campaign.daily_limit_kop - 1
+
+    def notices():
+        rows = world.repository.rows(WorkerRun, world.business.id, kind="notification")
+        return [row.log[0]["text"] for row in rows if row.log[0]["reason_code"] == "BALANCE_LOW"]
+
+    for _ in range(2):
+        world.clock.advance(hours=0.5)
+        await budget_guard(worker, world.business)
+    (text,) = notices()
+    assert text.startswith("На счёте Яндекс Директа осталось") and "Пополните счёт" in text
+    world.adapter.balance_kop = world.campaign.daily_limit_kop
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert world.business.settings["_worker"]["balance_low"] == {}
+    world.adapter.balance_kop = 0
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert len(notices()) == 2
+
+
+async def test_unknown_balance_or_platform_error_does_not_notify(monkeypatch):
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    await budget_guard(world.worker(), world.business)
+    monkeypatch.setattr(world.adapter, "get_balance_hint", AsyncMock(side_effect=PlatformError("Нет ответа.")))
+    world.clock.advance(hours=0.5)
+    await budget_guard(world.worker(), world.business)
+    assert not [
+        row
+        for row in world.repository.rows(WorkerRun, world.business.id, kind="notification")
+        if row.log[0]["reason_code"] == "BALANCE_LOW"
+    ]

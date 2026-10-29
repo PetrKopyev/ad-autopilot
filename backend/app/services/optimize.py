@@ -35,7 +35,7 @@ from app.domain.types import (
     Verdict,
     total_metrics,
 )
-from app.platforms.base import Operation, PlatformError
+from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import read_spend
 from app.services.changes import budget_operations
 from app.services.experiments import completed_hypotheses, group_available
@@ -86,7 +86,6 @@ async def snapshot(
 
     result = []
     rows = repository.rows(StatsDaily, business.id)
-    goals = {str(goal) for goal in business.lead_goal_ids} or {"lead"}
     for ad in ads:
         if ad.external_id not in states:
             continue
@@ -99,7 +98,7 @@ async def snapshot(
                 row.cost_kop,
                 row.impressions,
                 row.clicks,
-                min(row.clicks, sum(value for goal, value in row.conversions.items() if goal in goals)),
+                min(row.clicks, lead_count(row.conversions, business.lead_goal_ids)),
             )
             for row in rows
             if row.ad_id == ad.id and row.is_settled
@@ -337,7 +336,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     minimums = {platform: await platform_minimums(worker, business, platform) for platform in platforms}
     # Перенос между площадками не опускает кампанию ниже минимума площадки.
     floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), minimums)
-    shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
+    if not worker.proposed(business):
+        # Перенос бюджета между площадками по цене обращения — решение автопилота: в пробном режиме доли не меняются.
+        shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
     plan = budget_plan(shares)
     group_limits = {group.id: group.daily_limit for group in groups}
     local_groups = worker.repository.rows(AdGroup, business.id)
@@ -399,12 +400,11 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     else f"Дневной бюджет кампании меньше минимума площадки ({rubles(minimum)} ₽ в день): "
                     "кампанию остановили. Возобновим, когда бюджета снова хватит.",
                 )
-                if not worker.proposed(business):
-                    if minimum:
-                        held.add(campaign.id)
-                    else:
-                        campaign.daily_limit_kop = 0
-                        worker.repository.save(campaign)
+                if minimum:
+                    held.add(campaign.id)
+                else:
+                    campaign.daily_limit_kop = 0
+                    worker.repository.save(campaign)
                 continue
             last = worker.repository.last_status_change(
                 business.id, campaign.platform, "campaign", campaign.external_id
@@ -447,22 +447,21 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 if resume
                 else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
             )
-            if not worker.proposed(business):
-                held.discard(campaign.id)
-                # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
-                campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
-                worker.repository.save(campaign)
-                adapter = worker.resolve_adapter(business.id, campaign.platform)
-                if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
-                    try:
-                        await adapter.extend_end_date(campaign.external_id)
-                    except PlatformError:
-                        worker.notice(
-                            business,
-                            "CAMPAIGN_EXTEND_FAILED",
-                            "Не удалось продлить кампанию в Директе. Повторим при следующем пересчёте лимитов.",
-                            target_id=campaign.external_id,
-                        )
+            held.discard(campaign.id)
+            # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
+            campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
+            worker.repository.save(campaign)
+            adapter = worker.resolve_adapter(business.id, campaign.platform)
+            if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
+                try:
+                    await adapter.extend_end_date(campaign.external_id)
+                except PlatformError:
+                    worker.notice(
+                        business,
+                        "CAMPAIGN_EXTEND_FAILED",
+                        "Не удалось продлить кампанию в Директе. Повторим при следующем пересчёте лимитов.",
+                        target_id=campaign.external_id,
+                    )
         ledger = worker.repository.find(BudgetLedger, business_id=business.id, platform=limit.platform, month=month)
         ledger = ledger or BudgetLedger(business_id=business.id, platform=limit.platform, month=month, spent_kop=0)
         ledger.allocated_kop = plan.authorized * int(shares[limit.platform] * 1_000_000) // 1_000_000
@@ -470,17 +469,16 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         ledger.spent_kop = max(ledger.spent_kop, spent.get(limit.platform, 0))
         ledger.spent_at = worker.clock.now
         worker.repository.save(ledger)
-    if not worker.proposed(business):
-        worker.remember(
-            business,
-            started_on=meta.get("started_on", day.isoformat()),
-            shares={key: str(value) for key, value in shares.items()},
-            shares_at=worker.clock.now.isoformat()
-            if shares != {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
-            else previous.isoformat(),
-            group_limits=group_limits,
-            below_minimum=sorted(held),
-        )
+    worker.remember(
+        business,
+        started_on=meta.get("started_on", day.isoformat()),
+        shares={key: str(value) for key, value in shares.items()},
+        shares_at=worker.clock.now.isoformat()
+        if shares != {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
+        else previous.isoformat(),
+        group_limits=group_limits,
+        below_minimum=sorted(held),
+    )
     return minimums
 
 

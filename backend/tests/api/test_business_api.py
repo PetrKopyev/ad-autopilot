@@ -6,7 +6,7 @@ from app.db.models import Campaign, PlatformAccount
 
 
 def new_business(client, **changes):
-    body = {"site_url": "https://salon.example/", "city": "Самара", "month_budget_kop": 1_500_000} | changes
+    body = {"site_url": "https://salon.example/", "city": "Самара", "month_budget_kop": 1_600_000} | changes
     return client.post("/api/business", json=body)
 
 
@@ -22,10 +22,10 @@ def test_budget_must_be_whole_positive_kopecks(api, budget) -> None:
 
 def test_budget_below_direct_minimum_is_rejected_with_the_minimum(api) -> None:
     client, context = api
-    response = new_business(client, month_budget_kop=1_269_999)
+    response = new_business(client, month_budget_kop=1_549_999)
     assert response.status_code == 422
-    assert "Минимальный бюджет — 12 700 ₽ в месяц" in response.json()["detail"]
-    assert context.world.business.month_budget_kop != 1_269_999
+    assert "Минимальный бюджет — 15 500 ₽ в месяц" in response.json()["detail"]
+    assert context.world.business.month_budget_kop != 1_549_999
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,7 @@ def test_budget_hint_uses_plan_rules(api, query, expected) -> None:
     client, _ = api
     response = client.get(f"/api/business/budget-hint?{query}")
     assert response.status_code == 200, response.text
-    assert response.json() == {"minimum_kop": 1_270_000} | expected
+    assert response.json() == {"minimum_kop": 1_550_000} | expected
 
 
 def test_budget_hint_requires_login_and_positive_amount(api) -> None:

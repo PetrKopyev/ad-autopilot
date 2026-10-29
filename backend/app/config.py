@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     secret_key: SecretStr
     token_encryption_key: SecretStr
     platform_mode: Literal["live", "fake"] = "live"
-    dry_run: bool = True
+    dry_run: bool = False
     demo_login: bool = False
     media_dir: Path = Path("media")
     yandex_client_id: str = ""
@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     direct_api_url: str = "https://api.direct.yandex.com/json/v5"
     direct_api_v501_url: str = "https://api.direct.yandex.com/v501"
     direct_sandbox: bool = False
+    # Суммы стратегии в API Директа: по умолчанию считаем их без НДС и делим бюджет на (1 + НДС), чтобы трата
+    # с НДС не превысила бюджет. true — суммы API уже с НДС и передаются как есть.
+    direct_amounts_include_vat: bool = False
+    vat_percent: int = Field(default=22, ge=0, le=100)
     vk_package_id: int | None = Field(default=None, gt=0)
     vk_client_id: str = ""
     vk_client_secret: SecretStr = SecretStr("")

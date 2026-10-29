@@ -18,7 +18,7 @@ from app.demo_flags import ADVANCING, AdvanceProgress, advance_jobs, demo_now
 from app.platforms.base import AdPlatform
 from app.services.changes import ChangeConflict, ServerBusy
 from app.services.demo import DemoRepository, DemoService
-from app.services.experiments import create_experiment
+from app.services.experiments import create_experiment, rewrite_rejected
 from app.worker.clock import SystemClock
 from app.worker.jobs import Worker
 
@@ -38,7 +38,13 @@ def open_demo_service(resolve: Callable[[int, str], AdPlatform], business_id: in
 
     with SessionLocal() as db:
         yield DemoService(
-            Worker(DemoRepository(db, business_id), resolve, dry_run=False, experiment_factory=create_experiment)
+            Worker(
+                DemoRepository(db, business_id),
+                resolve,
+                dry_run=False,
+                experiment_factory=create_experiment,
+                rewrite_rejected=rewrite_rejected,
+            )
         )
 
 

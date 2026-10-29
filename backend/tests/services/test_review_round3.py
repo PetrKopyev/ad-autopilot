@@ -172,15 +172,15 @@ async def test_slow_stop_is_finished_even_after_deadline(monkeypatch) -> None:
     assert change.status == "applied" and world.campaign.status == "paused_owner"
 
 
-async def test_protective_stop_replaces_trial_proposal_of_the_same_step() -> None:
-    # Пробный режим уже предложил остановку с тем же ключом; защитная остановка выполняется по-настоящему.
+async def test_owner_stop_is_applied_in_trial_mode() -> None:
+    # Пробный режим касается только решений автопилота: остановка владельцем сразу уходит в кабинет.
     from app.services.budget_guard import stop_platform
 
     world = await make_world(business_settings={"dry_run": True})
     worker = world.worker()
     worker.step_key = "owner:revoke"
     operation = Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_owner")
-    proposal = await worker.apply(
+    stopped = await worker.apply(
         world.business,
         world.campaign,
         [operation],
@@ -190,21 +190,23 @@ async def test_protective_stop_replaces_trial_proposal_of_the_same_step() -> Non
         reason_text="Стоп.",
         suffix="revoke",
     )
-    assert proposal.evidence["_service"]["dry_run"]
+    assert stopped.status == "applied" and not stopped.evidence["_service"]["dry_run"]
     assert await stop_platform(world.business, worker=worker, platform="direct", reason_text="Стоп.", deadline=later())
     (change,) = world.changes(reason_code="ACCOUNT_REVOKE")
     assert change.status == "applied" and not change.evidence["_service"]["dry_run"]
     assert world.campaign.status == "paused_owner"
 
 
-async def test_budget_stop_notice_is_a_proposal_in_trial_mode(monkeypatch) -> None:
+async def test_budget_stop_works_in_trial_mode(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
     world = await make_world(business_settings={"dry_run": True})
     monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": BUDGET_KOP}, {})))
     await world.worker().run("budget_guard", 1)
     (notice,) = world.repository.rows(WorkerRun, 1, kind="notification")
-    assert notice.log[0]["reason_code"] == "BUDGET_STOP" and notice.status == "proposed"
+    assert notice.log[0]["reason_code"] == "BUDGET_STOP" and notice.status == "ok"
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert world.business.status == "budget_stop"
 
 
 async def test_month_notice_names_the_date_and_expires_with_the_month() -> None:
