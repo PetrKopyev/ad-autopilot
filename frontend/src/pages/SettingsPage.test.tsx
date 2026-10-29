@@ -3,13 +3,13 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getBusiness, saveBudget, saveBusinessSettings } from '../api/settings';
+import { getBusiness, pauseAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { saveDescription, saveMarking } from '../api/setup';
 import { SettingsPage } from './SettingsPage';
 
 vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn(),
-  saveBudget: vi.fn(), saveBusinessSettings: vi.fn() }));
+  saveBudget: vi.fn(), saveBusinessSettings: vi.fn(), pauseAutopilot: vi.fn(), resumeAutopilot: vi.fn() }));
 vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn() }));
 vi.mock('../api/screens', () => ({ mockEnabled: false,
   getAutopilotStatus: async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] }) }));
@@ -26,7 +26,7 @@ async function marking(settings = business) {
   vi.mocked(getBusiness).mockResolvedValue(settings);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
   const heading = await screen.findByRole('heading', { name: copy.settings.marking });
-  return within(heading.closest('.card') as HTMLElement);
+  return within(heading.closest('section') as HTMLElement);
 }
 
 it('сохранённую маркировку показывает с последними цифрами, а не пустой формой', async () => {
@@ -75,7 +75,7 @@ it('бюджет ниже порога ВКонтакте сохраняется
   vi.mocked(saveBusinessSettings).mockResolvedValue();
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
-  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('.card') as HTMLElement);
+  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('section') as HTMLElement);
   fireEvent.change(block.getByLabelText(copy.settingsScreen.budgetLabel), { target: { value: '20000' } });
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   expect(await block.findByText(warning)).toBeTruthy();
@@ -87,7 +87,7 @@ it('средний чек — только цифры, как бюджет; не
   vi.mocked(saveBusinessSettings).mockReset().mockResolvedValue();
   vi.mocked(getBusiness).mockResolvedValue({ ...business, avg_check_kop: 150050 });
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
-  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('.card') as HTMLElement);
+  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('section') as HTMLElement);
   const average = block.getByLabelText(copy.settingsScreen.averageLabel) as HTMLInputElement;
   expect(average.value).toBe('1 501');
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
@@ -105,11 +105,31 @@ it('услуги и цены в описании — одно поле, отде
   vi.mocked(getBusiness).mockResolvedValue({ ...business, description: { fields: {
     services: field('Маникюр — 1 500 ₽\nПедикюр'), prices: field('Маникюр — 1 500 ₽'), address: field(''), difference: field('') } } });
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
-  const block = within((await screen.findByRole('heading', { name: copy.settings.business })).closest('.card') as HTMLElement);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.business })).closest('section') as HTMLElement);
   expect((block.getByLabelText(copy.settingsScreen.description.services) as HTMLTextAreaElement).value).toBe('Маникюр — 1 500 ₽\nПедикюр');
   expect(block.queryByLabelText(copy.settingsScreen.description.prices)).toBeNull();
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   await vi.waitFor(() => expect(saveDescription).toHaveBeenCalled());
   const [sent] = vi.mocked(saveDescription).mock.calls[0];
   expect([sent.services.value, sent.prices.value]).toEqual(['Маникюр — 1 500 ₽\nПедикюр', '']);
+});
+
+it('режим автопилота — «Работает / Пауза»: «Пауза» останавливает автопилот, повторный выбор текущего режима ничего не шлёт', async () => {
+  vi.mocked(pauseAutopilot).mockResolvedValue();
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const mode = within(await screen.findByRole('group', { name: copy.autopilotMode.label }));
+  expect(mode.getByRole('button', { name: copy.autopilotMode.working }).getAttribute('aria-pressed')).toBe('true');
+  fireEvent.click(mode.getByRole('button', { name: copy.autopilotMode.working }));
+  expect(pauseAutopilot).not.toHaveBeenCalled();
+  fireEvent.click(mode.getByRole('button', { name: copy.autopilotMode.paused }));
+  await vi.waitFor(() => expect(pauseAutopilot).toHaveBeenCalledTimes(1));
+});
+
+it('кабинеты показывают состояние словами, а не только цветом', async () => {
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);
+  expect(block.getAllByText(copy.setup.accounts.disconnected)).toHaveLength(2);
+  expect(block.getAllByRole('button', { name: copy.settings.connect })).toHaveLength(2);
 });

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Card, EmptyState, ErrorBanner, Money } from '../components';
+import { EmptyState, ErrorBanner, Money, PageHeader, PanelCard, PlatformBadge, SegmentedControl } from '../components';
 import { copy } from '../copy';
 import { getAds, getBreakdown, getDaily, getSummary } from '../api/screens';
 import { getBusinessToday, getPeriod, type PeriodChoice } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Daily, StatsLevel } from '../api/types';
-import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, adLabels, platformName } from './StatsShared';
+import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, adLabels } from './StatsShared';
 import { formatMoney } from '../components/Money';
 
 function DailyChart({ daily, today }: { daily: Daily; today: string }) {
@@ -30,37 +30,37 @@ function DailyChart({ daily, today }: { daily: Daily; today: string }) {
   const y = (value: number, max: number) => 210 - value / max * 160;
   const line = (metric: 'cost_kop' | 'leads', max: number) => points.map((point, index) => `${x(index)},${y(point[metric], max)}`).join(' ');
   if (!hasData) return <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />;
-  return <>
-    <div className="stats-chart-key"><span>{copy.screens.chartSpend}</span><span>{copy.screens.chartLeads}</span></div>
+  return <div className="stats-chart-block">
+    <div className="stats-chart-key"><span className="stats-chart-key__spend">{copy.screens.chartSpend}</span><span className="stats-chart-key__leads">{copy.screens.chartLeads}</span></div>
     <p className="muted">{[copy.screens.chartExplanation, currentDay && copy.screens.chartToday, points.some((point) => point.is_incomplete) && copy.screens.chartPending].filter(Boolean).join(' ')}</p>
     <svg ref={chart} className="stats-chart" viewBox={`0 0 ${width} 260`} role="img" aria-label={copy.statistics.chart}>
       <title>{copy.statistics.chart}</title>
       {[...new Set([0, Math.ceil(maxLeads / 2), maxLeads])].map((leads) => {
         const fraction = leads / maxLeads;
         return <g key={leads}>
-          <line x1={left} x2={right} y1={y(fraction, 1)} y2={y(fraction, 1)} stroke="#dce2e9" />
-          <text x={left - 8} y={y(fraction, 1) + 4} textAnchor="end">{formatMoney(Math.round(maxCost * fraction))}</text>
-          <text x={right + 8} y={y(fraction, 1) + 4}>{leads}</text>
+          <line className="stats-chart__grid" x1={left} x2={right} y1={y(fraction, 1)} y2={y(fraction, 1)} />
+          <text className="stats-chart__tick" x={left - 8} y={y(fraction, 1) + 4} textAnchor="end">{formatMoney(Math.round(maxCost * fraction))}</text>
+          <text className="stats-chart__tick" x={right + 8} y={y(fraction, 1) + 4}>{leads}</text>
         </g>;
       })}
       <text x="0" y="24">{copy.home.spent}</text><text x={width} y="24" textAnchor="end">{copy.screens.chartLeads}</text>
-      <polyline points={line('cost_kop', maxCost)} fill="none" stroke="#245e4c" strokeWidth="3" strokeLinejoin="round" />
-      <polyline points={line('leads', maxLeads)} fill="none" stroke="#326bc0" strokeWidth="3" strokeLinejoin="round" strokeDasharray="7 4" />
-      {points.map((point, index) => <g key={point.date}>
-        <circle cx={x(index)} cy={y(point.cost_kop, maxCost)} r={point.is_incomplete ? 4 : 3} fill={point.is_incomplete ? '#fff' : '#245e4c'} stroke="#245e4c" strokeWidth="2" />
-        <circle cx={x(index)} cy={y(point.leads, maxLeads)} r={point.is_incomplete ? 4 : 3} fill={point.is_incomplete ? '#fff' : '#326bc0'} stroke="#326bc0" strokeWidth="2" />
+      <polyline className="stats-chart__line stats-chart__line--spend" points={line('cost_kop', maxCost)} />
+      <polyline className="stats-chart__line stats-chart__line--leads" points={line('leads', maxLeads)} />
+      {points.map((point, index) => <g key={point.date} className={point.is_incomplete ? 'stats-chart__dot stats-chart__dot--pending' : 'stats-chart__dot'}>
+        <circle className="stats-chart__dot--spend" cx={x(index)} cy={y(point.cost_kop, maxCost)} r={point.is_incomplete ? 4 : 3} />
+        <circle className="stats-chart__dot--leads" cx={x(index)} cy={y(point.leads, maxLeads)} r={point.is_incomplete ? 4 : 3} />
       </g>)}
-      <text x={left} y="242">{displayDate(points[0].date)}</text><text x={right} y="242" textAnchor="end">{displayDate(points[points.length - 1].date)}</text>
+      <text className="stats-chart__tick" x={left} y="242">{displayDate(points[0].date)}</text><text className="stats-chart__tick" x={right} y="242" textAnchor="end">{displayDate(points[points.length - 1].date)}</text>
     </svg>
     <details className="stats-chart-details"><summary>{copy.screens.chartDetails}</summary>
-      <div className="stats-table-scroll" tabIndex={0} role="region" aria-label={copy.screens.chartDetails}><table className="stats-table">
+      <div className="table-scroll" tabIndex={0} role="region" aria-label={copy.screens.chartDetails}><table className="table stats-table">
         <thead><tr><th scope="col">{copy.screens.day}</th><th scope="col">{copy.home.spent}</th><th scope="col">{copy.home.leads}</th></tr></thead>
-        <tbody>{daily.items.map((point) => <tr key={point.date}><th scope="row">{displayDate(point.date)}{point.is_incomplete ? ' *' : ''}</th>
-          <td><Money kopecks={point.cost_kop} /></td><td>{point.leads}</td></tr>)}</tbody>
+        <tbody>{daily.items.map((point) => <tr key={point.date}><th scope="row" className="mono">{displayDate(point.date)}{point.is_incomplete ? ' *' : ''}</th>
+          <td className="num"><Money kopecks={point.cost_kop} /></td><td className="num">{point.leads}</td></tr>)}</tbody>
       </table></div>
       <p className="muted">{copy.screens.chartFootnote}</p>
     </details>
-  </>;
+  </div>;
 }
 
 export function StatsPage() {
@@ -82,39 +82,44 @@ export function StatsPage() {
   for (const [id, name] of adLabels(ads.data?.items ?? [])) names.set(`ad:${id}`, name);
   function rowLabel(id: number | string | null) {
     if (id === null) return copy.screens.unknownGroup;
-    if (level === 'platform') return platformName(String(id));
+    if (level === 'platform') return <PlatformBadge platform={String(id)} />;
     return names.get(`${level}:${id}`) ?? copy.screens.entity(copy.screens.rowLabels[level], id);
   }
+  const columns = [copy.home.spent, copy.ads.impressions, copy.ads.clicks, copy.home.leads, copy.home.leadPrice];
   return <div className="page-stack">
-    <h1>{copy.statistics.title}</h1><DemoNotice /><PeriodPicker value={choice} onChange={setChoice} />
+    <PageHeader title={copy.statistics.title} actions={<PeriodPicker value={choice} onChange={setChoice} />}
+      description={summary.data && <span className="mono">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</span>} />
+    <DemoNotice />
     {summary.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {summary.error && <ErrorBanner message={summary.error} onRetry={summary.reload} />}
-    {summary.data && <>
-      <h2>{copy.screens.total}</h2><p className="muted">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</p>
-      <SummaryFigures summary={summary.data} /><ClientsSummary summary={summary.data} />
-    </>}
-    <Card className="page-stack"><h2>{copy.statistics.chart}</h2>
+    {summary.data && <section className="page-stack stats-total" aria-labelledby="stats-total">
+      <h2 id="stats-total" className="visually-hidden">{copy.screens.total}</h2>
+      <SummaryFigures summary={summary.data} />
+    </section>}
+    <PanelCard title={copy.statistics.chart} titleId="stats-chart">
       {daily.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
       {daily.error && <ErrorBanner message={daily.error} onRetry={daily.reload} />}
       {daily.data && <DailyChart daily={daily.data.data} today={daily.data.today} />}
-    </Card>
-    <Card className="page-stack">
-      <label className="stats-select">{copy.screens.level}<select value={level} onChange={(event) => setLevel(event.target.value as StatsLevel)}>
-        {(Object.keys(copy.screens.levels) as StatsLevel[]).map((key) => <option key={key} value={key}>{copy.screens.levels[key]}</option>)}
-      </select></label>
-      {breakdown.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-      {breakdown.error && <ErrorBanner message={breakdown.error} onRetry={breakdown.reload} />}
-      {breakdown.data && (breakdown.data.items.length ? <>
-        <p className="muted stats-scroll-hint" id="stats-scroll-help">{copy.screens.scrollHint}</p>
-        <div className="stats-table-scroll" role="region" aria-label={copy.screens.breakdown} aria-describedby="stats-scroll-help" tabIndex={0}>
-        <table className="stats-table">
-          <thead><tr><th scope="col">{copy.screens.rowLabels[level]}</th><th scope="col">{copy.home.spent}</th><th scope="col">{copy.ads.impressions}</th>
-            <th scope="col">{copy.ads.clicks}</th><th scope="col">{copy.home.leads}</th><th scope="col">{copy.home.leadPrice}</th></tr></thead>
-          <tbody>{breakdown.data.items.map((item) => <tr key={String(item.id)}><th scope="row">{rowLabel(item.id)}</th>
-            <td><Money kopecks={item.cost_kop} /></td><td>{item.impressions.toLocaleString('ru-RU')}</td><td>{item.clicks.toLocaleString('ru-RU')}</td>
-            <td>{item.leads.toLocaleString('ru-RU')}</td><td><NullableMoney value={item.cost_per_lead_kop} /></td></tr>)}</tbody>
-        </table></div></> : <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />)}
-    </Card>
+    </PanelCard>
+    <PanelCard title={copy.screens.breakdown} titleId="stats-breakdown" flush className="stats-breakdown"
+      action={<SegmentedControl label={copy.screens.level} value={level} onChange={setLevel}
+        options={(Object.keys(copy.screens.levels) as StatsLevel[]).map((key) => ({ value: key, label: copy.screens.levels[key] }))} />}>
+      {breakdown.loading && <p className="loading stats-panel-state" role="status">{copy.screens.loading}</p>}
+      {breakdown.error && <div className="stats-panel-state"><ErrorBanner message={breakdown.error} onRetry={breakdown.reload} /></div>}
+      {breakdown.data && (breakdown.data.items.length
+        ? <div className="table-scroll" role="region" aria-labelledby="stats-breakdown" tabIndex={0}>
+          <table className="table table--stack stats-table">
+            <thead><tr><th scope="col">{copy.screens.rowLabels[level]}</th>{columns.map((name) => <th key={name} scope="col">{name}</th>)}</tr></thead>
+            <tbody>{breakdown.data.items.map((item) => <tr key={String(item.id)}><th scope="row">{rowLabel(item.id)}</th>
+              <td className="num" data-label={columns[0]}><Money kopecks={item.cost_kop} /></td>
+              <td className="num" data-label={columns[1]}>{item.impressions.toLocaleString('ru-RU')}</td>
+              <td className="num" data-label={columns[2]}>{item.clicks.toLocaleString('ru-RU')}</td>
+              <td className="num" data-label={columns[3]}>{item.leads.toLocaleString('ru-RU')}</td>
+              <td className="num" data-label={columns[4]}><NullableMoney value={item.cost_per_lead_kop} /></td></tr>)}</tbody>
+          </table></div>
+        : <EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} />)}
+    </PanelCard>
+    {summary.data && <ClientsSummary summary={summary.data} />}
     <Sources sources={summary.data?.sources ?? []} />
   </div>;
 }

@@ -1,13 +1,21 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { getForecast, type Forecast } from '../api/forecast';
 import { getPlan, launchPlan, regenerateImages, saveAssets, uploadPhoto, type Plan } from '../api/plan';
+import { getBusiness, type BusinessSettings } from '../api/settings';
 import { PlanPage } from './PlanPage';
 
-vi.mock('../api/plan', () => ({ getPlan: vi.fn(), launchPlan: vi.fn(), regenerateImages: vi.fn(), saveAssets: vi.fn(), uploadPhoto: vi.fn() }));
+vi.mock('../api/plan', async (original) => ({ ...await original<typeof import('../api/plan')>(), getPlan: vi.fn(), launchPlan: vi.fn(), regenerateImages: vi.fn(), saveAssets: vi.fn(), uploadPhoto: vi.fn() }));
+vi.mock('../api/forecast', () => ({ getForecast: vi.fn() }));
+vi.mock('../api/settings', () => ({ getBusiness: vi.fn() }));
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getPlan).mockReset(); vi.mocked(launchPlan).mockReset(); vi.mocked(regenerateImages).mockReset(); vi.mocked(saveAssets).mockReset(); vi.mocked(uploadPhoto).mockReset(); });
+beforeEach(() => {
+  vi.mocked(getForecast).mockRejectedValue(new Error('Не найдено.'));
+  vi.mocked(getBusiness).mockRejectedValue(new Error('Не найдено.'));
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getPlan).mockReset(); vi.mocked(launchPlan).mockReset(); vi.mocked(regenerateImages).mockReset(); vi.mocked(saveAssets).mockReset(); vi.mocked(uploadPhoto).mockReset(); vi.mocked(getForecast).mockReset(); vi.mocked(getBusiness).mockReset(); });
 
 const interrupted = 'Запуск рекламы не завершился. Всё, что он успел создать на площадках, мы остановили: деньги не тратятся.';
 function plan(launch_error: string | null): Plan {
@@ -78,8 +86,10 @@ function deferred() {
   const promise = new Promise<Plan>((ok, fail) => { resolve = ok; reject = fail; });
   return { promise, resolve, reject };
 }
+// Справа открыта одна группа: выбираем её в списке и ищем внутри её панели.
 function card(name: string) {
-  return within(screen.getByRole('heading', { name, level: 2 }).closest('.card') as HTMLElement);
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(name) }));
+  return within(screen.getByRole('heading', { name, level: 2 }).closest('section') as HTMLElement);
 }
 function withNewImage(source: Plan, group: number, id: number): Plan {
   return { ...source, groups: source.groups.map((item) => item.id === group ? { ...item, assets: [...item.assets, { ...item.assets[0], id, url: `/api/plan/assets/${id}/file`, label: `Новая ${id}`, selected: true }] } : item) };
@@ -91,7 +101,7 @@ it('варианты картинок просят в нескольких гр�
   vi.mocked(saveAssets).mockResolvedValue(undefined);
   vi.mocked(regenerateImages).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
-  await screen.findByText('Педикюр', { selector: 'h2' });
+  await screen.findByRole('button', { name: /Педикюр/ });
   fireEvent.click(card('Маникюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   const running = await card('Маникюр').findByRole('button', { name: 'Рисуем картинки…' });
   expect(running.getAttribute('aria-busy')).toBe('true');
@@ -121,7 +131,7 @@ it('ошибка одной группы не останавливает оче�
   vi.mocked(saveAssets).mockResolvedValue(undefined);
   vi.mocked(regenerateImages).mockReturnValueOnce(first.promise).mockResolvedValueOnce(withNewImage(twoGroups(), 2, 11));
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
-  await screen.findByText('Педикюр', { selector: 'h2' });
+  await screen.findByRole('button', { name: /Педикюр/ });
   fireEvent.click(card('Маникюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   fireEvent.click(card('Педикюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   first.reject(new Error('Не удалось получить новые картинки.'));
@@ -136,7 +146,7 @@ it('ждущий запрос можно отменить: он не уходи�
   vi.mocked(saveAssets).mockResolvedValue(undefined);
   vi.mocked(regenerateImages).mockReturnValueOnce(first.promise);
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
-  await screen.findByText('Педикюр', { selector: 'h2' });
+  await screen.findByRole('button', { name: /Педикюр/ });
   fireEvent.click(card('Маникюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   fireEvent.click(card('Педикюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   expect(card('Маникюр').queryByRole('button', { name: 'Отменить' })).toBeNull();
@@ -159,7 +169,7 @@ it('пока своё фото группы ждёт или загружаетс
   vi.mocked(regenerateImages).mockReturnValueOnce(generated.promise);
   vi.mocked(uploadPhoto).mockReturnValueOnce(uploaded.promise);
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
-  await screen.findByText('Педикюр', { selector: 'h2' });
+  await screen.findByRole('button', { name: /Педикюр/ });
   expect(card('Педикюр').getByText('Можно попросить ещё 2 варианта картинок.')).toBeTruthy();
   fireEvent.click(card('Маникюр').getByRole('button', { name: 'Попросить ещё варианты' }));
   expect(card('Педикюр').getByText('Можно попросить ещё 1 вариант картинок.')).toBeTruthy();
@@ -228,4 +238,102 @@ it('у запущенного плана с несколькими площад�
   expect(await screen.findByText(plain('Яндекс Директ — 20 000 ₽ в месяц.'))).toBeTruthy();
   expect(screen.getByText(plain('ВКонтакте — 10 000 ₽ в месяц.'))).toBeTruthy();
   expect(screen.queryByText(/около|в день/)).toBeNull();
+});
+
+function forecast(fields: Partial<Forecast>): Forecast {
+  return { status: 'ready', leads_min: 9, leads_max: 26, clicks_min: 450, clicks_max: 870, cpc_rub: 32, cpc_rub_max: 61, budget_rub: 26000,
+    conversion: { min: 0.02, max: 0.03, source: 'benchmark', label: 'ориентир по рынку услуг, не измерение' },
+    explanation: 'За месяц 450–870 кликов.', explanation_by_ai: false,
+    sources: [{ what: 'Клики и цена клика', source: 'Яндекс Директ, прогноз бюджета', url: 'https://yandex.ru/dev/direct/' }],
+    computed_at: '2026-10-29T10:00:00Z', demo: false, vk: null, ...fields };
+}
+const forecastPanel = () => within(screen.getByRole('heading', { name: 'Прогноз на месяц', level: 2 }).closest('section') as HTMLElement);
+
+it('готовый прогноз: диапазон обращений с сервера, пояснение, источник и пометка, что прогноз может ошибаться', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ vk: { status: 'unavailable', label: 'Для ВКонтакте прогноз появится после первых дней работы.' } }));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByRole('heading', { name: 'Прогноз на месяц' });
+  expect(forecastPanel().getByText('≈ 9–26')).toBeTruthy();
+  expect(forecastPanel().getByText('За месяц 450–870 кликов.')).toBeTruthy();
+  expect(forecastPanel().getByText('Прогноз, может ошибаться.')).toBeTruthy();
+  expect(forecastPanel().getByText('Для ВКонтакте прогноз появится после первых дней работы.')).toBeTruthy();
+  expect(forecastPanel().getByRole('link', { name: 'Яндекс Директ, прогноз бюджета' }).getAttribute('href')).toBe('https://yandex.ru/dev/direct/');
+  expect(within(screen.getByRole('region', { name: 'Итог плана' })).getByText('≈ 9–26')).toBeTruthy();
+  expect(screen.queryByText('демо')).toBeNull();
+});
+
+it('пояснение от ИИ уже с пометкой — вторую не добавляем; демо-ответ помечен', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ explanation: 'Пересказ. Пояснение написал ИИ — это прогноз, он может ошибаться.', explanation_by_ai: true, demo: true }));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByRole('heading', { name: 'Прогноз на месяц' });
+  expect(screen.queryByText('Прогноз, может ошибаться.')).toBeNull();
+  expect(forecastPanel().getByText('демо')).toBeTruthy();
+});
+
+it('недоступный прогноз — объяснение сервера без чисел', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ status: 'unavailable', leads_min: null, leads_max: null, explanation: 'Прогноз появится, когда Яндекс одобрит доступ.', sources: [] }));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText('Прогноз появится, когда Яндекс одобрит доступ.')).toBeTruthy();
+  expect(screen.queryByText(/≈/)).toBeNull();
+});
+
+it('пока прогноз считается, спрашиваем снова, а после двух минут просим обновить страницу позже', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ status: 'pending', leads_min: null, leads_max: null, explanation: '', sources: [] }));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await vi.waitFor(() => expect(screen.getByText('Считаем прогноз…')).toBeTruthy());
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(getForecast).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(screen.getByText('Яндекс долго готовит прогноз, обновите страницу позже.')).toBeTruthy();
+  const calls = vi.mocked(getForecast).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(getForecast).toHaveBeenCalledTimes(calls);
+});
+
+it('без ответа прогноза блока нет', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByText('Маникюр', { selector: 'h2' });
+  await waitFor(() => expect(getForecast).toHaveBeenCalled());
+  expect(screen.queryByText('Прогноз на месяц')).toBeNull();
+});
+
+function withAds(): Plan {
+  const base = plan(null);
+  return { ...base, groups: [{ ...base.groups[0], ads: [{ title: 'Маникюр у дома', text: 'Первый текст' }, { title: 'Гель-лак за час', text: 'Второй текст' }] }] };
+}
+
+it('предпросмотр показывает выбранный текст с адресом сайта и подписан как примерный', async () => {
+  vi.mocked(getPlan).mockResolvedValue(withAds());
+  vi.mocked(getBusiness).mockResolvedValue({ site_url: 'https://www.studio.ru/', description: null } as BusinessSettings);
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  const preview = within((await screen.findByText('Примерный вид: площадка может показать немного иначе.')).closest('figure') as HTMLElement);
+  expect(preview.getByText('Маникюр у дома')).toBeTruthy();
+  await waitFor(() => expect(preview.getByText('Реклама · studio.ru')).toBeTruthy());
+  fireEvent.click(screen.getByRole('radio', { name: /Гель-лак за час/ }));
+  expect(preview.getByText('Гель-лак за час')).toBeTruthy();
+  expect(preview.getByText('Второй текст')).toBeTruthy();
+});
+
+it('если услуг в описании больше пяти, план говорит, что в Директ вошли первые пять', async () => {
+  const base = plan(null);
+  vi.mocked(getPlan).mockResolvedValue({ ...base, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
+  vi.mocked(getBusiness).mockResolvedValue({ site_url: 'https://studio.ru', description: { fields: { services: { value: 'Маникюр\nПедикюр, наращивание\nБрови; ресницы\nМакияж' } } } } as unknown as BusinessSettings);
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText('В Директ вошли первые 5 услуг из описания.')).toBeTruthy();
+});
+
+it('пять услуг — строки об обрезке нет', async () => {
+  const base = plan(null);
+  vi.mocked(getPlan).mockResolvedValue({ ...base, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
+  vi.mocked(getBusiness).mockResolvedValue({ site_url: 'https://studio.ru', description: { fields: { services: { value: 'Маникюр\nПедикюр, наращивание\nБрови; ресницы\nманикюр' } } } } as unknown as BusinessSettings);
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByText('Услуга 1', { selector: 'h2' });
+  await waitFor(() => expect(getBusiness).toHaveBeenCalled());
+  expect(screen.queryByText(/В Директ вошли первые/)).toBeNull();
 });

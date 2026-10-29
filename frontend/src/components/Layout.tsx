@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router';
 import { copy } from '../copy';
+import { getAutopilotStatus } from '../api/screens';
 import { logout } from '../api/setup';
 import { useSession } from '../api/session';
 import { AppNav } from './AppNav';
@@ -20,8 +21,21 @@ export function Layout() {
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(false); }
   }
-  // Мастер и план идут до запуска: разделов там ещё нет, меню не отвлекает.
-  const locked = !session.data?.has_business || pathname === '/plan' || pathname.startsWith('/setup');
+  // Мастер и план до первого запуска: разделов ещё нет, меню не отвлекает. Запустившемуся они открыты и тут. Запуск
+  // узнаём по статусу автопилота (до запуска — «draft») и помним для этого входа: снова до запуска реклама не вернётся.
+  const userId = session.data?.id;
+  const [launchedFor, setLaunchedFor] = useState<number>();
+  const beforeLaunch = pathname === '/plan' || pathname.startsWith('/setup');
+  const launched = userId !== undefined && launchedFor === userId;
+  useEffect(() => {
+    if (!session.data?.has_business || !beforeLaunch || launched) return;
+    const controller = new AbortController();
+    void getAutopilotStatus(controller.signal).then(({ status }) => {
+      if (!controller.signal.aborted && status !== 'draft' && status !== 'no_business') setLaunchedFor(userId);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [session.data, pathname]);
+  const locked = !session.data?.has_business || beforeLaunch && !launched;
   return (
     <div className={`app-layout${!session.data ? ' app-layout--guest' : locked ? '' : ' app-layout--tabbar'}`}>
       <a className="skip-link" href="#main">{copy.navigation.skip}</a>

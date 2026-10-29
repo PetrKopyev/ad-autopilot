@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useLocation } from 'react-router';
-import { Button, Card, ErrorBanner } from '../components';
+import { Button, ErrorBanner, Icon } from '../components';
+import type { IconName } from '../components';
 import { connectAccount, demoLogin, getAuthConfig } from '../api/setup';
 import type { StopResult } from '../api/setup';
 import { mockEnabled } from '../api/screens';
 import { useSession } from '../api/session';
 import { copy } from '../copy';
 import { StopNotice } from './SetupShared';
-import './Setup.css';
+import './Service.css';
+
+const pointIcons: IconName[] = ['spark', 'shield', 'history'];
 
 export function LoginPage() {
   const session = useSession();
@@ -44,26 +47,39 @@ export function LoginPage() {
     finally { setBusy(false); }
   }
   if (session.data && (!stopResult || session.data !== arrived.current)) return <Navigate to={next} replace />;
-  return <div className="page-stack launch-flow">
-    <h1>{copy.login.title}</h1>
+  return <div className="login">
     {stopResult && <StopNotice result={stopResult} />}
-    <Card className="page-stack">
-      <p>{copy.login.description}</p>
-      {error && <ErrorBanner message={error} />}
-      <label className="check consent-check">
-        <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />
-        <span>{copy.login.consent} <Link to="/policy" target="_blank" rel="noopener">{copy.login.policy}</Link></span>
-      </label>
-      <div className="actions login-actions">
-        <button type="button" className="yandex-id-button" disabled={busy || !agreed} onClick={() => void login()}>
-          <svg className="yandex-id-button__logo" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle cx="12" cy="12" r="12" fill="#fc3f1d" />
-            <path fill="#fff" d="M13.32 7.666h-.924c-1.694 0-2.585.858-2.585 2.123 0 1.43.616 2.1 1.881 2.959l1.045.704-3.003 4.487H7.49l2.695-4.014c-1.55-1.111-2.42-2.19-2.42-4.015 0-2.288 1.595-3.85 4.62-3.85h3.003v11.868H13.32V7.666z" />
-          </svg>
-          {copy.login.action}
-        </button>
-        {demo && <Button variant="secondary" disabled={busy || !agreed} onClick={() => void loginDemo()}>{copy.login.demo}</Button>}
-      </div>
-    </Card>
+    <div className="login__frame">
+      <section className="login__pitch" aria-label={copy.login.pointsLabel}>
+        <p className="login__platforms">{copy.login.platforms}</p>
+        <p className="login__headline">{copy.login.headline}</p>
+        <p className="login__lead">{copy.login.lead}</p>
+        <ul className="login__points">
+          {copy.login.points.map((point, index) => <li key={point.title}>
+            <span className="login__point-icon"><Icon name={pointIcons[index]} /></span>
+            <span><strong>{point.title}</strong><span>{point.text}</span></span>
+          </li>)}
+        </ul>
+      </section>
+      <section className="login__panel" aria-labelledby="login-title">
+        <h1 id="login-title">{copy.login.title}</h1>
+        <p className="login__description">{copy.login.description}</p>
+        {error && <ErrorBanner message={error} />}
+        <label className="login__consent">
+          <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />
+          <span>{copy.login.consent} <Link to="/policy" target="_blank" rel="noopener">{copy.login.policy}</Link></span>
+        </label>
+        <div className="login__actions">
+          <button type="button" className="yandex-id-button" disabled={busy || !agreed} onClick={() => void login()}>
+            <svg className="yandex-id-button__logo" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="12" fill="#fc3f1d" />
+              <path fill="#fff" d="M13.32 7.666h-.924c-1.694 0-2.585.858-2.585 2.123 0 1.43.616 2.1 1.881 2.959l1.045.704-3.003 4.487H7.49l2.695-4.014c-1.55-1.111-2.42-2.19-2.42-4.015 0-2.288 1.595-3.85 4.62-3.85h3.003v11.868H13.32V7.666z" />
+            </svg>
+            {copy.login.action}
+          </button>
+          {demo && <Button variant="secondary" disabled={busy || !agreed} onClick={() => void loginDemo()}>{copy.login.demo}</Button>}
+        </div>
+      </section>
+    </div>
   </div>;
 }

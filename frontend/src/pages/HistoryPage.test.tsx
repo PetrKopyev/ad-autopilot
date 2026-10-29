@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getHistoryPage, type HistoryEntry } from '../api/history';
+import { getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
 import { HistoryPage } from './HistoryPage';
 
 vi.mock('../api/history', () => ({ getHistoryPage: vi.fn(), revertChange: vi.fn() }));
@@ -60,4 +60,24 @@ it('кнопки отката нет, если сервер не разреша�
   await screen.findByText('Запись 1');
   expect(screen.queryByRole('button', { name: labels.resume })).toBeNull();
   expect(screen.getAllByRole('button', { name: copy.history.undo })).toHaveLength(1);
+});
+
+it('цифры причины видны сразу, отменённая запись помечена «Отменено» и без кнопки', async () => {
+  serve([{ ...entry(1, 'pause'), actor: 'autopilot', evidence: { cost_kop: 450000, leads: 0 } },
+    { ...entry(2, 'budget'), status: 'reverted', can_revert: false }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getByLabelText(labels.numbers).textContent?.replace(/\s/g, ' ')).toBe('Потрачено4 500 ₽Обращений0');
+  expect(screen.getByText(labels.statuses.reverted)).toBeTruthy();
+  expect(screen.getAllByRole('button', { name: /Продолжить|Отменить/ })).toHaveLength(1);
+});
+
+it('ошибку отката показывает в подтверждении, а не теряет', async () => {
+  serve([entry(1, 'budget')]);
+  vi.mocked(revertChange).mockRejectedValueOnce(new Error('Изменение уже отменено.'));
+  render(<HistoryPage />);
+  fireEvent.click(await screen.findByRole('button', { name: copy.history.undo }));
+  fireEvent.click(screen.getByRole('button', { name: labels.confirmYes }));
+  const group = screen.getByRole('group', { name: labels.confirmTitle });
+  expect(await within(group).findByText('Изменение уже отменено.')).toBeTruthy();
 });

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
-import { Button, Card, CityCombobox, ErrorBanner, RublesInput, Stepper } from '../components';
+import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, RublesInput, StatusBadge, Stepper, describedBy } from '../components';
+import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
   getMe, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
@@ -12,7 +14,7 @@ import { formatMoney } from '../components/Money';
 import { useSession } from '../api/session';
 import { cityKey } from '../components/CityCombobox';
 import { NotFoundPage } from './PlaceholderPage';
-import { MedicalNotice, SiteInstructions, StopNotice } from './SetupShared';
+import { MedicalNotice, SetupField, SiteInstructions, StopNotice } from './SetupShared';
 import './Setup.css';
 
 interface Draft {
@@ -42,6 +44,10 @@ const markingForm = (stored: StoredMarking | null): Marking => stored
   : emptyMarking;
 const fields: DescriptionKey[] = ['services', 'prices', 'address', 'difference'];
 const ownerFields: DescriptionKey[] = ['services', 'address', 'difference'];
+// Ошибка одного поля: показывается под ним, а не общей полосой; field — id поля.
+class FieldError extends Error {
+  constructor(readonly field: string, message: string) { super(message); }
+}
 
 export function SetupPage() {
   const { step } = useParams();
@@ -70,6 +76,7 @@ export function SetupPage() {
   const [siteRetry, setSiteRetry] = useState(0);
   const handledRetry = useRef(0);
   const [error, setError] = useState('');
+  const [fieldError, setFieldError] = useState<FieldError>();
   const [loadError, setLoadError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [stopResult, setStopResult] = useState<StopResult>();
@@ -190,10 +197,15 @@ export function SetupPage() {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [current, draft.business, otherUser, revision, siteRetry]);
   async function act(action: () => Promise<void>) {
-    if (busy) return; setBusy(true); setError(''); setStopResult(undefined);
-    try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
-    finally { setBusy(false); }
+    if (busy) return; setBusy(true); setError(''); setFieldError(undefined); setStopResult(undefined);
+    try { await action(); } catch (reason) {
+      if (reason instanceof FieldError) setFieldError(reason); else setError(reason instanceof Error ? reason.message : copy.errors.generic);
+    } finally { setBusy(false); }
   }
+  // Ошибка поля держится, пока его не поправят; курсор сразу ставим в поле с ошибкой.
+  useEffect(() => setFieldError(undefined), [current, website, city, budget, average, noSite, draft.counter, draft.goals, draft.description, marking]);
+  useEffect(() => { if (fieldError) document.getElementById(fieldError.field)?.focus(); }, [fieldError]);
+  const errorFor = (field: string) => fieldError?.field === field ? fieldError.message : undefined;
   // Проверка не перечитывает сессию: карточки кабинетов не пропадают на время запроса, итог — текстом под кнопкой.
   async function checkConnection() {
     if (checking) return; setChecking(true); setError('');
@@ -215,12 +227,13 @@ export function SetupPage() {
   async function submit() {
     if (current === 1) {
       const month_budget_kop = rublesToKopecks(budget); const avg_check_kop = average ? rublesToKopecks(average) : null;
-      if (!month_budget_kop || (average && !avg_check_kop)) throw new Error(copy.launchFlow.moneyError);
       let url: URL;
-      try { url = new URL(website); } catch { throw new Error(copy.launchFlow.businessError); }
-      if (!['http:', 'https:'].includes(url.protocol) || !city.trim()) throw new Error(copy.launchFlow.businessError);
+      try { url = new URL(website); } catch { throw new FieldError('website', copy.setup.business.websiteError); }
+      if (!['http:', 'https:'].includes(url.protocol)) throw new FieldError('website', copy.setup.business.websiteError);
       const chosen = cities ? cities.find((item) => cityKey(item) === cityKey(city)) : city.trim();
-      if (!chosen) throw new Error(copy.setup.business.cityError);
+      if (!chosen) throw new FieldError('city', copy.setup.business.cityError);
+      if (!month_budget_kop) throw new FieldError('budget', copy.launchFlow.moneyError);
+      if (average && !avg_check_kop) throw new FieldError('average', copy.launchFlow.moneyError);
       const input = { site_url: url.href, city: chosen, month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }
       const business = await createBusiness(input);
@@ -228,126 +241,204 @@ export function SetupPage() {
       setDraft({ user: draft.user, business, counter: 0, goals: [], approved: false, maxStep: 2 }); navigate('/setup/2');
     } else if (current === 2) {
       const fresh = await getMe();
-      if (!fresh.accounts.some((account) => account.platform === 'direct' && account.status === 'ok')
-        || !counters.some((item) => item.id === draft.counter) || !draft.goals.length
-        || draft.goals.some((id) => !goals.some((goal) => goal.id === id))) throw new Error(copy.launchFlow.accountsError);
+      if (!fresh.accounts.some((account) => account.platform === 'direct' && account.status === 'ok')) throw new Error(copy.launchFlow.accountsError);
+      if (!counters.some((item) => item.id === draft.counter)) throw new FieldError('counter', copy.setup.accounts.counterError);
+      if (!draft.goals.length || draft.goals.some((id) => !goals.some((goal) => goal.id === id))) throw new FieldError('goals', copy.setup.accounts.goalsError);
       await saveMetrica(draft.counter, draft.goals); next();
     } else if (current === 3) {
       if (reading || draft.site?.status !== 'ready' || !draft.site.counter_id) throw new Error(copy.setup.website.blocked);
       if (draft.site.counter_id !== draft.counter) throw new Error(copy.launchFlow.counterMismatch);
       next();
     } else if (current === 4) {
-      if (!draft.approved || !draft.description?.services.value.trim()) throw new Error(copy.launchFlow.draftError);
+      if (!draft.description?.services.value.trim()) throw new FieldError('services', copy.setup.draft.servicesError);
+      if (!draft.approved) throw new Error(copy.launchFlow.draftError);
       await saveDescription({ ...draft.description, prices: { ...draft.description.prices, value: '' } }); next();
     } else {
       // Сохранённые реквизиты без правок не отправляются заново: менять их можно, только введя ИНН и телефон.
       if (!keepMarking) {
         setInnTouched(true);
-        if (innError) throw new Error(innError);
+        if (innError) throw new FieldError('inn', innError);
+        if (!marking.name.trim()) throw new FieldError('name', copy.setup.advertiser.nameError);
+        if (!/^\+?[\d ()-]{10,25}$/.test(marking.phone) || marking.phone.replace(/\D/g, '').length < 10) throw new FieldError('phone', copy.setup.advertiser.phoneError);
       }
-      if (!keepMarking && (!marking.name.trim() || !/^\+?[\d ()-]{10,25}$/.test(marking.phone) || marking.phone.replace(/\D/g, '').length < 10)
-        || !marking.confirmed_in_platform.direct || (vk && !marking.confirmed_in_platform.vk)) throw new Error(copy.launchFlow.markingError);
+      if (!marking.confirmed_in_platform.direct || (vk && !marking.confirmed_in_platform.vk)) throw new FieldError('confirm', copy.setup.advertiser.confirmError);
       if (!keepMarking) await saveMarking(marking);
       navigate('/plan');
     }
   }
-  if (loadError) return <div className="page-stack launch-flow">
-    <h1>{copy.setup.title}</h1>
+  const header = (actions?: ReactNode) => <PageHeader title={copy.setup.title} actions={actions} />;
+  if (loadError) return <div className="page-stack launch-flow setup">
+    {header()}
     <ErrorBanner message={loadError} onRetry={() => { setLoadError(''); setAttempt((value) => value + 1); }} />
   </div>;
   // Без бизнеса восстанавливать нечего: первый шаг открывается сразу.
-  if (restoring && me?.has_business !== false || otherUser) return <p className="loading" role="status">{copy.screens.loading}</p>;
+  if (restoring && me?.has_business !== false || otherUser) return <div className="page-stack launch-flow setup">
+    {header()}<p className="loading" role="status">{copy.screens.loading}</p>
+  </div>;
   if (step === undefined) return <Navigate to={`/setup/${Math.min(5, draft.maxStep)}`} replace />;
   if (!/^[1-5]$/.test(step)) return <NotFoundPage />;
   if (current > draft.maxStep) return <Navigate to={`/setup/${Math.min(5, draft.maxStep)}`} replace />;
   const blocked = current === 1 && noSite || current === 3 && !!draft.site && (draft.site.status === 'blocked' || draft.site.status === 'ready' && !draft.site.counter_id);
   const siteReady = draft.site?.status === 'ready' && !!draft.site.counter_id && draft.site.counter_id === draft.counter;
-  return <div className="page-stack launch-flow">
-    <h1>{copy.setup.title}</h1>
-    <Stepper steps={copy.setup.steps.map((label, index) => ({ label, to: index + 1 < current ? `/setup/${index + 1}` : undefined }))} currentStep={current - 1} />
-    {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
-    <Card><form className="page-stack" onSubmit={(event) => { event.preventDefault(); void act(submit); }}>
-      <h2>{copy.setup.steps[current - 1]}</h2>
-      <fieldset disabled={busy} className="page-stack">
+  const metricaReady = !!draft.counter && draft.goals.length > 0;
+  const confirmed = marking.confirmed_in_platform.direct && (!vk || marking.confirmed_in_platform.vk);
+  const innMessage = errorFor('inn') ?? (showInnError ? innError : undefined);
+  const invalid = (message?: string) => message ? true : undefined;
+  const fieldErrorText = (field: string) => errorFor(field) && <p id={`${field}-error`} className="field__error" role="alert">{errorFor(field)}</p>;
+  return <div className="page-stack launch-flow setup">
+    {header(<Stepper steps={copy.setup.stepsShort.map((label, index) => ({ label, to: index + 1 < current ? `/setup/${index + 1}` : undefined }))} currentStep={current - 1} />)}
+    <Card className="setup__card"><form noValidate onSubmit={(event) => { event.preventDefault(); void act(submit); }}>
+      <header className="setup__head">
+        <p className="setup__eyebrow">{copy.setup.stepOf(current, copy.setup.steps.length)}</p>
+        <h2>{copy.setup.steps[current - 1]}</h2>
+        <p className="setup__intro">{current === 5 ? copy.setup.advertiser.explanation : copy.setup.intro[current - 1]}</p>
+      </header>
+      <fieldset disabled={busy} className="setup__body">
       {current === 1 && <>
         <label className="check"><input type="checkbox" checked={noSite} onChange={(event) => setNoSite(event.target.checked)} />{copy.launchFlow.websiteMissing}</label>
         {!noSite && <>
-          <label className="field">{copy.setup.business.website}<input type="url" required value={website} onChange={(event) => setWebsite(event.target.value)} /></label>
-          <CityCombobox label={copy.setup.business.city} cities={cities ?? []} value={city} onChange={setCity} required />
-          <label className="field">{copy.setup.business.budget}<RublesInput required max={maxBudgetRubles} value={budget} aria-describedby="budget-hint" onChange={setBudget} /></label>
-          <div id="budget-hint" className="page-stack">
-            <p className="muted">{copy.setup.business.budgetHint}</p>
-            {budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}
-          </div>
-          <label className="field">{copy.setup.business.visitPrice}<RublesInput max={maxBudgetRubles} value={average} aria-describedby="average-hint" onChange={setAverage} /></label>
-          <p id="average-hint" className="muted">{copy.setup.business.visitPriceHint}</p>
+          <SetupField id="website" label={copy.setup.business.website} hint={copy.setup.business.websiteHint} error={errorFor('website')}>
+            <input id="website" type="url" required placeholder="https://" value={website} aria-invalid={invalid(errorFor('website'))}
+              aria-describedby={describedBy('website', true, errorFor('website'))} onChange={(event) => setWebsite(event.target.value)} />
+          </SetupField>
+          <CityCombobox id="city" label={copy.setup.business.city} hint={copy.setup.business.cityHint} error={errorFor('city')} cities={cities ?? []} value={city} onChange={setCity} required />
+          <SetupField id="budget" label={copy.setup.business.budget} error={errorFor('budget')}
+            hint={<><p>{copy.setup.business.budgetHint}</p>{budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}</>}>
+            <RublesInput id="budget" className="mono" required max={maxBudgetRubles} value={budget} aria-invalid={invalid(errorFor('budget'))}
+              aria-describedby={describedBy('budget', true, errorFor('budget'))} onChange={setBudget} />
+          </SetupField>
+          <SetupField id="average" label={copy.setup.business.visitPrice} hint={copy.setup.business.visitPriceHint} error={errorFor('average')}>
+            <RublesInput id="average" className="mono" max={maxBudgetRubles} value={average} aria-invalid={invalid(errorFor('average'))}
+              aria-describedby={describedBy('average', true, errorFor('average'))} onChange={setAverage} />
+          </SetupField>
         </>}
       </>}
       {current === 2 && <>
-        {stopResult && <StopNotice result={stopResult} />}
-        <div className="account-grid">{(['direct', 'vk'] as const).map((platform) => {
-          const account = me?.accounts.find((item) => item.platform === platform);
-          return <Card key={platform} className="page-stack">
-            <h2>{copy.setup.accounts[platform]}</h2><p className="muted">{platform === 'direct' ? copy.setup.accounts.required : copy.setup.accounts.optional}</p>
-            <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected : account.status === 'ok' ? connectedAs(account) : copy.setup.accounts.expired}</p>
-            {platform === 'direct' ? account?.status !== 'ok'
-              && <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setChecks(undefined); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
-              : account?.status === 'ok' ? <Link className="tap-link" to="/connect/vk">{copy.setup.accounts.reconnect}</Link>
-                : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
-            {account && account.status !== 'revoked' && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(account.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); setChecks(undefined); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
-            <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
-          </Card>;
-        })}</div>
-        <div className="actions"><Button variant="secondary" aria-busy={checking || undefined} disabled={checking || !anyAccount} aria-describedby={anyAccount ? undefined : 'refresh-hint'} onClick={() => void checkConnection()}>
-          {checking ? <span className="loading">{copy.launchFlow.checking}</span> : copy.launchFlow.refresh}
-        </Button>{!anyAccount && <p className="muted" id="refresh-hint">{copy.launchFlow.refreshHint}</p>}</div>
-        <div role="status" aria-live="polite">{checks && <ul className="check-results">{checks.map((item) => <li key={item.platform} className={item.ok ? undefined : 'check-failed'}>
-          <strong>{copy.launchFlow.checkTitles[item.platform]}:</strong> {item.message}
-        </li>)}</ul>}</div>
-        <label className="field">{copy.setup.accounts.counter}<select disabled={!direct} required value={draft.counter || ''} onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
-          {!counters.length && <option value="">{direct && countersLoaded ? copy.launchFlow.noCounters : copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
-        </select></label>
-        {goals.length ? <fieldset className="page-stack"><legend>{copy.setup.accounts.goal}</legend>{goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}</fieldset>
-          : <div className="field"><strong>{copy.setup.accounts.goal}</strong><p className="muted">{direct && draft.counter && goalsFor === draft.counter ? copy.setup.accounts.goalsNone : copy.setup.accounts.goalsFirst}</p></div>}
-        <details><summary>{copy.setup.accounts.createGoal}</summary><ol>{copy.launchFlow.goalSteps.map((text) => <li key={text}>{text}</li>)}</ol></details>
-        {direct && countersLoaded && !counters.length && <div className="notice"><p><strong>{copy.launchFlow.noCounters}</strong></p><p>{copy.launchFlow.createCounter}</p>
-          <p>{copy.setup.website.blocked}</p><a href="https://metrika.yandex.ru/" target="_blank" rel="noreferrer">{copy.launchFlow.metricaLink}</a></div>}
+        <section className="setup__block" aria-labelledby="cabinets-title">
+          <h3 id="cabinets-title">{copy.setup.accounts.cabinets}</h3>
+          {stopResult && <StopNotice result={stopResult} />}
+          <div className="account-grid">{(['direct', 'vk'] as const).map((platform) => {
+            const account = me?.accounts.find((item) => item.platform === platform);
+            const live = account && account.status !== 'revoked' ? account : undefined;
+            const badge: [StatusTone, string] = live?.status === 'ok' ? ['success', copy.setup.accounts.ready] : live ? ['warning', copy.setup.accounts.expiredBadge]
+              : platform === 'direct' ? ['warning', copy.setup.accounts.needed] : ['neutral', copy.setup.accounts.notConnected];
+            return <div key={platform} className="account-card">
+              <div className="setup__block-head"><h4>{copy.setup.accounts[platform]}</h4><StatusBadge tone={badge[0]}>{badge[1]}</StatusBadge></div>
+              <p className="muted">{platform === 'direct' ? copy.setup.accounts.required : copy.setup.accounts.optional}</p>
+              {live && <p>{live.status === 'ok' ? connectedAs(live) : copy.setup.accounts.expired}</p>}
+              <div className="actions">
+                {platform === 'direct' ? account?.status !== 'ok'
+                  && <Button onClick={() => void act(async () => { await connectAccount('direct', draft.business?.id); setChecks(undefined); session.reload(); })}>{copy.setup.accounts.connectDirect}</Button>
+                  : account?.status === 'ok' ? <Link className="tap-link" to="/connect/vk">{copy.setup.accounts.reconnect}</Link>
+                    : <Link className="button button--secondary" to="/connect/vk">{copy.launchFlow.vkConnect}</Link>}
+                {live && <Button variant="secondary" onClick={() => void act(async () => { setStopResult(await disconnectAccount(live.id)); setDraft((value) => ({ ...value, ...(platform === 'direct' ? { counter: 0, goals: [] } : {}), maxStep: 2 })); setChecks(undefined); session.reload(); })}>{copy.launchFlow.disconnect}</Button>}
+              </div>
+              <details><summary>{copy.setup.accounts.create}</summary><ol>{(platform === 'direct' ? copy.launchFlow.createDirect : copy.launchFlow.createVk).map((text) => <li key={text}>{text}</li>)}</ol></details>
+            </div>;
+          })}</div>
+          <div className="actions"><Button variant="secondary" icon={checking ? undefined : 'shield'} aria-busy={checking || undefined} disabled={checking || !anyAccount} aria-describedby={anyAccount ? undefined : 'refresh-hint'} onClick={() => void checkConnection()}>
+            {checking ? <span className="loading">{copy.launchFlow.checking}</span> : copy.launchFlow.refresh}
+          </Button>{!anyAccount && <p className="field__hint" id="refresh-hint">{copy.launchFlow.refreshHint}</p>}</div>
+          <div role="status" aria-live="polite">{checks && <ul className="check-results">{checks.map((item) => <li key={item.platform} className={item.ok ? undefined : 'check-failed'}>
+            <strong>{copy.launchFlow.checkTitles[item.platform]}:</strong> {item.message}
+          </li>)}</ul>}</div>
+        </section>
+        <section className="setup__block" aria-labelledby="metrica-title">
+          <div className="setup__block-head"><h3 id="metrica-title">{copy.setup.accounts.metrica}</h3>
+            <StatusBadge tone={metricaReady ? 'success' : 'warning'}>{metricaReady ? copy.setup.accounts.chosen : copy.setup.accounts.choose}</StatusBadge></div>
+          <SetupField id="counter" label={copy.setup.accounts.counter} hint={copy.setup.accounts.counterHint} error={errorFor('counter')}>
+            <select id="counter" disabled={!direct} required value={draft.counter || ''} aria-invalid={invalid(errorFor('counter'))} aria-describedby={describedBy('counter', true, errorFor('counter'))}
+              onChange={(event) => setDraft((value) => ({ ...value, counter: Number(event.target.value), goals: [], site: undefined, description: undefined, approved: false, maxStep: 2 }))}>
+              {!counters.length && <option value="">{direct && countersLoaded ? copy.launchFlow.noCounters : copy.common.noData}</option>}{counters.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
+            </select>
+          </SetupField>
+          {goals.length ? <fieldset id="goals" className="setup__goals" aria-describedby={describedBy('goals', true, errorFor('goals'))}>
+            <legend>{copy.setup.accounts.goal}</legend>
+            <p id="goals-hint" className="field__hint">{copy.setup.accounts.goalHint}</p>
+            {goals.map((goal) => <label className="check" key={goal.id}><input type="checkbox" checked={draft.goals.includes(goal.id)} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 2, goals: event.target.checked ? [...value.goals, goal.id] : value.goals.filter((id) => id !== goal.id) }))} />{goal.name}</label>)}
+          </fieldset>
+            : <div className="field"><strong className="field__label">{copy.setup.accounts.goal}</strong><p className="field__hint">{direct && draft.counter && goalsFor === draft.counter ? copy.setup.accounts.goalsNone : copy.setup.accounts.goalsFirst}</p></div>}
+          {fieldErrorText('goals')}
+          <details><summary>{copy.setup.accounts.createGoal}</summary><ol>{copy.launchFlow.goalSteps.map((text) => <li key={text}>{text}</li>)}</ol></details>
+          {direct && countersLoaded && !counters.length && <div className="notice"><p><strong>{copy.launchFlow.noCounters}</strong></p><p>{copy.launchFlow.createCounter}</p>
+            <p>{copy.setup.website.blocked}</p><a href="https://metrika.yandex.ru/" target="_blank" rel="noreferrer">{copy.launchFlow.metricaLink}</a></div>}
+        </section>
       </>}
-      {current === 3 && <div className="page-stack" role="status" aria-live="polite">
-        {reading && <p className="loading">{copy.setup.website.reading}</p>}
-        {draft.site && <><p>{copy.launchFlow.pagesRead(draft.site.pages_read)}</p><p>{copy.setup.website.foundServices(draft.site.services_found)}</p>
-          {!!draft.site.services?.length && <ul className="found-services">{draft.site.services.map((item) => <li key={item.name}>{item.price_kop === null ? item.name : `${item.name} — ${formatMoney(item.price_kop)}`}</li>)}</ul>}<p>{draft.site.counter_id ? copy.setup.website.counterFound : copy.setup.website.counterMissing}</p></>}
+      {current === 3 && <>
+        <div className="site-check" role="status" aria-live="polite">
+          {reading && <p className="loading">{copy.setup.website.reading}</p>}
+          {draft.site && <dl className="site-check__rows">
+            <div><dt>{copy.setup.website.site}</dt><dd>{copy.launchFlow.pagesRead(draft.site.pages_read)}</dd></div>
+            <div><dt>{copy.setup.website.services}</dt><dd>{copy.setup.website.foundServices(draft.site.services_found)}</dd></div>
+            <div><dt>{copy.setup.website.counter}</dt><dd><StatusBadge tone={!draft.site.counter_id ? 'danger' : siteReady ? 'success' : 'warning'}>
+              {draft.site.counter_id ? copy.setup.website.counterFound : copy.setup.website.counterMissing}</StatusBadge></dd></div>
+          </dl>}
+          {!!draft.site?.services?.length && <ul className="found-services">{draft.site.services.map((item) => <li key={item.name}>
+            <span>{item.name}</span>{item.price_kop !== null && <><span className="visually-hidden"> — </span><span className="mono">{formatMoney(item.price_kop)}</span></>}
+          </li>)}</ul>}
+        </div>
         {!reading && !siteReady && !blocked && <div className="notice"><p>{draft.site?.counter_id ? copy.launchFlow.counterMismatch : copy.setup.website.blocked}</p><SiteInstructions /></div>}
         <Button variant="secondary" className={siteReady ? 'retry-small' : ''} disabled={reading} onClick={() => { setError(''); setRevision((value) => value + 1); setSiteRetry((value) => value + 1); }}>{copy.common.retry}</Button>
-      </div>}
-      {blocked && <div className="notice"><h2>{copy.launchFlow.blockedTitle}</h2><p>{copy.setup.website.blocked}</p>{noSite && <p>{copy.launchFlow.createSite}</p>}<SiteInstructions /></div>}
+      </>}
+      {blocked && <div className="notice"><h3>{copy.launchFlow.blockedTitle}</h3><p>{copy.setup.website.blocked}</p>{noSite && <p>{copy.launchFlow.createSite}</p>}<SiteInstructions /></div>}
       {current === 4 && draft.description && <>
         {(draft.site?.medical_level ?? draft.medical) !== 'none' && <MedicalNotice />}
-        {!fields.some((key) => draft.description![key].verified) && <><h2>{copy.launchFlow.ownDescription}</h2><p>{copy.launchFlow.ownDescriptionHint}</p></>}
-        {ownerFields.map((key) => { const field = draft.description![key]; const sourced = field.verified && field.quote?.trim() === field.value.trim(); return <div className="field" key={key}>
-          <label className="field">{copy.setup.draft[key]}<textarea required={key === 'services'} value={field.value} aria-describedby={[key === 'services' ? 'services-hint' : '', sourced ? '' : `source-${key}`].filter(Boolean).join(' ') || undefined} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: false, description: { ...value.description!, [key]: { ...field, value: event.target.value } } }))} /></label>
-          {key === 'services' && <p className="muted" id="services-hint">{copy.setup.draft.servicesHint}</p>}
-          {!sourced && <p className="source" id={`source-${key}`}>{field.verified && field.quote ? copy.setup.draft.source(field.quote) : `${copy.setup.draft.missing}. ${field.question || copy.setup.draft.question}`}</p>}
-        </div>; })}
-        <label className="check"><input type="checkbox" checked={draft.approved} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: event.target.checked }))} />{copy.launchFlow.approved}</label>
+        {!fields.some((key) => draft.description![key].verified) && <div className="notice"><h3>{copy.launchFlow.ownDescription}</h3><p>{copy.launchFlow.ownDescriptionHint}</p></div>}
+        {ownerFields.map((key) => {
+          const field = draft.description![key];
+          const sourced = field.verified && field.quote?.trim() === field.value.trim();
+          const message = errorFor(key);
+          return <div className={`field${message ? ' field--invalid' : ''}`} key={key}>
+            <div className="setup__label-row"><label htmlFor={key} className="field__label">{copy.setup.draft[key]}</label>
+              {sourced && <span className="source-badge"><Icon name="check" />{copy.setup.draft.fromSite}</span>}</div>
+            <textarea id={key} required={key === 'services'} value={field.value} aria-invalid={invalid(message)}
+              aria-describedby={[key === 'services' ? 'services-hint' : '', sourced ? '' : `source-${key}`, message ? `${key}-error` : ''].filter(Boolean).join(' ') || undefined}
+              onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: false, description: { ...value.description!, [key]: { ...field, value: event.target.value } } }))} />
+            {key === 'services' && <p className="field__hint" id="services-hint">{copy.setup.draft.servicesHint}</p>}
+            {!sourced && <p className={field.verified && field.quote ? 'source source--quote' : 'source'} id={`source-${key}`}>
+              {field.verified && field.quote ? copy.setup.draft.source(field.quote) : `${copy.setup.draft.missing}. ${field.question || copy.setup.draft.question}`}</p>}
+            {fieldErrorText(key)}
+          </div>;
+        })}
+        <div className="setup__confirm">
+          <label className="check"><input type="checkbox" checked={draft.approved} onChange={(event) => setDraft((value) => ({ ...value, maxStep: 4, approved: event.target.checked }))} />{copy.launchFlow.approved}</label>
+          {!draft.approved && <p className="field__hint" id="approval-help">{copy.launchFlow.approvalHint}</p>}
+        </div>
       </>}
       {current === 5 && <>
-        <p>{copy.setup.advertiser.explanation}</p>
-        <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => setMarking((value) => ({ ...value, subject_type: event.target.value as Marking['subject_type'] }))}>{Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label className="field">{copy.setup.advertiser.taxId}<input required={!savedMarking} inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError} aria-describedby={showInnError ? 'inn-help' : undefined} onBlur={() => setInnTouched(true)} onChange={(event) => setMarking((value) => ({ ...value, inn: event.target.value.trim() }))} /></label>
-        {showInnError && <p className="muted" id="inn-help">{innError}</p>}
-        <label className="field">{copy.launchFlow.fullName}<input required value={marking.name} onChange={(event) => setMarking((value) => ({ ...value, name: event.target.value }))} /></label>
-        <label className="field">{copy.launchFlow.phone}<input type="tel" required={!savedMarking} value={marking.phone} onChange={(event) => setMarking((value) => ({ ...value, phone: event.target.value }))} /></label>
-        {savedMarking && <p className="muted">{copy.settingsScreen.markingStored(savedMarking.inn_masked, savedMarking.phone_masked)}</p>}
-        <ol>{copy.launchFlow.markingSteps.map((text) => <li key={text}>{text}</li>)}</ol><p className="muted">{copy.launchFlow.markingOverwrite}</p>
-        {(['direct', 'vk'] as const).filter((platform) => platform === 'direct' || vk).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]} onChange={(event) => setMarking((value) => ({ ...value, confirmed_in_platform: { ...value.confirmed_in_platform, [platform]: event.target.checked } }))} />{platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
+        <SetupField id="subject-type" label={copy.setup.advertiser.type}>
+          <select id="subject-type" value={marking.subject_type} onChange={(event) => setMarking((value) => ({ ...value, subject_type: event.target.value as Marking['subject_type'] }))}>
+            {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </SetupField>
+        <SetupField id="inn" label={copy.setup.advertiser.taxId} hint={copy.setup.advertiser.taxIdHint(marking.subject_type === 'ooo' ? 10 : 12)} error={innMessage}>
+          <input id="inn" className="mono" required={!savedMarking} inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={invalid(innMessage)}
+            aria-describedby={describedBy('inn', true, innMessage)} onBlur={() => setInnTouched(true)} onChange={(event) => setMarking((value) => ({ ...value, inn: event.target.value.trim() }))} />
+        </SetupField>
+        <SetupField id="name" label={copy.launchFlow.fullName} hint={copy.setup.advertiser.nameHint} error={errorFor('name')}>
+          <input id="name" required value={marking.name} aria-invalid={invalid(errorFor('name'))} aria-describedby={describedBy('name', true, errorFor('name'))}
+            onChange={(event) => setMarking((value) => ({ ...value, name: event.target.value }))} />
+        </SetupField>
+        <SetupField id="phone" label={copy.launchFlow.phone} error={errorFor('phone')}>
+          <input id="phone" type="tel" required={!savedMarking} placeholder="+7" value={marking.phone} aria-invalid={invalid(errorFor('phone'))} aria-describedby={describedBy('phone', false, errorFor('phone'))}
+            onChange={(event) => setMarking((value) => ({ ...value, phone: event.target.value }))} />
+        </SetupField>
+        {savedMarking && <p className="field__hint">{copy.settingsScreen.markingStored(savedMarking.inn_masked, savedMarking.phone_masked)}</p>}
+        <section className="setup__block" aria-labelledby="confirm-title">
+          <div className="setup__block-head"><h3 id="confirm-title">{copy.setup.advertiser.confirmTitle}</h3>
+            <StatusBadge tone={confirmed ? 'success' : 'warning'}>{confirmed ? copy.setup.advertiser.confirmed : copy.setup.advertiser.confirmNeeded}</StatusBadge></div>
+          <ol>{copy.launchFlow.markingSteps.map((text) => <li key={text}>{text}</li>)}</ol>
+          <div className="notice"><p>{copy.launchFlow.markingOverwrite}</p></div>
+          {(['direct', 'vk'] as const).filter((platform) => platform === 'direct' || vk).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]} aria-invalid={invalid(errorFor('confirm'))} onChange={(event) => setMarking((value) => ({ ...value, confirmed_in_platform: { ...value.confirmed_in_platform, [platform]: event.target.checked } }))} />{platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
+          {fieldErrorText('confirm')}
+        </section>
       </>}
       </fieldset>
-      <div className="actions">
-        {current > 1 && <Link className="button button--secondary" to={`/setup/${current - 1}`}>{copy.common.back}</Link>}
-        <Button type="submit" aria-describedby={current === 4 && !draft.approved ? 'approval-help' : undefined} disabled={busy || blocked || current === 3 && (reading || !siteReady) || current === 4 && !draft.approved}>{busy ? copy.launchFlow.saving : current === 5 ? copy.plan.title : copy.common.next}</Button>
+      {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+      <div className="actions setup__actions">
+        {current > 1 && <Link className="button button--secondary" to={`/setup/${current - 1}`}><Icon name="back" />{copy.common.back}</Link>}
+        <Button type="submit" className="setup__next" aria-describedby={current === 4 && !draft.approved ? 'approval-help' : undefined} disabled={busy || blocked || current === 3 && (reading || !siteReady) || current === 4 && !draft.approved}>{busy ? copy.launchFlow.saving : current === 5 ? copy.plan.title : copy.common.next}</Button>
       </div>
-      {current === 4 && !draft.approved && <p className="muted" id="approval-help">{copy.launchFlow.approvalHint}</p>}
     </form></Card>
   </div>;
 }

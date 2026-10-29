@@ -14,6 +14,14 @@ export interface Plan {
   daily_kop: { direct?: number; vk?: number }; off: PlatformOff[]; groups: PlanGroup[]; generations_remaining: number; medical_level: 'none' | 'maybe' | 'required';
   marking_confirmed: boolean; ready_to_launch: boolean; blockers: string[]; launch_error?: string | null; status: 'draft' | 'launched';
 }
+// Групп Директа не больше пяти: по одной на услугу описания, услуги с одинаковой ключевой фразой — одна группа.
+export const maxDirectGroups = 5;
+/** Сколько групп Директа дало бы описание без потолка: услуги делятся, как на сервере (строки, «;», запятые вне цифр
+ *  и скобок), фраза группы — первые четыре слова услуги. */
+export function directServiceCount(services: string): number {
+  const names = services.split(/[\n;]|(?:(?<!\d),|,(?!\d))(?![^()]*\))/).map((item) => item.replace(/^[\s\-•]+|[\s\-•]+$/g, '')).filter(Boolean);
+  return new Set(names.map((name) => name.split(/\s+/).slice(0, 4).join(' ').toLowerCase())).size;
+}
 export async function getPlan(signal?: AbortSignal): Promise<Plan> {
   if (mockEnabled) return (await import('./mocks')).mockSetupPlan();
   return setupGet('/api/plan', signal);

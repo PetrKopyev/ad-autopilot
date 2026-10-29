@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { SessionProvider } from '../api/session';
-import { ServiceVkPage } from './ServicePage';
+import { ServiceErrorPage, ServicePolicyPage, ServiceVkPage } from './ServicePage';
 
 const fetchMock = vi.fn<typeof fetch>();
 let vkOauth = false;
@@ -54,4 +54,27 @@ it('после подключения по ключу формы скрываю�
   expect(screen.queryByLabelText(copy.launchFlow.clientIdLabel)).toBeNull();
   expect(screen.queryByRole('button', { name: copy.launchFlow.keyConnect })).toBeNull();
   expect(calls()).toContain('/api/accounts/vk/key');
+});
+
+it('ключ API — с подсказкой у поля, без неё поле не описано', async () => {
+  renderPage();
+  const secret = await screen.findByLabelText(copy.launchFlow.keyLabel);
+  expect(document.getElementById(secret.getAttribute('aria-describedby')!)!.textContent).toBe(copy.launchFlow.keyHint);
+  expect(screen.getByLabelText(copy.launchFlow.clientIdLabel).getAttribute('aria-describedby')).toBeNull();
+});
+
+it('помощь с подключением — три случая, у каждого заголовок и что делать', () => {
+  render(<MemoryRouter><ServiceErrorPage /></MemoryRouter>);
+  for (const title of [copy.service.reauthTitle, copy.service.lowBalanceTitle, copy.service.unavailableTitle]) {
+    expect(screen.getByRole('region', { name: title })).toBeTruthy();
+  }
+  expect(within(screen.getByRole('region', { name: copy.service.reauthTitle })).getByRole('button', { name: copy.setup.accounts.connectDirect })).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: copy.service.lowBalanceTitle })).getByRole('link', { name: copy.launchFlow.openDirect }).getAttribute('href')).toBe('https://direct.yandex.ru/');
+});
+
+it('политика: вошедшему — кто вошёл и «Выйти»', async () => {
+  render(<MemoryRouter><SessionProvider><ServicePolicyPage /></SessionProvider></MemoryRouter>);
+  expect(screen.getByRole('heading', { level: 1, name: copy.service.policyTitle })).toBeTruthy();
+  expect(await screen.findByText(copy.launchFlow.signedIn('owner'))).toBeTruthy();
+  expect(screen.getByRole('button', { name: copy.launchFlow.logout })).toBeTruthy();
 });

@@ -1,18 +1,33 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { BudgetRing, Button, Card, EmptyState, ErrorBanner, StatusBadge } from '../components';
+import { AdStatusBadge, BudgetRing, Button, EmptyState, ErrorBanner, MetricTile, PageHeader, PanelCard, PlatformBadge, SegmentedControl, Sparkline, StatusBadge } from '../components';
+import type { StatusTone } from '../components';
 import { copy } from '../copy';
-import { getAutopilotStatus, getHistory, getSummary, stopAllAds } from '../api/screens';
+import { getAds, getAutopilotStatus, getDaily, getExperiments, getSummary, stopAllAds } from '../api/screens';
+import { getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
+import { answerClientQuestion, getClientQuestions, type ClientQuestion } from '../api/clients';
 import { getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
-import { displayDate, displayDateTime, justNow } from '../format';
-import { ClientsSummary, DemoNotice, PeriodPicker, Sources, SummaryFigures } from './StatsShared';
+import type { Ad, AdStatus, Daily, Experiment, Summary } from '../api/types';
+import { displayClock, displayDate, displayDateTime, justNow } from '../format';
+import { DemoNotice, NullableMoney, platformName } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { formatMoney } from '../components/Money';
 import { resumeAutopilot } from '../api/settings';
 import './Home.css';
+
+const labels = copy.historyScreen;
+const journalSize = 5;
+const armLetters = ['А', 'Б'];
+// Статус кампании — самый «живой» из статусов её объявлений: работает хоть одно — кампания работает.
+const statusOrder: AdStatus[] = ['active', 'moderation', 'rejected', 'paused_owner', 'paused_auto', 'draft', 'archived'];
+const kindTone: Record<HistoryEntry['kind'], StatusTone | 'accent'> = {
+  pause: 'danger', resume: 'success', launch: 'success', budget: 'accent', text: 'info', image: 'info',
+  experiment_verdict: 'info', marking: 'neutral', revert: 'neutral',
+};
+const experimentTone: Record<Experiment['status'], StatusTone> = { running: 'info', concluded: 'success', cancelled: 'neutral' };
 
 function Notifications({ items, changed }: { items: AppNotification[]; changed: () => void }) {
   const [busy, setBusy] = useState<number>();
@@ -23,22 +38,204 @@ function Notifications({ items, changed }: { items: AppNotification[]; changed: 
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(undefined); }
   }
-  return <Card className="page-stack" aria-labelledby="notifications-title"><h2 id="notifications-title">{copy.home.notifications}</h2>
+  return <PanelCard title={copy.home.notifications} titleId="notifications-title"><div className="page-stack">
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {items.map((item) => <article key={item.id} className={`home-notice home-notice--${item.level}`}>
       <h3>{item.title}</h3>
       <time className="muted" dateTime={item.created_at}>{displayDateTime(item.created_at)}</time>
       <p>{item.text}</p>
-      <div className="actions"><Button variant="secondary" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button></div>
+      <div className="actions"><Button variant="secondary" size="small" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button></div>
     </article>)}
-  </Card>;
+  </div></PanelCard>;
+}
+
+function BudgetTile({ summary }: { summary: Summary }) {
+  const { budget } = summary;
+  return <div className="metric-tile metric-tile--wide home-budget">
+    <p className="metric-tile__label">{copy.home.budgetTile}</p>
+    <BudgetRing spentKopecks={budget.spent_kop} budgetKopecks={budget.budget_kop} daysRemaining={budget.days_remaining} />
+    <p className="metric-tile__hint">{copy.home.budgetLeft(formatMoney(budget.remaining_kop))}</p>
+  </div>;
+}
+
+function Tiles({ summary, daily }: { summary: Summary; daily: Daily['items'] | null }) {
+  const window = summary.clients_window;
+  return <section className="metric-tiles home-tiles" aria-label={copy.statistics.total}>
+    <BudgetTile summary={summary} />
+    <MetricTile label={copy.home.leads} value={summary.leads.toLocaleString('ru-RU')}
+      chart={daily && <Sparkline values={daily.map((day) => day.leads)} />}
+      hint={copy.home.periodSpent(formatMoney(summary.cost_kop))} />
+    <MetricTile label={copy.home.leadPrice} value={summary.cost_per_lead_kop === null ? '—' : formatMoney(summary.cost_per_lead_kop)}
+      chart={daily && <Sparkline values={daily.map((day) => day.cost_per_lead_kop)} tone="info" />}
+      hint={summary.cost_per_lead_kop === null ? copy.screens.noPrice : copy.screens.dates(displayDate(summary.from), displayDate(summary.to))} />
+    <MetricTile label={copy.home.clients} value={window.clients === null ? '—' : window.clients.toLocaleString('ru-RU')}
+      hint={copy.home.clientsHint(window.answered_weeks, window.answered_weeks + window.unknown_weeks)} />
+    <MetricTile label={copy.home.clientPrice} value={window.cost_per_client_kop === null ? '—' : formatMoney(window.cost_per_client_kop)}
+      hint={window.cost_per_client_kop === null ? copy.screens.noPrice : copy.screens.dates(displayDate(window.from), displayDate(window.to))} />
+  </section>;
+}
+
+function ClientQuestionRow({ question, answered }: { question: ClientQuestion; answered: () => void }) {
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const number = value.trim() === '' ? NaN : Number(value);
+  const valid = Number.isInteger(number) && number >= 0 && number <= question.leads_count;
+  async function send(answer: number | 'unknown') {
+    setBusy(true); setError(undefined);
+    try { await answerClientQuestion(question.id, answer); answered(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); setBusy(false); }
+  }
+  return <form className="home-need__row" onSubmit={(event) => { event.preventDefault(); if (valid) void send(number); }}>
+    <p className="home-need__text">{copy.clients.question(question.leads_count)}
+      <small>{copy.clientsScreen.week(displayDate(question.week_start), displayDate(question.week_end))}. {copy.home.clientsWhy}</small></p>
+    <input className="input mono home-need__input" type="number" inputMode="numeric" min={0} max={question.leads_count} step={1} value={value}
+      aria-label={copy.clientsScreen.countLabel} aria-describedby={`home-range-${question.id}`} aria-invalid={value !== '' && !valid}
+      onChange={(event) => setValue(event.target.value)} />
+    <Button type="submit" disabled={busy || !valid}>{busy ? copy.clientsScreen.sending : copy.clientsScreen.send}</Button>
+    <Button variant="secondary" disabled={busy} onClick={() => void send('unknown')}>{copy.clients.unknown}</Button>
+    <p className="visually-hidden" id={`home-range-${question.id}`}>{copy.clientsScreen.range(question.leads_count)}</p>
+    {error && <div className="home-need__error"><ErrorBanner message={error} onDismiss={() => setError(undefined)} /></div>}
+  </form>;
+}
+
+function campaignRows(ads: Ad[]) {
+  const byCampaign = ads.reduce((map, ad) => map.set(ad.campaign_id, [...(map.get(ad.campaign_id) ?? []), ad]), new Map<number, Ad[]>());
+  return [...byCampaign.entries()].map(([id, items]) => {
+    const status = statusOrder.find((value) => items.some((ad) => ad.status === value)) ?? 'draft';
+    const cost = items.reduce((sum, ad) => sum + ad.metrics.cost_kop, 0);
+    const leads = items.reduce((sum, ad) => sum + ad.metrics.leads, 0);
+    return { id, name: items[0].campaign_name, platform: items[0].platform, status, cost, leads, price: leads ? Math.round(cost / leads) : null,
+      reason: status === 'active' ? null : items.find((ad) => ad.status === status && ad.reason)?.reason ?? null };
+  });
+}
+
+function Campaigns({ ads }: { ads: Ad[] }) {
+  if (!ads.length) return <EmptyState title={copy.home.noCampaigns} description={copy.screens.noAdsHint} />;
+  return <div className="table-scroll"><table className="table table--stack home-campaigns">
+    <thead><tr><th scope="col">{copy.screens.rowLabels.campaign}</th><th scope="col" className="text">{copy.screens.status}</th>
+      <th scope="col">{copy.home.spent}</th><th scope="col">{copy.home.leads}</th><th scope="col">{copy.home.leadPrice}</th></tr></thead>
+    <tbody>{campaignRows(ads).map((row) => <tr key={row.id} className={row.status === 'active' || row.status === 'moderation' ? undefined : 'home-campaigns__off'}>
+      <td><strong className="home-campaigns__name">{row.name}</strong><PlatformBadge platform={row.platform} />
+        {row.reason && <span className="home-campaigns__why">{row.reason}</span>}</td>
+      <td className="text" data-label={copy.screens.status}><AdStatusBadge status={row.status} /></td>
+      <td className="num" data-label={copy.home.spent}>{formatMoney(row.cost)}</td>
+      <td className="num" data-label={copy.home.leads}>{row.leads.toLocaleString('ru-RU')}</td>
+      <td className="num" data-label={copy.home.leadPrice}><NullableMoney value={row.price} /></td>
+    </tr>)}</tbody>
+  </table></div>;
+}
+
+function Experiments({ items }: { items: Experiment[] }) {
+  if (!items.length) return <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />;
+  return <ul className="home-ab">{items.map((experiment) => <li key={experiment.id} className="home-ab__item">
+    <div className="home-ab__head"><h3>{experiment.title}</h3>
+      <StatusBadge tone={experimentTone[experiment.status]}>{copy.screens.experimentStates[experiment.status]}</StatusBadge></div>
+    <p className="home-ab__question">{experiment.comparing}</p>
+    <ol className="home-ab__arms">{experiment.arms.map((arm, index) => <li key={armLetters[index]}>
+      <span className="home-ab__letter" aria-label={copy.ads.arm(armLetters[index])}>{armLetters[index]}</span>
+      {arm.image && <img src={arm.image} alt={copy.ads.armImage(armLetters[index])} loading="lazy" />}
+      <span>«{arm.title}». {arm.text}</span>
+    </li>)}</ol>
+    {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
+    {experiment.conclusion && <p className="home-ab__verdict"><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion}</p>}
+  </li>)}</ul>;
+}
+
+function entryTitle(entry: HistoryEntry, all: HistoryEntry[]): string {
+  if (entry.kind !== 'revert') return labels.kinds[entry.kind];
+  const original = all.find((item) => item.id === entry.reverts_id);
+  if (!original) return labels.revertedPlain;
+  if (original.kind === 'pause') return labels.resumedAfterStop;
+  const text = labels.kinds[original.kind];
+  return labels.revertedLine(text.charAt(0).toLowerCase() + text.slice(1));
+}
+function figures(entry: HistoryEntry): string[] {
+  return (Object.keys(labels.numberLabels) as (keyof typeof labels.numberLabels)[])
+    .filter((key) => typeof entry.evidence[key] === 'number')
+    .map((key) => {
+      const value = entry.evidence[key] as number;
+      return `${labels.numberLabels[key]}: ${key.endsWith('_kop') ? formatMoney(value) : value.toLocaleString('ru-RU')}`;
+    });
+}
+
+function Journal({ items, now, changed }: { items: HistoryEntry[]; now: number | null; changed: () => void }) {
+  const [confirming, setConfirming] = useState<number>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  async function revert(id: number) {
+    setBusy(true); setError(undefined);
+    try { await revertChange(id); setConfirming(undefined); changed(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
+    finally { setBusy(false); }
+  }
+  if (!items.length) return <EmptyState title={copy.screens.noHistory} description={labels.emptyDescription} />;
+  return <>
+    {error && <div className="home-log__error"><ErrorBanner message={error} onDismiss={() => setError(undefined)} /></div>}
+    <ol className="home-log">{items.map((entry) => {
+      const numbers = figures(entry);
+      // Отменить остановку — значит продолжить рекламу: так кнопка и подписана, как в истории.
+      const action = entry.kind === 'pause'
+        ? { button: labels.resume, title: labels.resumeTitle, yes: labels.resumeYes, no: labels.resumeNo, busy: labels.resuming }
+        : { button: copy.history.undo, title: labels.confirmTitle, yes: labels.confirmYes, no: labels.confirmNo, busy: labels.reverting };
+      return <li key={entry.id} className={`home-log__item home-log__item--${kindTone[entry.kind]}`}>
+        <time className="home-log__time mono" dateTime={entry.created_at}>
+          {justNow(entry.created_at, now) ? labels.justNow : <><span>{displayDate(entry.created_at).slice(0, 5)}</span> <span>{displayClock(entry.created_at)}</span></>}</time>
+        <div className="home-log__body">
+          <h3>{entryTitle(entry, items)}</h3>
+          <p>{entry.reason_text}</p>
+          {numbers.length > 0 && <p className="home-log__numbers mono">{numbers.join(' · ')}</p>}
+          <p className="home-log__meta">{labels.authors[entry.actor]}{entry.platform ? ` · ${platformName(entry.platform)}` : ''}</p>
+          {entry.status in labels.statuses && <StatusBadge>{labels.statuses[entry.status as keyof typeof labels.statuses]}</StatusBadge>}
+          {entry.can_revert && confirming !== entry.id && <div className="actions">
+            <Button variant="secondary" size="small" icon={entry.kind === 'pause' ? 'play' : 'undo'} onClick={() => setConfirming(entry.id)}>{action.button}</Button></div>}
+          {confirming === entry.id && <div className="home-log__confirm" role="group" aria-label={action.title}>
+            <strong>{action.title}</strong>
+            {entry.revert_warning && <p>{entry.revert_warning}</p>}
+            <div className="actions"><Button size="small" disabled={busy} onClick={() => void revert(entry.id)}>{busy ? action.busy : action.yes}</Button>
+              <Button variant="secondary" size="small" disabled={busy} onClick={() => setConfirming(undefined)}>{action.no}</Button></div>
+          </div>}
+        </div>
+      </li>;
+    })}</ol>
+  </>;
+}
+
+function Sources({ summary }: { summary: Summary }) {
+  const platforms = summary.sources.map((source) => source.platform);
+  return <footer className="home-sources" aria-label={copy.home.sourcesTitle}>
+    <p>{summary.sources.length
+      ? summary.sources.map((source) => copy.statistics.source(platformName(source.platform), displayDateTime(source.fetched_at))).join(' · ')
+      : copy.screens.noSources} · {copy.statistics.provisional}</p>
+    <div className="home-sources__links">
+      {platforms.includes('direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}</a>}
+      {platforms.includes('vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}</a>}
+    </div>
+  </footer>;
+}
+
+/** Средний расход за прошедшие дни месяца (сегодня включительно) и бюджет месяца, разложенный на все его дни. */
+function pace(summary: Summary) {
+  const [year, month] = summary.budget.month.split('-').map(Number);
+  const days = new Date(year, month, 0).getDate();
+  const passed = days - summary.budget.days_remaining + 1;
+  if (passed < 1 || summary.budget.budget_kop === 0) return null;
+  return copy.home.pace(formatMoney(Math.round(summary.budget.spent_kop / passed)), formatMoney(Math.round(summary.budget.budget_kop / days)));
 }
 
 export function HomePage() {
   const [choice, setChoice] = useState<PeriodChoice>('month');
-  const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod(choice, signal), signal), [choice]));
+  const board = useResource(useCallback(async (signal: AbortSignal) => {
+    const period = await getPeriod(choice, signal);
+    // График — дополнение к плиткам: без ряда по дням плитки показываются без него.
+    const [summary, daily] = await Promise.all([getSummary(period, signal), getDaily(period, signal).then((value) => value.items).catch(() => null)]);
+    return { summary, daily };
+  }, [choice]));
+  const ads = useResource(useCallback(async (signal: AbortSignal) => getAds(signal, await getPeriod(choice, signal)), [choice]));
   const autopilot = useResource(getAutopilotStatus);
-  const history = useResource(getHistory);
+  const history = useResource(useCallback((signal: AbortSignal) => getHistoryPage({ platform: '', actor: '' }, journalSize, signal), []));
+  const experiments = useResource(getExperiments);
+  const questions = useResource(getClientQuestions);
   const notifications = useResource(getNotifications);
   const dialog = useRef<HTMLDialogElement>(null);
   const stopLock = useRef(false);
@@ -50,6 +247,7 @@ export function HomePage() {
   const [resumeWarning, setResumeWarning] = useState<string | null>(null);
   const now = useBusinessNow();
   const status = autopilot.data;
+  const summary = board.data?.summary;
   // Пока время бизнеса неизвестно, показываем время проверки, а не «N минут назад», и не судим о давности.
   const minutes = status?.last_check_at && now !== null ? Math.max(0, Math.floor((now - Date.parse(status.last_check_at)) / 60000)) : null;
   const stale = status?.status === 'running' && now !== null && (minutes === null || minutes > 15);
@@ -57,66 +255,94 @@ export function HomePage() {
     : minutes === null ? copy.home.checkedAt(displayDateTime(status.last_check_at)) : copy.home.working(minutes);
   const statusText = status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
-      : status?.status === 'draft' ? copy.screens.draft : copy.home.paused;
+      : status?.status === 'draft' ? copy.screens.draft : copy.home.pausedLine;
+  const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at);
+  const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' ? 'success' : 'warning';
+  const question = questions.data?.items.find((item) => !item.answered_at);
+  const attention = status?.needs_attention.filter((item) => !(question && item.destination === 'clients')) ?? [];
+  const canSwitch = (status?.status === 'running' || status?.status === 'paused') && !stopping && !resuming;
+  function reloadAll() { board.reload(); ads.reload(); autopilot.reload(); history.reload(); experiments.reload(); questions.reload(); notifications.reload(); }
+  function askStop() { setStopError(undefined); dialog.current?.showModal(); }
+  function resume() {
+    setResuming(true); setResumeError(''); setResumeWarning(null);
+    void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); autopilot.reload(); history.reload(); ads.reload(); })
+      .catch((reason: unknown) => setResumeError(reason instanceof Error ? reason.message : copy.errors.generic))
+      .finally(() => setResuming(false));
+  }
   async function stop() {
     if (stopLock.current) return;
     stopLock.current = true; setStopping(true); setStopError(undefined);
-    try { await stopAllAds(); setStopped(true); dialog.current?.close(); autopilot.reload(); history.reload(); }
+    try { await stopAllAds(); setStopped(true); dialog.current?.close(); autopilot.reload(); history.reload(); ads.reload(); }
     catch (error) { setStopError(error instanceof Error ? error.message : copy.errors.generic); }
     finally { stopLock.current = false; setStopping(false); }
   }
-  return <div className="page-stack">
-    <div className="home-heading"><div className="page-heading"><h1>{copy.home.title}</h1><p className="muted">{copy.screens.intro}</p></div>
-      <Button variant="danger" onClick={() => { setStopError(undefined); dialog.current?.showModal(); }} disabled={stopping || stopped || status?.status === 'paused'}>{copy.home.stopAll}</Button>
-    </div>
+  return <div className="page-stack home">
+    <PageHeader title={copy.home.title} description={copy.screens.intro} actions={<>
+      {status && <SegmentedControl label={copy.autopilotMode.label} value={status.status === 'running' ? 'working' : 'paused'} disabled={!canSwitch}
+        options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]}
+        onChange={(mode) => { if (mode === 'paused') askStop(); else resume(); }} />}
+      <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped || status?.status === 'paused'}>{copy.home.stopAll}</Button>
+    </>} />
     <DemoNotice />
-    <DemoPanel changed={() => { summary.reload(); autopilot.reload(); history.reload(); notifications.reload(); }} />
+    <DemoPanel changed={reloadAll} />
+    <section className={`home-state home-state--${tone}`} aria-label={copy.screens.status}>
+      <span className="home-state__light" aria-hidden="true" />
+      <div className="home-state__text">
+        {autopilot.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
+        {status && <p>{onTrack && <><strong>{copy.home.onTrack}</strong>{' '}</>}
+          {onTrack && summary && pace(summary) && <><span>{pace(summary)}</span>{' '}</>}
+          <span className={onTrack ? 'home-state__check' : 'home-state__headline'}>{statusText}</span></p>}
+      </div>
+      <SegmentedControl dark label={copy.statistics.period} value={choice} onChange={setChoice}
+        options={(Object.keys(copy.screens.periods) as PeriodChoice[]).map((value) => ({ value, label: copy.screens.periods[value], shortLabel: copy.screens.shortPeriods[value] }))} />
+    </section>
+    {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
+    {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
+    {stopped && <p role="status" className="notice">{copy.screens.stopped}</p>}
+    {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
+    {resumeWarning && <div className="notice" role="status"><p>{resumeWarning}</p></div>}
+    {board.loading && <div className="metric-tiles" aria-hidden="true">{[0, 1, 2, 3].map((index) => <div key={index} className={`metric-tile${index === 0 ? ' metric-tile--wide' : ''}`}>
+      <span className="skeleton home-skeleton" /></div>)}</div>}
+    {board.loading && <p className="loading visually-hidden" role="status">{copy.screens.loading}</p>}
+    {board.error && <ErrorBanner message={board.error} onRetry={board.reload} />}
+    {summary && <>
+      <Tiles summary={summary} daily={board.data?.daily ?? null} />
+      {summary.budget.spent_kop > summary.budget.reported_kop && <p className="muted home-fresher">{copy.budget.fresher(formatMoney(summary.budget.reported_kop))}</p>}
+    </>}
+    {(question || attention.length > 0) && <section className="home-need" aria-labelledby="home-need-title">
+      <h2 id="home-need-title" className="home-need__tag"><span aria-hidden="true" />{copy.home.needYou}</h2>
+      <div className="home-need__list">
+        {question && <ClientQuestionRow key={question.id} question={question} answered={() => { questions.reload(); board.reload(); autopilot.reload(); }} />}
+        {attention.map((item) => <div className="home-need__row" key={item.id}>
+          <p className="home-need__text">{item.title}<small>{item.description}</small></p>
+          <Link className="button button--secondary" to={`/${item.destination}`}>{copy.screens.open}</Link>
+        </div>)}
+      </div>
+    </section>}
     {/* Уведомления — дополнение к главной: если их нет или они не загрузились, блока нет. */}
     {notifications.data && notifications.data.length > 0 && <Notifications items={notifications.data} changed={notifications.reload} />}
-    {stopped && <p role="status">{copy.screens.stopped}</p>}
-    <Card className="page-stack">
-      {autopilot.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-      {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
-      {status && <StatusBadge tone={stale ? 'danger' : status.status === 'running' ? 'success' : 'warning'}>{statusText}</StatusBadge>}
-      {status?.status === 'paused' && <Button disabled={resuming} onClick={() => {
-        setResuming(true); setResumeError(''); setResumeWarning(null);
-        void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); autopilot.reload(); history.reload(); })
-          .catch((reason: unknown) => setResumeError(reason instanceof Error ? reason.message : copy.errors.generic))
-          .finally(() => setResuming(false));
-      }}>{copy.settings.resume}</Button>}
-      {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
-      {resumeWarning && <div className="notice" role="status"><p>{resumeWarning}</p></div>}
-      {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
-      {summary.data && <BudgetRing spentKopecks={summary.data.budget.spent_kop} budgetKopecks={summary.data.budget.budget_kop} daysRemaining={summary.data.budget.days_remaining} />}
-      {summary.data && summary.data.budget.spent_kop > summary.data.budget.reported_kop && <p className="muted">{copy.budget.fresher(formatMoney(summary.data.budget.reported_kop))}</p>}
-    </Card>
-    <PeriodPicker value={choice} onChange={setChoice} />
-    {summary.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-    {summary.error && <ErrorBanner message={summary.error} onRetry={summary.reload} />}
-    {summary.data && <>
-      <p className="muted">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</p>
-      <SummaryFigures summary={summary.data} />
-      {summary.data.sources.length === 0 && <Card><EmptyState title={copy.screens.noStats} description={copy.screens.noStatsHint} /></Card>}
-      <ClientsSummary summary={summary.data} />
-      <Sources sources={summary.data.sources} />
-    </>}
     <div className="home-columns">
-      <Card className="page-stack"><h2>{copy.home.needsAttention}</h2>
-        {autopilot.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-        {status && (status.needs_attention.length ? status.needs_attention.map((item) => <div className="home-list-item" key={item.id}>
-          <h3>{item.title}</h3><p>{item.description}</p><Link to={`/${item.destination}`}>{copy.screens.open}</Link>
-        </div>) : <EmptyState title={copy.screens.noAttention} description={copy.screens.noAttentionHint} />)}
-      </Card>
-      <Card className="page-stack"><h2>{copy.home.recent}</h2>
-        {history.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-        {history.error && <ErrorBanner message={history.error} onRetry={history.reload} />}
-        {history.data && (history.data.items.length ? history.data.items.slice(0, 3).map((item) => <div className="home-list-item" key={item.id}>
-          <time className="muted" dateTime={item.created_at}>{justNow(item.created_at, now) ? copy.historyScreen.justNow : displayDateTime(item.created_at)}</time>
-          <p>{item.reason_text}</p><StatusBadge>{copy.screens.historyStates[item.status as keyof typeof copy.screens.historyStates] ?? copy.screens.pending}</StatusBadge>
-        </div>) : <EmptyState title={copy.screens.noHistory} description={copy.screens.historyHint} />)}
-        <Link to="/history">{copy.screens.allHistory}</Link>
-      </Card>
+      <div className="home-columns__main">
+        <PanelCard title={copy.home.campaigns} titleId="home-campaigns-title" flush
+          action={<Link to="/ads">{copy.home.allAds} <span aria-hidden="true">→</span></Link>}>
+          {ads.loading && <p className="loading home-panel-pad" role="status">{copy.screens.loading}</p>}
+          {ads.error && <div className="home-panel-pad"><ErrorBanner message={ads.error} onRetry={ads.reload} /></div>}
+          {ads.data && <Campaigns ads={ads.data.items} />}
+        </PanelCard>
+        <PanelCard title={copy.ads.experiments} titleId="home-ab-title">
+          {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
+          {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
+          {experiments.data && <Experiments items={experiments.data.items} />}
+        </PanelCard>
+      </div>
+      <PanelCard title={copy.home.journal} titleId="home-log-title" flush
+        action={<Link to="/history">{copy.home.allHistory} <span aria-hidden="true">→</span></Link>}>
+        {history.loading && <p className="loading home-panel-pad" role="status">{copy.screens.loading}</p>}
+        {history.error && <div className="home-panel-pad"><ErrorBanner message={history.error} onRetry={history.reload} /></div>}
+        {history.data && <Journal items={history.data.items} now={now} changed={() => { history.reload(); autopilot.reload(); ads.reload(); board.reload(); }} />}
+      </PanelCard>
     </div>
+    {summary && <Sources summary={summary} />}
     <dialog ref={dialog} className="home-confirm" aria-labelledby="stop-title" aria-describedby="stop-description" onCancel={(event) => { if (stopping) event.preventDefault(); }}>
       <div className="page-stack"><h2 id="stop-title">{copy.screens.stopTitle}</h2><p id="stop-description">{copy.screens.stopDescription}</p>
         {stopError && <ErrorBanner message={stopError} />}

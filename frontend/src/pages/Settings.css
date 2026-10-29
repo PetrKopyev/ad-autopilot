@@ -1,0 +1,36 @@
+/* Настройки: две колонки панелей; на телефоне — одна. */
+.settings-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.settings-column { display: grid; gap: var(--space-4); min-width: 0; }
+.settings-hint { display: flex; align-items: flex-start; gap: var(--space-2); color: var(--color-muted); font-size: .9rem; }
+.settings-hint .icon { width: 18px; height: 18px; margin-top: 1px; color: var(--color-success); }
+.settings textarea.input { min-height: 84px; }
+.settings .actions .button { flex: 0 1 auto; overflow-wrap: normal; }
+.settings-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); }
+
+.settings .check { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; font-weight: 700; cursor: pointer; }
+.settings .check input { flex: 0 0 20px; width: 20px; height: 20px; margin: 0; accent-color: var(--color-ink); cursor: pointer; }
+.settings-check { display: grid; gap: 2px; }
+.settings-check .field__hint { padding-left: 32px; }
+
+.settings-accounts { display: grid; margin: 0; padding: 0; list-style: none; border: 1px solid var(--color-line); border-radius: var(--radius-small); }
+.settings-account { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 12px 14px; }
+.settings-account + .settings-account { border-top: 1px solid var(--color-line); }
+.settings-account__name { display: grid; gap: 6px; min-width: 0; }
+.settings-account__name h3 { display: flex; align-items: center; gap: var(--space-2); }
+.settings-account__name .platform-badge__dot { width: 8px; height: 8px; }
+.platform-badge__dot.platform-badge--direct { background: var(--color-direct); }
+.platform-badge__dot.platform-badge--vk { background: var(--color-vk); }
+
+.settings-stored { display: grid; gap: 4px; padding: 12px 14px; border-radius: var(--radius-small); background: var(--color-surface-muted); }
+.settings-stored__name { font-weight: 700; }
+
+.settings-danger { border-color: #f4c4bf; }
+.settings-danger .panel__head { border-bottom-color: #f4c4bf; background: var(--color-danger-soft); }
+.settings-danger .panel__head h2 { color: var(--color-danger); }
+
+@media (max-width: 1100px) { .settings-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) {
+  .settings-pair { grid-template-columns: minmax(0, 1fr); }
+  .settings .actions .button, .settings-account .actions { flex: 1 1 100%; }
+  .settings-account .actions .button { flex: 1 1 140px; }
+}

@@ -81,3 +81,12 @@ it('остановленное вами объявление подписано 
   expect(screen.queryByText(/Остановлено вами:/)).toBeNull();
   expect(screen.getByText(copy.screens.adPeriod(copy.screens.dates('21.10.2026', '03.11.2026')))).toBeTruthy();
 });
+
+it('период цифр подписан один раз на всю страницу, у объявления — кнопка «Включить»', async () => {
+  const second: Ad = { ...ad, id: 8, title: 'Педикюр', status: 'active', reason: null };
+  await show('text', [{ title: 'Маникюр', text, image: null }, { title: 'Маникюр', text, image: null }], [ad, second]);
+  expect(screen.getAllByText(/^Цифры за /)).toHaveLength(1);
+  expect(screen.getByRole('button', { name: copy.common.enable })).toBeTruthy();
+  expect(screen.getByRole('button', { name: copy.common.stop })).toBeTruthy();
+  expect(screen.getByText(copy.screens.because(copy.status.stoppedAuto, ad.reason!))).toBeTruthy();
+});

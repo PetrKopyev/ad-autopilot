@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { Card, EmptyState } from '../components';
+import { EmptyState, Icon, PageHeader } from '../components';
 import { copy } from '../copy';
+import './Service.css';
 
 export function PlaceholderPage({ title, description, children }: {
   title: string;
@@ -10,16 +11,20 @@ export function PlaceholderPage({ title, description, children }: {
 }) {
   return (
     <div className="page-stack">
-      <header className="page-heading"><h1>{title}</h1><p className="muted">{copy.common.placeholder}</p></header>
+      <PageHeader title={title} description={copy.common.placeholder} />
       {children}
-      <Card><EmptyState description={description} /></Card>
+      <section className="panel service-panel"><EmptyState description={description} /></section>
     </div>
   );
 }
 
 export function NotFoundPage() {
   return (
-    <Card><EmptyState title={copy.service.notFoundTitle} description={copy.service.notFoundDescription}
-      action={<Link className="button button--primary" to="/">{copy.service.goHome}</Link>} /></Card>
+    <div className="service-center">
+      <section className="panel service-panel">
+        <EmptyState icon="pilot" title={copy.service.notFoundTitle} description={copy.service.notFoundDescription}
+          action={<Link className="button button--primary" to="/"><Icon name="home" />{copy.service.goHome}</Link>} />
+      </section>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
-import { Fragment, useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router';
-import { Button, Card, ErrorBanner, RublesInput } from '../components';
+import { Button, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, SegmentedControl, StatusBadge, describedBy } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
@@ -12,7 +12,7 @@ import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import { useResource } from '../api/useResource';
 import { StopNotice } from './SetupShared';
-import './Setup.css';
+import './Settings.css';
 
 const labels = copy.settingsScreen;
 const descriptionKeys: DescriptionKey[] = ['services', 'prices', 'address', 'difference'];
@@ -43,8 +43,10 @@ function Status({ section }: { section: Section }) {
 function SaveButton({ section }: { section: Section }) {
   return <div className="actions"><Button type="submit" disabled={section.busy}>{section.busy ? labels.saving : labels.save}</Button></div>;
 }
-function Block({ title, children }: { title: string; children: ReactNode }) {
-  return <Card className="page-stack"><h2>{title}</h2>{children}</Card>;
+function Block({ id, title, hint, danger, children }: { id: string; title: string; hint?: ReactNode; danger?: boolean; children: ReactNode }) {
+  return <PanelCard title={title} titleId={`settings-${id}-title`} className={danger ? 'settings-danger' : undefined}>
+    <div className="page-stack">{hint && <p className="settings-hint">{hint}</p>}{children}</div>
+  </PanelCard>;
 }
 
 function DescriptionBlock({ business }: { business: BusinessSettings }) {
@@ -56,11 +58,15 @@ function DescriptionBlock({ business }: { business: BusinessSettings }) {
       { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: key === 'prices' ? '' : values[key].trim(), verified: true }])) as Description;
     void section.run(() => saveDescription(description), labels.saved);
   }
-  return <Block title={copy.settings.business}>
+  return <Block id="business" title={copy.settings.business} hint={labels.businessHint}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-      {descriptionKeys.filter((key) => key !== 'prices').map((key) => <Fragment key={key}><label className="field">{labels.description[key]}
-        <textarea value={values[key]} aria-describedby={key === 'services' ? 'settings-services-hint' : undefined} onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></label>
-        {key === 'services' && <p className="muted" id="settings-services-hint">{copy.setup.draft.servicesHint}</p>}</Fragment>)}
+      {descriptionKeys.filter((key) => key !== 'prices').map((key) => {
+        const id = `settings-${key}`;
+        const hint = key === 'services' ? copy.setup.draft.servicesHint : undefined;
+        return <Field key={key} id={id} label={labels.description[key]} hint={hint}>
+          <textarea id={id} className="input" rows={key === 'services' ? 6 : 3} value={values[key]} aria-describedby={describedBy(id, hint)}
+            onChange={(event) => setValues((value) => ({ ...value, [key]: event.target.value }))} /></Field>;
+      })}
       <Status section={section} /><SaveButton section={section} />
     </form>
   </Block>;
@@ -83,16 +89,19 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
       await saveBusinessSettings(autoContinue, averageKop);
     }, labels.saved);
   }
-  return <Block title={labels.budgetTitle}>
+  const budgetHint = budgetKop === null ? undefined : `${formatMoney(budgetKop)}. ${copy.settings.budgetHint}`;
+  const budgetError = budgetKop === null ? labels.budgetError : undefined;
+  return <Block id="budget" title={labels.budgetTitle} hint={<><Icon name="shield" />{copy.plan.promise}</>}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-      <label className="field">{labels.budgetLabel}
-        <RublesInput required max={maxBudgetRubles} value={budget} aria-invalid={budgetKop === null} aria-describedby="budget-help" onChange={setBudget} /></label>
-      <p className="muted" id="budget-help">{budgetKop === null ? labels.budgetError : `${formatMoney(budgetKop)}. ${copy.settings.budgetHint}`}</p>
-      <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
-      <p className="muted" id="continue-help">{labels.nextMonth}</p>
-      <label className="field">{labels.averageLabel}
-        <RublesInput max={maxBudgetRubles} value={average} aria-describedby="average-help" onChange={setAverage} /></label>
-      <p className="muted" id="average-help">{labels.averageHint}</p>
+      <Field id="settings-budget" label={labels.budgetLabel} hint={budgetHint} error={budgetError}>
+        <RublesInput id="settings-budget" className="input mono" required max={maxBudgetRubles} value={budget} aria-invalid={budgetKop === null}
+          aria-describedby={describedBy('settings-budget', budgetHint, budgetError)} onChange={setBudget} /></Field>
+      <div className="settings-check">
+        <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
+        <p className="field__hint" id="continue-help">{labels.nextMonth}</p>
+      </div>
+      <Field id="settings-average" label={labels.averageLabel} hint={labels.averageHint}>
+        <RublesInput id="settings-average" className="input mono" max={maxBudgetRubles} value={average} aria-describedby={describedBy('settings-average', labels.averageHint)} onChange={setAverage} /></Field>
       <Status section={section} />
       {warning && <div className="notice" role="status"><p>{warning}</p></div>}
       <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null}>{section.busy ? labels.saving : labels.save}</Button></div>
@@ -106,22 +115,24 @@ function AccountsBlock() {
   const [stopResult, setStopResult] = useState<StopResult>();
   const me = session.data;
   const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
-  return <Block title={copy.settings.accounts}>
-    <p className="muted">{labels.accountsHint}</p>
+  return <Block id="accounts" title={copy.settings.accounts} hint={labels.accountsHint}>
     {session.error && <ErrorBanner message={session.error} onRetry={session.reload} />}
     <Status section={section} />
     {stopResult && <StopNotice result={stopResult} />}
-    {me && <div className="account-grid">{platforms.map((platform) => {
+    {me && <ul className="settings-accounts">{platforms.map((platform) => {
       const account = me.accounts.find((item) => item.platform === platform.id);
-      return <Card key={platform.id} className="page-stack"><h3>{platform.name}</h3>
-        <p>{!account || account.status === 'revoked' ? copy.setup.accounts.disconnected
-          : account.status === 'ok' ? copy.setup.accounts.connected(account.external_login) : copy.setup.accounts.expired}</p>
+      const off = !account || account.status === 'revoked';
+      return <li key={platform.id} className="settings-account">
+        <div className="settings-account__name"><h3><span className={`platform-badge__dot platform-badge--${platform.id}`} aria-hidden="true" />{platform.name}</h3>
+          {off ? <StatusBadge>{copy.setup.accounts.disconnected}</StatusBadge>
+            : account.status === 'ok' ? <StatusBadge tone="success">{copy.setup.accounts.connected(account.external_login)}</StatusBadge>
+              : <StatusBadge tone="warning">{copy.setup.accounts.expired}</StatusBadge>}</div>
         <div className="actions">
           <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); }); }}>{!account || account.status === 'revoked' ? copy.settings.connect : copy.settings.reconnect}</Button>
           {account && account.status !== 'revoked' && <Button variant="secondary" disabled={section.busy}
             onClick={() => { setStopResult(undefined); void section.run(async () => { setStopResult(await disconnectAccount(account.id)); session.reload(); }); }}>{copy.settings.disconnect}</Button>}
-        </div></Card>;
-    })}</div>}
+        </div></li>;
+    })}</ul>}
   </Block>;
 }
 
@@ -148,17 +159,18 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
     }
     void section.run(async () => { await saveMarking(marking); setStored(maskMarking(marking)); setEditing(false); }, labels.markingSaved);
   }
-  return <Block title={copy.settings.marking}>
-    <p className="muted">{labels.markingHint}</p>
+  return <Block id="marking" title={copy.settings.marking} hint={labels.markingHint}>
     {editing ? <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-      <label className="field">{copy.setup.advertiser.type}<select value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
-        {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-      <label className="field">{copy.setup.advertiser.taxId}<input required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError}
-        aria-describedby={showInnError ? 'settings-inn-help' : undefined} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></label>
-      {showInnError && <p className="muted" id="settings-inn-help">{innError}</p>}
-      <label className="field">{copy.launchFlow.fullName}<input required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></label>
-      <label className="field">{copy.launchFlow.phone}<input type="tel" required value={marking.phone} onChange={(event) => set({ phone: event.target.value })} /></label>
-      <p className="muted">{copy.launchFlow.markingOverwrite}</p>
+      <div className="settings-pair">
+        <Field id="settings-subject" label={copy.setup.advertiser.type}><select id="settings-subject" className="input" value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
+          {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
+        <Field id="settings-inn" label={copy.setup.advertiser.taxId} error={showInnError ? innError : undefined}>
+          <input id="settings-inn" className="input mono" required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError}
+            aria-describedby={describedBy('settings-inn', undefined, showInnError)} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></Field>
+      </div>
+      <Field id="settings-name" label={copy.launchFlow.fullName}><input id="settings-name" className="input" required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></Field>
+      <Field id="settings-phone" label={copy.launchFlow.phone}><input id="settings-phone" className="input" type="tel" required value={marking.phone} onChange={(event) => set({ phone: event.target.value })} /></Field>
+      <p className="notice">{copy.launchFlow.markingOverwrite}</p>
       {(['direct', 'vk'] as const).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
         onChange={(event) => set({ confirmed_in_platform: { ...marking.confirmed_in_platform, [platform]: event.target.checked } })} />
         {platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
@@ -168,9 +180,11 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
         {stored && <Button variant="secondary" disabled={section.busy} onClick={() => { section.clear(); setEditing(false); }}>{labels.markingCancel}</Button>}
       </div>
     </form> : stored && <>
-      <p>{labels.markingAdvertiser(copy.launchFlow.subjectTypes[stored.subject_type], stored.name)}</p>
-      <p>{labels.markingStored(stored.inn_masked, stored.phone_masked)}</p>
-      <p className="muted">{confirmed.length ? labels.markingConfirmed(confirmed.map((platform) => copy.setup.accounts[platform]).join(', ')) : labels.markingNotConfirmed}</p>
+      <div className="settings-stored">
+        <p className="settings-stored__name">{labels.markingAdvertiser(copy.launchFlow.subjectTypes[stored.subject_type], stored.name)}</p>
+        <p>{labels.markingStored(stored.inn_masked, stored.phone_masked)}</p>
+      </div>
+      <StatusBadge tone={confirmed.length ? 'success' : 'warning'}>{confirmed.length ? labels.markingConfirmed(confirmed.map((platform) => copy.setup.accounts[platform]).join(', ')) : labels.markingNotConfirmed}</StatusBadge>
       <Status section={section} />
       <div className="actions"><Button variant="secondary" onClick={edit}>{labels.markingEdit}</Button></div>
     </>}
@@ -183,14 +197,18 @@ function AutopilotBlock() {
   const state = status.data?.status;
   const paused = state === 'paused' || state === 'budget_stop';
   const [warning, setWarning] = useState<string | null>(null);
-  return <Block title={labels.autopilot}>
+  function toggle() {
+    void section.run(async () => { if (paused) setWarning(await resumeAutopilot()); else { setWarning(null); await pauseAutopilot(); } status.reload(); });
+  }
+  return <Block id="autopilot" title={labels.autopilot}>
+    {status.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
-    {state && <p>{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
+    {state && state !== 'draft' && <SegmentedControl label={copy.autopilotMode.label} value={paused ? 'paused' : 'working'} disabled={section.busy}
+      onChange={(mode) => { if ((mode === 'paused') !== paused) toggle(); }}
+      options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]} />}
+    {state && <p className="settings-hint">{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
     <Status section={section} />
     {warning && <div className="notice" role="status"><p>{warning}</p></div>}
-    {state && state !== 'draft' && <div className="actions"><Button variant={paused ? 'primary' : 'secondary'} disabled={section.busy}
-      onClick={() => void section.run(async () => { if (paused) setWarning(await resumeAutopilot()); else { setWarning(null); await pauseAutopilot(); } status.reload(); })}>
-      {paused ? copy.settings.resume : labels.pause}</Button></div>}
   </Block>;
 }
 
@@ -199,15 +217,14 @@ function DeleteBlock() {
   const navigate = useNavigate();
   const [word, setWord] = useState('');
   const confirmed = word.trim().toLowerCase() === labels.deleteWord;
-  return <Block title={labels.deleteTitle}>
-    <p>{labels.deleteHint}</p>
+  return <Block id="delete" title={labels.deleteTitle} hint={labels.deleteHint} danger>
     <form className="page-stack" onSubmit={(event) => {
       event.preventDefault();
       // Итог остановки рекламы показываем на странице входа: после удаления владелец попадает туда, а сессию она
       // перечитывает сама.
       if (confirmed) void section.run(async () => { navigate('/login', { state: { stopResult: await deleteMyData() } }); });
     }}>
-      <label className="field">{labels.deleteLabel}<input autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></label>
+      <Field id="settings-delete" label={labels.deleteLabel}><input id="settings-delete" className="input" autoComplete="off" value={word} onChange={(event) => setWord(event.target.value)} /></Field>
       <Status section={section} />
       <div className="actions"><Button type="submit" variant="danger" disabled={!confirmed || section.busy}>{labels.deleteButton}</Button></div>
     </form>
@@ -216,16 +233,17 @@ function DeleteBlock() {
 
 export function SettingsPage() {
   const business = useResource(useCallback((signal: AbortSignal) => getBusiness(signal), []));
-  return <div className="page-stack launch-flow">
-    <h1>{copy.settings.title}</h1>
-    <p className="muted">{labels.intro}</p>
+  return <div className="page-stack settings">
+    <PageHeader title={copy.settings.title} description={labels.intro} />
     {business.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {business.error && <ErrorBanner message={business.error} onRetry={business.reload} />}
-    {business.data && <>
-      <BudgetBlock business={business.data} /><DescriptionBlock business={business.data} />
-      <AccountsBlock /><MarkingBlock business={business.data} />
-      <Block title={copy.settings.license}><p>{labels.licenseText}</p></Block>
-      <AutopilotBlock /><DeleteBlock />
-    </>}
+    {business.data && <div className="settings-layout">
+      <div className="settings-column"><BudgetBlock business={business.data} /><DescriptionBlock business={business.data} /></div>
+      <div className="settings-column">
+        <AutopilotBlock /><AccountsBlock /><MarkingBlock business={business.data} />
+        <Block id="license" title={copy.settings.license}><p className="settings-hint">{labels.licenseText}</p></Block>
+        <DeleteBlock />
+      </div>
+    </div>}
   </div>;
 }

@@ -99,3 +99,12 @@ it('на странице входа одна ссылка на политику
   expect(links[0].textContent).toBe(copy.login.policy);
   expect(screen.queryByRole('link', { name: copy.login.title })).toBeNull();
 });
+
+it('рядом с входом — что сделает автопилот, тремя пунктами', async () => {
+  renderGuestLogin();
+  await screen.findByRole('button', { name: copy.login.demo });
+  const pitch = screen.getByRole('region', { name: copy.login.pointsLabel });
+  expect(pitch.textContent).toContain(copy.login.headline);
+  expect(pitch.querySelectorAll('li')).toHaveLength(3);
+  expect(screen.getByRole('heading', { level: 1, name: copy.login.title })).toBeTruthy();
+});

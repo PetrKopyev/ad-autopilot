@@ -103,6 +103,7 @@ export function mockHistory() {
 // Onboarding and running screens share the business budget and account state.
 import type { AccountCheck, BudgetHint, Business, BusinessInput, Description, Marking, Me, SiteCheck, StopResult } from './setup';
 import type { Plan, PlanAsset } from './plan';
+import type { Forecast } from './forecast';
 import type { HistoryEntry, HistoryFilter, HistoryPage } from './history';
 import type { ClientQuestion, ClientQuestions } from './clients';
 import { maskMarking } from './settings';
@@ -207,10 +208,12 @@ export function mockSetupPlan(): Plan {
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
     vk_budget_kop: vkBudget, daily_kop: hint.daily_kop, off: hint.off, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
     marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: 'draft',
-    groups: (vk ? ['direct', 'vk'] as const : ['direct'] as const).map((platform, index) => ({
-      id: index + 1, name: copy.plan.groupExample, platform, audience: copy.launchFlow.mockAudience,
-      daily_limit_kop: Math.floor((platform === 'vk' ? vkBudget : budget - vkBudget) / 31),
-      ads: [{ title: copy.screens.mockAdTitle, text: copy.screens.mockAdText }],
+    // Как на сервере: в Директе группа на услугу, во VK — на повод; дневной лимит площадки делится поровну.
+    groups: copy.plan.mockGroups.filter((group) => vk || group.platform === 'direct').map((group, index, groups) => ({
+      id: index + 1, name: group.name, platform: group.platform, audience: group.audience,
+      daily_limit_kop: Math.floor((group.platform === 'vk' ? vkBudget : budget - vkBudget) / 31
+        / groups.filter((item) => item.platform === group.platform).length),
+      ads: group.ads.map((ad) => ({ ...ad })),
       assets: [mockAsset(index * 100 + 1, true), mockAsset(index * 100 + 2)],
     })) };
   setupMock.plan.ready_to_launch = ready; setupMock.plan.marking_confirmed = marking;
@@ -238,6 +241,16 @@ export async function mockPlanUpload(groupId: number, file: File): Promise<Plan>
 export function mockPlanAssets(ids: number[]) {
   mockSetupPlan(); setupMock.plan!.groups.forEach((group) => group.assets.forEach((asset) => { asset.selected = ids.includes(asset.id); }));
   persistSetupMock();
+}
+// Демо-прогноз: числа придуманы для показа, ответ помечен demo, как у сервера в демо-режиме.
+export function mockForecast(): Forecast {
+  return { status: 'ready', leads_min: 9, leads_max: 26, clicks_min: 450, clicks_max: 870, cpc_rub: 32, cpc_rub_max: 61, budget_rub: 26_000,
+    conversion: { min: 0.02, max: 0.03, source: 'benchmark', label: copy.plan.mockForecastConversion },
+    explanation: copy.plan.mockForecastExplanation, explanation_by_ai: false,
+    sources: [{ what: copy.plan.mockForecastSources[0], source: copy.plan.mockForecastSources[1], url: null },
+      { what: copy.plan.mockForecastSources[2], source: copy.plan.mockForecastConversion, url: null }],
+    computed_at: new Date().toISOString(), demo: true,
+    vk: setupMock.plan?.vk_budget_kop ? { status: 'unavailable', label: copy.plan.mockForecastVk } : null };
 }
 export function mockPlanLaunch(acknowledged: boolean) {
   const plan = mockSetupPlan();

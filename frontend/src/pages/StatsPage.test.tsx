@@ -90,3 +90,14 @@ it('отказ сервера по периоду показывает его т
   render(<StatsPage />);
   expect((await screen.findByRole('alert')).textContent).toContain(detail);
 });
+
+it('у линий графика и образцов легенды одни цвета: расход сплошной, обращения пунктиром', async () => {
+  vi.mocked(getBusinessToday).mockResolvedValue('2026-10-30');
+  vi.mocked(getDaily).mockResolvedValue({ business_id: 1, from: '2026-10-25', to: '2026-10-26', items: [day('2026-10-25'), day('2026-10-26')],
+    is_incomplete: false, incomplete_days: [] });
+  const { container } = render(<StatsPage />);
+  await screen.findByRole('img', { name: copy.statistics.chart });
+  expect(container.querySelector('.stats-chart-key__spend')!.textContent).toBe(copy.screens.chartSpend);
+  expect(container.querySelector('.stats-chart-key__leads')!.textContent).toBe(copy.screens.chartLeads);
+  expect(container.querySelectorAll('.stats-chart__line--spend, .stats-chart__line--leads')).toHaveLength(2);
+});

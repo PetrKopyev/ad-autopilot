@@ -1,4 +1,4 @@
-import { Button, Card, Money } from '../components';
+import { Icon, MetricTile, Money, PanelCard, SegmentedControl, formatMoney } from '../components';
 import { copy } from '../copy';
 import type { PeriodChoice } from '../api/period';
 import { displayDate, displayDateTime } from '../format';
@@ -8,45 +8,48 @@ import './Stats.css';
 
 export function DemoNotice() { return mockEnabled ? <p className="stats-demo">{copy.screens.demo}</p> : null; }
 export function PeriodPicker({ value, onChange }: { value: PeriodChoice; onChange: (value: PeriodChoice) => void }) {
-  return <div className="period-picker" role="group" aria-label={copy.statistics.period}>
-    {(Object.keys(copy.screens.periods) as PeriodChoice[]).map((period) => <Button key={period}
-      variant={value === period ? 'primary' : 'secondary'} aria-pressed={value === period}
-      onClick={() => onChange(period)}><span className="period-label-full">{copy.screens.periods[period]}</span><span className="period-label-short">{copy.screens.shortPeriods[period]}</span></Button>)}
-  </div>;
+  return <SegmentedControl label={copy.statistics.period} value={value} onChange={onChange}
+    options={(Object.keys(copy.screens.periods) as PeriodChoice[]).map((period) => ({ value: period, label: copy.screens.periods[period], shortLabel: copy.screens.shortPeriods[period] }))} />;
 }
 export function NullableMoney({ value }: { value: number | null }) {
   return value === null ? <span className="muted">{copy.screens.noPrice}</span> : <Money kopecks={value} />;
 }
+const tileMoney = (value: number | null) => value === null ? '—' : formatMoney(value);
 export function SummaryFigures({ summary }: { summary: Summary }) {
-  return <div className="stats-figures">
-    <Card><p className="muted">{copy.home.spent}</p><p className="stats-value"><Money kopecks={summary.cost_kop} /></p></Card>
-    <Card><p className="muted">{copy.home.leads}</p><p className="stats-value">{summary.leads.toLocaleString('ru-RU')}</p></Card>
-    <Card><p className="muted">{copy.home.clients}</p><p className="stats-value">{summary.clients ?? '—'}</p></Card>
-    <Card><p className="muted">{copy.home.leadPrice}</p><p className="stats-value"><NullableMoney value={summary.cost_per_lead_kop} /></p></Card>
+  return <div className="metric-tiles stats-figures">
+    <MetricTile label={copy.home.spent} value={formatMoney(summary.cost_kop)} />
+    <MetricTile label={copy.home.leads} value={summary.leads.toLocaleString('ru-RU')} />
+    <MetricTile label={copy.home.leadPrice} value={tileMoney(summary.cost_per_lead_kop)} hint={summary.cost_per_lead_kop === null ? copy.screens.noPrice : undefined} />
+    <MetricTile label={copy.home.clients} value={summary.clients?.toLocaleString('ru-RU') ?? '—'} hint={summary.clients === null ? copy.statistics.clientsHint : undefined} />
+    <MetricTile label={copy.home.clientPrice} value={tileMoney(summary.cost_per_client_kop)} hint={summary.cost_per_client_kop === null ? copy.screens.noPrice : undefined} />
   </div>;
 }
 export function ClientsSummary({ summary }: { summary: Summary }) {
   const window = summary.clients_window;
-  return <Card className="page-stack"><h2>{copy.statistics.clients}</h2>
-    <p>{copy.screens.clientsWindow}</p><p className="muted">{copy.screens.dates(displayDate(window.from), displayDate(window.to))}</p>
-    {window.clients === null ? <p>{copy.screens.noClients}. {copy.statistics.clientsHint}</p> : <div className="actions">
-      <p>{copy.home.clients}: <strong>{window.clients}</strong></p>
-      <p>{copy.home.clientPrice}: <NullableMoney value={window.cost_per_client_kop} /></p>
-    </div>}
-    <p className="muted">{copy.screens.answeredWeeks(window.answered_weeks, window.unknown_weeks)}</p>
-  </Card>;
+  return <PanelCard title={copy.statistics.clients} titleId="stats-clients" action={<span className="muted mono">{copy.screens.dates(displayDate(window.from), displayDate(window.to))}</span>}>
+    <div className="stats-clients">
+      <p>{copy.screens.clientsWindow}</p>
+      {window.clients === null ? <p>{copy.screens.noClients}. {copy.statistics.clientsHint}</p> : <dl className="stats-clients__figures">
+        <div><dt>{copy.home.clients}</dt><dd className="mono">{window.clients.toLocaleString('ru-RU')}</dd></div>
+        <div><dt>{copy.home.clientPrice}</dt><dd className="mono"><NullableMoney value={window.cost_per_client_kop} /></dd></div>
+      </dl>}
+      <p className="muted">{copy.screens.answeredWeeks(window.answered_weeks, window.unknown_weeks)}</p>
+    </div>
+  </PanelCard>;
 }
 export function platformName(platform: string): string {
   return copy.screens.platforms[platform as keyof typeof copy.screens.platforms] ?? platform;
 }
 export function Sources({ sources }: { sources: Source[] }) {
   return <div className="stats-sources">
-    <p>{copy.statistics.provisional}</p>
-    {sources.length === 0 && <p>{copy.screens.noSources}</p>}
-    {sources.map((source) => <p key={source.platform}>{copy.statistics.source(platformName(source.platform), displayDateTime(source.fetched_at))}</p>)}
-    <div className="actions">
-      {sources.some((source) => source.platform === 'direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}</a>}
-      {sources.some((source) => source.platform === 'vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}</a>}
+    <div className="stats-sources__text">
+      <p className="stats-sources__pending"><Icon name="history" />{copy.statistics.provisional}</p>
+      {sources.length === 0 && <p>{copy.screens.noSources}</p>}
+      {sources.map((source) => <p key={source.platform}>{copy.statistics.source(platformName(source.platform), displayDateTime(source.fetched_at))}</p>)}
+    </div>
+    <div className="stats-sources__links">
+      {sources.some((source) => source.platform === 'direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}<Icon name="arrow" /></a>}
+      {sources.some((source) => source.platform === 'vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}<Icon name="arrow" /></a>}
     </div>
   </div>;
 }

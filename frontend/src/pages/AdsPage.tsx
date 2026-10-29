@@ -1,35 +1,36 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { Button, Card, EmptyState, ErrorBanner, Money, StatusBadge } from '../components';
+import { AdStatusBadge, Button, EmptyState, ErrorBanner, Money, PageHeader, PanelCard, PlatformBadge, StatusBadge } from '../components';
+import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { getAds, getExperiments, setAdStatus } from '../api/screens';
 import { getBusinessToday, lastDays } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Ad, Experiment } from '../api/types';
-import { DemoNotice, NullableMoney, adLabels, platformName } from './StatsShared';
+import { DemoNotice, NullableMoney, adLabels } from './StatsShared';
 import './Ads.css';
 
 const armLetters = ['А', 'Б'];
 const adsDays = 14;
+const experimentTone: Record<Experiment['status'], StatusTone> = { running: 'info', concluded: 'success', cancelled: 'neutral' };
 
 function Arms({ experiment }: { experiment: Experiment }) {
   return <ul className="ads-arms">{experiment.arms.map((arm, index) => <li className="ads-arm" key={armLetters[index]}>
-    <strong>{copy.ads.arm(armLetters[index])}</strong>
+    <strong className="ads-arm__letter">{copy.ads.arm(armLetters[index])}</strong>
     {arm.image ? <img src={arm.image} alt={copy.ads.armImage(armLetters[index])} loading="lazy" />
       : experiment.hypothesis === 'image' && <span className="muted">{copy.ads.armNoImage}</span>}
     <span>«{arm.title}». {arm.text}</span>
   </li>)}</ul>;
 }
 
-function AdCard({ ad, name, dates, changed }: { ad: Ad; name: string; dates: string; changed: () => void }) {
+function AdRow({ ad, name, changed }: { ad: Ad; name: string; changed: () => void }) {
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState(false);
   const canPause = ad.status === 'active';
   const canResume = ad.status === 'paused_auto' || ad.status === 'paused_owner';
-  const label = copy.screens.adStates[ad.status] ?? copy.screens.draft;
   async function toggle() {
     if (lock.current) return;
     lock.current = true; setBusy(true); setError(undefined); setSuccess(false);
@@ -37,27 +38,42 @@ function AdCard({ ad, name, dates, changed }: { ad: Ad; name: string; dates: str
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { lock.current = false; setBusy(false); }
   }
-  return <article className="ads-ad page-stack">
-    <div className="ads-ad-heading"><h3>{name}</h3><StatusBadge tone={ad.status === 'active' ? 'success' : ad.status === 'rejected' ? 'danger' : 'neutral'}>
-      {ad.reason ? copy.screens.because(label, ad.reason) : label}</StatusBadge></div>
-    {ad.image_url && <img className="ads-image" src={ad.image_url} alt={ad.title} loading="lazy" />}
-    <p>{ad.text}</p>
-    {/* Причина остановки — о цифрах на момент решения, а ниже цифры за последние дни: подписываем период. */}
-    <p className="muted">{(ad.status === 'paused_auto' && ad.reason ? copy.screens.adPeriodStopped : copy.screens.adPeriod)(dates)}</p>
+  const stopped = ad.status !== 'active' && ad.status !== 'moderation';
+  return <article className={`ads-ad${stopped ? ' ads-ad--stopped' : ''}`}>
+    <div className="ads-ad__main">
+      {ad.image_url && <img className="ads-ad__image" src={ad.image_url} alt={ad.title} loading="lazy" />}
+      <div className="ads-ad__text">
+        <h4>{name}</h4>
+        <p className="muted">{ad.text}</p>
+        <AdStatusBadge status={ad.status} reason={ad.reason} />
+      </div>
+    </div>
     <dl className="ads-metrics">
-      <div><dt>{copy.home.spent}</dt><dd><Money kopecks={ad.metrics.cost_kop} /></dd></div>
-      <div><dt>{copy.ads.impressions}</dt><dd>{ad.metrics.impressions.toLocaleString('ru-RU')}</dd></div>
-      <div><dt>{copy.ads.clicks}</dt><dd>{ad.metrics.clicks.toLocaleString('ru-RU')}</dd></div>
-      <div><dt>{copy.home.leads}</dt><dd>{ad.metrics.leads.toLocaleString('ru-RU')}</dd></div>
-      <div><dt>{copy.home.leadPrice}</dt><dd><NullableMoney value={ad.metrics.cost_per_lead_kop} /></dd></div>
+      <div><dt>{copy.home.spent}</dt><dd className="mono"><Money kopecks={ad.metrics.cost_kop} /></dd></div>
+      <div><dt>{copy.ads.impressions}</dt><dd className="mono">{ad.metrics.impressions.toLocaleString('ru-RU')}</dd></div>
+      <div><dt>{copy.ads.clicks}</dt><dd className="mono">{ad.metrics.clicks.toLocaleString('ru-RU')}</dd></div>
+      <div><dt>{copy.home.leads}</dt><dd className="mono">{ad.metrics.leads.toLocaleString('ru-RU')}</dd></div>
+      <div><dt>{copy.home.leadPrice}</dt><dd className="mono"><NullableMoney value={ad.metrics.cost_per_lead_kop} /></dd></div>
     </dl>
-    {error && <ErrorBanner message={error} onRetry={() => void toggle()} />}
-    {success && <p role="status">{copy.screens.updatedAd}</p>}
-    <div className="actions ads-actions">
-      <Button variant="secondary" disabled={busy || (!canPause && !canResume)} onClick={() => void toggle()}>
+    <div className="ads-ad__action">
+      <Button variant="secondary" size="small" icon={canResume ? 'play' : 'pause'} disabled={busy || (!canPause && !canResume)} onClick={() => void toggle()}>
         {busy ? copy.screens.changing : canResume ? copy.common.enable : copy.common.stop}
       </Button>
     </div>
+    {error && <div className="ads-ad__note"><ErrorBanner message={error} onRetry={() => void toggle()} /></div>}
+    {success && <p className="ads-ad__note ads-ad__done" role="status">{copy.screens.updatedAd}</p>}
+  </article>;
+}
+
+function ExperimentCard({ experiment }: { experiment: Experiment }) {
+  return <article className="ads-experiment">
+    <div className="ads-experiment__head"><h3>{experiment.title}</h3>
+      <StatusBadge tone={experimentTone[experiment.status]}>{copy.screens.experimentStates[experiment.status]}</StatusBadge></div>
+    <p><strong>{copy.ads.comparison}: </strong>{experiment.comparing}</p>
+    <Arms experiment={experiment} />
+    {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
+    <p className={`ads-verdict${experiment.conclusion ? ' ads-verdict--done' : ''}`}><strong>{copy.ads.conclusion}: </strong>
+      {experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
   </article>;
 }
 
@@ -74,41 +90,49 @@ export function AdsPage() {
   const names = adLabels(items);
   const period = ads.data?.period;
   const dates = period ? copy.screens.dates(displayDate(period.from), displayDate(period.to)) : copy.screens.recentDays(adsDays);
+  // Причина остановки — о цифрах на момент решения, а в строках цифры за последние дни: подписываем период.
+  const stoppedByUs = items.some((ad) => ad.status === 'paused_auto' && ad.reason);
   return <div className="page-stack">
-    <div className="page-heading"><h1>{copy.ads.title}</h1><p className="muted">{copy.screens.adIntro}</p></div>
+    <PageHeader title={copy.ads.title} description={copy.screens.adIntro} />
     <DemoNotice />
     {ads.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {ads.error && <ErrorBanner message={ads.error} onRetry={ads.reload} />}
-    {ads.data && items.length === 0 && <Card><EmptyState title={copy.screens.noAds} description={copy.screens.noAdsHint}
-      action={<Link className="button button--primary" to="/setup">{copy.common.start}</Link>} /></Card>}
+    {ads.data && items.length === 0 && <div className="panel"><EmptyState title={copy.screens.noAds} description={copy.screens.noAdsHint}
+      action={<Link className="button button--primary" to="/setup">{copy.common.start}</Link>} /></div>}
+    {items.length > 0 && <div className="ads-legend">
+      <p>{(stoppedByUs ? copy.screens.adPeriodStopped : copy.screens.adPeriod)(dates)}</p>
+      <p className="muted">{copy.ads.toggleHint}</p>
+    </div>}
     {platforms.map((platform) => {
       const platformAds = items.filter((ad) => ad.platform === platform);
       const campaigns = [...new Set(platformAds.map((ad) => ad.campaign_id))];
-      return <Card className="page-stack" key={platform}><h2>{platformName(platform)}</h2>
+      return <PanelCard key={platform} title={<PlatformBadge platform={platform} />} titleId={`ads-${platform}`} flush
+        action={<span className="muted">{copy.ads.count(platformAds.length)}</span>}>
         {campaigns.map((campaignId) => {
           const campaignAds = platformAds.filter((ad) => ad.campaign_id === campaignId);
           const groups = [...new Set(campaignAds.map((ad) => ad.group_id))];
-          return <details className="ads-branch" key={campaignId} open><summary>{campaignAds[0].campaign_name}</summary>
+          return <section className="ads-campaign" key={campaignId} aria-labelledby={`campaign-${campaignId}`}>
+            <h3 id={`campaign-${campaignId}`}><span className="ads-kicker">{copy.ads.campaign}</span>{campaignAds[0].campaign_name}</h3>
             {groups.map((groupId) => {
               const groupAds = campaignAds.filter((ad) => ad.group_id === groupId);
-              return <details className="ads-branch ads-group" key={groupId} open><summary>{groupAds[0].group_name}</summary>
-                <div className="page-stack">{groupAds.map((ad) => <AdCard key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} dates={dates} changed={ads.reload} />)}</div>
-              </details>;
+              return <div className="ads-group" key={groupId}>
+                <p className="ads-group__name"><span className="ads-kicker">{copy.ads.group}</span>{groupAds[0].group_name}</p>
+                {groupAds.map((ad) => <AdRow key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} changed={ads.reload} />)}
+              </div>;
             })}
-          </details>;
+          </section>;
         })}
-      </Card>;
+      </PanelCard>;
     })}
-    <Card className="page-stack"><h2>{copy.ads.experiments}</h2><p className="muted">{copy.screens.experimentExplanation}</p>
-      {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
-      {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
-      {experiments.data && (experiments.data.items.length ? experiments.data.items.map((experiment) => <article className="ads-ad page-stack" key={experiment.id}>
-        <h3>{experiment.title}</h3><StatusBadge>{copy.screens.experimentStates[experiment.status]}</StatusBadge>
-        <p><strong>{copy.ads.comparison}: </strong>{experiment.comparing}</p>
-        <Arms experiment={experiment} />
-        {experiment.status === 'running' && <p>{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
-        <p><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
-      </article>) : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}
-    </Card>
+    <PanelCard title={copy.ads.experiments} titleId="ads-experiments">
+      <div className="page-stack">
+        <p className="muted">{copy.screens.experimentExplanation}</p>
+        {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
+        {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
+        {experiments.data && (experiments.data.items.length
+          ? experiments.data.items.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} />)
+          : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}
+      </div>
+    </PanelCard>
   </div>;
 }
