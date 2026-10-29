@@ -49,6 +49,7 @@ def test_requests_sent_before_setup_answer_without_business(client) -> None:
         "last_check_at": None,
         "auto_continue": False,
         "needs_attention": [],
+        "has_plan": False,
     }
     demo = client.get("/api/demo/status").json()
     assert demo["total_days"] == 0 and demo["advance"] is None

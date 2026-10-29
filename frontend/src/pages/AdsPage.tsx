@@ -9,6 +9,7 @@ import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Ad, Experiment } from '../api/types';
 import { DemoNotice, NullableMoney, adLabels } from './StatsShared';
+import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import './Ads.css';
 
 const armLetters = ['А', 'Б'];
@@ -91,6 +92,7 @@ export function AdsPage() {
     return { ...await getAds(signal, period ?? undefined), period };
   }, []));
   const experiments = useResource(getExperiments);
+  const prelaunch = usePrelaunch();
   const items = ads.data?.items ?? [];
   const platforms = [...new Set(items.map((item) => item.platform))];
   const names = adLabels(items);
@@ -103,7 +105,8 @@ export function AdsPage() {
     <DemoNotice />
     {ads.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {ads.error && <ErrorBanner message={ads.error} onRetry={ads.reload} />}
-    {ads.data && items.length === 0 && <div className="panel"><EmptyState title={copy.screens.noAds} description={copy.screens.noAdsHint}
+    {ads.data && items.length === 0 && prelaunch && <div className="panel"><PrelaunchEmpty hasPlan={prelaunch.hasPlan} title={copy.screens.noAds} description={copy.prelaunch.ads} /></div>}
+    {ads.data && items.length === 0 && prelaunch === false && <div className="panel"><EmptyState title={copy.screens.noAds} description={copy.screens.noAdsHint}
       action={<Link className="button button--primary" to="/setup">{copy.common.start}</Link>} /></div>}
     {items.length > 0 && <div className="ads-legend">
       <p>{(stoppedByUs ? copy.screens.adPeriodStopped : copy.screens.adPeriod)(dates)}</p>
@@ -135,7 +138,7 @@ export function AdsPage() {
         })}
       </PanelCard>;
     })}
-    <PanelCard title={copy.ads.experiments} titleId="ads-experiments">
+    {!prelaunch && <PanelCard title={copy.ads.experiments} titleId="ads-experiments">
       <div className="page-stack">
         <p className="muted">{copy.screens.experimentExplanation}</p>
         {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
@@ -144,6 +147,6 @@ export function AdsPage() {
           ? experiments.data.items.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} />)
           : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}
       </div>
-    </PanelCard>
+    </PanelCard>}
   </div>;
 }

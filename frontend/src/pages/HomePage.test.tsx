@@ -16,7 +16,7 @@ vi.mock('../api/screens', () => ({
   getDaily: vi.fn(async () => { throw new Error('нет ряда'); }),
   getAds: vi.fn(async () => ({ items: [], campaigns: [] })),
   getExperiments: async () => ({ items: [] }),
-  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] })),
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })),
 }));
 vi.mock('../api/history', () => ({ getHistoryPage: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 5 })), revertChange: vi.fn() }));
 vi.mock('../api/clients', () => ({ getClientQuestions: vi.fn(async () => ({ items: [], cost_per_client_kop: null })), answerClientQuestion: vi.fn() }));
@@ -60,7 +60,7 @@ it('без расхождения пояснения нет', async () => {
 });
 
 it('пишет темп расхода из бюджета месяца: за прошедшие 27 дней и по бюджету на 31 день', async () => {
-  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, needs_attention: [] });
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, needs_attention: [], has_plan: true });
   await show(2_700_000, 2_700_000);
   expect(await screen.findByText(copy.home.onTrack)).toBeTruthy();
   expect(screen.getByText(copy.home.pace(formatMoney(100_000), formatMoney(96_774)), raw)).toBeTruthy();
@@ -95,7 +95,7 @@ it('рисует графики обращений из ряда по дням',
 
 it('объясняет, почему реклама не включилась после переключения на «Работает»', async () => {
   const warning = 'Реклама не включилась: при текущем бюджете площадкам не хватает минимума. Увеличьте бюджет в настройках.';
-  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'paused', last_check_at: null, auto_continue: true, needs_attention: [] });
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'paused', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(resumeAutopilot).mockResolvedValue(warning);
   await show(0, 0);
   const mode = await screen.findByRole('group', { name: copy.autopilotMode.label });
@@ -104,7 +104,7 @@ it('объясняет, почему реклама не включилась п
 });
 
 it('«Пауза» останавливает рекламу только после подтверждения', async () => {
-  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] });
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(stopAllAds).mockResolvedValue();
   await show(0, 0);
   const mode = await screen.findByRole('group', { name: copy.autopilotMode.label });
@@ -178,4 +178,44 @@ it('спрашивает о клиентах прямо на главной', as
   fireEvent.change(within(need).getByRole('spinbutton', { name: copy.clientsScreen.countLabel }), { target: { value: '9' } });
   fireEvent.click(send);
   await vi.waitFor(() => expect(answerClientQuestion).toHaveBeenCalledWith('w1', 9));
+});
+
+it('до запуска нет остановки и переключателя: главное действие — открыть план, без нулей и источников', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, has_plan: true,
+    needs_attention: [{ id: 'budget', title: copy.screens.draft, description: 'Бюджет месяца — 30 000 ₽.', destination: 'settings' }] });
+  vi.mocked(getSummary).mockResolvedValue({
+    business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
+    ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
+  } satisfies Summary);
+  vi.mocked(getAds).mockResolvedValueOnce({ items: [], campaigns: [] });
+  render(<MemoryRouter><HomePage /></MemoryRouter>);
+  expect(await screen.findByText(copy.prelaunch.afterBudget(formatMoney(3_000_000)), raw)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
+  expect(screen.queryByRole('group', { name: copy.autopilotMode.label })).toBeNull();
+  expect(screen.queryByText(copy.screens.noSources, { exact: false })).toBeNull();
+  expect(screen.queryByText(copy.home.leads)).toBeNull();
+  const links = screen.getAllByRole('link', { name: copy.prelaunch.openPlan });
+  expect(links.length).toBe(2);
+  expect(links.every((link) => link.getAttribute('href') === '/plan')).toBe(true);
+  expect(screen.getByText(copy.prelaunch.planHint)).toBeTruthy();
+  expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
+  expect(screen.getByText(copy.prelaunch.campaigns)).toBeTruthy();
+});
+
+it('до запуска без плана ведёт в мастер', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, has_plan: false, needs_attention: [] });
+  vi.mocked(getAds).mockResolvedValueOnce({ items: [], campaigns: [] });
+  render(<MemoryRouter><HomePage /></MemoryRouter>);
+  expect((await screen.findAllByRole('link', { name: copy.prelaunch.setup }))[0].getAttribute('href')).toBe('/setup');
+  expect(await screen.findByRole('heading', { name: copy.home.noCampaigns })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
+});
+
+it('после запуска остановка и переключатель на месте', async () => {
+  await show(0, 0);
+  expect(await screen.findByRole('button', { name: copy.home.stopAll })).toBeTruthy();
+  expect(screen.getByRole('group', { name: copy.autopilotMode.label })).toBeTruthy();
+  expect(screen.queryByRole('link', { name: copy.prelaunch.openPlan })).toBeNull();
 });

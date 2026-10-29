@@ -4,7 +4,11 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
 import { HistoryPage } from './HistoryPage';
+import { MemoryRouter } from 'react-router';
+import { getAutopilotStatus } from '../api/screens';
 
+vi.mock('../api/screens', () => ({ mockEnabled: false,
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
 vi.mock('../api/history', () => ({ getHistoryPage: vi.fn(), revertChange: vi.fn() }));
 vi.mock('../api/useBusinessNow', () => ({ useBusinessNow: () => null }));
 
@@ -80,4 +84,13 @@ it('ошибку отката показывает в подтверждении
   fireEvent.click(screen.getByRole('button', { name: labels.confirmYes }));
   const group = screen.getByRole('group', { name: labels.confirmTitle });
   expect(await within(group).findByText('Изменение уже отменено.')).toBeTruthy();
+});
+
+it('до запуска с готовым планом пустая история ведёт в план', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
+  serve([]);
+  render(<MemoryRouter><HistoryPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
+  expect(screen.getByText(copy.prelaunch.history)).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
 });

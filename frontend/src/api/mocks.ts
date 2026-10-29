@@ -12,6 +12,8 @@ const base = (cost: number, leads: number, impressions = 1200, clicks = 48): Met
   sources: [{ platform: 'direct', fetched_at: timestamp }],
 });
 let paused = false;
+// До запуска плана, как на сервере: кампаний, расхода, журнала и вопросов о клиентах ещё нет.
+const live = () => !!setupMock.launched;
 // Объявления, которые остановила «Пауза» всей рекламы: продолжение включает только их.
 let pausedByStop: number[] = [];
 const ads: Ad[] = [
@@ -30,6 +32,7 @@ function mockDay(date: Date): Daily['items'][number] {
   const incomplete = day > isoDate(cutoff);
   const cost = Math.round(8200 + Math.sin(seed / 3) * 1900 + (seed * 37 % 9) * 220);
   const leads = Math.max(0, Math.round(2 + Math.sin(seed / 4 + 1) * 1.3 + (seed * 13 % 5 - 2) * 0.3));
+  if (!live()) return { date: day, ...base(0, 0, 0, 0), sources: [], is_incomplete: false, incomplete_days: [] };
   return { date: day, ...base(cost, leads, 240 + (seed * 17 % 60), 9 + seed % 6), is_incomplete: incomplete, incomplete_days: incomplete ? [day] : [] };
 }
 export function mockDaily(period: Period): Daily {
@@ -49,6 +52,7 @@ function totals(period: Period): Metrics {
 export function mockSummary(period: Period): Summary {
   const month = periodFor('month');
   const spent = totals(month).cost_kop;
+  const fresh = live() ? 15100 : 0;
   const today = new Date();
   const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
@@ -57,27 +61,31 @@ export function mockSummary(period: Period): Summary {
   const budget = mockMonthBudget();
   const clients = clientResults(period);
   const window = clientResults({ from: isoDate(start), to: isoDate(end) });
-  return { business_id: 1, ...period, ...totals(period), clients: clients.clients, cost_per_client_kop: clients.cost_per_client_kop,
+  return { business_id: 1, ...period, ...totals(period), ...(live() ? {} : { sources: [] }), clients: clients.clients, cost_per_client_kop: clients.cost_per_client_kop,
     clients_window: { from: isoDate(start), to: isoDate(end), ...window, unknown_weeks: 4 - window.answered_weeks },
-    budget: { month: month.from, budget_kop: budget, spent_kop: spent + 15100, reported_kop: spent, remaining_kop: Math.max(0, budget - spent - 15100),
+    budget: { month: month.from, budget_kop: budget, spent_kop: spent + fresh, reported_kop: spent, remaining_kop: Math.max(0, budget - spent - fresh),
       days_remaining: new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate() - today.getDate() + 1,
-      platforms: [{ platform: 'direct', spent_kop: spent + 15100, source: 'budget_ledger', spent_at: timestamp }] },
+      platforms: live() ? [{ platform: 'direct', spent_kop: spent + fresh, source: 'budget_ledger', spent_at: timestamp }] : [] },
   };
 }
 export function mockBreakdown(period: Period, level: StatsLevel): Breakdown {
   const metrics = totals(period);
   return { business_id: 1, ...period, level, is_incomplete: metrics.is_incomplete,
-    incomplete_days: metrics.incomplete_days, items: [{ id: level === 'platform' ? 'direct' : 1, ...metrics }] };
+    incomplete_days: metrics.incomplete_days, items: live() ? [{ id: level === 'platform' ? 'direct' : 1, ...metrics }] : [] };
 }
 export function mockStatus(): AutopilotStatus {
   // Как на сервере: до запуска плана — черновик, мастер и план без меню.
-  return { status: !setupMock.launched ? 'draft' : paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
+  if (!live()) return { status: 'draft', last_check_at: null, auto_continue: true, has_plan: !!setupMock.plan,
+    needs_attention: [{ id: 'budget', title: copy.screens.draft, description: '', destination: 'settings' }] };
+  return { status: paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
     needs_attention: questions.some((item) => !item.answered_at)
-      ? [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] : [] };
+      ? [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] : [],
+    has_plan: true };
 }
 export function mockAds(): AdsResponse {
   const today = new Date(); today.setHours(12, 0, 0, 0);
   const days = Array.from({ length: 14 }, (_, index) => { const date = new Date(today); date.setDate(date.getDate() - 13 + index); return mockDay(date); });
+  if (!live()) return { items: [], campaigns: [] };
   return { items: ads.map((ad) => ({ ...ad })), campaigns: [{ id: 1, platform: 'direct', name: copy.screens.mockCampaign, status: 'active',
     daily: days.map(({ date, cost_kop, leads, is_incomplete }) => ({ date, cost_kop, leads, is_incomplete })) }] };
 }
@@ -94,6 +102,7 @@ export function mockStopAll() {
   record('pause', 'business', '1', 'Вы остановили всю рекламу.');
 }
 export function mockExperiments() {
+  if (!live()) return { items: [] };
   const text = 'Запись онлайн, мастер рядом с домом.';
   return { items: [
     { id: 2, title: copy.screens.mockImageExperiment, hypothesis: 'image' as const, comparing: copy.screens.mockImageComparing,
@@ -221,7 +230,7 @@ export function mockSetupPlan(): Plan {
       ads: group.ads.map((ad) => ({ ...ad })),
       assets: [mockAsset(index * 100 + 1, true), mockAsset(index * 100 + 2)],
     })) };
-  setupMock.plan.ready_to_launch = ready; setupMock.plan.marking_confirmed = marking;
+  setupMock.plan.ready_to_launch = ready; setupMock.plan.marking_confirmed = marking; persistSetupMock();
   setupMock.plan.blockers = ready ? [] : [marking ? copy.launchFlow.accountsError : copy.launchFlow.markingError];
   return structuredClone(setupMock.plan);
 }
@@ -276,7 +285,7 @@ const historyEntries: HistoryEntry[] = [
     reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null },
 ];
 export function mockHistoryPage(filter: HistoryFilter, pageSize: number): HistoryPage {
-  const items = historyEntries.filter((item) => (!filter.platform || item.platform === filter.platform)
+  const items = !live() ? [] : historyEntries.filter((item) => (!filter.platform || item.platform === filter.platform)
     && (!filter.actor || item.actor === filter.actor)).map((item) => structuredClone(item));
   return { items: items.slice(0, pageSize), total: items.length, page: 1, page_size: pageSize };
 }
@@ -310,7 +319,7 @@ function clientResults(period?: Period) {
     cost_per_client_kop: clients ? Math.round(cost / clients) : null, answered_weeks: answered.length };
 }
 export function mockClientQuestions(): ClientQuestions {
-  return { items: structuredClone(questions), cost_per_client_kop: clientResults().cost_per_client_kop };
+  return { items: live() ? structuredClone(questions) : [], cost_per_client_kop: clientResults().cost_per_client_kop };
 }
 export function mockClientAnswer(id: string, clients: number | null) {
   const question = questions.find((item) => item.id === id);
@@ -358,7 +367,7 @@ const notifications: AppNotification[] = [
   { id: 1, kind: 'budget', created_at: hoursAgo(26), level: 'info', title: 'Потрачена половина бюджета',
     text: 'За месяц потратили 15 000 ₽ из 30 000 ₽. Остальное распределим на оставшиеся дни.' },
 ];
-export function mockNotifications(): AppNotification[] { return structuredClone(notifications); }
+export function mockNotifications(): AppNotification[] { return live() ? structuredClone(notifications) : []; }
 export function mockReadNotification(id: number) {
   const index = notifications.findIndex((item) => item.id === id);
   if (index < 0) throw new Error(copy.errors.notFound);

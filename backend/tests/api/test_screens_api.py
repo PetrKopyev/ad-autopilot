@@ -208,7 +208,7 @@ def test_status_contract_heartbeat_and_platform_error(setup):
         )
     )
     response = client.get("/api/autopilot/status").json()
-    assert set(response) == {"status", "last_check_at", "auto_continue", "needs_attention"}
+    assert set(response) == {"status", "last_check_at", "auto_continue", "needs_attention", "has_plan"}
     assert response["last_check_at"] is not None
     world.repository.save(
         WorkerRun(
@@ -221,6 +221,16 @@ def test_status_contract_heartbeat_and_platform_error(setup):
     assert any(
         row["title"] == "Ошибка площадки" for row in client.get("/api/autopilot/status").json()["needs_attention"]
     )
+
+
+def test_status_tells_whether_plan_is_ready_before_launch(setup):
+    client, world = setup
+    for business_status, has_plan in (("draft", False), ("plan_ready", True)):
+        world.business.status = business_status
+        response = client.get("/api/autopilot/status").json()
+        assert (response["status"], response["has_plan"]) == ("draft", has_plan)
+    world.business.status = "running"
+    assert client.get("/api/autopilot/status").json()["has_plan"] is True
 
 
 def test_ads_period_metrics_and_contract(setup):

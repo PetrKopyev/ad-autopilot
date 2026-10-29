@@ -5,11 +5,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { ApiError } from '../api/client';
 import { getBusinessToday } from '../api/period';
-import { getAds, getExperiments } from '../api/screens';
+import { getAds, getAutopilotStatus, getExperiments } from '../api/screens';
 import type { Ad, Experiment } from '../api/types';
 import { AdsPage } from './AdsPage';
 
-vi.mock('../api/screens', () => ({ mockEnabled: false, getAds: vi.fn(), getExperiments: vi.fn(), setAdStatus: vi.fn() }));
+vi.mock('../api/screens', () => ({ mockEnabled: false, getAds: vi.fn(), getExperiments: vi.fn(), setAdStatus: vi.fn(),
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
 vi.mock('../api/period', async (original) => ({ ...await original<typeof import('../api/period')>(), getBusinessToday: vi.fn(async () => '2026-11-03') }));
 
 afterEach(() => { cleanup(); vi.mocked(getAds).mockReset(); vi.mocked(getExperiments).mockReset(); vi.mocked(getBusinessToday).mockRestore(); });
@@ -89,4 +90,24 @@ it('период цифр подписан один раз на всю стра�
   expect(screen.getByRole('button', { name: copy.common.enable })).toBeTruthy();
   expect(screen.getByRole('button', { name: copy.common.stop })).toBeTruthy();
   expect(screen.getByText(copy.screens.because(copy.status.stoppedAuto, ad.reason!))).toBeTruthy();
+});
+
+it('до запуска с готовым планом ведёт в план, а не в настройку', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
+  vi.mocked(getAds).mockResolvedValue({ items: [], campaigns: [] });
+  vi.mocked(getExperiments).mockResolvedValue({ items: [] });
+  render(<MemoryRouter><AdsPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
+  expect(screen.getByText(copy.prelaunch.ads)).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
+  expect(screen.queryByText(copy.screens.noAdsHint)).toBeNull();
+});
+
+it('до запуска без плана ведёт в мастер, как раньше', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: false });
+  vi.mocked(getAds).mockResolvedValue({ items: [], campaigns: [] });
+  vi.mocked(getExperiments).mockResolvedValue({ items: [] });
+  render(<MemoryRouter><AdsPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.screens.noAds })).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.prelaunch.setup }).getAttribute('href')).toBe('/setup');
 });

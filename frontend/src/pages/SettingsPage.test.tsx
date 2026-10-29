@@ -14,7 +14,7 @@ vi.mock('../api/settings', async (original) => ({ ...await original<typeof impor
 vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn(),
   getGoals: async () => ({ items: [{ id: 1, name: 'Заявка' }, { id: 2, name: 'Звонок' }] }) }));
 vi.mock('../api/screens', () => ({ mockEnabled: false,
-  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] })) }));
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
 vi.mock('../api/session', () => ({ useSession: () => ({ data: { id: 1, login: 'owner', email: null, accounts: [] }, reload: () => {} }) }));
 
 afterEach(() => { cleanup(); vi.mocked(getBusiness).mockReset(); vi.mocked(saveMarking).mockReset(); });
@@ -146,7 +146,7 @@ it('Метрика в кабинетах: счётчик и цели слова�
 });
 
 it('до запуска счётчик и цели меняются в мастере: «Изменить» ведёт на его шаг', async () => {
-  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [] });
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
   const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);

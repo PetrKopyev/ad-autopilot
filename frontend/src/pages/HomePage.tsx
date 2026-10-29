@@ -16,6 +16,7 @@ import { DemoNotice, NullableMoney, platformName } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { formatMoney } from '../components/Money';
 import { resumeAutopilot } from '../api/settings';
+import { PrelaunchEmpty, PrelaunchLink, beforeLaunch } from './Prelaunch';
 import './Home.css';
 
 const labels = copy.historyScreen;
@@ -80,6 +81,15 @@ function Tiles({ summary, daily }: { summary: Summary; daily: Daily['items'] | n
   </section>;
 }
 
+// До запуска нулей и плоских графиков не рисуем: только бюджет, который задал владелец, и что появится после запуска.
+function AfterLaunch({ summary }: { summary: Summary }) {
+  return <section className="home-after" aria-labelledby="home-after-title">
+    <h2 id="home-after-title">{copy.prelaunch.afterTitle}</h2>
+    <p className="home-after__budget">{copy.prelaunch.afterBudget(formatMoney(summary.budget.budget_kop))}</p>
+    <p className="muted">{copy.prelaunch.afterHint}</p>
+  </section>;
+}
+
 function ClientQuestionRow({ question, answered }: { question: ClientQuestion; answered: () => void }) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
@@ -115,7 +125,8 @@ function campaignRows({ items: ads }: AdsResponse) {
   });
 }
 
-function Campaigns({ data }: { data: AdsResponse }) {
+function Campaigns({ data, prelaunch }: { data: AdsResponse; prelaunch: { hasPlan: boolean } | null }) {
+  if (!data.items.length && prelaunch) return <PrelaunchEmpty hasPlan={prelaunch.hasPlan} title={copy.home.noCampaigns} description={copy.prelaunch.campaigns} action={!prelaunch.hasPlan} />;
   if (!data.items.length) return <EmptyState title={copy.home.noCampaigns} description={copy.screens.noAdsHint} />;
   return <div className="table-scroll home-campaigns-box"><table className="table table--stack home-campaigns">
     <thead><tr><th scope="col">{copy.screens.rowLabels.campaign}</th><th scope="col" className="text">{copy.screens.status}</th>
@@ -259,6 +270,7 @@ export function HomePage() {
   const now = useBusinessNow();
   const status = autopilot.data;
   const summary = board.data?.summary;
+  const prelaunch = status && beforeLaunch(status) ? { hasPlan: status.has_plan } : null;
   // Пока время бизнеса неизвестно, показываем время проверки, а не «N минут назад», и не судим о давности.
   const minutes = status?.last_check_at && now !== null ? Math.max(0, Math.floor((now - Date.parse(status.last_check_at)) / 60000)) : null;
   const stale = status?.status === 'running' && now !== null && (minutes === null || minutes > 15);
@@ -290,7 +302,8 @@ export function HomePage() {
     finally { stopLock.current = false; setStopping(false); }
   }
   return <div className="page-stack home">
-    <PageHeader title={copy.home.title} description={copy.screens.intro} actions={<>
+    <PageHeader title={copy.home.title} description={copy.screens.intro} actions={prelaunch ? <PrelaunchLink hasPlan={prelaunch.hasPlan} />
+      : (status || autopilot.error) && <>
       {status && <SegmentedControl label={copy.autopilotMode.label} value={status.status === 'running' ? 'working' : 'paused'} disabled={!canSwitch}
         options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]}
         onChange={(mode) => { if (mode === 'paused') askStop(); else resume(); }} />}
@@ -306,8 +319,8 @@ export function HomePage() {
           {onTrack && summary && pace(summary) && <><span>{pace(summary)}</span>{' '}</>}
           <span className={onTrack ? 'home-state__check' : 'home-state__headline'}>{statusText}</span></p>}
       </div>
-      <SegmentedControl dark label={copy.statistics.period} value={choice} onChange={setChoice}
-        options={(Object.keys(copy.screens.periods) as PeriodChoice[]).map((value) => ({ value, label: copy.screens.periods[value], shortLabel: copy.screens.shortPeriods[value] }))} />
+      {!prelaunch && <SegmentedControl dark label={copy.statistics.period} value={choice} onChange={setChoice}
+        options={(Object.keys(copy.screens.periods) as PeriodChoice[]).map((value) => ({ value, label: copy.screens.periods[value], shortLabel: copy.screens.shortPeriods[value] }))} />}
     </section>
     {autopilot.error && <ErrorBanner message={autopilot.error} onRetry={autopilot.reload} />}
     {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
@@ -318,7 +331,8 @@ export function HomePage() {
       <span className="skeleton home-skeleton" /></div>)}</div>}
     {board.loading && <p className="loading visually-hidden" role="status">{copy.screens.loading}</p>}
     {board.error && <ErrorBanner message={board.error} onRetry={board.reload} />}
-    {summary && <>
+    {summary && prelaunch && <AfterLaunch summary={summary} />}
+    {summary && !prelaunch && <>
       <Tiles summary={summary} daily={board.data?.daily ?? null} />
       {summary.budget.spent_kop > summary.budget.reported_kop && <p className="muted home-fresher">{copy.budget.fresher(formatMoney(summary.budget.reported_kop))}</p>}
     </>}
@@ -327,8 +341,9 @@ export function HomePage() {
       <div className="home-need__list">
         {question && <ClientQuestionRow key={question.id} question={question} answered={() => { questions.reload(); board.reload(); autopilot.reload(); }} />}
         {attention.map((item) => <div className="home-need__row" key={item.id}>
-          <p className="home-need__text">{item.title}<small>{item.description}</small></p>
-          <Link className="button button--secondary" to={`/${item.destination}`}>{item.id === 'budget' && status?.status === 'budget_stop' ? copy.home.changeBudget : copy.screens.open}</Link>
+          <p className="home-need__text">{item.title}<small>{prelaunch && item.id === 'budget'
+            ? (prelaunch.hasPlan ? copy.prelaunch.planHint : copy.prelaunch.setupHint) : item.description}</small></p>
+          {prelaunch && item.id === 'budget' ? <PrelaunchLink hasPlan={prelaunch.hasPlan} variant="secondary" /> : <Link className="button button--secondary" to={`/${item.destination}`}>{item.id === 'budget' && status?.status === 'budget_stop' ? copy.home.changeBudget : copy.screens.open}</Link>}
         </div>)}
       </div>
     </section>}
@@ -340,13 +355,14 @@ export function HomePage() {
           action={<Link to="/ads">{copy.home.allAds} <span aria-hidden="true">→</span></Link>}>
           {ads.loading && <p className="loading home-panel-pad" role="status">{copy.screens.loading}</p>}
           {ads.error && <div className="home-panel-pad"><ErrorBanner message={ads.error} onRetry={ads.reload} /></div>}
-          {ads.data && <Campaigns data={ads.data} />}
+          {ads.data && <Campaigns data={ads.data} prelaunch={prelaunch} />}
         </PanelCard>
-        <PanelCard title={copy.ads.experiments} titleId="home-ab-title">
+        {/* До запуска сравнивать нечего: блок появится вместе с кампаниями. */}
+        {!prelaunch && <PanelCard title={copy.ads.experiments} titleId="home-ab-title">
           {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
           {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
           {experiments.data && <Experiments items={experiments.data.items} />}
-        </PanelCard>
+        </PanelCard>}
       </div>
       <PanelCard title={copy.home.journal} titleId="home-log-title" flush
         action={<Link to="/history">{copy.home.allHistory} <span aria-hidden="true">→</span></Link>}>
@@ -355,7 +371,7 @@ export function HomePage() {
         {history.data && <Journal items={history.data.items} now={now} changed={() => { history.reload(); autopilot.reload(); ads.reload(); board.reload(); }} />}
       </PanelCard>
     </div>
-    {summary && <Sources summary={summary} />}
+    {summary && !prelaunch && <Sources summary={summary} />}
     <dialog ref={dialog} className="home-confirm" aria-labelledby="stop-title" aria-describedby="stop-description" onCancel={(event) => { if (stopping) event.preventDefault(); }}>
       <div className="page-stack"><h2 id="stop-title">{copy.screens.stopTitle}</h2><p id="stop-description">{copy.screens.stopDescription}</p>
         {stopError && <ErrorBanner message={stopError} />}

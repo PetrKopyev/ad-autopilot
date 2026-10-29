@@ -4,7 +4,11 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { getClientQuestions } from '../api/clients';
 import { ClientsPage } from './ClientsPage';
+import { MemoryRouter } from 'react-router';
+import { getAutopilotStatus } from '../api/screens';
 
+vi.mock('../api/screens', () => ({ mockEnabled: false,
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
 vi.mock('../api/clients', () => ({ getClientQuestions: vi.fn(), answerClientQuestion: vi.fn() }));
 
 afterEach(cleanup);
@@ -28,4 +32,14 @@ it('без открытых вопросов и ответов показыва�
   expect(screen.getByText(copy.clientsScreen.nothingAnswered)).toBeTruthy();
   expect(screen.getByText(copy.clientsScreen.costPerClientEmpty)).toBeTruthy();
   expect(screen.getByText('—')).toBeTruthy();
+});
+
+it('до запуска с готовым планом не ждёт вопросов, а ведёт в план', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
+  vi.mocked(getClientQuestions).mockResolvedValue({ cost_per_client_kop: null, items: [] });
+  render(<MemoryRouter><ClientsPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
+  expect(screen.getByText(copy.prelaunch.clients)).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
+  expect(screen.queryByText(copy.clientsScreen.nothingOpen)).toBeNull();
 });

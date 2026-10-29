@@ -35,7 +35,13 @@ class ScreensRepository(WorkerRepository):
 
 
 # Пользователь ещё не прошёл мастер: бизнеса нет, показывать нечего.
-NO_BUSINESS = {"status": "no_business", "last_check_at": None, "auto_continue": False, "needs_attention": []}
+NO_BUSINESS = {
+    "status": "no_business",
+    "last_check_at": None,
+    "auto_continue": False,
+    "needs_attention": [],
+    "has_plan": False,
+}
 
 
 def screens_service(request: Request, db: DBSession, business: Business) -> ScreensService:

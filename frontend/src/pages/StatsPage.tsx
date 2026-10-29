@@ -5,6 +5,7 @@ import { getAds, getBreakdown, getDaily, getSummary } from '../api/screens';
 import { getBusinessToday, getPeriod, type PeriodChoice } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
+import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import type { Daily, StatsLevel } from '../api/types';
 import { ClientsSummary, DemoNotice, NullableMoney, PeriodPicker, Sources, SummaryFigures, adLabels } from './StatsShared';
 import { formatMoney } from '../components/Money';
@@ -85,8 +86,13 @@ export function StatsPage() {
     if (level === 'platform') return <PlatformBadge platform={String(id)} />;
     return names.get(`${level}:${id}`) ?? copy.screens.entity(copy.screens.rowLabels[level], id);
   }
+  const prelaunch = usePrelaunch();
   const columns = [copy.home.spent, copy.ads.impressions, copy.ads.clicks, copy.home.leads, copy.home.leadPrice];
   return <div className="page-stack stats-page">
+    {prelaunch ? <>
+      <PageHeader title={copy.statistics.title} />
+      <div className="panel"><PrelaunchEmpty hasPlan={prelaunch.hasPlan} description={copy.prelaunch.stats} /></div>
+    </> : <>
     <PageHeader title={copy.statistics.title} actions={<PeriodPicker value={choice} onChange={setChoice} />}
       description={summary.data && <span className="mono">{copy.screens.dates(displayDate(summary.data.from), displayDate(summary.data.to))}</span>} />
     <DemoNotice />
@@ -121,5 +127,6 @@ export function StatsPage() {
     </PanelCard>
     {summary.data && <ClientsSummary summary={summary.data} />}
     <Sources sources={summary.data?.sources ?? []} />
+    </>}
   </div>;
 }

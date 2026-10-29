@@ -6,6 +6,7 @@ import type { ClientQuestion } from '../api/clients';
 import { displayDate } from '../format';
 import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
+import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import './Clients.css';
 
 const labels = copy.clientsScreen;
@@ -46,11 +47,14 @@ export function ClientsPage() {
   const open = items.filter((item) => !item.answered_at);
   const answered = items.filter((item) => item.answered_at);
   const cost = questions.data?.cost_per_client_kop ?? null;
+  const prelaunch = usePrelaunch();
   return <div className="page-stack">
     <PageHeader title={copy.clients.title} description={labels.intro} />
     {questions.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {questions.error && <ErrorBanner message={questions.error} onRetry={questions.reload} />}
-    {questions.data && <>
+    {questions.data && !items.length && prelaunch && <div className="panel">
+      <PrelaunchEmpty hasPlan={prelaunch.hasPlan} description={copy.prelaunch.clients} /></div>}
+    {questions.data && !(items.length === 0 && prelaunch) && <>
       <div className="metric-tiles clients-tiles">
         <MetricTile label={labels.costPerClient} value={cost === null ? '—' : formatMoney(cost)} hint={cost === null ? labels.costPerClientEmpty : undefined} />
         <MetricTile label={labels.openCount} value={open.length.toLocaleString('ru-RU')} hint={labels.openCountHint} />

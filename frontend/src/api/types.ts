@@ -54,6 +54,8 @@ export interface AutopilotStatus {
   last_check_at: string | null;
   auto_continue: boolean;
   needs_attention: { id: string; title: string; description: string; destination: 'clients' | 'ads' | 'settings' }[];
+  /** План собран или уже запущен: до запуска экраны ведут в план, без плана — в мастер. */
+  has_plan: boolean;
 }
 export type AdStatus = 'draft' | 'moderation' | 'active' | 'paused_auto' | 'paused_owner' | 'rejected' | 'archived';
 export interface Ad {

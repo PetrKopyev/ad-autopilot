@@ -115,9 +115,14 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 .app-layout--guest { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; background: none; }
 .app-body { display: flex; flex-direction: column; min-width: 0; min-height: 100vh; }
 .app-layout--guest .app-body { min-height: 0; }
-.main-content { --main-pad-y: 20px; --main-pad-x: 24px; flex: 1; width: 100%; max-width: 1360px; min-width: 0; padding: var(--main-pad-y) var(--main-pad-x) 40px; }
+.app-body { --content-max: 1600px; }
+.app-layout:not(.app-layout--guest) .app-body { container-type: inline-size; }
+/* Рабочая область во всю ширину; на очень широком экране содержимое не шире --content-max и по центру. Белая шапка
+   страницы при этом идёт от края до края, а заголовок в ней — вровень с содержимым (--main-side считается от .app-body). */
+.main-content { --main-pad-y: 20px; --main-pad-x: 24px; --main-side: max(0px, (100cqw - var(--content-max)) / 2 - var(--main-pad-x));
+  flex: 1; width: 100%; min-width: 0; padding: var(--main-pad-y) calc(var(--main-pad-x) + var(--main-side)) 40px; }
 .main-content:focus { outline: none; }
-.app-layout--guest .main-content { max-width: 1040px; margin: 0 auto; }
+.app-layout--guest .main-content { --main-side: 0px; max-width: 1040px; margin: 0 auto; }
 
 .app-rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: var(--space-1); padding: var(--space-4) var(--space-2); background: var(--color-ink); color: #8fa6ad; overflow-y: auto; scrollbar-width: none; }
 .app-rail__logo { display: grid; place-items: center; margin-bottom: 18px; border-radius: 12px; color: var(--color-ink); text-decoration: none; }
@@ -147,13 +152,13 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 .guest-header__login:hover { color: var(--color-accent); }
 .guest-header a:focus-visible { outline-color: var(--color-accent); }
 
-.app-footer { display: flex; flex-wrap: wrap; gap: 0 var(--space-5); padding: var(--space-2) 24px var(--space-4); font-size: .85rem; color: var(--color-muted); }
+.app-footer { display: flex; flex-wrap: wrap; gap: 0 var(--space-5); padding: var(--space-2) max(24px, (100cqw - var(--content-max)) / 2) var(--space-4); font-size: .85rem; color: var(--color-muted); }
 .app-footer a { display: inline-flex; align-items: center; min-height: 44px; color: var(--color-muted); font-weight: 600; }
 .app-footer a:hover { color: var(--color-text); }
 .app-layout--guest .app-footer { justify-content: center; }
 
 /* Шапка страницы: белая полоса во всю ширину рабочей области. */
-.page-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); margin: calc(-1 * var(--main-pad-y)) calc(-1 * var(--main-pad-x)) 0; padding: 14px var(--main-pad-x); background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+.page-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); margin: calc(-1 * var(--main-pad-y)) calc(-1 * (var(--main-pad-x) + var(--main-side))) 0; padding: 14px calc(var(--main-pad-x) + var(--main-side)); background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
 .page-header__title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-4); min-width: 0; }
 .page-header h1 { font-size: 1.35rem; }
 .page-header__description { color: var(--color-faint); font-size: .87rem; font-weight: 600; }
@@ -325,7 +330,7 @@ dialog::backdrop { background: rgba(9, 31, 38, .5); }
   .button.app-rail__logout { flex-direction: row; width: auto; min-height: 44px; padding: 0 8px; font-size: .85rem; }
   .app-layout--tabbar .app-body { padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom)); }
   .app-body { min-height: 0; }
-  .main-content { --main-pad-y: 12px; --main-pad-x: 12px; padding-bottom: 24px; }
+  .main-content { --main-pad-y: 12px; --main-pad-x: 12px; --main-side: 0px; padding-bottom: 24px; }
   .guest-header { padding: 8px 14px; }
   .app-footer { gap: 0 var(--space-4); padding: 0 12px var(--space-3); }
   .page-header { padding: 12px var(--main-pad-x); }

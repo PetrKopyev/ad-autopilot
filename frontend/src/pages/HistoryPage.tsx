@@ -9,6 +9,7 @@ import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { displayClock, displayDate, justNow } from '../format';
 import { platformName } from './StatsShared';
+import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import './History.css';
 
 const pageStep = 20;
@@ -56,6 +57,7 @@ export function HistoryPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const now = useBusinessNow();
+  const prelaunch = usePrelaunch();
   const history = useResource(useCallback((signal: AbortSignal) => getHistoryPage(filter, limit, signal), [filter, limit]));
   const items = history.data?.items ?? [];
   function change(next: Partial<HistoryFilter>) { setFilter((value) => ({ ...value, ...next })); setLimit(pageStep); setConfirming(undefined); }
@@ -92,7 +94,8 @@ export function HistoryPage() {
     {history.error && <ErrorBanner message={history.error} onRetry={history.reload} />}
     {history.data && !items.length && <div className="panel">{filter.platform || filter.actor
       ? <EmptyState title={labels.emptyFiltered} description={labels.emptyFilteredHint} />
-      : <EmptyState title={labels.emptyTitle} description={labels.emptyDescription} />}</div>}
+      : prelaunch ? <PrelaunchEmpty hasPlan={prelaunch.hasPlan} description={copy.prelaunch.history} />
+        : <EmptyState title={labels.emptyTitle} description={labels.emptyDescription} />}</div>}
     {days.map(({ day, entries }) => <PanelCard key={day} title={dayTitle(day, now)} titleId={`day-${day}`} flush
       action={<span className="muted">{labels.count(entries.length)}</span>}>
       <ol className="journal">{entries.map((entry) => {

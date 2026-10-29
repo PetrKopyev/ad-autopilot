@@ -93,6 +93,8 @@ class ScreensService:
             "last_check_at": last_check,
             "auto_continue": business.auto_continue,
             "needs_attention": attention,
+            # План собран (plan_ready) или уже запущен: до запуска экраны ведут в план, а не в мастер.
+            "has_plan": business.status != "draft",
         }
 
     async def pause(self, business: Business) -> dict:

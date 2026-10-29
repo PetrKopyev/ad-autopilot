@@ -3,7 +3,8 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { ApiError } from '../api/client';
-import { getDaily } from '../api/screens';
+import { getAutopilotStatus, getDaily } from '../api/screens';
+import { MemoryRouter } from 'react-router';
 import { getBusinessToday } from '../api/period';
 import type { Daily } from '../api/types';
 import { displayDate } from '../format';
@@ -11,7 +12,8 @@ import { StatsPage } from './StatsPage';
 
 vi.mock('../api/screens', () => {
   const never = () => new Promise<never>(() => {});
-  return { mockEnabled: false, getDaily: vi.fn(), getSummary: never, getBreakdown: never, getAds: never };
+  return { mockEnabled: false, getDaily: vi.fn(), getSummary: never, getBreakdown: never, getAds: never,
+    getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) };
 });
 vi.mock('../api/period', () => ({ getPeriod: async () => ({ from: '2026-10-25', to: '2026-10-27' }), getBusinessToday: vi.fn() }));
 
@@ -100,4 +102,15 @@ it('у линий графика и образцов легенды одни ц�
   expect(container.querySelector('.stats-chart-key__spend')!.textContent).toBe(copy.screens.chartSpend);
   expect(container.querySelector('.stats-chart-key__leads')!.textContent).toBe(copy.screens.chartLeads);
   expect(container.querySelectorAll('.stats-chart__line--spend, .stats-chart__line--leads')).toHaveLength(2);
+});
+
+it('до запуска вместо пустых таблиц и периода — «План готов» и путь в план', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
+  vi.mocked(getBusinessToday).mockResolvedValue('2026-10-27');
+  vi.mocked(getDaily).mockResolvedValue({ business_id: 1, from: '2026-10-25', to: '2026-10-27', items: [], is_incomplete: false, incomplete_days: [] });
+  render(<MemoryRouter><StatsPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
+  expect(screen.queryByText(copy.screens.noStatsHint)).toBeNull();
+  expect(screen.queryByRole('group', { name: copy.statistics.period })).toBeNull();
 });
