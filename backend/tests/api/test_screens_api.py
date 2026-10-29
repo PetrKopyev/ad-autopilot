@@ -260,8 +260,19 @@ def test_ads_period_metrics_and_contract(setup):
     assert item["metrics"]["cost_kop"] == 900
     assert item["metrics"]["leads"] == 3
     assert item["metrics"]["cost_per_lead_kop"] == 300
+    campaign = next(row for row in client.get("/api/ads").json()["campaigns"] if row["id"] == world.campaign.id)
+    assert set(campaign) == {"id", "platform", "name", "status", "daily"}
+    assert len(campaign["daily"]) == 14
+    assert campaign["daily"][-1] == {
+        "date": world.clock.now.date().isoformat(),
+        "cost_kop": 900,
+        "leads": 3,
+        "is_incomplete": True,
+    }
+    assert campaign["daily"][0]["cost_kop"] == 0 and not campaign["daily"][0]["is_incomplete"]
     response = client.get("/api/ads?from=2025-12-01&to=2025-12-31")
     assert response.json()["items"][0]["metrics"]["cost_kop"] == 2000
+    assert response.json()["campaigns"][0]["daily"] == client.get("/api/ads").json()["campaigns"][0]["daily"]
     assert client.get("/api/ads?from=2026-02-01&to=2026-01-01").status_code == 422
     assert client.get("/api/ads?to=0001-01-03").status_code == 422
     assert client.get("/api/ads?from=0001-01-01&to=0001-01-03").status_code == 200

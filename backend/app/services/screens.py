@@ -22,7 +22,7 @@ from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
 from app.services.optimize import rebalance_budget
-from app.services.stats import aggregate, aggregate_budget
+from app.services.stats import aggregate, aggregate_budget, aggregate_daily
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
 
@@ -228,8 +228,30 @@ class ScreensService:
                     ),
                 }
             )
+        # Ряд для спарклайна — всегда последние 14 дней до сегодня, по тем же правилам, что /api/stats/daily.
+        day = today(self.worker.clock)
+        recent = self.repository.rows(StatsDaily, business.id, date=Window(day - timedelta(days=13), day))
         return {
-            "items": sorted(items, key=lambda row: (row["platform"], row["campaign_id"], row["group_id"], row["id"]))
+            "items": sorted(items, key=lambda row: (row["platform"], row["campaign_id"], row["group_id"], row["id"])),
+            "campaigns": [
+                {
+                    "id": campaign.id,
+                    "platform": campaign.platform,
+                    "name": campaign.name,
+                    "status": campaign.status,
+                    "daily": [
+                        {key: point[key] for key in ("date", "cost_kop", "leads", "is_incomplete")}
+                        for point in aggregate_daily(
+                            [row for row in recent if row.campaign_id == campaign.id],
+                            day - timedelta(days=13),
+                            day,
+                            business.lead_goal_ids,
+                            day,
+                        )
+                    ],
+                }
+                for campaign in sorted(campaigns.values(), key=lambda row: (row.platform, row.id))
+            ],
         }
 
     async def ad_status(self, business: Business, ad_id: int, active: bool) -> dict:
