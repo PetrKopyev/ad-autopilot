@@ -20,6 +20,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def closed_platforms(worker: Worker, business: Business) -> set[str]:
+    """Площадки, кабинет которых отключён или требует входа заново (Worker.reachable): спросить их нечем. Пересчёт
+    лимитов и «Продолжить» обходят их, чтобы работала другая площадка; доля бюджета и расход из BudgetLedger за ними
+    сохраняются."""
+    return {
+        platform
+        for platform in {campaign.platform for campaign in worker.campaigns(business)}
+        if not worker.reachable(business.id, platform)
+    }
+
+
 async def read_spend(
     worker: Worker, business: Business, *, tolerate_errors: bool = False, campaigns: list[Campaign] | None = None
 ) -> tuple[dict[str, int], dict[str, int]]:
@@ -175,19 +186,32 @@ async def stop_platform(
 
 async def resume_reconnected(worker: Worker, business: Business, platform: str) -> None:
     """Кабинет подключили снова: кампании площадки, остановленные при его отключении (stop_platform), продолжают
-    работать, если реклама не на паузе. Кампании без бюджета (ниже минимума площадки, нулевой лимит) не включаются."""
+    работать, если реклама не на паузе. Как «Продолжить», сначала пересчитывает лимиты: кампания стояла, бюджет месяца
+    мог уйти на другие. Не включаются кампании без бюджета (ниже минимума площадки, нулевой лимит), остановленные
+    владельцем в кабинете площадки и защищённые его отменой (frozen_until). Ключ изменения — шаг владельца
+    (owner:<uuid>), поэтому новое подключение после нового отключения включает кампании снова."""
+    from app.services.optimize import rebalance_budget
+
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
         return
+    await rebalance_budget(worker, business, force=True)
     held = set(worker.metadata(business).get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
-        if campaign.platform != platform or campaign.id in held or not campaign.daily_limit_kop:
+        if (
+            campaign.platform != platform
+            or campaign.id in held
+            or not campaign.daily_limit_kop
+            or campaign.owner_paused
+            or (campaign.frozen_until is not None and campaign.frozen_until > worker.clock.now)
+        ):
             continue
         last = worker.repository.last_status_change(business.id, platform, "campaign", campaign.external_id)
         if last is None or last.reason_code != "ACCOUNT_REVOKE":
             continue
-        state = (await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign)))[
-            campaign.external_id
-        ]
+        states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
+        state = states.get(campaign.external_id)
+        if state is None or state.status not in {"paused_owner", "paused_auto"}:
+            continue
         await worker.apply(
             business,
             campaign,

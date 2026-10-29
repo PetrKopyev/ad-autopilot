@@ -128,7 +128,8 @@ def evaluate_experiment(
         control.clicks, control.impressions, variant.clicks, variant.impressions, settings.fisher_expected_min
     )
     a, b = float(control.ctr), float(variant.ctr)
-    lift = b / a - 1 if a else float("inf") if b else 0.0
+    # Ни одного нажатия у контроля: относительной разницы нет (бесконечность не сохранить в JSON).
+    lift = b / a - 1 if a else None if b else 0.0
     # A second look spends at most another 1%: the two-look A/A error is bounded by 6%.
     alpha = settings.test_extension_alpha if extended else settings.test_alpha
     required_ratio = 1 + Decimal(str(settings.test_win_lift))
@@ -187,7 +188,8 @@ def evaluate_audience(
     p = binomial_test(variant.leads, leads, variant.spend / (control.spend + variant.spend))
     # Обращений на рубль: у варианта control.spend * variant.leads против variant.spend * control.leads у контроля.
     a, b = control.leads * variant.spend, variant.leads * control.spend
-    lift = b / a - 1 if a else float("inf")
+    # У контроля ни одного обращения: относительной разницы нет (бесконечность не сохранить в JSON).
+    lift = b / a - 1 if a else None
     required_ratio = 1 + Decimal(str(settings.test_win_lift))
     if p < settings.test_alpha and (b >= a * required_ratio or a >= b * required_ratio):
         return ExperimentResult(Verdict.VARIANT if b > a else Verdict.CONTROL, "EXPERIMENT_WIN", p, lift)

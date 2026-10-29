@@ -233,10 +233,18 @@ def explain_audience(
     variant: Metrics,
     labels: Sequence[str],
     settings: DomainSettings = DEFAULT_SETTINGS,
+    *,
+    overlap: bool = False,
 ) -> str:
-    """Вывод проверки аудиторий словами: цена обращения каждой аудитории и что оставили."""
+    """Вывод проверки аудиторий словами: цена обращения каждой аудитории и что оставили. overlap — аудитории
+    пересекаются (VK: «все возрасты» включают «25–54 года»), вывод говорит, что сравнивали настройку показа."""
     old, new = labels
     numbers = f"{audience_side(old, control)}, {audience_side(new, variant)}"
+    if overlap:
+        numbers += (
+            ". Аудитории пересекаются: одни и те же люди могли видеть оба объявления, поэтому это сравнение настройки "
+            "показа, а не двух разных групп людей"
+        )
     if control.leads + variant.leads < settings.audience_min_leads:
         return (
             f"За две недели проверки аудиторий обращений слишком мало для честного сравнения: {numbers}. "

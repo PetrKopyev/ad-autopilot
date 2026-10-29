@@ -20,7 +20,7 @@ from app.domain.explain import PLURALS, explain_audience, explain_experiment, pl
 from app.domain.rules import first_decision_days
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError, lead_count
-from app.services.budget_guard import STOPPED, read_spend, stop_all
+from app.services.budget_guard import STOPPED, closed_platforms, read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
@@ -173,7 +173,12 @@ class ScreensService:
     async def check_remaining(self, business: Business) -> None:
         from app.config import get_domain_settings
 
-        spent, _ = await read_spend(self.worker, business)
+        closed = closed_platforms(self.worker, business)
+        spent, _ = await read_spend(
+            self.worker,
+            business,
+            campaigns=[item for item in self.worker.campaigns(business) if item.platform not in closed],
+        )
         budget = self.budget(business)
         margin = stop_margin(
             sum(campaign.daily_limit_kop for campaign in self.worker.current_campaigns(business)),
@@ -402,7 +407,9 @@ class ScreensService:
             audiences = experiment.stats.get("audiences") if experiment.metric == "cpl" else None
             conclusion = (
                 (
-                    explain_audience(ExperimentResult(**result), *arms, audiences)
+                    explain_audience(
+                        ExperimentResult(**result), *arms, audiences, overlap=experiment.stats.get("overlap", False)
+                    )
                     if audiences
                     else explain_experiment(ExperimentResult(**result), *arms)
                 )

@@ -91,7 +91,7 @@ async def vk_callback(
     except PlatformError as failure:
         raise HTTPException(400, str(failure)) from None
     accounts.save(business_id, accounts.lock_account(business_id), tokens, auth_mode="oauth")
-    await resume(business_id, "vk")
+    resume(business_id, "vk")
     return _redirect()
 
 
@@ -124,7 +124,7 @@ async def vk_key(
         client_id=client_id,
         client_secret=client_secret,
     )
-    await resume(business.id, "vk")
+    resume(business.id, "vk")
     return {
         "id": account.id,
         "business_id": business.id,

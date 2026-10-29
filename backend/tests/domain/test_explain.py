@@ -184,3 +184,7 @@ def test_audience_verdict_names_both_audiences_with_lead_prices():
     assert "Убедительной разницы в цене обращения нет" in explain_audience(same, control, variant, labels)
     few = explain_audience(same, Metrics(500_000, 900, 30, 0), Metrics(500_000, 900, 30, 3), labels)
     assert "обращений слишком мало" in few and "ни одного обращения за 5 000 ₽" in few
+    # VK: «все возрасты» включают «25–54 года» — вывод не выдаёт это за две разные группы людей.
+    vk = explain_audience(win, control, variant, ("все возрасты", "25–54 года"), overlap=True)
+    assert "Аудитории пересекаются" in vk and "сравнение настройки показа" in vk
+    assert "пересекаются" not in explain_audience(win, control, variant, labels)

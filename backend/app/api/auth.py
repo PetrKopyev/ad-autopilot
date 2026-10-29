@@ -34,10 +34,10 @@ from app.auth.sessions import (
 )
 from app.db.models import Business, Campaign, PlatformAccount, Session, User
 from app.demo_flags import advance_jobs, demo_enabled, demo_now
-from app.platforms.base import AdPlatform, PlatformError
+from app.platforms.base import AdPlatform
 from app.platforms.fake import VirtualClock
 from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, resume_reconnected, stop_platform
-from app.services.changes import CLOSED_ACCOUNT, ChangeConflict, ServerBusy, wait_for_lock
+from app.services.changes import ChangeConflict, ServerBusy, wait_for_lock
 from app.services.connections import check_connections
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
 from app.services.launch import TITLES
@@ -132,16 +132,16 @@ def get_ad_stopper(request: Request) -> AdStopper:
 Stopper = Annotated[AdStopper, Depends(get_ad_stopper)]
 
 
-async def resume_account_ads(
-    db: DBSession, resolve: Callable[[int, str], AdPlatform], business_id: int, platform: str
-) -> None:
+async def resume_account_ads(resolve: Callable[[int, str], AdPlatform], business_id: int, platform: str) -> None:
     """Кабинет подключён снова: кампании, остановленные при его отключении, продолжают работать (resume_reconnected).
-    Не вышло — подключение всё равно сохранено, кампании включит «Продолжить» на главной."""
+    Идёт в фоне после ответа, со своей сессией БД. Не вышло — подключение всё равно сохранено, кампании включит
+    «Продолжить» на главной; в журнал сервера только тип ошибки: в её тексте может быть ответ площадки с токеном."""
+    from app.db.session import SessionLocal
     from app.worker.jobs import Worker, WorkerRepository
 
-    repository = WorkerRepository(db)
-    with ExitStack() as stack:
-        try:
+    try:
+        with SessionLocal() as db, ExitStack() as stack:
+            repository = WorkerRepository(db)
             await wait_for_lock(stack, repository, business_id, LOCK_WAIT_SECONDS)
             business = repository.business(business_id)
             worker = Worker(
@@ -149,23 +149,21 @@ async def resume_account_ads(
             )
             worker.step_key = f"owner:{uuid4()}"
             await resume_reconnected(worker, business, platform)
-        except (ChangeConflict, PlatformError, *CLOSED_ACCOUNT):
-            logger.warning(
-                "Campaigns of reconnected %s account were not resumed for business %s", platform, business_id
-            )
+    except Exception as error:
+        logger.warning(
+            "Campaigns of reconnected %s account were not resumed for business %s: %s",
+            platform,
+            business_id,
+            type(error).__name__,
+        )
 
 
-def get_ad_resumer(request: Request) -> Callable[[int, str], Awaitable[None]]:
-    async def resume(business_id: int, platform: str) -> None:
-        from app.db.session import SessionLocal
-
-        with SessionLocal() as db:
-            await resume_account_ads(db, request.app.state.platform_adapters.resolve, business_id, platform)
-
-    return resume
+def get_ad_resumer(request: Request, background: BackgroundTasks) -> Callable[[int, str], None]:
+    resolve = request.app.state.platform_adapters.resolve
+    return lambda business_id, platform: background.add_task(resume_account_ads, resolve, business_id, platform)
 
 
-Resumer = Annotated[Callable[[int, str], Awaitable[None]], Depends(get_ad_resumer)]
+Resumer = Annotated[Callable[[int, str], None], Depends(get_ad_resumer)]
 
 
 @contextmanager
@@ -320,7 +318,7 @@ async def yandex_callback(
         set_session_cookies(response, new_session)
         response.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
     elif repository.save_account(business_id, profile["login"], tokens).status == "ok":
-        await resume(business_id, "direct")
+        resume(business_id, "direct")
     return response
 
 

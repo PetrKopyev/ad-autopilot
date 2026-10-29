@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -519,6 +520,11 @@ async def test_audience_test_runs_in_new_group_and_concludes_by_lead_price(exper
     assert (variant.title, variant.text) == (control.title, control.text)
     states = await world.adapter.get_state(worker.refs(world.campaign))
     assert states[group.external_id].parent_id == world.campaign.external_id
+    # Запросы с городом достаются только исходной группе: аудитории не пересекаются.
+    assert "самара" in states[group.external_id].targeting["negative_keywords"]
+    source = world.repository.find(AdGroup, id=control.ad_group_id)
+    assert "самара" not in states[source.external_id].targeting.get("negative_keywords", [])
+    assert experiment.stats["overlap"] is False
     start = experiment.started_at.astimezone(MOSCOW).date()
     for row, leads in ((control, 1), (variant, 2)):
         for offset in range(14):
@@ -580,3 +586,25 @@ async def test_audience_launch_rolls_back_to_the_old_audience(experiment_world):
     states = await world.adapter.get_state(worker.refs(world.campaign))
     assert states[world.ads["borderline-1"].external_id].status == "active"
     assert states[variant.external_id].status == "paused_owner"
+
+
+async def test_vk_audience_is_marked_as_overlapping(experiment_world, monkeypatch):
+    from app.services.experiments import audience_variant
+
+    world = experiment_world
+    worker = world.worker()
+    group = next(item for item in world.repository.rows(AdGroup) if item.id == world.ads["borderline-1"].ad_group_id)
+    monkeypatch.setattr(worker, "refs", lambda campaign: world.refs)
+    audience = await audience_variant(worker, world.business, SimpleNamespace(platform="vk"), group)
+    ages = (audience["targeting"]["age_from"], audience["targeting"]["age_to"])
+    assert audience["overlap"] is True and ages == (25, 54)
+
+
+@pytest.mark.parametrize(("demo_login", "threshold"), [(True, 10_000), (False, 70_000)])
+def test_audience_threshold_is_lowered_only_in_demo(monkeypatch, demo_login, threshold):
+    from app.config import settings
+    from app.services.experiments import experiment_settings
+
+    monkeypatch.setattr(settings, "platform_mode", "fake")
+    monkeypatch.setattr(settings, "demo_login", demo_login)
+    assert experiment_settings().audience_min_daily_budget == threshold

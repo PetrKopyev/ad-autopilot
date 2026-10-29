@@ -19,7 +19,7 @@ from app.demo_flags import demo_enabled
 from app.domain.experiments import next_hypothesis
 from app.domain.explain import explain
 from app.domain.rules import can_change
-from app.domain.settings import DEFAULT_SETTINGS
+from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.types import AdSnapshot, ExperimentDesign
 from app.platforms.base import AdGroupSpec, AdSpec, Operation, PlatformError, TargetSpec
 from app.platforms.fake import FakeAdapter
@@ -147,7 +147,7 @@ async def _create_experiment(
         .get("group_limits", {})
         .get(group.external_id, campaign.daily_limit_kop // len(siblings))
     )
-    hypothesis = next_hypothesis(completed_hypotheses(worker, business, group.id), budget)
+    hypothesis = next_hypothesis(completed_hypotheses(worker, business, group.id), budget, experiment_settings())
     if hypothesis is None or not 0 < design.daily_budget <= int(budget * DEFAULT_SETTINGS.test_budget_share):
         return None
     # Ключ не зависит от расписания: повтор завтра не создаёт новое предложение.
@@ -440,9 +440,23 @@ async def launch_variant(worker, business, campaign, group, control, change, des
 AUDIENCE_AGES = (25, 54)
 
 
+# В демо бюджет 30–50 тыс. ₽ в месяц: группе не набрать 700 ₽ в день, и приёмщик не увидел бы проверку аудиторий.
+DEMO_AUDIENCE_MIN_DAILY_BUDGET = 10_000
+
+
+def experiment_settings() -> DomainSettings:
+    """Пороги гипотез: в демо проверка аудиторий начинается со 100 ₽ в день у группы, на живых площадках — с 700 ₽."""
+    if demo_enabled():
+        return replace(DEFAULT_SETTINGS, audience_min_daily_budget=DEMO_AUDIENCE_MIN_DAILY_BUDGET)
+    return DEFAULT_SETTINGS
+
+
 async def audience_variant(worker: Worker, business: Business, campaign, group: AdGroup) -> dict | None:
-    """Другая аудитория для группы. Директ: те же фразы без названия города — люди того же региона, которые не пишут
-    город в запросе. VK: 25–54 года вместо всех возрастов. Отличить нечем — None."""
+    """Другая аудитория для группы. Директ: те же фразы без названия города и город в минус-фразах — люди того же
+    региона, которые не пишут город в запросе; запросы с городом достаются только исходной группе, аудитории не
+    пересекаются. VK: 25–54 года вместо всех возрастов; исключить этот возраст из исходной группы значило бы сменить
+    её аудиторию, поэтому люди 25–54 лет видят обе группы (overlap) и вывод говорит об этом прямо. Отличить нечем —
+    None."""
     adapter = worker.resolve_adapter(business.id, campaign.platform)
     targeting = (await adapter.get_state(worker.refs(campaign)))[group.external_id].targeting
     if campaign.platform == "direct":
@@ -455,8 +469,9 @@ async def audience_variant(worker: Worker, business: Business, campaign, group: 
         wide = list(dict.fromkeys(phrase.removesuffix(city) for phrase in phrases))
         if not phrases or wide == phrases:
             return None
+        negatives = list(targeting.get("negative_keywords", []))
         return {
-            "targeting": targeting,
+            "targeting": targeting | {"negative_keywords": [*negatives, city.strip()]},
             "phrases": wide,
             "name": "без города в запросе",
             "labels": ["ищут с названием города", "ищут без названия города"],
@@ -472,6 +487,7 @@ async def audience_variant(worker: Worker, business: Business, campaign, group: 
         "phrases": [],
         "name": f"{low}–{high} года",
         "labels": ["все возрасты", f"{low}–{high} года"],
+        "overlap": True,
     }
 
 
@@ -547,7 +563,11 @@ async def launch_audience(worker, business, campaign, group, control, change, de
             # Вывод — когда уточнятся цифры последнего дня проверки; день запаса на шаг воркера.
             deadline=started + timedelta(days=DEFAULT_SETTINGS.test_max_days + DEFAULT_SETTINGS.settlement_days + 1),
             status="running",
-            stats={"launch_change_id": change.id, "audiences": audience["labels"]},
+            stats={
+                "launch_change_id": change.id,
+                "audiences": audience["labels"],
+                "overlap": audience.get("overlap", False),
+            },
             change_id=change.id,
         )
         repository.save(experiment)

@@ -704,3 +704,23 @@ def test_accounts_check_is_rate_limited(
     statuses = [client.post("/api/accounts/check", headers=csrf).status_code for _ in range(7)]
     assert statuses == [200] * 6 + [429]
     assert "слишком часто" in client.post("/api/accounts/check", headers=csrf).json()["detail"]
+
+
+def test_failed_resume_after_reconnect_keeps_redirect_and_logs_no_details(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.api.auth import get_ad_resumer
+
+    def broken_session():
+        raise RuntimeError("access_token=secret-token")
+
+    monkeypatch.setattr("app.db.session.SessionLocal", broken_session)
+    client.app.dependency_overrides.pop(get_ad_resumer)
+    login(client, repository)
+    response = callback(client, start(client, "direct")["state"])
+    assert response.status_code == 303 and repository.accounts[1].status == "ok"
+    assert "RuntimeError" in caplog.text and "secret-token" not in caplog.text

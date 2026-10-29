@@ -17,6 +17,7 @@ from app.db.models import (
     BudgetLedger,
     Business,
     Campaign,
+    ChangeLog,
     Plan,
     PlatformAccount,
     Target,
@@ -52,6 +53,7 @@ from app.services.plan import (
     group_key,
     launch_blockers,
     launch_unsettled,
+    phrase,
     targeting,
 )
 from app.worker.jobs import NoticesRepository
@@ -764,21 +766,30 @@ async def stop_interrupted(worker: Worker, business: Business, campaign_id: int)
 async def sync_removed_services(worker: Worker, business: Business) -> None:
     """Описание поменяли после запуска: кампания Директа, все услуги которой из описания убраны, останавливается, а в
     общей с другими услугами кампании останавливаются объявления групп убранных услуг. Услугу вернули — её
-    кампания, остановленная так, продолжает работать. Действие владельца: идёт и в пробном режиме."""
+    кампания или объявления, остановленные так, продолжают работать. Услуги сравниваются по ключевой фразе, как при
+    сборке групп (direct_services): «маникюр» и « Маникюр » — одна услуга. Действие владельца: идёт и в пробном
+    режиме."""
     launched = [plan for plan in worker.repository.rows(Plan, business.id) if plan.status == "launched"]
     if not launched:
         return
     plan = max(launched, key=lambda item: item.id)
-    services = {service.name for service in description_draft(business).services}
+    services = {phrase(service.name, business.city) for service in description_draft(business).services}
     # Неподтверждённое описание сохраняется и без услуг: пустой список — не «убрали всё».
     if not services:
         return
     groups = {
         group["id"]: group for group in plan.payload["groups"] if group["platform"] == "direct" and "service" in group
     }
-    removed = {id_ for id_, group in groups.items() if group["service"] not in services}
+    removed = {id_ for id_, group in groups.items() if phrase(group["service"], business.city) not in services}
     batches = plan.payload["launch"].get("batches", {})
     current = {campaign.id: campaign for campaign in worker.current_campaigns(business)}
+    # Объявления, которые останавливали из-за убранной услуги: при её возврате включаются только они.
+    paused_ads = {
+        operation["entity_id"]
+        for change in worker.repository.rows(ChangeLog, business.id, reason_code="SERVICE_REMOVED", status="applied")
+        for operation in change.operations
+        if operation["entity_type"] == "ad"
+    }
     for key, campaign_id in plan.payload["launch"]["campaigns"].items():
         campaign = current.get(campaign_id)
         if campaign_platform(key) != "direct" or campaign is None or not campaign.external_id:
@@ -786,43 +797,83 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
         ids = [id_ for id_ in batches.get(key, groups) if id_ in groups]
         gone = [groups[id_]["service"] for id_ in ids if id_ in removed]
         last = worker.repository.last_status_change(business.id, "direct", "campaign", campaign.external_id)
-        returned = not gone and last is not None and last.reason_code == "SERVICE_REMOVED" and last.kind == "pause"
-        if not gone and not returned:
+        stopped = last is not None and last.reason_code == "SERVICE_REMOVED" and last.kind == "pause"
+        if not (gone or stopped or paused_ads):
+            continue
+        themes = {groups[id_]["name"]: groups[id_]["service"] for id_ in ids}
+        gone_themes = {groups[id_]["name"] for id_ in ids if id_ in removed}
+        rows = {row.id: row.theme for row in worker.repository.rows(AdGroup, business.id, campaign_id=campaign.id)}
+        ads = [ad for ad in worker.repository.rows(Ad, business.id) if ad.ad_group_id in rows and ad.external_id]
+        stale = [ad for ad in ads if rows[ad.ad_group_id] in gone_themes]
+        back = [ad for ad in ads if ad.external_id in paused_ads and rows[ad.ad_group_id] not in gone_themes]
+        if not (gone or stopped or back):
             continue
         states = await worker.resolve_adapter(business.id, "direct").get_state(worker.refs(campaign))
+        if campaign.external_id not in states:
+            continue
         status = states[campaign.external_id].status
-        if returned:
-            if status != "paused_owner" or business.status != "running":
-                continue
-            operations = [Operation("set_status", "campaign", campaign.external_id, "status", status, "active")]
-            text = "Услуга снова в описании — её кампания продолжила работу."
-        elif len(gone) == len(ids):
+        if len(gone) == len(ids):
             if status in STOPPED:
                 continue
-            operations = [Operation("set_status", "campaign", campaign.external_id, "status", status, "paused_owner")]
-            text = f"Убрали из описания: {', '.join(gone)} — остановили кампанию «{campaign.name}»."
-        else:
-            themes = {groups[id_]["name"] for id_ in ids if id_ in removed}
-            stale = {
-                row.id
-                for row in worker.repository.rows(AdGroup, business.id)
-                if row.campaign_id == campaign.id and row.theme in themes
-            }
-            operations = [
-                Operation("set_status", "ad", ad.external_id, "status", states[ad.external_id].status, "paused_owner")
-                for ad in worker.repository.rows(Ad, business.id)
-                if ad.ad_group_id in stale and states[ad.external_id].status not in STOPPED
-            ]
-            if not operations:
-                continue
-            text = f"Убрали из описания: {', '.join(gone)} — остановили её объявления в кампании «{campaign.name}»."
-        await worker.apply(
-            business,
-            campaign,
-            operations,
-            actor="owner",
-            kind="resume" if returned else "pause",
-            reason_code="SERVICE_RETURNED" if returned else "SERVICE_REMOVED",
-            reason_text=text,
-            suffix=f"services:{campaign.id}:{','.join(gone)}",
-        )
+            await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "campaign", campaign.external_id, "status", status, "paused_owner")],
+                actor="owner",
+                kind="pause",
+                reason_code="SERVICE_REMOVED",
+                reason_text=f"Убрали из описания: {', '.join(gone)} — остановили кампанию «{campaign.name}».",
+                suffix=f"services:{campaign.id}:{','.join(gone)}",
+            )
+            continue
+        pauses = [
+            Operation("set_status", "ad", ad.external_id, "status", states[ad.external_id].status, "paused_owner")
+            for ad in stale
+            if ad.external_id in states and states[ad.external_id].status not in STOPPED
+        ]
+        if pauses:
+            await worker.apply(
+                business,
+                campaign,
+                pauses,
+                actor="owner",
+                kind="pause",
+                reason_code="SERVICE_REMOVED",
+                reason_text=f"Убрали из описания: {', '.join(gone)} — остановили её объявления в кампании "
+                f"«{campaign.name}».",
+                suffix=f"services:{campaign.id}:{','.join(gone)}",
+            )
+        if business.status != "running":
+            continue
+        if stopped and status == "paused_owner":
+            await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "campaign", campaign.external_id, "status", status, "active")],
+                actor="owner",
+                kind="resume",
+                reason_code="SERVICE_RETURNED",
+                reason_text="Услуга снова в описании — её кампания продолжила работу.",
+                suffix=f"services:{campaign.id}:returned",
+            )
+        resumed = [
+            ad
+            for ad in back
+            if ad.external_id in states
+            and states[ad.external_id].status == "paused_owner"
+            and (change := worker.repository.last_status_change(business.id, "direct", "ad", ad.external_id))
+            and change.reason_code == "SERVICE_REMOVED"
+        ]
+        if resumed:
+            names = sorted({themes[rows[ad.ad_group_id]] for ad in resumed if rows[ad.ad_group_id] in themes})
+            await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "ad", ad.external_id, "status", "paused_owner", "active") for ad in resumed],
+                actor="owner",
+                kind="resume",
+                reason_code="SERVICE_RETURNED",
+                reason_text=f"Снова в описании: {', '.join(names)} — объявления в кампании «{campaign.name}» "
+                "снова работают.",
+                suffix=f"services:{campaign.id}:returned-ads",
+            )

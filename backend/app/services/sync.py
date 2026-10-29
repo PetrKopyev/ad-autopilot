@@ -190,11 +190,14 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
     """Пауза и включение кампании в кабинете площадки. Площадка не говорит, кто остановил кампанию: что меняли мы,
     помнит локальный статус — его переписывает каждое применённое изменение."""
     from app.config import get_domain_settings
+    from app.services.budget_guard import closed_platforms
 
     held = set(worker.metadata(business).get("below_minimum", []))
+    # Кабинет, который требует входа заново, спросить нечем: остальные площадки сверяются.
     pending = {change.platform for change in worker.repository.pending(business.id)}
+    skipped = pending | closed_platforms(worker, business)
     for campaign in worker.current_campaigns(business):
-        if campaign.platform in pending:
+        if campaign.platform in skipped:
             continue
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]

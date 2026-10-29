@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import contextmanager, nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -474,3 +474,59 @@ async def test_stop_user_ads_of_busy_business_refuses_revoke(owner, monkeypatch)
             await stop_user_ads(db, lambda *_: adapter, user.id, None, "Стоп.", later())
         step.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": busy.business_id})
     assert adapter.statuses == {"c-1": "paused_owner", "c-2": "active"}
+
+
+async def disconnect(world, worker, key: str) -> None:
+    from app.services.budget_guard import stop_platform
+
+    worker.step_key = f"owner:revoke-{key}"
+    await stop_platform(world.business, worker=worker, platform="direct", reason_text="Отключили.", deadline=later())
+    assert world.campaign.status == "paused_owner"
+
+
+async def test_reconnect_resumes_after_each_new_disconnect_and_rebalances_first(monkeypatch):
+    from app.services import optimize
+    from app.services.budget_guard import resume_reconnected
+
+    world = await make_world()
+    worker = world.worker()
+    rebalance = AsyncMock(wraps=optimize.rebalance_budget)
+    monkeypatch.setattr(optimize, "rebalance_budget", rebalance)
+    for attempt in range(2):
+        await disconnect(world, worker, str(attempt))
+        worker.step_key = f"owner:{uuid4()}"
+        await resume_reconnected(worker, world.business, "direct")
+        assert world.campaign.status == "active"
+    assert len(world.changes(reason_code="OWNER_RESUME")) == 2
+    assert rebalance.await_count == 2 and rebalance.await_args.kwargs == {"force": True}
+
+
+@pytest.mark.parametrize("protection", ["owner_paused", "frozen"])
+async def test_reconnect_leaves_campaign_owner_paused_or_protected_by_undo(protection):
+    from app.services.budget_guard import resume_reconnected
+
+    world = await make_world()
+    worker = world.worker()
+    await disconnect(world, worker, "0")
+    if protection == "owner_paused":
+        world.campaign.owner_paused = True
+    else:
+        world.campaign.frozen_until = world.clock.now + timedelta(days=1)
+    worker.step_key = f"owner:{uuid4()}"
+    await resume_reconnected(worker, world.business, "direct")
+    assert world.campaign.status == "paused_owner"
+    assert not world.changes(reason_code="OWNER_RESUME")
+
+
+async def test_reconnect_skips_campaign_missing_on_platform(monkeypatch):
+    from app.services import optimize
+    from app.services.budget_guard import resume_reconnected
+
+    world = await make_world()
+    worker = world.worker()
+    await disconnect(world, worker, "0")
+    monkeypatch.setattr(optimize, "rebalance_budget", AsyncMock())
+    monkeypatch.setattr(world.adapter, "get_state", AsyncMock(return_value={}))
+    worker.step_key = f"owner:{uuid4()}"
+    await resume_reconnected(worker, world.business, "direct")
+    assert not world.changes(reason_code="OWNER_RESUME")

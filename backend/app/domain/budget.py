@@ -206,13 +206,21 @@ def daily_minimum(minimum: Mapping[str, int]) -> int:
     return max(minimum.get("daily_limit_kop", minimum.get("day", 0)), -(-minimum.get("weekly_limit_kop", 0) // 7))
 
 
-def share_floors(total_daily: int, minimums: Mapping[str, Mapping[str, int]]) -> dict[str, Decimal]:
-    """Доли дневного бюджета, ниже которых кампания площадки не наберёт её минимум. Дневной минимум получает запас
-    MINIMUM_MARGIN по тому же правилу, что и при возобновлении: иначе доля у порога держала бы кампанию на паузе."""
+def share_floors(
+    total_daily: int, minimums: Mapping[str, Mapping[str, int]], campaigns: Mapping[str, int] | None = None
+) -> dict[str, Decimal]:
+    """Доли дневного бюджета, ниже которых кампании площадки не наберут её минимум. Минимум у каждой кампании свой
+    (в Директе — кампания на услугу), поэтому он умножается на число кампаний площадки (campaigns, по умолчанию одна).
+    Дневной минимум получает запас MINIMUM_MARGIN по тому же правилу, что и при возобновлении: иначе доля у порога
+    держала бы кампанию на паузе."""
     if not total_daily:
         return {}
+    campaigns = campaigns or {}
     return {
-        platform: daily_floor(minimum, MINIMUM_MARGIN) * CAP_MULTIPLIER / total_daily
+        platform: daily_floor(minimum, MINIMUM_MARGIN)
+        * CAP_MULTIPLIER
+        * max(1, campaigns.get(platform, 1))
+        / total_daily
         for platform, minimum in minimums.items()
     }
 

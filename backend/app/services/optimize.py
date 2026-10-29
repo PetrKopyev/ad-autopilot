@@ -4,6 +4,7 @@ import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from decimal import Decimal
+from math import ceil
 from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, BudgetLedger, Business, Campaign, ChangeLog, Experiment, StatsDaily
@@ -14,6 +15,7 @@ from app.domain.budget import (
     PLATFORM_MINIMUMS,
     allocate,
     campaign_limits,
+    daily_floor,
     meets_minimum,
     plan_budget,
     platform_shares,
@@ -36,9 +38,9 @@ from app.domain.types import (
     total_metrics,
 )
 from app.platforms.base import Operation, PlatformError, lead_count
-from app.services.budget_guard import read_spend
+from app.services.budget_guard import closed_platforms, read_spend
 from app.services.changes import budget_operations
-from app.services.experiments import completed_hypotheses, group_available, testing_groups
+from app.services.experiments import completed_hypotheses, experiment_settings, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
 
@@ -52,7 +54,8 @@ async def snapshot(
     worker: Worker, business: Business, *, include_paused_campaigns: bool = False
 ) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
     repository = worker.repository
-    campaigns = worker.current_campaigns(business)
+    closed = closed_platforms(worker, business)
+    campaigns = [campaign for campaign in worker.current_campaigns(business) if campaign.platform not in closed]
     states = {}
     for campaign in campaigns:
         states.update(await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))
@@ -197,6 +200,7 @@ async def optimize(worker: Worker, business: Business) -> None:
     testing = testing_groups(worker, business)
     ad_map = {ad.id: ad for ad in ads}
     lifetime = None
+    floors: dict[str, int] = {}
     titles = {ad.external_id: ad.title for ad in worker.repository.rows(Ad, business.id)}
     for decision in decisions:
         if decision.action == Action.NOTIFY:
@@ -224,12 +228,26 @@ async def optimize(worker: Worker, business: Business) -> None:
             before = limits.copy()
             scaled = limits.copy()
             increment = decision.new_daily_limit - limits[group_id]
-            # Сначала забираем средства у остановленных групп; сумма лимитов не растёт.
+            # Сначала забираем средства у остановленных групп; сумма лимитов не растёт. У группы из другой кампании
+            # берём только то, что выше минимума площадки для её кампании: иначе, когда группа снова заработает,
+            # её кампания встанет на паузу из-за минимума.
             for donor in groups:
                 donor_group = next(item for item in local_groups if item.external_id == donor.id)
                 if donor.active or donor_group.id in testing or increment <= 0:
                     continue
-                take = min(increment, scaled[donor.id])
+                spare = scaled[donor.id]
+                if donor_group.campaign_id != campaign.id:
+                    if donor.platform not in floors:
+                        floors[donor.platform] = ceil(
+                            daily_floor(await platform_minimums(worker, business, donor.platform), MINIMUM_MARGIN)
+                        )
+                    kept = sum(
+                        scaled[item.external_id]
+                        for item in local_groups
+                        if item.campaign_id == donor_group.campaign_id and item.external_id in scaled
+                    )
+                    spare = min(spare, max(0, kept - floors[donor.platform]))
+                take = min(increment, spare)
                 scaled[donor.id] -= take
                 scaled[group_id] += take
                 increment -= take
@@ -325,7 +343,11 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     day = today(worker.clock)
     month = day.replace(day=1)
     meta = worker.metadata(business)
-    spent, lifetime = await read_spend(worker, business)
+    # Площадку с отключённым кабинетом спросить нечем: её расход — из BudgetLedger, лимиты её кампаний не меняем.
+    closed = closed_platforms(worker, business)
+    spent, lifetime = await read_spend(
+        worker, business, campaigns=[item for item in worker.campaigns(business) if item.platform not in closed]
+    )
     for ledger in worker.repository.rows(BudgetLedger, business.id, month=month):
         spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
     # Расход — по всем кампаниям (read_spend), а лимиты получают только кампании действующего плана.
@@ -360,15 +382,29 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             settings=domain,
         )
 
-    minimums = {platform: await platform_minimums(worker, business, platform) for platform in platforms}
-    # Перенос между площадками не опускает кампанию ниже минимума площадки.
-    floors = share_floors(sum(limit.daily_limit for limit in budget_plan(shares).limits), minimums)
+    minimums = {
+        platform: dict(PLATFORM_MINIMUMS.get(platform, {}))
+        if platform in closed
+        else await platform_minimums(worker, business, platform)
+        for platform in platforms
+    }
+    local_groups = worker.repository.rows(AdGroup, business.id)
+    live = {group.id for group in groups if group.active}
+    funded = {group.campaign_id for group in local_groups if group.external_id in live}
+    # Перенос между площадками не опускает ни одну кампанию площадки ниже её минимума.
+    floors = share_floors(
+        sum(limit.daily_limit for limit in budget_plan(shares).limits),
+        minimums,
+        {
+            platform: sum(1 for item in campaigns if item.platform == platform and item.id in funded)
+            for platform in platforms
+        },
+    )
     if not worker.proposed(business):
         # Перенос бюджета между площадками по цене обращения — решение автопилота: в пробном режиме доли не меняются.
         shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
     plan = budget_plan(shares)
     group_limits = {group.id: group.daily_limit for group in groups}
-    local_groups = worker.repository.rows(AdGroup, business.id)
     held = set(meta.get("below_minimum", []))
     # Неиспользуемый вес остаётся у остановленных групп: его получают только хорошие через decide().
     for limit in plan.limits:
@@ -379,7 +415,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         daily = allocate(limit.daily_limit, weights)
         caps = allocate(limit.remaining_cap, weights)
         for campaign in campaigns:
-            if campaign.platform != limit.platform:
+            if campaign.platform != limit.platform or campaign.platform in closed:
                 continue
             own = {group.external_id for group in local_groups if group.campaign_id == campaign.id}
             active = {group.id for group in platform_groups if group.id in own and group.active}
@@ -606,7 +642,13 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         campaign = campaigns[local_groups[experiment.ad_group_id].campaign_id]
         control_metrics, variant_metrics = total_metrics(control_days), total_metrics(variant_days)
         text = (
-            explain_audience(result, control_metrics, variant_metrics, experiment.stats["audiences"])
+            explain_audience(
+                result,
+                control_metrics,
+                variant_metrics,
+                experiment.stats["audiences"],
+                overlap=experiment.stats.get("overlap", False),
+            )
             if audience
             else explain_experiment(result, control_metrics, variant_metrics)
         )
@@ -648,7 +690,11 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         local_group = next(item for item in local_groups.values() if item.external_id == group.id)
         completed = completed_hypotheses(worker, business, local_group.id)
         design = design_experiment(
-            float(metrics.ctr), metrics.impressions // max(1, len(days)), group.daily_limit, completed
+            float(metrics.ctr),
+            metrics.impressions // max(1, len(days)),
+            group.daily_limit,
+            completed,
+            experiment_settings(),
         )
         if not design.accepted:
             worker.notice(

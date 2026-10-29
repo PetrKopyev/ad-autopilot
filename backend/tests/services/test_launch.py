@@ -1,15 +1,17 @@
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from cryptography.fernet import InvalidToken
 
 from app.content.images import run_decoding
-from app.db.models import AdGroup, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
+from app.db.models import Ad, AdGroup, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
 from app.platforms.base import ExternalRefs, Operation, PlatformError
 from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter, VirtualClock
@@ -2194,6 +2196,51 @@ async def test_direct_gets_campaign_per_service_with_share_of_platform_limit(tmp
     assert sorted(change.platform for change in history) == ["direct", "direct", "direct", "vk"]
 
 
+async def test_platform_share_floor_counts_every_direct_campaign(tmp_path: Path, monkeypatch) -> None:
+    from app.domain.budget import share_floors
+    from app.services import optimize
+
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"])
+    await launch(world, plan)
+    counted = []
+
+    def floors(total_daily, minimums, campaigns):
+        counted.append(campaigns)
+        return share_floors(total_daily, minimums, campaigns)
+
+    monkeypatch.setattr(optimize, "share_floors", floors)
+    await optimize.rebalance_budget(recovery_worker(world, dry_run=False), world.business, force=True)
+    assert counted == [{"direct": 3, "vk": 1}]
+
+async def test_scale_leaves_donor_campaign_its_platform_minimum(tmp_path: Path, monkeypatch) -> None:
+    from math import ceil
+
+    from app.domain.budget import MINIMUM_MARGIN, daily_floor
+    from app.domain.types import Action, Decision, GroupSnapshot
+    from app.services import optimize
+
+    adapters = {"direct": WeeklyMinimum(14_000), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"], adapters=adapters)
+    await launch(world, plan)
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    target, donor, other = (world.repository.tree_rows(item.id)[0][0].external_id for item in direct)
+    groups = [
+        GroupSnapshot(target, "direct", 50_000),
+        GroupSnapshot(donor, "direct", 50_000, active=False),
+        GroupSnapshot(other, "direct", 50_000),
+    ]
+    numbers = {"old_limit": 50_000, "new_limit": 100_000}
+    scale = Decision(target, Action.SCALE, "SCALE_UP", entity="group", new_daily_limit=100_000, numbers=numbers)
+    monkeypatch.setattr(optimize, "snapshot", AsyncMock(return_value=([], groups)))
+    monkeypatch.setattr(optimize, "decide", lambda *args, **kwargs: [scale])
+    monkeypatch.setattr(launch_module, "sync_removed_services", AsyncMock())
+    worker = recovery_worker(world, after=timedelta(days=2), dry_run=False)
+    await optimize.optimize(worker, world.business)
+    floor = ceil(daily_floor(await world.adapters["direct"].min_budgets(), MINIMUM_MARGIN))
+    assert floor == 2_000
+    limits = worker.metadata(world.business)["group_limits"]
+    assert limits == {target: 100_000 - floor, donor: floor, other: 50_000}
+
 async def test_direct_budget_below_campaign_minimums_shares_campaigns_between_services(tmp_path: Path) -> None:
     services = ["Маникюр", "Педикюр", "Наращивание ресниц", "Дизайн ногтей"]
     limit = budget_limits(make_world(tmp_path / "probe").business, ["direct", "vk"], TODAY)["direct"]
@@ -2252,3 +2299,107 @@ async def test_service_removed_from_shared_campaign_stops_only_its_ads(tmp_path:
     assert (
         change.status == "applied" and "Наращивание ресниц" in change.reason_text and shared.name in change.reason_text
     )
+
+
+async def shared_campaign_world(tmp_path: Path) -> tuple[World, Worker, Campaign]:
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц", "Дизайн ногтей"]
+    limit = budget_limits(make_world(tmp_path / "probe").business, ["direct", "vk"], TODAY)["direct"]
+    whole = weekly_limit(limit.daily_limit, limit.remaining_cap, TODAY)
+    adapters = {"direct": WeeklyMinimum(whole * 3 // 8), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, services, adapters=adapters)
+    await launch(world, plan)
+    shared = next(item for item in campaigns(world) if "Наращивание ресниц" in item.name)
+    return world, recovery_worker(world, dry_run=True), shared
+
+
+async def describe_services(world: World, worker: Worker, value: str) -> None:
+    from app.services.launch import sync_removed_services
+
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": value}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    worker.step_key = f"optimize:{value}"
+    await sync_removed_services(worker, world.business)
+
+
+async def test_service_spelled_differently_is_not_removed(tmp_path: Path) -> None:
+    world, worker, _ = await shared_campaign_world(tmp_path)
+    await describe_services(world, worker, "маникюр\n  Педикюр \nнаращивание  РЕСНИЦ\nДизайн ногтей")
+    assert not [row for row in world.repository.rows(ChangeLog) if row.reason_code == "SERVICE_REMOVED"]
+    assert "paused_owner" not in {ad.status for ad in world.repository.rows(Ad)}
+
+
+async def test_service_returned_to_shared_campaign_resumes_only_ads_stopped_for_it(tmp_path: Path) -> None:
+    world, worker, shared = await shared_campaign_world(tmp_path)
+    rows, ads, _ = world.repository.tree_rows(shared.id)
+    themes = {row.id: row.theme for row in rows}
+    own = [ad for ad in ads if "Наращивание ресниц" in themes[ad.ad_group_id]]
+    other = next(ad for ad in ads if "Наращивание ресниц" not in themes[ad.ad_group_id])
+    # Объявление, которое владелец остановил сам, возврат услуги не включает.
+    states = world.adapters["direct"]._states
+    states[other.external_id] = replace(states[other.external_id], status="paused_owner")
+    other.status = "paused_owner"
+    await describe_services(world, worker, "Маникюр\nПедикюр\nДизайн ногтей")
+    assert {ad.status for ad in own} == {"paused_owner"}
+    await describe_services(world, worker, "Маникюр\nПедикюр\nНаращивание ресниц\nДизайн ногтей")
+    assert {ad.status for ad in own} == {"active"} and other.status == "paused_owner"
+    assert states[other.external_id].status == "paused_owner"
+    (returned,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "SERVICE_RETURNED"]
+    assert returned.status == "applied" and "Наращивание ресниц" in returned.reason_text
+    assert {op["entity_id"] for op in returned.operations} == {ad.external_id for ad in own}
+
+
+async def test_removed_service_skips_ads_not_created_on_platform(tmp_path: Path) -> None:
+    world, worker, shared = await shared_campaign_world(tmp_path)
+    rows, ads, _ = world.repository.tree_rows(shared.id)
+    themes = {row.id: row.theme for row in rows}
+    own = [ad for ad in ads if "Наращивание ресниц" in themes[ad.ad_group_id]]
+    own[0].external_id = None
+    before = own[0].status
+    await describe_services(world, worker, "Маникюр\nПедикюр\nДизайн ногтей")
+    assert own[0].status == before and {ad.status for ad in own[1:]} == {"paused_owner"}
+
+
+async def vk_disconnected_world(tmp_path: Path) -> tuple[World, Worker]:
+    from time import monotonic
+
+    from app.db.models import PlatformAccount
+    from app.services.budget_guard import stop_platform
+
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"])
+    await launch(world, plan)
+    worker = recovery_worker(world, after=timedelta(days=2), dry_run=False)
+    for platform in ("direct", "vk"):
+        worker.step_key = f"owner:revoke-{platform}"
+        await stop_platform(
+            world.business, worker=worker, platform=platform, reason_text="Отключили.", deadline=monotonic() + 60
+        )
+    assert {item.status for item in campaigns(world)} == {"paused_owner"}
+    vk = next(item for item in world.repository.rows(PlatformAccount) if item.platform == "vk")
+    vk.status = "revoked"
+
+    def resolve(business_id: int, platform: str):
+        if platform == "vk":
+            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+        return world.adapters[platform]
+
+    return world, recovery_worker(world, after=timedelta(days=2), resolve=resolve, dry_run=False)
+
+
+async def test_reconnected_direct_resumes_while_vk_account_stays_disconnected(tmp_path: Path) -> None:
+    from app.services.budget_guard import resume_reconnected
+
+    world, worker = await vk_disconnected_world(tmp_path)
+    worker.step_key = "owner:reconnect"
+    await resume_reconnected(worker, world.business, "direct")
+    assert {item.platform: item.status for item in campaigns(world)} == {"direct": "active", "vk": "paused_owner"}
+
+
+async def test_continue_works_while_vk_account_stays_disconnected(tmp_path: Path) -> None:
+    from app.services.screens import ScreensService
+
+    world, worker = await vk_disconnected_world(tmp_path)
+    world.business.status = "paused"
+    await ScreensService(worker).resume(world.business)
+    assert world.business.status == "running"
+    assert {item.platform: item.status for item in campaigns(world)} == {"direct": "active", "vk": "paused_owner"}

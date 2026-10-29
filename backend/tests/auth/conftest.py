@@ -36,7 +36,7 @@ class FakeRepository:
         # Включение кампаний после повторного подключения кабинета: (business_id, площадка).
         self.resumes: list[tuple[int, str]] = []
 
-    async def resume_ads(self, business_id: int, platform: str) -> None:
+    def resume_ads(self, business_id: int, platform: str) -> None:
         self.resumes.append((business_id, platform))
 
     async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> list[str]:

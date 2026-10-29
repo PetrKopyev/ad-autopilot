@@ -826,3 +826,25 @@ def test_service_removed_from_description_stops_its_campaign_and_returns_with_it
     services("Маникюр\nПедикюр\nНаращивание ногтей")
     assert set(statuses().values()) == {"active"}
     assert any(row.reason_code == "SERVICE_RETURNED" for row in worker.repository.rows(ChangeLog))
+
+
+
+def test_demo_budget_reaches_audience_test_and_its_verdict(demo):
+    import asyncio
+
+    from app.db.models import AdGroup
+
+    client, world, worker = demo
+    launch(client)
+    for _ in range(2):
+        assert client.post("/api/demo/advance", json={"days": 20}).status_code == 202
+    (audience,) = [row for row in worker.repository.rows(Experiment) if row.hypothesis == "audience"]
+    assert audience.status == "concluded" and audience.verdict
+    assert audience.stats["audiences"] == ["ищут с названием города", "ищут без названия города"]
+    verdicts = [row.reason_text for row in worker.repository.rows(ChangeLog) if row.kind == "experiment_verdict"]
+    assert any(text.startswith("Сравнили аудитории: «ищут с названием города»") for text in verdicts)
+    # Запросы с городом новой группе не достаются: город в её минус-фразах.
+    group = worker.repository.find(AdGroup, id=worker.repository.find(Ad, id=audience.variant_ad_id).ad_group_id)
+    campaign = next(item for item in worker.campaigns(world.business) if item.id == group.campaign_id)
+    states = asyncio.run(world.adapters["direct"].get_state(worker.refs(campaign)))
+    assert "москва" in states[group.external_id].targeting["negative_keywords"]

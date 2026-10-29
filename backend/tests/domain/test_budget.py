@@ -274,6 +274,9 @@ def test_share_floors_keep_each_campaign_at_its_live_minimum():
     assert share_floors(100_000, {"direct": {"day": 0, "period": 0}}) == {"direct": Decimal(0)}
     assert share_floors(100_000, {"fake": {"day": 10_000}}) == {"fake": Decimal("0.14375")}
     assert share_floors(0, minimums) == {}
+    # У каждой кампании Директа свой минимум: три кампании на услугу — втрое больший пол доли.
+    assert share_floors(100_000, minimums, {"direct": 3})["direct"] == Decimal("0.053575") * 3
+    assert share_floors(100_000, minimums, {"direct": 0})["direct"] == Decimal("0.053575")
 
 
 def test_rebalance_does_not_push_platform_below_its_floor():

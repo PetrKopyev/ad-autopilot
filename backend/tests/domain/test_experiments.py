@@ -1,4 +1,5 @@
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
 from datetime import timedelta
 from math import ceil
 from random import Random
@@ -120,6 +121,13 @@ def test_winner_control_and_unequal_samples(design, arms, now):
     assert evaluate_experiment(design, control, variant, start, now.date()).verdict == Verdict.VARIANT
 
 
+
+def test_ctr_verdict_without_control_clicks_is_saved_to_json(design, arms, now):
+    control, variant = arms(control_clicks=0, control_leads=0)
+    result = evaluate_experiment(design, control, variant, now.date() - timedelta(days=10), now.date())
+    assert result.verdict == Verdict.VARIANT and result.relative_lift is None
+    json.dumps(asdict(result), allow_nan=False)
+
 @pytest.mark.parametrize(
     "p,expected",
     [
@@ -230,6 +238,9 @@ def test_audience_verdict_waits_for_the_full_settled_period(now):
     result = evaluate_audience(control, variant, start, start + timedelta(days=15))
     assert (result.verdict, result.reason_code) == (Verdict.VARIANT, "EXPERIMENT_WIN")
     assert result.p_value < DEFAULT_SETTINGS.test_alpha
+    # У контроля ни одного обращения: разница без бесконечности, вывод сохраняется в JSON.
+    assert result.relative_lift is None
+    json.dumps(asdict(result), allow_nan=False)
 
 
 def test_audience_needs_enough_leads_and_a_real_price_gap(now):
