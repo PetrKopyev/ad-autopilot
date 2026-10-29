@@ -14,7 +14,7 @@ import { HomePage } from './HomePage';
 vi.mock('../api/screens', () => ({
   mockEnabled: false, getSummary: vi.fn(), stopAllAds: vi.fn(),
   getDaily: vi.fn(async () => { throw new Error('нет ряда'); }),
-  getAds: vi.fn(async () => ({ items: [] })),
+  getAds: vi.fn(async () => ({ items: [], campaigns: [] })),
   getExperiments: async () => ({ items: [] }),
   getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] })),
 }));
@@ -72,6 +72,20 @@ it('без ряда по дням плитки показываются без �
   expect(getDaily).toHaveBeenCalled();
 });
 
+it('цену обращения рисует, только если дней с обращениями хотя бы три, и соединяет их через дни без обращений', async () => {
+  vi.mocked(getDaily).mockResolvedValueOnce({ business_id: 1, from: '2026-10-01', to: '2026-10-05', incomplete_days: [], is_incomplete: false,
+    items: [1, 0, 2, 0, 1].map((leads, index) => ({ date: `2026-10-0${index + 1}`, ...metrics(90_000, leads) })) });
+  await show(0, 0);
+  const lines = [...document.querySelectorAll('.sparkline--info polyline')];
+  expect(lines).toHaveLength(1);
+  expect(lines[0].getAttribute('points')!.split(' ')).toHaveLength(3);
+  cleanup();
+  vi.mocked(getDaily).mockResolvedValueOnce({ business_id: 1, from: '2026-10-01', to: '2026-10-03', incomplete_days: [], is_incomplete: false,
+    items: [1, 0, 2].map((leads, index) => ({ date: `2026-10-0${index + 1}`, ...metrics(90_000, leads) })) });
+  await show(0, 0);
+  expect(document.querySelector('.sparkline--info')).toBeNull();
+});
+
 it('рисует графики обращений из ряда по дням', async () => {
   vi.mocked(getDaily).mockResolvedValueOnce({ business_id: 1, from: '2026-10-01', to: '2026-10-03', incomplete_days: [], is_incomplete: false,
     items: [1, 3, 2].map((leads, index) => ({ date: `2026-10-0${index + 1}`, ...metrics(90_000, leads) })) });
@@ -105,7 +119,9 @@ it('сводит объявления в кампании: статус по р�
   const ad = (id: number, campaign_id: number, status: Ad['status'], cost: number, leads: number, reason: string | null = null): Ad => ({
     id, platform: 'direct', campaign_id, campaign_name: `Кампания ${campaign_id}`, group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
     image_url: null, status, reason, metrics: metrics(cost, leads) });
-  vi.mocked(getAds).mockResolvedValue({ items: [ad(1, 1, 'active', 300_000, 2), ad(2, 1, 'paused_auto', 100_000, 0, 'дорого'), ad(3, 2, 'paused_auto', 50_000, 0, 'ни одного обращения')] });
+  const daily = [300, 0, 500, 450].map((cost, index) => ({ date: `2026-10-2${index + 4}`, cost_kop: cost * 100, leads: 0, is_incomplete: index > 1 }));
+  vi.mocked(getAds).mockResolvedValue({ items: [ad(1, 1, 'active', 300_000, 2), ad(2, 1, 'paused_auto', 100_000, 0, 'дорого'), ad(3, 2, 'paused_auto', 50_000, 0, 'ни одного обращения')],
+    campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'active', daily }, { id: 2, platform: 'direct', name: 'Кампания 2', status: 'active', daily: daily.map((day) => ({ ...day, cost_kop: 0 })) }] });
   await show(0, 0);
   const table = await screen.findByRole('table');
   const [first, second] = within(table).getAllByRole('row').slice(1);
@@ -115,6 +131,10 @@ it('сводит объявления в кампании: статус по р�
   expect(within(first).queryByText('дорого')).toBeNull();
   expect(within(second).getByText(copy.status.stoppedAuto)).toBeTruthy();
   expect(within(second).getByText('ни одного обращения')).toBeTruthy();
+  // Расход за 14 дней — линией по дням кампании; уточняемые дни пунктиром.
+  const trend = within(first).getByRole('img', { name: copy.home.trendLabel('Кампания 1') });
+  expect(trend.querySelectorAll('polyline')).toHaveLength(2);
+  expect(trend.querySelectorAll('polyline.sparkline__dashed')).toHaveLength(1);
 });
 
 it('отменяет изменение из журнала только после подтверждения', async () => {

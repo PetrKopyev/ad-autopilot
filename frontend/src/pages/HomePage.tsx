@@ -10,7 +10,7 @@ import { getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
-import type { Ad, AdStatus, Daily, Experiment, Summary } from '../api/types';
+import type { Ad, AdStatus, AdsResponse, Daily, Experiment, Summary } from '../api/types';
 import { displayClock, displayDate, displayDateTime, justNow } from '../format';
 import { DemoNotice, NullableMoney, platformName } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
@@ -38,15 +38,15 @@ function Notifications({ items, changed }: { items: AppNotification[]; changed: 
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { setBusy(undefined); }
   }
-  return <PanelCard title={copy.home.notifications} titleId="notifications-title"><div className="page-stack">
+  return <section className="home-notices" aria-labelledby="notifications-title">
+    <h2 id="notifications-title" className="visually-hidden">{copy.home.notifications}</h2>
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {items.map((item) => <article key={item.id} className={`home-notice home-notice--${item.level}`}>
-      <h3>{item.title}</h3>
-      <time className="muted" dateTime={item.created_at}>{displayDateTime(item.created_at)}</time>
-      <p>{item.text}</p>
-      <div className="actions"><Button variant="secondary" size="small" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button></div>
+      <p className="home-notice__text"><strong>{item.title}.</strong> {item.text}{' '}
+        <time className="home-notice__time" dateTime={item.created_at}>{displayDateTime(item.created_at)}</time></p>
+      <Button variant="secondary" size="small" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button>
     </article>)}
-  </div></PanelCard>;
+  </section>;
 }
 
 function BudgetTile({ summary }: { summary: Summary }) {
@@ -58,15 +58,20 @@ function BudgetTile({ summary }: { summary: Summary }) {
   </div>;
 }
 
+// Цена обращения есть только в дни с обращениями: по двум таким дням тренда не видно.
+const minPricePoints = 3;
+
 function Tiles({ summary, daily }: { summary: Summary; daily: Daily['items'] | null }) {
   const window = summary.clients_window;
+  const prices = daily?.map((day) => day.cost_per_lead_kop) ?? [];
   return <section className="metric-tiles home-tiles" aria-label={copy.statistics.total}>
     <BudgetTile summary={summary} />
     <MetricTile label={copy.home.leads} value={summary.leads.toLocaleString('ru-RU')}
-      chart={daily && <Sparkline values={daily.map((day) => day.leads)} />}
+      chart={daily && <Sparkline values={daily.map((day) => day.leads)} dashed={daily.map((day) => day.is_incomplete)} />}
       hint={copy.home.periodSpent(formatMoney(summary.cost_kop))} />
     <MetricTile label={copy.home.leadPrice} value={summary.cost_per_lead_kop === null ? '—' : formatMoney(summary.cost_per_lead_kop)}
-      chart={daily && <Sparkline values={daily.map((day) => day.cost_per_lead_kop)} tone="info" />}
+      chart={prices.filter((price) => price !== null).length >= minPricePoints
+        && <Sparkline values={prices} dashed={daily!.map((day) => day.is_incomplete)} connect tone="info" />}
       hint={summary.cost_per_lead_kop === null ? copy.screens.noPrice : copy.screens.dates(displayDate(summary.from), displayDate(summary.to))} />
     <MetricTile label={copy.home.clients} value={window.clients === null ? '—' : window.clients.toLocaleString('ru-RU')}
       hint={copy.home.clientsHint(window.answered_weeks, window.answered_weeks + window.unknown_weeks)} />
@@ -99,7 +104,7 @@ function ClientQuestionRow({ question, answered }: { question: ClientQuestion; a
   </form>;
 }
 
-function campaignRows(ads: Ad[]) {
+function campaignRows({ items: ads }: AdsResponse) {
   const byCampaign = ads.reduce((map, ad) => map.set(ad.campaign_id, [...(map.get(ad.campaign_id) ?? []), ad]), new Map<number, Ad[]>());
   return [...byCampaign.entries()].map(([id, items]) => {
     const status = statusOrder.find((value) => items.some((ad) => ad.status === value)) ?? 'draft';
@@ -110,19 +115,25 @@ function campaignRows(ads: Ad[]) {
   });
 }
 
-function Campaigns({ ads }: { ads: Ad[] }) {
-  if (!ads.length) return <EmptyState title={copy.home.noCampaigns} description={copy.screens.noAdsHint} />;
+function Campaigns({ data }: { data: AdsResponse }) {
+  if (!data.items.length) return <EmptyState title={copy.home.noCampaigns} description={copy.screens.noAdsHint} />;
   return <div className="table-scroll"><table className="table table--stack home-campaigns">
     <thead><tr><th scope="col">{copy.screens.rowLabels.campaign}</th><th scope="col" className="text">{copy.screens.status}</th>
+      <th scope="col" className="home-campaigns__trend">{copy.home.trend}</th>
       <th scope="col">{copy.home.spent}</th><th scope="col">{copy.home.leads}</th><th scope="col">{copy.home.leadPrice}</th></tr></thead>
-    <tbody>{campaignRows(ads).map((row) => <tr key={row.id} className={row.status === 'active' || row.status === 'moderation' ? undefined : 'home-campaigns__off'}>
+    <tbody>{campaignRows(data).map((row) => {
+      const daily = data.campaigns.find((campaign) => campaign.id === row.id)?.daily ?? [];
+      return <tr key={row.id} className={row.status === 'active' || row.status === 'moderation' ? undefined : 'home-campaigns__off'}>
       <td><strong className="home-campaigns__name">{row.name}</strong><PlatformBadge platform={row.platform} />
         {row.reason && <span className="home-campaigns__why">{row.reason}</span>}</td>
       <td className="text" data-label={copy.screens.status}><AdStatusBadge status={row.status} /></td>
+      <td className="home-campaigns__trend" data-label={copy.home.trend}>
+        <Sparkline values={daily.map((day) => day.cost_kop)} dashed={daily.map((day) => day.is_incomplete)} label={copy.home.trendLabel(row.name)} /></td>
       <td className="num" data-label={copy.home.spent}>{formatMoney(row.cost)}</td>
       <td className="num" data-label={copy.home.leads}>{row.leads.toLocaleString('ru-RU')}</td>
       <td className="num" data-label={copy.home.leadPrice}><NullableMoney value={row.price} /></td>
-    </tr>)}</tbody>
+    </tr>;
+    })}</tbody>
   </table></div>;
 }
 
@@ -327,7 +338,7 @@ export function HomePage() {
           action={<Link to="/ads">{copy.home.allAds} <span aria-hidden="true">→</span></Link>}>
           {ads.loading && <p className="loading home-panel-pad" role="status">{copy.screens.loading}</p>}
           {ads.error && <div className="home-panel-pad"><ErrorBanner message={ads.error} onRetry={ads.reload} /></div>}
-          {ads.data && <Campaigns ads={ads.data.items} />}
+          {ads.data && <Campaigns data={ads.data} />}
         </PanelCard>
         <PanelCard title={copy.ads.experiments} titleId="home-ab-title">
           {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}

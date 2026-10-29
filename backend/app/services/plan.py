@@ -185,13 +185,13 @@ def phrase(service: str, city: str) -> str:
     return f"{' '.join(service.split()[:4])} {phrase_city(city)}".lower()
 
 
-def direct_services(services: list[Service], city: str) -> list[Service]:
+def direct_services(services: list[Service], city: str, limit: int | None = MAX_SERVICE_GROUPS) -> list[Service]:
     """Услуги групп Директа: у каждой своя ключевая фраза, и группы кампании не спорят за один запрос. Услуги с той
-    же фразой, что у прежней, пропускаются; групп не больше MAX_SERVICE_GROUPS — первые услуги описания."""
+    же фразой, что у прежней, пропускаются; групп не больше limit — первые услуги описания."""
     chosen: dict[str, Service] = {}
     for service in services:
         chosen.setdefault(phrase(service.name, city), service)
-    return list(chosen.values())[:MAX_SERVICE_GROUPS]
+    return list(chosen.values())[:limit]
 
 
 def group_slots(platform: str, services: list[str], segments: list[str]) -> list[tuple[str, str]]:
@@ -481,8 +481,10 @@ class PlanService:
         niche = business.niche_class or "other"
         segments = list(SEGMENTS.get(niche, SEGMENTS["other"]))
         draft = description_draft(business)
-        by_name = {service.name: service for service in draft.services}
-        services = [service.name for service in direct_services(draft.services, business.city)] or [""]
+        # Одноимённые услуги дают одну фразу: группе достаётся та же первая услуга, что выбрал direct_services.
+        chosen = direct_services(draft.services, business.city)
+        by_name = {service.name: service for service in chosen}
+        services = [service.name for service in chosen] or [""]
         # Площадка и пара (услуга, сегмент) каждой группы в её порядке: группы идут по площадкам.
         slots = [
             (platform, service, segment)
@@ -812,6 +814,8 @@ class PlanService:
             "daily_kop": {platform: limit.daily_limit for platform, limit in limits.items()},
             "off": off_view(payload.get("off", {})),
             "groups": groups,
+            # Сколько групп Директа дало бы описание без потолка: больше MAX_SERVICE_GROUPS — часть услуг не вошла.
+            "direct_services_total": len(direct_services(description_draft(business).services, business.city, None)),
             "generations_remaining": self.generations_remaining(
                 ai_budget(self.repository, business, self.limits, today)
             ),

@@ -20,10 +20,10 @@ function experiment(hypothesis: Experiment['hypothesis'], arms: Experiment['arms
     arms, remaining_impressions: 1200, status: 'running', conclusion: null };
 }
 async function show(hypothesis: Experiment['hypothesis'], arms: Experiment['arms'], ads: Ad[] = []) {
-  vi.mocked(getAds).mockResolvedValue({ items: ads });
+  vi.mocked(getAds).mockResolvedValue({ items: ads, campaigns: [] });
   vi.mocked(getExperiments).mockResolvedValue({ items: [experiment(hypothesis, arms)] });
   render(<MemoryRouter><AdsPage /></MemoryRouter>);
-  return screen.findByRole('list');
+  return within(screen.getByRole('region', { name: copy.ads.experiments })).findByRole('list');
 }
 
 it('варианты подписаны по порядку: первый — А, второй — Б', async () => {

@@ -47,6 +47,7 @@ export async function getMe(signal?: AbortSignal): Promise<Me> {
 }
 /** vk_oauth — на сервере настроено приложение VK: можно войти через VK, а не только ключом API. */
 export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean; vk_oauth: boolean }> {
+  if (mockEnabled) return { demo: false, vk_oauth: false };
   return setupGet('/api/auth/config', signal);
 }
 export async function demoLogin() {

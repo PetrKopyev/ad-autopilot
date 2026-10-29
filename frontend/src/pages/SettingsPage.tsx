@@ -1,15 +1,16 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { Button, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, SegmentedControl, StatusBadge, describedBy } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
-import { connectAccount, disconnectAccount, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
+import { connectAccount, disconnectAccount, getGoals, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
+import type { AutopilotStatus } from '../api/types';
 import { useResource } from '../api/useResource';
 import { StopNotice } from './SetupShared';
 import './Settings.css';
@@ -109,7 +110,24 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   </Block>;
 }
 
-function AccountsBlock() {
+type StatusResource = ReturnType<typeof useResource<AutopilotStatus>>;
+
+/** Счётчик и цели выбирают в мастере: до запуска туда ведёт «Изменить», после запуска они не меняются. */
+function MetricaRow({ business, draft }: { business: BusinessSettings; draft: boolean }) {
+  const counter = business.metrica_counter_id;
+  const goals = useResource(useCallback((signal: AbortSignal) => counter ? getGoals(counter, signal) : Promise.resolve({ items: [] }), [counter]));
+  // Цели Метрики не загрузились — называем их числом, а не прячем строку.
+  const names = business.lead_goal_ids.map((id) => goals.data?.items.find((goal) => goal.id === id)?.name).filter(Boolean);
+  const goalText = names.length === business.lead_goal_ids.length ? names.map((name) => `«${name}»`).join(', ') : labels.metricaGoals(business.lead_goal_ids.length);
+  return <li className="settings-account">
+    <div className="settings-account__name"><h3><span className="platform-badge__dot platform-badge--metrica" aria-hidden="true" />{labels.metrica}</h3>
+      <p className="settings-account__line">{counter && business.lead_goal_ids.length ? labels.metricaLine(String(counter), goalText) : labels.metricaNone}</p>
+      {!draft && <p className="field__hint">{labels.metricaLocked}</p>}</div>
+    {draft && <div className="actions"><Link className="button button--secondary" to="/setup/2">{labels.metricaEdit}</Link></div>}
+  </li>;
+}
+
+function AccountsBlock({ business, status }: { business: BusinessSettings; status: StatusResource }) {
   const section = useSection();
   const session = useSession();
   const [stopResult, setStopResult] = useState<StopResult>();
@@ -132,7 +150,8 @@ function AccountsBlock() {
           {account && account.status !== 'revoked' && <Button variant="secondary" disabled={section.busy}
             onClick={() => { setStopResult(undefined); void section.run(async () => { setStopResult(await disconnectAccount(account.id)); session.reload(); }); }}>{copy.settings.disconnect}</Button>}
         </div></li>;
-    })}</ul>}
+    })}
+      {status.data && <MetricaRow business={business} draft={status.data.status === 'draft'} />}</ul>}
   </Block>;
 }
 
@@ -191,9 +210,8 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   </Block>;
 }
 
-function AutopilotBlock() {
+function AutopilotBlock({ status }: { status: StatusResource }) {
   const section = useSection();
-  const status = useResource(useCallback((signal: AbortSignal) => getAutopilotStatus(signal), []));
   const state = status.data?.status;
   const paused = state === 'paused' || state === 'budget_stop';
   const [warning, setWarning] = useState<string | null>(null);
@@ -233,6 +251,12 @@ function DeleteBlock() {
 
 export function SettingsPage() {
   const business = useResource(useCallback((signal: AbortSignal) => getBusiness(signal), []));
+  const status = useResource(useCallback((signal: AbortSignal) => getAutopilotStatus(signal), []));
+  const { hash } = useLocation();
+  // Ссылки «В настройках» с других экранов ведут к своему блоку: он появляется, когда загрузились настройки.
+  useEffect(() => {
+    if (business.data && hash) document.getElementById(decodeURIComponent(hash.slice(1)))?.closest('.panel')?.scrollIntoView({ block: 'start' });
+  }, [business.data, hash]);
   return <div className="page-stack settings">
     <PageHeader title={copy.settings.title} description={labels.intro} />
     {business.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
@@ -240,7 +264,7 @@ export function SettingsPage() {
     {business.data && <div className="settings-layout">
       <div className="settings-column"><BudgetBlock business={business.data} /><DescriptionBlock business={business.data} /></div>
       <div className="settings-column">
-        <AutopilotBlock /><AccountsBlock /><MarkingBlock business={business.data} />
+        <AutopilotBlock status={status} /><AccountsBlock business={business.data} status={status} /><MarkingBlock business={business.data} />
         <Block id="license" title={copy.settings.license}><p className="settings-hint">{labels.licenseText}</p></Block>
         <DeleteBlock />
       </div>

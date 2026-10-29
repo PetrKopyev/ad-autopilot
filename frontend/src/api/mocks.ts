@@ -1,7 +1,7 @@
 import { copy } from '../copy';
 import { ApiError } from './client';
 import { isoDate, periodFor } from './period';
-import type { Ad, AutopilotStatus, Breakdown, Daily, HistoryItem, Metrics, Period, StatsLevel, Summary } from './types';
+import type { Ad, AdsResponse, AutopilotStatus, Breakdown, Daily, Metrics, Period, StatsLevel, Summary } from './types';
 
 const timestamp = new Date().toISOString();
 const base = (cost: number, leads: number, impressions = 1200, clicks = 48): Metrics => ({
@@ -12,10 +12,8 @@ const base = (cost: number, leads: number, impressions = 1200, clicks = 48): Met
   sources: [{ platform: 'direct', fetched_at: timestamp }],
 });
 let paused = false;
-const history: HistoryItem[] = [{ id: 1, created_at: timestamp, actor: 'autopilot', reason_text: copy.screens.mockHistory, status: 'applied' }];
-function record(reason_text: string) {
-  history.unshift({ id: history[0].id + 1, created_at: new Date().toISOString(), actor: 'owner', reason_text, status: 'applied' });
-}
+// Объявления, которые остановила «Пауза» всей рекламы: продолжение включает только их.
+let pausedByStop: number[] = [];
 const ads: Ad[] = [
   { id: 1, platform: 'direct', campaign_id: 1, campaign_name: copy.screens.mockCampaign,
     group_id: 1, group_name: copy.screens.mockGroup, title: copy.screens.mockAdTitle, text: copy.screens.mockAdText,
@@ -24,17 +22,20 @@ const ads: Ad[] = [
     group_id: 1, group_name: copy.screens.mockGroup, title: copy.screens.mockSecondAdTitle, text: copy.screens.mockSecondAdText,
     image_url: null, status: 'paused_auto', reason: copy.screens.mockReason, metrics: base(75000, 0, 900, 30) },
 ];
+// День демо-ряда: расход и обращения плавно колеблются по дням, последние два дня уточняются.
+function mockDay(date: Date): Daily['items'][number] {
+  const day = isoDate(date);
+  const seed = Math.floor(date.getTime() / 86_400_000);
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 2);
+  const incomplete = day > isoDate(cutoff);
+  const cost = Math.round(8200 + Math.sin(seed / 3) * 1900 + (seed * 37 % 9) * 220);
+  const leads = Math.max(0, Math.round(2 + Math.sin(seed / 4 + 1) * 1.3 + (seed * 13 % 5 - 2) * 0.3));
+  return { date: day, ...base(cost, leads, 240 + (seed * 17 % 60), 9 + seed % 6), is_incomplete: incomplete, incomplete_days: incomplete ? [day] : [] };
+}
 export function mockDaily(period: Period): Daily {
   const items: Daily['items'] = [];
   const last = new Date(`${period.to}T12:00:00`);
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 2);
-  for (const date = new Date(`${period.from}T12:00:00`); date <= last; date.setDate(date.getDate() + 1)) {
-    const day = isoDate(date);
-    const seed = date.getDate();
-    const incomplete = day > isoDate(cutoff);
-    items.push({ date: day, ...base(6000 + (seed % 7) * 1700, seed % 4, 200 + seed * 10, 8 + seed),
-      is_incomplete: incomplete, incomplete_days: incomplete ? [day] : [] });
-  }
+  for (const date = new Date(`${period.from}T12:00:00`); date <= last; date.setDate(date.getDate() + 1)) items.push(mockDay(date));
   const incomplete_days = items.flatMap((item) => item.incomplete_days);
   return { business_id: 1, ...period, items, is_incomplete: incomplete_days.length > 0, incomplete_days };
 }
@@ -69,21 +70,28 @@ export function mockBreakdown(period: Period, level: StatsLevel): Breakdown {
     incomplete_days: metrics.incomplete_days, items: [{ id: level === 'platform' ? 'direct' : 1, ...metrics }] };
 }
 export function mockStatus(): AutopilotStatus {
-  return { status: paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
+  // Как на сервере: до запуска плана — черновик, мастер и план без меню.
+  return { status: !setupMock.launched ? 'draft' : paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
     needs_attention: questions.some((item) => !item.answered_at)
       ? [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] : [] };
 }
-export function mockAds() { return { items: ads.map((ad) => ({ ...ad })) }; }
+export function mockAds(): AdsResponse {
+  const today = new Date(); today.setHours(12, 0, 0, 0);
+  const days = Array.from({ length: 14 }, (_, index) => { const date = new Date(today); date.setDate(date.getDate() - 13 + index); return mockDay(date); });
+  return { items: ads.map((ad) => ({ ...ad })), campaigns: [{ id: 1, platform: 'direct', name: copy.screens.mockCampaign, status: 'active',
+    daily: days.map(({ date, cost_kop, leads, is_incomplete }) => ({ date, cost_kop, leads, is_incomplete })) }] };
+}
 export function mockAdAction(id: number, action: 'pause' | 'resume') {
   const ad = ads.find((item) => item.id === id);
   if (!ad) throw new Error(copy.errors.notFound);
   ad.status = action === 'pause' ? 'paused_owner' : 'active'; ad.reason = null;
-  record(action === 'pause' ? copy.screens.mockPaused(ad.title) : copy.screens.mockResumed(ad.title));
+  record(action, 'ad', String(id), action === 'pause' ? copy.screens.mockPaused(ad.title) : copy.screens.mockResumed(ad.title));
 }
 export function mockStopAll() {
   paused = true;
-  ads.forEach((ad) => { if (ad.status === 'active' || ad.status === 'moderation') ad.status = 'paused_owner'; });
-  record(copy.screens.stopped);
+  pausedByStop = ads.filter((ad) => ad.status === 'active' || ad.status === 'moderation').map((ad) => ad.id);
+  ads.forEach((ad) => { if (pausedByStop.includes(ad.id)) ad.status = 'paused_owner'; });
+  record('pause', 'business', '1', 'Вы остановили всю рекламу.');
 }
 export function mockExperiments() {
   const text = 'Запись онлайн, мастер рядом с домом.';
@@ -95,9 +103,6 @@ export function mockExperiments() {
       arms: [{ title: copy.screens.mockAdTitle, text, image: null }, { title: copy.screens.mockSecondAdTitle, text, image: null }],
       remaining_impressions: 4200, status: 'running' as const, conclusion: null },
   ] };
-}
-export function mockHistory() {
-  return { items: history.slice(0, 3).map((item) => ({ ...item })), total: history.length, page: 1, page_size: 3 };
 }
 
 // Onboarding and running screens share the business budget and account state.
@@ -111,7 +116,7 @@ import type { BusinessSettings } from './settings';
 import type { AppNotification } from './notifications';
 interface SetupMockState {
   me: Omit<Me, 'has_business'>; business?: Business; description?: Description; counter?: number; goals?: number[];
-  marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean;
+  marking?: { direct: boolean; vk: boolean }; plan?: Plan; signedOut?: boolean; launched?: boolean;
 }
 const setupMockKey = 'ad-autopilot-setup-mock';
 function readSetupMock(): SetupMockState {
@@ -207,7 +212,7 @@ export function mockSetupPlan(): Plan {
   if (setupMock.plan?.month_budget_kop !== budget) setupMock.plan = undefined;
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
     vk_budget_kop: vkBudget, daily_kop: hint.daily_kop, off: hint.off, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
-    marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: 'draft',
+    marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: setupMock.launched ? 'launched' : 'draft', direct_services_total: 2,
     // Как на сервере: в Директе группа на услугу, во VK — на повод; дневной лимит площадки делится поровну.
     groups: copy.plan.mockGroups.filter((group) => vk || group.platform === 'direct').map((group, index, groups) => ({
       id: index + 1, name: group.name, platform: group.platform, audience: group.audience,
@@ -256,7 +261,7 @@ export function mockPlanLaunch(acknowledged: boolean) {
   const plan = mockSetupPlan();
   if (!plan.ready_to_launch || (plan.medical_level !== 'none' && !acknowledged)
     || plan.groups.some((group) => !group.assets.some((asset) => asset.selected))) throw new Error(copy.launchFlow.notReady);
-  setupMock.plan!.status = 'launched'; persistSetupMock();
+  setupMock.plan!.status = 'launched'; setupMock.launched = true; persistSetupMock();
 }
 
 // History, clients and settings demo state.
@@ -275,9 +280,15 @@ export function mockHistoryPage(filter: HistoryFilter, pageSize: number): Histor
     && (!filter.actor || item.actor === filter.actor)).map((item) => structuredClone(item));
   return { items: items.slice(0, pageSize), total: items.length, page: 1, page_size: pageSize };
 }
+function record(kind: 'pause' | 'resume', entity_type: string, entity_id: string, reason_text: string) {
+  historyEntries.unshift({ id: historyEntries[0].id + 1, business_id: 1, created_at: new Date().toISOString(), actor: 'owner', kind,
+    platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_text, evidence: {}, status: 'applied', reverts_id: null,
+    can_revert: kind === 'pause' && entity_type === 'business', revert_warning: null });
+}
 export function mockRevert(id: number): HistoryEntry {
   const original = historyEntries.find((item) => item.id === id);
   if (!original || !original.can_revert) throw new Error(copy.errors.conflict);
+  if (original.kind === 'pause' && original.entity_type === 'business') resumeAll();
   original.status = 'reverted'; original.can_revert = false;
   const entry: HistoryEntry = { ...original, id: historyEntries[0].id + 1, created_at: new Date().toISOString(), actor: 'owner', kind: 'revert',
     reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false };
@@ -326,8 +337,16 @@ export function mockSaveBudget(kopecks: number) {
 export function mockSaveBusinessSettings(autoContinue: boolean, average: number | null) {
   businessSettings.auto_continue = autoContinue; businessSettings.avg_check_kop = average;
 }
-export function mockPauseAutopilot() { paused = true; }
-export function mockResumeAutopilot() { paused = false; }
+export function mockPauseAutopilot() { mockStopAll(); }
+function resumeAll() {
+  paused = false;
+  ads.forEach((ad) => { if (pausedByStop.includes(ad.id) && ad.status === 'paused_owner') ad.status = 'active'; });
+  pausedByStop = [];
+}
+export function mockResumeAutopilot() {
+  resumeAll();
+  record('resume', 'business', '1', 'Вы продолжили рекламу.');
+}
 export function mockDeleteMyData(): StopResult {
   businessSettings = { ...businessSettings, marking: null }; mockSetupLogout();
   return { stopped: true, message: 'Данные удалены. Рекламу перед удалением остановили.' };
@@ -335,7 +354,7 @@ export function mockDeleteMyData(): StopResult {
 
 const notifications: AppNotification[] = [
   { id: 2, kind: 'moderation', created_at: hoursAgo(1), level: 'warning', title: 'Площадка отклонила объявление',
-    text: 'ВКонтакте не пропустил объявление «Маникюр рядом с вами»: на картинке слишком много текста. Замените картинку в разделе «Реклама».' },
+    text: 'ВКонтакте не пропустил объявление «Маникюр рядом с вами»: на картинке слишком много текста. Подготовили исправленное объявление.' },
   { id: 1, kind: 'budget', created_at: hoursAgo(26), level: 'info', title: 'Потрачена половина бюджета',
     text: 'За месяц потратили 15 000 ₽ из 30 000 ₽. Остальное распределим на оставшиеся дни.' },
 ];

@@ -91,7 +91,7 @@ it('после удаления данных вход показывает ит�
   withBusiness();
   answers['/api/autopilot/status'] = { status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] };
   answers['/api/business'] = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
-    auto_continue: true, description: null, marking: null };
+    auto_continue: true, description: null, marking: null, metrica_counter_id: null, lead_goal_ids: [] };
   const message = 'Данные удалены, но не все площадки подтвердили остановку рекламы.';
   const answer = fetchMock.getMockImplementation()!;
   fetchMock.mockImplementation(async (url, init) => {

@@ -20,6 +20,8 @@
 .settings-account__name .platform-badge__dot { width: 8px; height: 8px; }
 .platform-badge__dot.platform-badge--direct { background: var(--color-direct); }
 .platform-badge__dot.platform-badge--vk { background: var(--color-vk); }
+.platform-badge__dot.platform-badge--metrica { background: var(--color-warning-fill); }
+.settings-account__line { font-size: .9rem; }
 
 .settings-stored { display: grid; gap: 4px; padding: 12px 14px; border-radius: var(--radius-small); background: var(--color-surface-muted); }
 .settings-stored__name { font-weight: 700; }

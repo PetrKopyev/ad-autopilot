@@ -1,6 +1,6 @@
 import { api, ApiError } from './client';
 import { copy } from '../copy';
-import type { Ad, AdsResponse, AutopilotStatus, Breakdown, Daily, ExperimentsResponse, HistoryResponse, Period, StatsLevel, Summary } from './types';
+import type { Ad, AdsResponse, AutopilotStatus, Breakdown, Daily, ExperimentsResponse, Period, StatsLevel, Summary } from './types';
 
 export const mockEnabled = (import.meta as ImportMeta & { env: Record<string, string> }).env.VITE_MOCK === '1';
 
@@ -42,8 +42,4 @@ export async function stopAllAds(): Promise<void> {
 export async function getExperiments(signal?: AbortSignal): Promise<ExperimentsResponse> {
   if (mockEnabled) return (await import('./mocks')).mockExperiments();
   return get('/api/experiments', signal);
-}
-export async function getHistory(signal?: AbortSignal): Promise<HistoryResponse> {
-  if (mockEnabled) return (await import('./mocks')).mockHistory();
-  return get('/api/history?page_size=3', signal);
 }

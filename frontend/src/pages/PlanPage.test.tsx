@@ -21,7 +21,7 @@ const interrupted = 'Запуск рекламы не завершился. Вс
 function plan(launch_error: string | null): Plan {
   return {
     id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, daily_kop: { direct: 71225 }, off: [], generations_remaining: 2, medical_level: 'none',
-    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft',
+    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft', direct_services_total: 1,
     groups: [{ id: 1, name: 'Маникюр', platform: 'direct', audience: 'Рядом', daily_limit_kop: 100000, ads: [{ title: 'Маникюр', text: 'Запись онлайн' }],
       assets: [{ id: 1, url: '/api/plan/assets/1/file', kind: 'image', alt: 'Френч с золотой фольгой', label: 'Френч с золотой фольгой', selected: true }] }],
   };
@@ -322,18 +322,15 @@ it('предпросмотр показывает выбранный текст 
 
 it('если услуг в описании больше пяти, план говорит, что в Директ вошли первые пять', async () => {
   const base = plan(null);
-  vi.mocked(getPlan).mockResolvedValue({ ...base, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
-  vi.mocked(getBusiness).mockResolvedValue({ site_url: 'https://studio.ru', description: { fields: { services: { value: 'Маникюр\nПедикюр, наращивание\nБрови; ресницы\nМакияж' } } } } as unknown as BusinessSettings);
+  vi.mocked(getPlan).mockResolvedValue({ ...base, direct_services_total: 6, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   expect(await screen.findByText('В Директ вошли первые 5 услуг из описания.')).toBeTruthy();
 });
 
 it('пять услуг — строки об обрезке нет', async () => {
   const base = plan(null);
-  vi.mocked(getPlan).mockResolvedValue({ ...base, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
-  vi.mocked(getBusiness).mockResolvedValue({ site_url: 'https://studio.ru', description: { fields: { services: { value: 'Маникюр\nПедикюр, наращивание\nБрови; ресницы\nманикюр' } } } } as unknown as BusinessSettings);
+  vi.mocked(getPlan).mockResolvedValue({ ...base, direct_services_total: 5, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   await screen.findByText('Услуга 1', { selector: 'h2' });
-  await waitFor(() => expect(getBusiness).toHaveBeenCalled());
   expect(screen.queryByText(/В Директ вошли первые/)).toBeNull();
 });

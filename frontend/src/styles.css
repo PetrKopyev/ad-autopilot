@@ -102,7 +102,7 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 .field__label { font-weight: 700; font-size: .93rem; }
 .field__hint { color: var(--color-muted); font-size: .87rem; }
 .field__error { color: var(--color-danger); font-size: .87rem; font-weight: 600; }
-.combobox { position: relative; }
+.combobox, .combobox__control { position: relative; }
 .field.combobox .combobox__input { padding-right: 44px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none' stroke='%2355646a' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 5.25 7 9.25l4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 16px center; background-size: 14px; }
 .combobox__list { position: absolute; z-index: 10; top: 100%; left: 0; right: 0; max-height: 280px; overflow-y: auto; margin: var(--space-1) 0 0; padding: var(--space-1); list-style: none; border: 1px solid var(--color-border); border-radius: var(--radius-small); background: var(--color-surface); box-shadow: var(--shadow-2); }
 .combobox__list[hidden] { display: none; }
@@ -226,6 +226,7 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 .sparkline--danger polyline { stroke: var(--color-danger-fill); }
 .sparkline--neutral polyline { stroke: var(--color-neutral-fill); }
 .sparkline--info polyline { stroke: var(--color-primary); }
+.sparkline .sparkline__dashed { stroke-dasharray: 3 4; }
 
 /* Кольцо бюджета. */
 .budget-ring { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
@@ -281,17 +282,11 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 /* Состояния. */
 .empty-state { display: grid; justify-items: center; gap: var(--space-2); padding: var(--space-6) var(--space-3); text-align: center; }
 .empty-state p { max-width: 460px; }
+.empty-state h1.empty-state__title { font-size: 1.25rem; }
 .empty-state__icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: var(--space-2); border-radius: 14px; background: var(--color-bg); color: var(--color-faint); font-size: 1.6rem; }
 .empty-state__action { margin-top: var(--space-3); }
 .error-banner { display: grid; gap: var(--space-3); padding: 12px 16px; border: 1px solid #f4c4bf; border-left: 4px solid var(--color-danger-fill); border-radius: var(--radius-small); color: var(--color-text); background: var(--color-danger-soft); font-weight: 600; overflow-wrap: anywhere; }
 .error-banner > p::before { content: "!"; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: var(--space-2); border-radius: 50%; background: var(--color-danger); color: #fff; font-size: 12px; font-weight: 800; vertical-align: 1px; }
-.stepper { display: grid; gap: var(--space-2); list-style: none; padding: 0; margin: 0; }
-.stepper li > a, .stepper li > span { display: flex; gap: var(--space-3); align-items: center; min-height: 44px; padding: var(--space-2); color: var(--color-muted); font-weight: 600; text-decoration: none; border-radius: var(--radius-small); }
-.stepper li > a:hover { background: var(--color-surface); }
-.stepper__number { display: grid; place-items: center; flex: 0 0 auto; width: 28px; height: 28px; border-radius: 8px; background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); font-family: var(--font-mono); font-size: .85rem; }
-.stepper__current > a, .stepper__current > span { background: var(--color-ink); color: #fff !important; font-weight: 700; }
-.stepper__current .stepper__number { background: var(--color-accent); color: var(--color-ink); box-shadow: none; }
-.step-title { margin: var(--space-5) 0; }
 .loading { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-muted); }
 .loading::after { content: ""; flex: 0 0 auto; width: 16px; height: 16px; border: 2px solid var(--color-line); border-top-color: var(--color-primary); border-radius: 50%; animation: loading-spin .8s linear infinite; }
 @keyframes loading-spin { to { transform: rotate(360deg); } }
@@ -339,6 +334,7 @@ dialog::backdrop { background: rgba(9, 31, 38, .5); }
   .card { padding: var(--space-4); }
   .panel__head { padding: 12px 14px; }
   .panel__body { padding: 14px; }
+  .panel__body--flush { padding: 0; }
   .actions > .button { flex: 1 1 120px; }
   .metric-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .metric-tile { padding: 12px 14px; }

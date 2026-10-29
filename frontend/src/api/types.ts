@@ -70,7 +70,10 @@ export interface Ad {
   reason: string | null;
   metrics: Metrics;
 }
-export interface AdsResponse { items: Ad[] }
+export interface CampaignDay { date: string; cost_kop: number; leads: number; is_incomplete: boolean }
+/** Кампании действующего плана; daily — последние 14 дней до сегодня по дате бизнеса. */
+export interface Campaign { id: number; platform: string; name: string; status: string; daily: CampaignDay[] }
+export interface AdsResponse { items: Ad[]; campaigns: Campaign[] }
 export interface Experiment {
   id: number;
   title: string;
@@ -84,11 +87,3 @@ export interface Experiment {
   conclusion: string | null;
 }
 export interface ExperimentsResponse { items: Experiment[] }
-export interface HistoryItem {
-  id: number;
-  created_at: string;
-  actor: string;
-  reason_text: string;
-  status: string;
-}
-export interface HistoryResponse { items: HistoryItem[]; total: number; page: number; page_size: number }

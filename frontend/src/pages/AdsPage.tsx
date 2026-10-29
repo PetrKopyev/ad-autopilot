@@ -14,6 +14,12 @@ import './Ads.css';
 const armLetters = ['А', 'Б'];
 const adsDays = 14;
 const experimentTone: Record<Experiment['status'], StatusTone> = { running: 'info', concluded: 'success', cancelled: 'neutral' };
+// Настройки рекламы, которые владелец меняет сам: все они в разделе «Настройки», ссылки ведут к нужному блоку.
+const changes = [
+  { id: 'budget', title: copy.ads.changeBudget, hint: copy.ads.changeBudgetHint },
+  { id: 'business', title: copy.ads.changeDescription, hint: copy.ads.changeDescriptionHint },
+  { id: 'autopilot', title: copy.ads.changeAutopilot, hint: copy.ads.changeAutopilotHint },
+];
 
 function Arms({ experiment }: { experiment: Experiment }) {
   return <ul className="ads-arms">{experiment.arms.map((arm, index) => <li className="ads-arm" key={armLetters[index]}>
@@ -103,6 +109,11 @@ export function AdsPage() {
       <p>{(stoppedByUs ? copy.screens.adPeriodStopped : copy.screens.adPeriod)(dates)}</p>
       <p className="muted">{copy.ads.toggleHint}</p>
     </div>}
+    {items.length > 0 && <section className="ads-changes" aria-labelledby="ads-changes-title">
+      <h2 id="ads-changes-title" className="ads-kicker">{copy.ads.changeTitle}</h2>
+      <ul>{changes.map((item) => <li key={item.id}><Link to={`/settings#settings-${item.id}-title`}>{item.title} <span aria-hidden="true">→</span></Link>
+        <span className="muted">{item.hint}</span></li>)}</ul>
+    </section>}
     {platforms.map((platform) => {
       const platformAds = items.filter((ad) => ad.platform === platform);
       const campaigns = [...new Set(platformAds.map((ad) => ad.campaign_id))];

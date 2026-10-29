@@ -6,7 +6,7 @@ import { formatMoney } from '../components/Money';
 import { getForecast } from '../api/forecast';
 import type { Forecast } from '../api/forecast';
 import { dailyAverage } from '../api/period';
-import { directServiceCount, getPlan, launchPlan, maxDirectGroups, regenerateImages, saveAssets, uploadPhoto } from '../api/plan';
+import { getPlan, launchPlan, maxDirectGroups, regenerateImages, saveAssets, uploadPhoto } from '../api/plan';
 import type { Plan, PlanGroup } from '../api/plan';
 import { getBusiness } from '../api/settings';
 import { useResource } from '../api/useResource';
@@ -112,6 +112,17 @@ export function PlanPage() {
       queue.current.shift(); setJobs([...queue.current]);
     }
   }
+  // В одну колонку панель группы ниже списка: если её начала не видно, выбор группы ведёт к ней.
+  function choose(id: number) {
+    setChosen(id);
+    requestAnimationFrame(() => {
+      const panel = document.getElementById('plan-group')?.closest('.panel');
+      const top = panel?.getBoundingClientRect().top ?? 0;
+      if (panel && (top < 0 || top > window.innerHeight * 0.6)) {
+        panel.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      }
+    });
+  }
   // Отменить можно только ждущий запрос: первый в очереди уже выполняется.
   function cancel(group: number, kind: Job['kind']) {
     queue.current = queue.current.filter((job, index) => index === 0 || job.group !== group || job.kind !== kind); setJobs([...queue.current]);
@@ -132,9 +143,7 @@ export function PlanPage() {
   }
   const launched = plan?.status === 'launched';
   const group = plan?.groups.find((item) => item.id === chosen) ?? plan?.groups[0];
-  const directGroups = plan?.groups.filter((item) => item.platform === 'direct').length ?? 0;
-  const services = business.data?.description?.fields.services.value ?? '';
-  const servicesCut = directGroups >= maxDirectGroups && directServiceCount(services) > maxDirectGroups;
+  const servicesCut = !!plan && plan.direct_services_total > maxDirectGroups;
   const steps = copy.plan.steps.map((label, index) => ({ label, to: index < 5 ? `/setup/${index + 1}` : undefined }));
   return <div className="page-stack plan-page">
     <PageHeader title={launched ? copy.launchFlow.launched : copy.plan.title} description={plan && copy.plan.summary(formatMoney(plan.month_budget_kop))}
@@ -156,7 +165,7 @@ export function PlanPage() {
           <PanelCard title={copy.plan.groups} titleId="plan-groups" flush className="plan-groups"
             action={<span className="muted">{copy.plan.groupsReady(plan.groups.filter(groupReady).length, plan.groups.length)}</span>}>
             <ul className="plan-groups__list">{plan.groups.map((item) => <li key={item.id}>
-              <button type="button" className="plan-group" aria-current={item.id === group?.id || undefined} onClick={() => setChosen(item.id)}>
+              <button type="button" className="plan-group" aria-current={item.id === group?.id || undefined} onClick={() => choose(item.id)}>
                 <span className="plan-group__top"><PlatformBadge platform={item.platform} />
                   {groupReady(item) ? <StatusBadge tone="success">{copy.status.ready}</StatusBadge> : <StatusBadge tone="warning">{copy.plan.needImage}</StatusBadge>}</span>
                 <span className="plan-group__name">{item.name}</span>

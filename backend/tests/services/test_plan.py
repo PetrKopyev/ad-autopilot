@@ -4,6 +4,7 @@ import shutil
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -130,6 +131,7 @@ async def test_each_direct_group_answers_only_its_service_and_ads_of_group_diffe
     assert all(group["phrases"] == [] for group in vk)
     plan = world.plans.view(world.business, world.repository.latest_plan(world.business.id), TODAY)
     assert plan["groups"][1]["audience"].startswith("Тем, кто ищет в Яндексе «педикюр». Регион: Самара.")
+    assert plan["direct_services_total"] == len(services)
     assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
 
 
@@ -152,6 +154,9 @@ async def test_direct_groups_skip_repeated_phrases_and_stop_at_cap(world: World)
     assert [group["service"] for group in direct] == services[:3] + ["Услуга 1", "Услуга 2"]
     phrases = [phrase for group in direct for phrase in group["phrases"]]
     assert len(phrases) == len(set(phrases)) == plan_module.MAX_SERVICE_GROUPS
+    # Владелец видит, что часть услуг не вошла: без потолка групп было бы восемь.
+    plan = world.plans.view(world.business, world.repository.latest_plan(world.business.id), TODAY)
+    assert plan["direct_services_total"] == 8
 
 
 async def test_images_follow_service_of_each_group(world: World) -> None:
@@ -347,6 +352,29 @@ async def test_rebuild_without_ai_budget_leaves_new_pairs_without_images(tmp_pat
     assert any(not group["assets"] for group in plan["groups"])
     assert "В каждой группе отметьте хотя бы одну картинку." in plan["blockers"]
     assert world.repository.ai_spent(world.business.id) <= 9 * ART_COST_KOP + 100
+
+
+async def test_group_of_repeated_service_name_writes_ads_about_first_of_them(world: World, monkeypatch) -> None:
+    await onboard(world)
+    real, write = plan_module.description_draft, plan_module.generate_ad_text
+    seen = []
+
+    def doubled(business):
+        draft = real(business)
+        first = draft.services[0]
+        draft.services = [first, replace(first, price=99_900), *draft.services[1:]]
+        return draft
+
+    async def spy(llm, draft, **options):
+        seen.append(options["service"])
+        return await write(llm, draft, **options)
+
+    monkeypatch.setattr(plan_module, "description_draft", doubled)
+    monkeypatch.setattr(plan_module, "generate_ad_text", spy)
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    first = real(world.business).services[0]
+    named = [service for service in seen if service is not None and service.name == first.name]
+    assert named and all(service.price == first.price for service in named)
 
 
 def test_audience_of_old_direct_group_with_phrases_of_all_services_names_its_service_first() -> None:

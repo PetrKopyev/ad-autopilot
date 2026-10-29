@@ -6,13 +6,15 @@ import { copy } from '../copy';
 import { getBusiness, pauseAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { saveDescription, saveMarking } from '../api/setup';
+import { getAutopilotStatus } from '../api/screens';
 import { SettingsPage } from './SettingsPage';
 
 vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn(),
   saveBudget: vi.fn(), saveBusinessSettings: vi.fn(), pauseAutopilot: vi.fn(), resumeAutopilot: vi.fn() }));
-vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn() }));
+vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn(),
+  getGoals: async () => ({ items: [{ id: 1, name: 'Заявка' }, { id: 2, name: 'Звонок' }] }) }));
 vi.mock('../api/screens', () => ({ mockEnabled: false,
-  getAutopilotStatus: async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] }) }));
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [] })) }));
 vi.mock('../api/session', () => ({ useSession: () => ({ data: { id: 1, login: 'owner', email: null, accounts: [] }, reload: () => {} }) }));
 
 afterEach(() => { cleanup(); vi.mocked(getBusiness).mockReset(); vi.mocked(saveMarking).mockReset(); });
@@ -132,4 +134,22 @@ it('кабинеты показывают состояние словами, а 
   const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);
   expect(block.getAllByText(copy.setup.accounts.disconnected)).toHaveLength(2);
   expect(block.getAllByRole('button', { name: copy.settings.connect })).toHaveLength(2);
+});
+
+it('Метрика в кабинетах: счётчик и цели словами; после запуска их не меняют', async () => {
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);
+  expect(await block.findByText(copy.settingsScreen.metricaLine('12345', '«Заявка»'))).toBeTruthy();
+  expect(block.getByText(copy.settingsScreen.metricaLocked)).toBeTruthy();
+  expect(block.queryByRole('link', { name: copy.settingsScreen.metricaEdit })).toBeNull();
+});
+
+it('до запуска счётчик и цели меняются в мастере: «Изменить» ведёт на его шаг', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [] });
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);
+  expect((await block.findByRole('link', { name: copy.settingsScreen.metricaEdit })).getAttribute('href')).toBe('/setup/2');
+  expect(block.queryByText(copy.settingsScreen.metricaLocked)).toBeNull();
 });
