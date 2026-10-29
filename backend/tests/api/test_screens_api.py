@@ -5,7 +5,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from app.db.models import Ad, Business, ChangeLog, Experiment, Session, StatsDaily, User, WorkerRun
+from app.db.models import Ad, Business, Campaign, ChangeLog, Experiment, Session, StatsDaily, User, WorkerRun
 from app.platforms.base import Operation, PlatformError
 from app.services.changes import ChangeConflict
 from app.services.rollback import RollbackService
@@ -276,6 +276,45 @@ def test_ads_period_metrics_and_contract(setup):
     assert client.get("/api/ads?from=2026-02-01&to=2026-01-01").status_code == 422
     assert client.get("/api/ads?to=0001-01-03").status_code == 422
     assert client.get("/api/ads?from=0001-01-01&to=0001-01-03").status_code == 200
+
+
+def test_campaign_daily_without_stats_is_zeros_and_foreign_rows_are_hidden(setup):
+    client, world = setup
+    today = world.clock.now.date()
+    world.repository.save(
+        Campaign(
+            business_id=2,
+            platform_account_id=99,
+            platform="direct",
+            type="unified",
+            name="Чужая",
+            status="active",
+            daily_limit_kop=1000,
+            period_cap_kop=1000,
+        ),
+        StatsDaily(
+            business_id=2,
+            campaign_id=world.campaign.id,
+            ad_id=next(iter(world.ads.values())).id,
+            platform=world.campaign.platform,
+            date=today,
+            cost_kop=5000,
+            impressions=100,
+            clicks=10,
+            conversions={"1": 3},
+            fetched_at=world.clock.now,
+            is_settled=True,
+        ),
+    )
+
+    campaigns = client.get("/api/ads").json()["campaigns"]
+
+    assert "Чужая" not in {row["name"] for row in campaigns}
+    daily = next(row for row in campaigns if row["id"] == world.campaign.id)["daily"]
+    assert [day["date"] for day in daily] == [(today - timedelta(days=13 - offset)).isoformat() for offset in range(14)]
+    assert all(day["cost_kop"] == 0 and day["leads"] == 0 for day in daily)
+    # Сегодня и вчера цифры ещё уточняются, даже без строк статистики.
+    assert [day["is_incomplete"] for day in daily] == [False] * 12 + [True] * 2
 
 
 def test_experiments_and_safe_business(setup):

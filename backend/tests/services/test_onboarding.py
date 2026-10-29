@@ -40,6 +40,7 @@ from app.services.changes import ChangeConflict
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
     LOCK_WAITERS,
+    MAX_PRICE_LINE,
     MAX_SERVICES,
     SAVING,
     SITE_CHECKS,
@@ -56,6 +57,7 @@ from app.services.onboarding import (
     launch_time,
     normalize_phone,
     owner_fields,
+    priced_lines,
     service_names,
     split_price,
     split_services,
@@ -1109,6 +1111,27 @@ def test_long_lines_and_many_services_are_parsed_quickly() -> None:
     assert time.perf_counter() - started < 0.5
     assert names == "\n".join(evil[:MAX_SERVICES]) and prices == "" and shown["services"]["value"] == names
     assert split_price(f"Маникюр{' ' * 300}1 500 ₽") == (f"Маникюр{' ' * 300}1 500 ₽", None, False)
+
+
+def test_priced_lines_keep_first_line_of_service() -> None:
+    lines = ["Маникюр — 1 500 ₽", "маникюр — 2 000 ₽", "Педикюр", "от 2 000 ₽"]
+
+    assert priced_lines(lines) == {"маникюр": "Маникюр — 1 500 ₽", "": "от 2 000 ₽"}
+    assert priced_lines([]) == {}
+    # Цена без названия ни к одной услуге не пристаёт.
+    assert split_services("Маникюр\nПедикюр", "от 2 000 ₽") == ("Маникюр\nПедикюр", "")
+
+
+def test_price_line_and_services_limits_are_inclusive() -> None:
+    line = "а" * (MAX_PRICE_LINE - len(" — 500 ₽")) + " — 500 ₽"
+    assert len(line) == MAX_PRICE_LINE and split_price(line)[1] == 50_000
+    assert split_price("а" + line) == ("а" + line, None, False)
+    names = [f"Услуга {index}" for index in range(MAX_SERVICES + 1)]
+    assert split_services("\n".join(names[:MAX_SERVICES]), "")[0] == "\n".join(names[:MAX_SERVICES])
+    with pytest.raises(OnboardingError, match="Слишком много услуг"):
+        split_services("\n".join(names), "")
+    with pytest.raises(OnboardingError, match="Слишком много услуг"):
+        split_services("Маникюр", "\n".join(names))
 
 
 def test_extra_spaces_do_not_turn_a_number_in_the_name_into_a_price() -> None:

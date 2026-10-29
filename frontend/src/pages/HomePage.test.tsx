@@ -137,6 +137,17 @@ it('сводит объявления в кампании: статус по р�
   expect(trend.querySelectorAll('polyline.sparkline__dashed')).toHaveLength(1);
 });
 
+it('кампания без ряда по дням показывается без графика', async () => {
+  const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
+    image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) };
+  vi.mocked(getAds).mockResolvedValue({ items: [ad], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'active', daily: [] }] });
+  await show(0, 0);
+  const table = await screen.findByRole('table');
+  expect(within(table).getByText('Кампания 1')).toBeTruthy();
+  expect(within(table).queryByRole('img', { name: copy.home.trendLabel('Кампания 1') })).toBeNull();
+  expect(table.querySelector('.sparkline')).toBeNull();
+});
+
 it('отменяет изменение из журнала только после подтверждения', async () => {
   const entry: HistoryEntry = { id: 7, business_id: 1, created_at: '2026-10-27T09:00:00Z', actor: 'autopilot', kind: 'budget', platform: 'direct',
     entity_type: 'campaign', entity_id: '1', reason_text: 'Обращение здесь дешевле всего.', evidence: { budget_kop: 105_000 }, status: 'applied',

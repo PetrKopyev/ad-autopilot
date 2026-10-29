@@ -10,6 +10,7 @@ import respx
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.direct_forecast import (
     LIVE_URL,
+    MAX_PHRASES,
     SANDBOX_URL,
     DirectForecastClient,
     ForecastAccessDenied,
@@ -205,3 +206,14 @@ async def test_sandbox_and_network_failure() -> None:
             with pytest.raises(PlatformError, match="Не удалось связаться"):
                 await client.statuses()
     assert route.called
+
+
+@pytest.mark.parametrize("count,sent", [(MAX_PHRASES, MAX_PHRASES), (MAX_PHRASES + 1, MAX_PHRASES)])
+async def test_create_sends_at_most_max_phrases(
+    client: DirectForecastClient, direct: Direct, count: int, sent: int
+) -> None:
+    direct.answers = {"CreateNewForecast": [{"data": 7}]}
+
+    await client.create([f"фраза {index}" for index in range(count)], [51])
+
+    assert direct.calls[0]["param"]["Phrases"] == [f"фраза {index}" for index in range(sent)]

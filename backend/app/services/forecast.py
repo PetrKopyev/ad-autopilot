@@ -105,8 +105,10 @@ def clear() -> None:
 
 
 def weighted(pairs: list[tuple[int, Decimal]]) -> Decimal | None:
-    total = sum(clicks for clicks, _ in pairs)
-    return sum((clicks * price for clicks, price in pairs), Decimal(0)) / total if total else None
+    """Средняя цена по кликам. Нулевая цена — Директ цены не назвал: бесплатных кликов нет, в среднее она не идёт."""
+    priced = [(clicks, price) for clicks, price in pairs if price]
+    total = sum(clicks for clicks, _ in priced)
+    return sum((clicks * price for clicks, price in priced), Decimal(0)) / total if total else None
 
 
 def direct_clicks(rows: list[PhraseForecast], budget_rub: Decimal) -> Clicks:
@@ -119,10 +121,9 @@ def direct_clicks(rows: list[PhraseForecast], budget_rub: Decimal) -> Clicks:
         sum(row.first_place_clicks for row in rows),
         weighted([(row.first_place_clicks, row.max_cpc) for row in rows]),
     )
+    # Сценарий без цены не считается: сколько кликов оплатит бюджет, без цены не сказать.
     scenarios = [
-        min(potential, int(budget_rub / price) if price else potential)
-        for potential, price in (entry, first)
-        if potential
+        min(potential, int(budget_rub / price)) for potential, price in (entry, first) if potential and price
     ] or [0]
     return Clicks(min(scenarios), max(scenarios), max(entry[0], first[0]), entry[1], first[1])
 
@@ -178,6 +179,12 @@ def template(clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_
         if clicks.cpc_min is not None and clicks.cpc_max is not None
         else f"около {rub(clicks.cpc_min or clicks.cpc_max or 0)} ₽"
     )
+    if not clicks.max:
+        return (
+            f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
+            f"{rub(clicks.potential)} кликов. Но при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} не "
+            "выйдет ни одного клика, а значит, и обращений из Директа. Это прогноз, он может ошибаться."
+        )
     if conversion.source == "metrica":
         rate = (
             f"На вашем сайте цели достигают от {percent(conversion.min)} до {percent(conversion.max)}% визитов "
@@ -412,10 +419,14 @@ class ForecastService:
         self, business: Business, key: str, rows: list[PhraseForecast], budget_rub: Decimal, now: datetime, today: date
     ) -> Entry:
         clicks = direct_clicks(rows, budget_rub)
+        if clicks.potential and clicks.cpc_min is None and clicks.cpc_max is None:
+            return self.failed(
+                key, "Яндекс Директ не назвал цену клика по фразам плана: прогноз посчитать не из чего.", now
+            )
         conversion = await self.conversion(business)
         leads_range = leads(clicks, conversion)
         text = template(clicks, budget_rub, conversion, leads_range)
-        explanation = await self.explain(business, text, leads_range, today) if clicks.potential else None
+        explanation = await self.explain(business, text, leads_range, today) if clicks.max else None
         forecast = (
             "Демо: числа придуманы для показа, это не прогноз Яндекса"
             if self.demo

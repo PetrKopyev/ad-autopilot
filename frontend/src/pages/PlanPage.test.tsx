@@ -295,6 +295,44 @@ it('пока прогноз считается, спрашиваем снова,
   expect(getForecast).toHaveBeenCalledTimes(calls);
 });
 
+it('после готового прогноза больше не спрашиваем', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValueOnce(forecast({ status: 'pending', leads_min: null, leads_max: null, explanation: '', sources: [] }))
+    .mockResolvedValue(forecast({}));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await vi.waitFor(() => expect(screen.getByText('Считаем прогноз…')).toBeTruthy());
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(forecastPanel().getByText('≈ 9–26')).toBeTruthy();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(getForecast).toHaveBeenCalledTimes(2);
+});
+
+it('уйдя со страницы, прогноз больше не спрашиваем', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ status: 'pending', leads_min: null, leads_max: null, explanation: '', sources: [] }));
+  const { unmount } = render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await vi.waitFor(() => expect(screen.getByText('Считаем прогноз…')).toBeTruthy());
+  unmount();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(getForecast).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(getForecast).mock.calls[0][0]?.aborted).toBe(true);
+});
+
+it('сбой сети во время опроса убирает блок прогноза и останавливает опрос', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValueOnce(forecast({ status: 'pending', leads_min: null, leads_max: null, explanation: '', sources: [] }))
+    .mockRejectedValue(new TypeError('Failed to fetch'));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await vi.waitFor(() => expect(screen.getByText('Считаем прогноз…')).toBeTruthy());
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(screen.queryByText('Прогноз на месяц')).toBeNull();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(getForecast).toHaveBeenCalledTimes(2);
+});
+
 it('без ответа прогноза блока нет', async () => {
   vi.mocked(getPlan).mockResolvedValue(plan(null));
   render(<MemoryRouter><PlanPage /></MemoryRouter>);

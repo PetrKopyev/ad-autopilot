@@ -451,3 +451,200 @@ async def test_no_plan(http: httpx.AsyncClient) -> None:
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["status"] == "unavailable" and result["vk"] is None
+
+
+def test_zero_price_does_not_make_clicks_free() -> None:
+    # Директ не назвал цену фразы: её клики входят в потенциал, но бюджет делится только на названные цены.
+    clicks = direct_clicks([row(1000, 1500, "0", "0"), row(100, 150, "20", "40")], Decimal(1000))
+
+    assert clicks == Clicks(25, 50, 1650, Decimal(20), Decimal(40))
+
+
+def test_no_price_at_all_gives_no_clicks() -> None:
+    clicks = direct_clicks([row(1000, 1500, "0", "0")], Decimal(30_000))
+
+    assert (clicks.min, clicks.max, clicks.cpc_min, clicks.cpc_max) == (0, 0, None, None)
+
+
+def test_one_priced_scenario_gives_one_number() -> None:
+    clicks = direct_clicks([row(1000, 1500, "0", "40")], Decimal(4000))
+
+    assert clicks == Clicks(100, 100, 1500, None, Decimal(40))
+    assert "около 40 ₽" in template(clicks, Decimal(4000), BENCHMARK, leads(clicks, BENCHMARK))
+
+
+@pytest.mark.parametrize("budget", ["0", "15"])
+def test_budget_below_one_click_says_so_without_leads_range(budget: str) -> None:
+    clicks = direct_clicks([row(100, 150, "20", "40")], Decimal(budget))
+
+    assert (clicks.min, clicks.max) == (0, 0) and leads(clicks, BENCHMARK) == (0, 0)
+    text = template(clicks, Decimal(budget), BENCHMARK, (0, 0))
+    assert "не выйдет ни одного клика" in text and "Итого" not in text and "Обычно заявку" not in text
+
+
+@pytest.mark.parametrize("budget", [0, 1, 25, 39, 40, 1000, 10**6])
+def test_clicks_min_never_above_max(budget: int) -> None:
+    for rows in ([row(100, 150, "20", "40")], [row(500, 100, "40", "20")], [row(100, 0, "20", "0")]):
+        clicks = direct_clicks(rows, Decimal(budget))
+        assert 0 <= clicks.min <= clicks.max <= clicks.potential
+        low, high = leads(clicks, BENCHMARK)
+        assert 0 <= low <= high
+
+
+def test_wilson_when_every_visit_reached_goal() -> None:
+    conversion = measured(100, 100)
+
+    assert Decimal(0) < conversion.min < conversion.max <= Decimal(1)
+    assert "100 из 100 визитов" in conversion.label
+
+
+def test_measured_at_exactly_min_visits() -> None:
+    assert measured(module.MIN_VISITS, 3) is not None and measured(module.MIN_VISITS - 1, 3) is None
+
+
+def test_rub_and_percent_rounding() -> None:
+    assert module.rub(Decimal("12500.5")) == "12\u00a0501" and module.rub(Decimal("0.49")) == "0"
+    assert module.rub(1_234_567) == "1\u00a0234\u00a0567"
+    assert module.percent(Decimal("0.0125")) == "1,3" and module.percent(Decimal("0.03")) == "3"
+    assert module.percent(Decimal("0.01449")) == "1,4" and module.percent(Decimal(0)) == "0"
+
+
+def test_leads_in_text_match_leads_in_numbers() -> None:
+    for clicks in (Clicks(250, 410, 500, Decimal(30), Decimal(50)), Clicks(1, 1, 3000, Decimal(30), None)):
+        low, high = leads(clicks, BENCHMARK)
+        assert f"Итого примерно от {low} до {high} обращений" in template(clicks, Decimal(9000), BENCHMARK, (low, high))
+
+
+def test_numbers_read_thousands_with_any_space_and_decimal_comma() -> None:
+    assert numbers("12 500, 12\u00a0500 и 12\u202f500") == {Decimal(12500)}
+    assert numbers("1,5% и 2.5") == {Decimal("1.5"), Decimal("2.5")}
+
+
+def test_ai_text_edge_cases() -> None:
+    allowed = {Decimal(12500), Decimal(6), Decimal(30), Decimal("1.5")}
+
+    def check(text: str) -> str | None:
+        return ai_text(json.dumps({"text": text}, ensure_ascii=False), allowed, (6, 30))
+
+    assert check("Обращений от 6 до 30 при бюджете 12 500 ₽ в месяц.") is not None
+    assert check("Обращений от 6 до 30 при бюджете 12\u00a0500 ₽ в месяц и доле 1,5%.") is not None
+    assert check("Обращений от 6 до 30 при бюджете 12 501 ₽ в месяц.") is None
+    assert check("Бюджет 12 500 ₽, обращений от 6 до 30.") is None
+    # Число дальше LEADS_NEAR от слова «обращений» — уже не про обращения: допустимое число не мешает.
+    assert check(f"Обращений от 6 до 30 в месяц{' ' * module.LEADS_NEAR}при бюджете 12 500 ₽.") is not None
+    assert check("От 6 до 30, обращений 12 500.") is None
+    assert check("   ") is None and check("") is None
+    assert ai_text(json.dumps({"text": None}), allowed, (6, 30)) is None
+    assert ai_text(json.dumps(["обращений от 6 до 30"]), allowed, (6, 30)) is None
+    long = "Обращений от 6 до 30."
+    assert check(long + " " * (module.EXPLANATION_LIMIT - len(long))) is not None
+    assert check(long + " " * (module.EXPLANATION_LIMIT - len(long) + 1)) is None
+
+
+async def test_zero_price_report_is_unavailable_not_invented(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct, phrase=PHRASE | {"Min": 0, "Max": 0})
+    writer = Writer("обращений от 0 до 0")
+    case = world(http, llm=writer)
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert result["status"] == "unavailable" and result["clicks_max"] is None and result["leads_max"] is None
+    assert "не назвал цену клика" in result["explanation"] and writer.calls == 0
+
+
+async def test_budget_below_one_click_is_not_retold_by_ai(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct, phrase=PHRASE | {"Min": 50_000, "Max": 60_000})
+    writer = Writer("обращений от 0 до 0")
+    case = world(http, llm=writer)
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert (result["clicks_min"], result["clicks_max"], result["leads_min"], result["leads_max"]) == (0, 0, 0, 0)
+    assert "не выйдет ни одного клика" in result["explanation"] and writer.calls == 0
+
+
+async def test_leads_in_explanation_match_response(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct, phrase=PHRASE | {"Clicks": 1000, "FirstPlaceClicks": 1200})
+    case = world(http)
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert f"от {result['leads_min']} до {result['leads_max']} обращений" in result["explanation"]
+    assert (
+        f"от {module.rub(result['clicks_min'])} до {module.rub(result['clicks_max'])} кликов" in result["explanation"]
+    )
+
+
+class Failing:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [module.YandexGPTError("YandexGPT transport failure"), None])
+async def test_ai_failure_or_empty_answer_keeps_template(
+    http: httpx.AsyncClient, direct: Direct, error: Exception | None
+) -> None:
+    done(direct)
+    case = world(http, llm=Failing(error) if error else Writer(""))
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert result["status"] == "ready" and not result["explanation_by_ai"]
+    assert f"от {result['leads_min']} до {result['leads_max']} обращений" in result["explanation"]
+
+
+async def test_busy_report_slots_are_retried_after_short_ttl(http: httpx.AsyncClient, direct: Direct) -> None:
+    busy = {"data": [{"ForecastID": id_, "StatusForecast": "Pending"} for id_ in range(1, 6)]}
+    direct.answers = {"CreateNewForecast": [{"error_code": 31}, {"data": 7}], "GetForecastList": [busy]}
+    case = world(http)
+
+    result = await case.service.forecast(case.business, NOW, TODAY)
+    cached = await case.service.forecast(case.business, NOW + module.TTL["unavailable"] - timedelta(seconds=1), TODAY)
+    retried = await case.service.forecast(case.business, NOW + module.TTL["unavailable"], TODAY)
+
+    assert result["status"] == "unavailable" and "все пять мест" in result["explanation"]
+    assert cached == result
+    assert retried["status"] == "pending" and direct.methods().count("CreateNewForecast") == 2
+
+
+async def test_direct_timeout_is_unavailable_not_error(http: httpx.AsyncClient) -> None:
+    case = world(http)
+    with respx.mock(assert_all_mocked=True) as router:
+        router.post(LIVE_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
+        result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert result["status"] == "unavailable" and result["leads_min"] is None
+    assert "Не удалось связаться с Яндекс Директом" in result["explanation"]
+
+
+async def test_ready_forecast_lives_24_hours(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct)
+    case = world(http)
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    done(direct, 8)
+    assert await case.service.forecast(case.business, NOW + timedelta(hours=24, seconds=-1), TODAY) == result
+    fresh = await case.service.forecast(case.business, NOW + timedelta(hours=24), TODAY)
+
+    assert fresh["status"] == "pending" and direct.methods().count("CreateNewForecast") == 2
+
+
+async def test_cached_forecast_is_not_shared_between_businesses(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct)
+    first, second = world(http), world(http)
+    second.business.id = second.repository.rows(Plan)[0].business_id = first.business.id + 1
+    await first.service.forecast(first.business, NOW, TODAY)
+    assert (await first.service.forecast(first.business, NOW, TODAY))["status"] == "ready"
+
+    done(direct, 8)
+    other = await second.service.forecast(second.business, NOW, TODAY)
+
+    assert other["status"] == "pending" and direct.calls[-1]["method"] == "CreateNewForecast"

@@ -16,12 +16,13 @@ from app.content.ad_text import MEDICAL_DISCLAIMER, SEGMENTS
 from app.content.art import ART_COST_KOP
 from app.content.ideas import subject
 from app.content.images import check_image, run_decoding
+from app.content.verify import Service
 from app.db.models import Ad, ArtCall, Asset, LLMCall, Plan
 from app.domain.settings import DEFAULT_SETTINGS
 from app.services import plan as plan_module
 from app.services.changes import ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, NotFound, OnboardingError
-from app.services.plan import group_key, launch_blockers
+from app.services.plan import direct_services, group_key, group_slots, launch_blockers, phrase
 from tests.services.test_onboarding import (
     BUDGET_KOP,
     NOW,
@@ -959,3 +960,35 @@ async def test_audience_names_city_of_the_plan_and_area_phrases_use_city_name(wo
     assert world.plans.view(world.business, stored, TODAY)["groups"][-1]["audience"].startswith(
         "Регион: Москва и Московская область."
     )
+
+
+def service(name: str) -> Service:
+    return Service(name, None, "", "owner")
+
+
+def test_phrase_takes_four_words_lowercase_and_city_of_area() -> None:
+    assert phrase("Маникюр  Классический с покрытием гель-лак", "Самара") == "маникюр классический с покрытием самара"
+    assert phrase("Стрижка", "Нижний Новгород") == "стрижка нижний новгород"
+    assert phrase("Стрижка", "Москва и Московская область") == "стрижка москва"
+
+
+def test_direct_services_skip_same_phrase_and_respect_limit() -> None:
+    services = [service("Маникюр"), service("маникюр"), service("МАНИКЮР  "), service("Педикюр"), service("Стрижка")]
+
+    assert [item.name for item in direct_services(services, "Самара")] == ["Маникюр", "Педикюр", "Стрижка"]
+    assert direct_services(services, "Самара")[0] is services[0]
+    assert len(direct_services([service(f"Услуга {index}") for index in range(8)], "Самара")) == 5
+    assert len(direct_services([service(f"Услуга {index}") for index in range(8)], "Самара", None)) == 8
+    assert direct_services(services, "Самара", 0) == []
+    assert direct_services([], "Самара") == []
+
+
+def test_group_slots_pair_services_and_segments_by_platform() -> None:
+    assert group_slots("direct", ["Маникюр", "Педикюр", "Стрижка"], ["a", "b"]) == [
+        ("Маникюр", "a"),
+        ("Педикюр", "b"),
+        ("Стрижка", "a"),
+    ]
+    assert group_slots("vk", ["Маникюр", "Педикюр", "Стрижка"], ["a", "b"]) == [("Маникюр", "a"), ("Педикюр", "b")]
+    assert group_slots("vk", [""], ["a", "b"]) == [("", "a"), ("", "b")]
+    assert group_slots("direct", [], ["a"]) == [] and group_slots("vk", ["Маникюр"], []) == []

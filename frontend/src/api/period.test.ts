@@ -96,3 +96,13 @@ it('среднее за день считается по дням месяца �
   expect(dailyAverage(3_000_000, new Date('2026-09-30T20:00:00Z'))).toBe(100_000);
   expect(dailyAverage(2_800_000, new Date('2026-02-10T12:00:00+03:00'))).toBe(100_000);
 });
+
+it('среднее за день: нулевой бюджет, декабрь и високосный февраль', async () => {
+  const { dailyAverage } = await import('./period');
+  expect(dailyAverage(0, new Date('2026-10-29T12:00:00Z'))).toBe(0);
+  expect(dailyAverage(3_100_000, new Date('2026-12-31T20:00:00Z'))).toBe(100_000);
+  // 31 декабря 21:00 UTC — в Москве уже январь следующего года, тоже 31 день.
+  expect(dailyAverage(3_100_000, new Date('2026-12-31T21:00:00Z'))).toBe(100_000);
+  expect(dailyAverage(2_900_000, new Date('2028-02-29T12:00:00+03:00'))).toBe(100_000);
+  expect(dailyAverage(100, new Date('2026-11-15T12:00:00+03:00'))).toBe(3);
+});
