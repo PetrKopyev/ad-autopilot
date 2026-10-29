@@ -55,11 +55,13 @@ async def test_plan_requires_approved_description(world: World) -> None:
         await world.plans.get_plan(world.business.id, NOW, TODAY)
 
 
-async def test_plan_groups_cover_segments_for_each_platform(world: World) -> None:
+async def test_direct_groups_are_services_and_vk_groups_cover_segments(world: World) -> None:
     plan = await build(world)
     segments = SEGMENTS["nails"]
+    # Услуга одна: в Директе одна группа, вторая с теми же фразами спорила бы с ней за запрос.
     assert [(group["platform"], group["name"].split(" — ")[1]) for group in plan["groups"]] == [
-        (platform, segment) for platform in ("direct", "vk") for segment in segments
+        ("direct", segments[0]),
+        *(("vk", segment) for segment in segments),
     ]
     assert plan["groups"][0]["audience"] == (
         "Тем, кто ищет в Яндексе «маникюр классический». Регион: Самара. Объявления — в поиске и на сайтах-партнёрах "
@@ -106,22 +108,50 @@ async def test_plan_with_vk_off_waits_for_new_plan_when_vk_is_disconnected(world
     assert plan["off"] == [] and {group["platform"] for group in plan["groups"]} == {"direct"}
 
 
-async def test_groups_take_services_in_turn_and_ads_of_group_differ(world: World) -> None:
+async def test_each_direct_group_answers_only_its_service_and_ads_of_group_differ(world: World) -> None:
     await onboard(world)
+    services = ["Маникюр классический", "Педикюр", "Наращивание ресниц", "Снятие покрытия", "Дизайн ногтей"]
     fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
-    fields["services"] = {"value": "Маникюр классический\nПедикюр\nНаращивание ресниц"}
-    fields["prices"] = {"value": "Маникюр классический — 1 500 ₽\nПедикюр — 2 500 ₽\nНаращивание ресниц — 3 000 ₽"}
+    fields["services"] = {"value": "\n".join(services)}
+    fields["prices"] = {"value": "\n".join(f"{name} — 1 500 ₽" for name in services)}
     world.onboarding.save_description(world.business.id, fields, True, NOW)
     await world.plans.get_plan(world.business.id, NOW, TODAY)
     groups = world.repository.latest_plan(world.business.id).payload["groups"]
-    services = ["Маникюр классический", "Педикюр", "Наращивание ресниц"]
-    assert [group["service"] for group in groups] == services * 2
-    assert [group["name"].split(" — ")[0] for group in groups] == services * 2
+    direct = [group for group in groups if group["platform"] == "direct"]
+    vk = [group for group in groups if group["platform"] == "vk"]
+    segments = SEGMENTS["nails"]
+    assert [(group["service"], group["segment"]) for group in direct] == [
+        (name, segments[index % 3]) for index, name in enumerate(services)
+    ]
+    assert [group["phrases"] for group in direct] == [[f"{name.lower()} самара"] for name in services]
+    assert [(group["service"], group["segment"]) for group in vk] == [
+        (name, segment) for name, segment in zip(services, segments)
+    ]
+    assert all(group["phrases"] == [] for group in vk)
     plan = world.plans.view(world.business, world.repository.latest_plan(world.business.id), TODAY)
-    assert plan["groups"][1]["audience"].startswith(
-        "Тем, кто ищет в Яндексе «педикюр», «маникюр классический», «наращивание ресниц». Регион: Самара."
-    )
+    assert plan["groups"][1]["audience"].startswith("Тем, кто ищет в Яндексе «педикюр». Регион: Самара.")
     assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
+
+
+async def test_direct_groups_skip_repeated_phrases_and_stop_at_cap(world: World) -> None:
+    await onboard(world)
+    services = [
+        "Маникюр классический",
+        "Маникюр классический без покрытия",
+        "Маникюр классический с покрытием гель-лак",
+        *(f"Услуга {index}" for index in range(1, 6)),
+    ]
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "\n".join(services)}
+    fields["prices"] = {"value": ""}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    await world.plans.get_plan(world.business.id, NOW, TODAY)
+    groups = world.repository.latest_plan(world.business.id).payload["groups"]
+    direct = [group for group in groups if group["platform"] == "direct"]
+    # «Маникюр классический с покрытием гель-лак» даёт фразу «маникюр классический с покрытием», а не повтор.
+    assert [group["service"] for group in direct] == services[:3] + ["Услуга 1", "Услуга 2"]
+    phrases = [phrase for group in direct for phrase in group["phrases"]]
+    assert len(phrases) == len(set(phrases)) == plan_module.MAX_SERVICE_GROUPS
 
 
 async def test_images_follow_service_of_each_group(world: World) -> None:
@@ -140,15 +170,16 @@ async def test_images_follow_service_of_each_group(world: World) -> None:
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     stored = world.repository.latest_plan(world.business.id).payload["groups"]
     assets = {asset.id: asset for asset in world.repository.assets(world.business.id)}
-    # Шесть групп — шесть разных пар (услуга, сегмент), по две картинки на пару одним вызовом идей.
-    assert len(assets) == 2 * len(stored) == 12 and world.llm.calls.count("ideas") == 1
-    seen: set[int] = set()
+    # Пять групп Директа — пять разных пар (услуга, сегмент), по две картинки на пару одним вызовом идей; три группы
+    # VK — те же пары, что у первых трёх групп Директа, и те же картинки.
+    assert len(stored) == 8 and len(assets) == 10 and world.llm.calls.count("ideas") == 1
+    seen: dict[str, set[int]] = {}
     for group, shown in zip(stored, plan["groups"], strict=True):
         ids = {asset["id"] for asset in shown["assets"]}
-        assert len(ids) == 2 and not ids & seen
-        seen |= ids
+        assert len(ids) == 2 and seen.setdefault(group_key(group), ids) == ids
         assert all(assets[id_].prompt.startswith(subject(group["service"], "nails")) for id_ in ids)
         assert all(asset["label"].startswith("Идея ") for asset in shown["assets"])
+    assert len({id_ for ids in seen.values() for id_ in ids}) == 10
     pedicure = next(shown for group, shown in zip(stored, plan["groups"]) if group["service"] == "Педикюр с покрытием")
     assert all(assets[asset["id"]].prompt.startswith("Женские ступни") for asset in pedicure["assets"])
     assert all(asset.prompt.endswith("без текста и надписей.") for asset in assets.values())
@@ -171,11 +202,12 @@ async def test_rebuild_keeps_images_of_same_pair_and_generates_for_new_pairs(wor
     add_service(world, "Педикюр")
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     after = keyed_assets(world)
-    for key, ids in before.items():
-        assert after[key] == ids
+    # Педикюр получает свою группу Директа со вторым сегментом, и вторая группа VK переходит к той же паре.
+    kept = [f"Маникюр классический — {SEGMENTS['nails'][index]}" for index in (0, 2)]
+    assert all(after[key] == before[key] for key in kept)
     old_ids = {id_ for ids in before.values() for id_ in ids}
     new_keys = [key for key in after if key.startswith("Педикюр — ")]
-    assert len(new_keys) == 3
+    assert set(after) == {*kept, *new_keys} and new_keys == [f"Педикюр — {SEGMENTS['nails'][1]}"]
     assert all(len(after[key]) == 2 and not set(after[key]) & old_ids for key in new_keys)
     assets = {asset.id: asset for asset in world.repository.assets(world.business.id)}
     assert all(assets[id_].prompt.startswith("Женские ступни") for key in new_keys for id_ in after[key])
@@ -307,13 +339,25 @@ async def test_upload_limit_counts_images_only(world: World, monkeypatch) -> Non
 async def test_rebuild_without_ai_budget_leaves_new_pairs_without_images(tmp_path: Path) -> None:
     world = make_world(tmp_path, limits=AiLimits(onboarding_kop=9 * ART_COST_KOP + 100, weekly_kop=2500))
     await build(world)
-    add_service(world, "Педикюр")
+    add_service(world, "Педикюр\nНаращивание ногтей")
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     after = keyed_assets(world)
-    assert sum(len(after.get(key, [])) for key in after if key.startswith("Педикюр — ")) == 1
+    # Две новые пары, денег — на одну картинку: её получает первая пара, вторая остаётся без картинок.
+    assert [len(after.get(key, [])) for key in after if not key.startswith("Маникюр")] == [1]
     assert any(not group["assets"] for group in plan["groups"])
     assert "В каждой группе отметьте хотя бы одну картинку." in plan["blockers"]
     assert world.repository.ai_spent(world.business.id) <= 9 * ART_COST_KOP + 100
+
+
+def test_audience_of_old_direct_group_with_phrases_of_all_services_names_its_service_first() -> None:
+    group = {
+        "platform": "direct",
+        "service": "Педикюр",
+        "phrases": ["маникюр классический самара", "педикюр самара", "наращивание ресниц самара"],
+    }
+    assert plan_module.audience(group, "Самара").startswith(
+        "Тем, кто ищет в Яндексе «педикюр», «маникюр классический», «наращивание ресниц». Регион: Самара."
+    )
 
 
 def test_old_plan_groups_keep_images_by_segment() -> None:

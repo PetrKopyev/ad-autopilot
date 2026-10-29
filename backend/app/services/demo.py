@@ -13,14 +13,21 @@ from app.worker.jobs import Worker, WorkerRepository
 DEMO_UID_PREFIX = "demo-"
 
 DEMO_DESCRIPTION = {
-    "services": [{"name": "Маникюр", "price": 200000, "quote": "Маникюр — 2000 ₽"}],
+    "services": [
+        {"name": "Маникюр", "price": 200000, "quote": "Маникюр — 2000 ₽"},
+        {"name": "Педикюр", "price": 250000, "quote": "Педикюр — 2500 ₽"},
+        {"name": "Наращивание ногтей", "price": 300000, "quote": "Наращивание ногтей — 3000 ₽"},
+    ],
     "address": {"value": "Москва, улица Примерная, 10", "quote": "Москва, улица Примерная, 10"},
     "advantages": [{"value": "Запись онлайн каждый день", "quote": "Запись онлайн каждый день"}],
 }
 
 
 async def read_demo_site(url: str) -> SiteReadResult:
-    text = "Демонстрационный салон. Маникюр — 2000 ₽. Москва, улица Примерная, 10. Запись онлайн каждый день."
+    text = (
+        "Демонстрационный салон. Маникюр — 2000 ₽. Педикюр — 2500 ₽. Наращивание ногтей — 3000 ₽. "
+        "Москва, улица Примерная, 10. Запись онлайн каждый день."
+    )
     return SiteReadResult([Page(url, text, counter_ids=[12345])])
 
 
@@ -40,7 +47,7 @@ def prepare_business(repository, business: Business) -> None:
 
 
 def configure_adapter(adapter: FakeAdapter, spec) -> None:
-    """Три группы из обычного плана: сильная, слабая и пограничная; события считает Fake."""
+    """Три группы Директа из демо-плана, по услуге на группу: сильная, слабая и пограничная; события считает Fake."""
     for group, truth in zip(
         spec.groups,
         (AdTruth(0.08, 25, 0.2, 600), AdTruth(0.007, 62, 0.01, 600), AdTruth(0.035, 45, 0.06, 600)),

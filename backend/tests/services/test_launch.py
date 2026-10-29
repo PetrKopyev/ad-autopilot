@@ -129,11 +129,23 @@ async def test_simulated_spend_never_exceeds_budget(tmp_path: Path) -> None:
     assert spent <= BUDGET_KOP
 
 
+def selected_platforms(plan: dict) -> dict[int, set[str]]:
+    """Площадки, на которые уходит каждая выбранная картинка: картинки пары — в группы этой пары на обеих площадках."""
+    result: dict[int, set[str]] = {}
+    for group in plan["groups"]:
+        for asset in group["assets"]:
+            if asset["selected"]:
+                result.setdefault(asset["id"], set()).add(group["platform"])
+    return result
+
+
 async def test_images_are_cut_uploaded_and_cached_per_platform(tmp_path: Path) -> None:
     world, plan = await ready(tmp_path)
     await launch(world, plan)
+    expected = selected_platforms(plan)
     selected = [asset for asset in world.repository.assets(world.business.id) if asset.selected]
-    assert selected and all(set(asset.platform_refs) == {"direct", "vk"} for asset in selected)
+    assert {"direct", "vk"} in expected.values()
+    assert selected and all(set(asset.platform_refs) == expected[asset.id] for asset in selected)
 
 
 async def test_images_are_cut_in_decode_queue(tmp_path: Path, monkeypatch) -> None:
@@ -148,8 +160,7 @@ async def test_images_are_cut_in_decode_queue(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(launch_module, "run_decoding", spy)
     await launch(world, plan)
-    selected = [asset for asset in world.repository.assets(world.business.id) if asset.selected]
-    assert calls == [world.launches.cut_image] * (2 * len(selected))
+    assert calls == [world.launches.cut_image] * sum(map(len, selected_platforms(plan).values()))
 
 
 async def test_image_with_reference_of_other_platform_only_is_uploaded_before_campaign(tmp_path: Path) -> None:
@@ -202,7 +213,7 @@ async def test_retry_after_failure_is_safe_and_idempotent(tmp_path: Path) -> Non
         await launch(world, plan)
     adapters["vk"].fail = False
     await launch(world, plan)
-    assert len(campaigns(world)) == 2 and len(world.repository.rows(AdGroup)) == 6
+    assert len(campaigns(world)) == 2 and len(world.repository.rows(AdGroup)) == len(plan["groups"]) == 4
     assert len(adapters["direct"]._trees) == 1 and len(adapters["vk"]._trees) == 1
     assert world.business.status == "running"
     for item in campaigns(world):

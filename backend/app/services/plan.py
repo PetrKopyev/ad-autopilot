@@ -20,6 +20,7 @@ from app.content.art import ArtCall as ArtRecord
 from app.content.ideas import TITLE_LIMIT, generate_ideas
 from app.content.images import DEFAULT_FONT, ImageRejected, accept_upload, check_image, run_decoding
 from app.content.llm import LLMClient
+from app.content.verify import Service
 from app.content.video import VideoError, build_video
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Ad, Asset, Business, MarkingProfile, Plan, PlatformAccount
@@ -46,13 +47,15 @@ from app.services.onboarding import (
     SpendLLM,
     ai_budget,
     description_draft,
-    service_names,
     waited_lock,
 )
 
 logger = logging.getLogger(__name__)
 PLATFORMS = ("direct", "vk")
 ANGLES_PER_GROUP = 2
+# Групп Директа не больше пяти: при минимальном бюджете (около 300 ₽ в день на Директ) на группу и так приходится
+# по 60 ₽ в день, а каждая новая группа — ещё два текста и две картинки от ИИ.
+MAX_SERVICE_GROUPS = 5
 IMAGE_CANDIDATES = 8
 IMAGES_PER_KEY = 2
 REGENERATE_COUNT = 2
@@ -178,10 +181,25 @@ def budget_view(monthly_budget: int, connected: list[str], today: date, domain: 
     }
 
 
-def phrases(business: Business) -> list[str]:
-    names = service_names(business.description.get("fields", {}).get("services", {}).get("value", ""))
-    result = [f"{' '.join(name.split()[:4])} {phrase_city(business.city)}".lower() for name in names[:5]]
-    return list(dict.fromkeys(result))
+def phrase(service: str, city: str) -> str:
+    return f"{' '.join(service.split()[:4])} {phrase_city(city)}".lower()
+
+
+def direct_services(services: list[Service], city: str) -> list[Service]:
+    """Услуги групп Директа: у каждой своя ключевая фраза, и группы кампании не спорят за один запрос. Услуги с той
+    же фразой, что у прежней, пропускаются; групп не больше MAX_SERVICE_GROUPS — первые услуги описания."""
+    chosen: dict[str, Service] = {}
+    for service in services:
+        chosen.setdefault(phrase(service.name, city), service)
+    return list(chosen.values())[:MAX_SERVICE_GROUPS]
+
+
+def group_slots(platform: str, services: list[str], segments: list[str]) -> list[tuple[str, str]]:
+    """Пары (услуга, сегмент) групп площадки. В Директе группа — услуга со своей фразой, сегмент даёт повод текстам и
+    картинкам; во VK, где фраз нет, группа — сегмент. Первые пары площадок совпадают и делят картинки."""
+    if platform == "direct":
+        return [(service, segments[index % len(segments)]) for index, service in enumerate(services)]
+    return [(services[index % len(services)], segment) for index, segment in enumerate(segments)]
 
 
 def audience(group: dict, city: str) -> str:
@@ -194,7 +212,8 @@ def audience(group: dict, city: str) -> str:
             "заявку на сайте."
         )
     own = " ".join(group.get("service", "").split()[:4]).lower()
-    themes = [phrase.removesuffix(f" {phrase_city(city).lower()}") for phrase in group["phrases"]]
+    themes = [item.removesuffix(f" {phrase_city(city).lower()}") for item in group["phrases"]]
+    # В планах до групп по услугам у каждой группы Директа фразы всех услуг: своя услуга — первой.
     themes.sort(key=lambda theme: theme != own)
     if not themes:
         return f"Регион: {city}. Ключевых фраз пока нет: добавьте услуги в описание бизнеса."
@@ -462,12 +481,13 @@ class PlanService:
         niche = business.niche_class or "other"
         segments = list(SEGMENTS.get(niche, SEGMENTS["other"]))
         draft = description_draft(business)
-        names = [service.name for service in draft.services] or [""]
-        # Площадка и пара (услуга, сегмент) каждой группы в её порядке: группы идут по площадкам, в каждой — по
-        # сегментам.
+        by_name = {service.name: service for service in draft.services}
+        services = [service.name for service in direct_services(draft.services, business.city)] or [""]
+        # Площадка и пара (услуга, сегмент) каждой группы в её порядке: группы идут по площадкам.
         slots = [
-            (platforms[index // len(segments)], names[index % len(names)], segments[index % len(segments)])
-            for index in range(len(platforms) * len(segments))
+            (platform, service, segment)
+            for platform in platforms
+            for service, segment in group_slots(platform, services, segments)
         ]
         pairs = list(dict.fromkeys((service, segment) for _, service, segment in slots))
         assets = self.carry_assets(previous, [assets_key(*pair) for pair in pairs])
@@ -476,10 +496,14 @@ class PlanService:
         limits = budget_limits(business, platforms, today, self.domain)
         groups = []
         for platform in platforms:
-            daily = split_group_limits(limits[platform], dict.fromkeys(segments, Decimal(1)))
-            for segment, group_limit in zip(segments, daily, strict=True):
-                # Услуги идут по группам по кругу: каждая группа рекламирует одну услугу, разные группы — разные.
-                service = draft.services[len(groups) % len(draft.services)] if draft.services else None
+            # Пары внутри площадки не повторяются: в Директе разные услуги, во VK разные сегменты.
+            names = {
+                f"{service or 'Услуги'} — {segment}": (service, segment)
+                for slot_platform, service, segment in slots
+                if slot_platform == platform
+            }
+            daily = split_group_limits(limits[platform], dict.fromkeys(names, Decimal(1)))
+            for (name, (service, segment)), group_limit in zip(names.items(), daily, strict=True):
                 ads = []
                 try:
                     for angle in ANGLES[:ANGLES_PER_GROUP]:
@@ -490,7 +514,7 @@ class PlanService:
                                 platform=platform,
                                 angle=angle,
                                 segment=segment,
-                                service=service,
+                                service=by_name.get(service),
                                 other=ads[-1].ad if ads else None,
                             )
                         )
@@ -501,10 +525,11 @@ class PlanService:
                         "id": len(groups) + 1,
                         "platform": platform,
                         "segment": segment,
-                        "service": service.name if service else "",
-                        "name": f"{service.name if service else 'Услуги'} — {segment}",
+                        "service": service,
+                        "name": name,
                         "daily_limit_kop": group_limit.daily_limit,
-                        "phrases": phrases(business) if platform == "direct" else [],
+                        # Группа Директа отвечает только на запросы своей услуги.
+                        "phrases": [phrase(service, business.city)] if platform == "direct" and service else [],
                         "ads": [
                             {
                                 "angle": ad.angle,
