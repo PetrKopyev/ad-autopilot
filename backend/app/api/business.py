@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from app.api.autopilot import Screens
 from app.api.demo import router as demo_router
-from app.api.limits import site_check_limit
+from app.api.limits import description_limit, site_check_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_session, current_user, require_csrf
@@ -144,7 +144,7 @@ async def site_check(
         )
 
 
-@router.put("/business/description", dependencies=[Depends(require_csrf)])
+@router.put("/business/description", dependencies=[Depends(description_limit), Depends(require_csrf)])
 def save_description(body: DescriptionIn, business: CurrentBusiness, service: Service) -> dict:
     # Синхронный обработчик: запись ждёт блокировку бизнеса в пуле потоков, а не в цикле событий.
     fields = {key: item.model_dump() for key, item in body.description.items()}

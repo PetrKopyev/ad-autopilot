@@ -1,14 +1,15 @@
 """Прогноз обращений до запуска: клики и цена клика — из прогноза бюджета Директа, конверсия — из Метрики бизнеса
 или общий ориентир с подписью. Нейросеть только пересказывает готовые числа; новых чисел в её тексте быть не должно.
 
-Отчёт Директа готовится до минуты: первый запрос заказывает его и ждёт несколько секунд, следующие спрашивают
-готовность. Результат хранится в памяти процесса API (он один) по входу: фразы, регион, бюджет, цели Метрики."""
+Отчёт Директа готовится до минуты: первый запрос заказывает его и сразу отвечает «готовится», следующие спрашивают
+готовность. Результат хранится в памяти процесса API (он один) по входу: фразы, регион, бюджет, цели Метрики и
+подключение Директа — после переподключения кабинета прогноз спрашивается заново."""
 
 import asyncio
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from hashlib import sha256
@@ -29,12 +30,22 @@ FORECAST_DOC = "https://yandex.ru/dev/direct/doc/dg-v4/ru/reference/CreateNewFor
 BENCHMARK_URL = "https://etodigital.ru/zametki/konversiya-sajta-uslug-norma/"
 # Меньше сотни визитов с рекламы — доля обращений слишком шаткая даже как интервал.
 MIN_VISITS = 100
+# Каждый вызов Директа внутри запроса прогноза — не дольше этого: замок бизнеса не держится минутами.
+DIRECT_TIMEOUT = 10.0
 TTL = {"ready": timedelta(hours=24), "pending": timedelta(minutes=10), "unavailable": timedelta(minutes=10)}
 ACCESS_TTL = timedelta(hours=1)
 EXPLANATION_LIMIT = 800
 AI_NOTE = "Пояснение написал ИИ по готовым числам — это прогноз, он может ошибаться."
 VK_NOTE = "Для ВКонтакте прогноз появится после первых дней работы: до запуска площадка его не даёт."
 NUMBER = re.compile(r"\d+(?:[   ]\d{3})*(?:[.,]\d+)?")
+LEADS_WORD = re.compile(r"обращени", re.IGNORECASE)
+# Число в стольких знаках от слова «обращения» нейросеть выдаёт за число обращений.
+LEADS_NEAR = 12
+PENDING = "Яндекс Директ готовит прогноз, обычно это занимает до минуты."
+VISITS_NOTE = (
+    "Доля считается на визит, а визитов на сайт бывает меньше, чем кликов: часть людей уходит до загрузки страницы. "
+    "Поэтому обращений может выйти меньше."
+)
 SYSTEM = (
     "Перескажи прогноз рекламы для владельца небольшого бизнеса простыми словами, 3–5 предложений. "
     "Используй только числа из входа, не добавляй новых, не округляй и не пересчитывай. "
@@ -49,6 +60,8 @@ class Conversion:
     source: str
     label: str
     url: str | None = None
+    # Почему вместо измерения ориентир: Метрика без целей, мало визитов или ошибка ответа.
+    note: str | None = None
 
 
 BENCHMARK = Conversion(
@@ -122,7 +135,10 @@ def measured(visits: int, reached: int) -> Conversion | None:
     if visits < MIN_VISITS:
         return None
     low, high = wilson(reached, visits)
-    label = f"измерено на вашем сайте: {reached} обращений на {visits} визитов с рекламы за 90 дней (Метрика)"
+    label = (
+        f"измерено Метрикой на вашем сайте: {reached} из {visits} визитов с рекламы Яндекс Директа (поиск и сети) за "
+        "90 дней достигли выбранных целей"
+    )
     return Conversion(low, high, "metrica", label)
 
 
@@ -156,7 +172,7 @@ def template(clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_
     )
     if conversion.source == "metrica":
         rate = (
-            f"На вашем сайте обращаются от {percent(conversion.min)} до {percent(conversion.max)}% посетителей "
+            f"На вашем сайте цели достигают от {percent(conversion.min)} до {percent(conversion.max)}% визитов "
             f"с рекламы — {conversion.label}."
         )
     else:
@@ -164,24 +180,42 @@ def template(clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_
             f"Обычно заявку оставляют от {percent(conversion.min)} до {percent(conversion.max)} из 100 посетителей "
             f"сайта — это {conversion.label}, не по вашему сайту."
         )
+        rate += f" {conversion.note}" if conversion.note else ""
     return (
         f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
         f"{rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} выйдет "
         f"примерно от {rub(clicks.min)} до {rub(clicks.max)} кликов. {rate} Итого примерно от {leads_range[0]} до "
-        f"{leads_range[1]} обращений в месяц. Это прогноз, он может ошибаться: вся сумма не обязательно потратится, "
-        "а после первой недели покажем цифры по вашему сайту."
+        f"{leads_range[1]} обращений в месяц. {VISITS_NOTE} Это прогноз, он может ошибаться: вся сумма не обязательно "
+        "потратится, а после первой недели покажем цифры по вашему сайту."
     )
 
 
-def ai_text(response: str, allowed: set[Decimal]) -> str | None:
-    """Текст нейросети годится, только если в нём нет чисел, которых не было во входе."""
+def near_leads(text: str) -> set[Decimal]:
+    """Числа рядом со словом «обращения» в том же предложении."""
+    found = set()
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        words = [(word.start() - LEADS_NEAR, word.end() + LEADS_NEAR) for word in LEADS_WORD.finditer(sentence)]
+        found |= {
+            Decimal(re.sub(r"\s", "", number[0]).replace(",", "."))
+            for number in NUMBER.finditer(sentence)
+            if any(number.end() > start and number.start() < end for start, end in words)
+        }
+    return found
+
+
+def ai_text(response: str, allowed: set[Decimal], leads_range: tuple[int, int]) -> str | None:
+    """Текст нейросети годится, только если в нём нет чисел, которых не было во входе, есть обе границы обращений
+    и рядом со словом «обращения» нет чисел вне их вилки."""
     try:
         text = json.loads(response)["text"]
     except (ValueError, KeyError, TypeError):
         return None
     if not isinstance(text, str) or not text.strip() or len(text) > EXPLANATION_LIMIT:
         return None
-    if not numbers(text) <= allowed:
+    low, high = leads_range
+    if not numbers(text) <= allowed or not {Decimal(low), Decimal(high)} <= numbers(text):
+        return None
+    if any(not low <= number <= high for number in near_leads(text)):
         return None
     return text.strip()
 
@@ -225,8 +259,6 @@ def status(name: str, message: str, vk: dict | None) -> dict:
 
 
 class ForecastService:
-    poll_delay = 2.0
-
     def __init__(
         self,
         repository: PlanRepository,
@@ -263,24 +295,30 @@ class ForecastService:
         budget_rub = Decimal(shares["direct"]) * (1 - self.domain.budget_reserve) / 100
         city = payload.get("city", business.city)
         goals = list(business.lead_goal_ids or [])[:MAX_GOALS]
-        inputs = [phrases, city, str(budget_rub), business.metrica_counter_id, goals, self.demo]
+        info = None if self.demo else self.registry.load(business.id, "direct")
+        # Подключение в ключе: после входа заново прежний отказ (58, истёкший вход) не держится до конца срока.
+        account = [info.status, info.token] if info else None
+        inputs = [phrases, city, str(budget_rub), business.metrica_counter_id, goals, self.demo, account]
         key = sha256(json.dumps(inputs, ensure_ascii=False).encode()).hexdigest()
         # Площадки и ИИ отвечают секундами: соединение с базой на это время возвращается в пул.
         self.repository.commit()
         lock = LOCKS.setdefault(business.id, asyncio.Lock())
         async with lock:
             entry = FORECASTS.get(business.id)
-            if entry is None or entry.key != key or entry.expires <= now:
+            if entry is not None and (entry.key != key or entry.expires <= now):
+                # Заказанный и уже ненужный отчёт удаляется: у пользователя Директа всего пять мест под отчёты.
+                await self.drop(info, entry.forecast_id)
                 entry = None
-            elif entry.status != "pending":
+            if entry is not None and entry.status != "pending":
                 return entry.response | {"vk": vk}
-            entry = await self.refresh(business, entry, key, phrases, city, budget_rub, now, today)
+            entry = await self.refresh(business, info, entry, key, phrases, city, budget_rub, now, today)
             FORECASTS[business.id] = entry
             return entry.response | {"vk": vk}
 
     async def refresh(
         self,
         business: Business,
+        info: Any,
         entry: Entry | None,
         key: str,
         phrases: list[str],
@@ -289,65 +327,72 @@ class ForecastService:
         now: datetime,
         today: date,
     ) -> Entry:
+        """Один шаг без ожидания: заказать отчёт или спросить его готовность; готовый прочитать и удалить."""
         if self.demo:
             return await self.ready(business, key, demo_rows(phrases), budget_rub, now, today)
+        forecast_id = entry.forecast_id if entry else None
         try:
-            client = self.client(business.id)
-            if entry is None:
+            client = self.client(info)
+            if forecast_id is None:
                 region = await self.registry.resolve(business.id, "direct").geo_targeting(city)
                 forecast_id = await client.create(phrases, region["region_ids"])
-                state = await client.wait(forecast_id)
+                state = "Pending"
             else:
-                forecast_id = entry.forecast_id
                 state = await client.status(forecast_id)
             if state == "Pending":
-                message = "Яндекс Директ готовит прогноз, обычно это занимает до минуты."
-                return Entry(
-                    key,
-                    "pending",
-                    entry.expires if entry else now + TTL["pending"],
-                    forecast_id,
-                    status("pending", message, None),
-                )
+                expires = entry.expires if entry else now + TTL["pending"]
+                return Entry(key, "pending", expires, forecast_id, status("pending", PENDING, None))
             rows = await client.get(forecast_id) if state == "Done" else None
-            # Отчёт больше не нужен: у пользователя Директа всего пять мест под отчёты.
-            try:
-                await client.delete(forecast_id)
-            except PlatformError:
-                pass
-            if rows is None:
-                return self.failed(key, "Яндекс Директ не смог посчитать прогноз. Попробуем ещё раз позже.", now)
-        except ForecastAccessDenied as error:
-            return Entry(key, "unavailable", now + ACCESS_TTL, response=unavailable(str(error), None))
-        except AuthExpired:
-            return self.failed(key, "Войдите в Яндекс Директ заново: без этого прогноз не получить.", now)
         except PlatformError as error:
-            return self.failed(key, f"Прогноз Яндекс Директа сейчас недоступен: {error}", now)
+            await self.drop(info, forecast_id)
+            return self.failure(key, error, now)
+        await self.drop(info, forecast_id)
+        if rows is None:
+            return self.failed(key, "Яндекс Директ не смог посчитать прогноз. Попробуем ещё раз позже.", now)
         return await self.ready(business, key, rows, budget_rub, now, today)
 
-    def client(self, business_id: int) -> DirectForecastClient:
-        info = self.registry.load(business_id, "direct")
+    def client(self, info: Any) -> DirectForecastClient:
         if info is None or info.status != "ok":
             raise PlatformError("подключите кабинет Яндекс Директа.")
         return DirectForecastClient(
-            info.token, config=self.registry.config, client=self.registry.http, delay=self.poll_delay
+            info.token, config=self.registry.config, client=self.registry.http, timeout=DIRECT_TIMEOUT
         )
+
+    async def drop(self, info: Any, forecast_id: int | None) -> None:
+        if forecast_id is None:
+            return
+        try:
+            await self.client(info).delete(forecast_id)
+        except PlatformError:
+            pass
 
     @staticmethod
     def failed(key: str, message: str, now: datetime) -> Entry:
         return Entry(key, "unavailable", now + TTL["unavailable"], response=unavailable(message, None))
 
+    @classmethod
+    def failure(cls, key: str, error: PlatformError, now: datetime) -> Entry:
+        if isinstance(error, ForecastAccessDenied):
+            return Entry(key, "unavailable", now + ACCESS_TTL, response=unavailable(str(error), None))
+        if isinstance(error, AuthExpired):
+            return cls.failed(key, "Войдите в Яндекс Директ заново: без этого прогноз не получить.", now)
+        return cls.failed(key, f"Прогноз Яндекс Директа сейчас недоступен: {error}", now)
+
     async def conversion(self, business: Business) -> Conversion:
         if not business.metrica_counter_id or not business.lead_goal_ids:
-            return BENCHMARK
+            return replace(BENCHMARK, note="Своей доли нет: в Метрике не выбраны цели обращений.")
         try:
             metrica = self.registry.metrica(business.id)
             visits, reached = await metrica.get_ad_conversions(
                 business.metrica_counter_id, list(business.lead_goal_ids)[:MAX_GOALS]
             )
-        except (MetricaError, PlatformError):
-            return BENCHMARK
-        return measured(visits, reached) or BENCHMARK
+        except (MetricaError, PlatformError) as error:
+            return replace(BENCHMARK, note=f"Свою долю по Метрике посчитать не удалось: {error}")
+        return measured(visits, reached) or replace(
+            BENCHMARK,
+            note=f"Своей доли нет: в Метрике за 90 дней {visits} визитов с рекламы Яндекс Директа, а нужно не меньше "
+            f"{MIN_VISITS}.",
+        )
 
     async def ready(
         self, business: Business, key: str, rows: list[PhraseForecast], budget_rub: Decimal, now: datetime, today: date
@@ -356,7 +401,7 @@ class ForecastService:
         conversion = await self.conversion(business)
         leads_range = leads(clicks, conversion)
         text = template(clicks, budget_rub, conversion, leads_range)
-        explanation = await self.explain(business, text, today) if clicks.potential else None
+        explanation = await self.explain(business, text, leads_range, today) if clicks.potential else None
         forecast = (
             "Демо: числа придуманы для показа, это не прогноз Яндекса"
             if self.demo
@@ -369,7 +414,11 @@ class ForecastService:
                 "source": f"Ваш план: {rub(budget_rub)} ₽ в месяц на Яндекс Директ, без запаса на перерасход",
                 "url": None,
             },
-            {"what": "Доля обращений", "source": conversion.label, "url": conversion.url},
+            {
+                "what": "Доля обращений",
+                "source": " ".join(filter(None, [f"{conversion.label}, на визит.", conversion.note])),
+                "url": conversion.url,
+            },
         ]
         response = {
             "status": "ready",
@@ -394,7 +443,7 @@ class ForecastService:
         }
         return Entry(key, "ready", now + TTL["ready"], response=response)
 
-    async def explain(self, business: Business, text: str, today: date) -> str | None:
+    async def explain(self, business: Business, text: str, leads_range: tuple[int, int], today: date) -> str | None:
         """Пересказ нейросетью по готовому тексту; любые сбои и новые числа — остаётся шаблон."""
         if self.llm is None:
             return None
@@ -404,4 +453,4 @@ class ForecastService:
             response = await llm.complete_json(SYSTEM, json.dumps({"forecast": text}, ensure_ascii=False))
         except YandexGPTError:
             return None
-        return ai_text(response, numbers(text))
+        return ai_text(response, numbers(text), leads_range)

@@ -179,29 +179,49 @@ async def test_invalid_counters(metrica: MetricaClient, mock_api: respx.MockRout
         await metrica.list_counters()
 
 
-async def test_ad_conversions(metrica: MetricaClient, mock_api: respx.MockRouter) -> None:
-    route = mock_api.get(
+async def test_ad_conversions_count_direct_visits_reaching_any_goal(
+    metrica: MetricaClient, mock_api: respx.MockRouter
+) -> None:
+    direct = "ym:s:lastsignTrafficSource=='ad' AND ym:s:lastsignAdvEngine=.('ya_direct','yandex_direct_star')"
+    query = {
+        "ids": 1,
+        "metrics": "ym:s:visits",
+        "date1": "90daysAgo",
+        "date2": "yesterday",
+        "accuracy": "full",
+    }
+    visits = mock_api.get(f"{BASE_URL}/stat/v1/data", params=query | {"filters": direct}).respond(
+        json={"totals": [240.0]}
+    )
+    reached = mock_api.get(
         f"{BASE_URL}/stat/v1/data",
-        params={
-            "ids": 1,
-            "metrics": "ym:s:visits,ym:s:goal12visits,ym:s:goal13visits",
-            "filters": "ym:s:lastsignTrafficSource=='ad'",
-            "date1": "90daysAgo",
-            "date2": "yesterday",
-        },
-    ).respond(json={"totals": [240.0, 5, 2]})
+        params=query | {"filters": f"{direct} AND EXISTS(ym:s:goal=.('12','13'))"},
+    ).respond(json={"totals": [6]})
 
-    assert await metrica.get_ad_conversions(1, [12, 13]) == (240, 7)
-    assert route.called
+    assert await metrica.get_ad_conversions(1, [12, 13]) == (240, 6)
+    assert visits.called and reached.called
 
 
 async def test_ad_conversions_never_exceed_visits(metrica: MetricaClient, mock_api: respx.MockRouter) -> None:
-    mock_api.get(f"{BASE_URL}/stat/v1/data").respond(json={"totals": [3, 2, 2]})
+    mock_api.get(f"{BASE_URL}/stat/v1/data").mock(
+        side_effect=[httpx.Response(200, json={"totals": [3]}), httpx.Response(200, json={"totals": [4]})]
+    )
 
     assert await metrica.get_ad_conversions(1, [12, 13]) == (3, 3)
 
 
-@pytest.mark.parametrize("totals", [[10], [10, -1], [10, 1.5]])
+async def test_sampled_ad_conversions_are_rounded(metrica: MetricaClient, mock_api: respx.MockRouter) -> None:
+    mock_api.get(f"{BASE_URL}/stat/v1/data").mock(
+        side_effect=[
+            httpx.Response(200, json={"totals": [240.6], "sampled": True}),
+            httpx.Response(200, json={"totals": [6.4], "sampled": True}),
+        ]
+    )
+
+    assert await metrica.get_ad_conversions(1, [12]) == (241, 6)
+
+
+@pytest.mark.parametrize("totals", [[], [10, 1], [-1], [1.5]])
 async def test_invalid_ad_conversions(metrica: MetricaClient, mock_api: respx.MockRouter, totals: list) -> None:
     mock_api.get(f"{BASE_URL}/stat/v1/data").respond(json={"totals": totals})
 

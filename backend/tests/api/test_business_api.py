@@ -153,6 +153,21 @@ def test_site_check_is_rate_limited_per_user_and_ip(api, monkeypatch) -> None:
     assert client.get("/api/business/site-check").status_code == 429
 
 
+def test_description_save_is_rate_limited_and_too_many_services_are_refused(api) -> None:
+    client, _ = api
+    description = {"description": {"services": {"value": "Педикюр"}}, "approved": False}
+    statuses = [client.put("/api/business/description", json=description).status_code for _ in range(21)]
+    assert statuses == [200] * 20 + [429]
+    assert "Описание сохраняется слишком часто" in client.put("/api/business/description", json=description).text
+
+    from app.api import limits
+
+    limits.description_limit.reset()
+    many = {"description": {"services": {"value": ",".join(f"у{index}" for index in range(300))}}, "approved": False}
+    response = client.put("/api/business/description", json=many)
+    assert response.status_code == 422 and "Слишком много услуг" in response.json()["detail"]
+
+
 def test_site_check_answered_from_cache_does_not_spend_the_limit(api, monkeypatch) -> None:
     """Шаг 3 мастера запрашивает проверку при каждом входе; чтение сайта одно, остальное — из кэша."""
     client, context = api

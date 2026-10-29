@@ -7,8 +7,11 @@ import httpx
 
 BASE_URL = "https://api-metrika.yandex.net"
 PAGE_SIZE = 1000
-# Метрика принимает до 20 метрик в запросе; одна из них — визиты.
+# Целей-обращений в расчёте не больше 19; условие фильтра Метрики принимает до 100 значений.
 MAX_GOALS = 19
+# Визиты с рекламы Яндекс Директа по последнему значимому источнику: и поиск, и Рекламная сеть, — тип площадки
+# в фильтр не входит. Директ в Метрике — ya_direct; yandex_direct_star документация называет «Yandex: Direct».
+DIRECT_VISITS = "ym:s:lastsignTrafficSource=='ad' AND ym:s:lastsignAdvEngine=.('ya_direct','yandex_direct_star')"
 
 
 @dataclass(frozen=True)
@@ -176,27 +179,37 @@ class MetricaClient:
         return _total(totals[0])
 
     async def get_ad_conversions(self, counter_id: int, goal_ids: list[int]) -> tuple[int, int]:
-        """Визиты с рекламы за 90 дней до вчера и сколько из них достигли целей-обращений (по последнему значимому
-        источнику). Визит, достигший двух целей, считается дважды, поэтому сумма не больше числа визитов."""
+        """Визиты с рекламы Яндекс Директа за 90 дней до вчера и сколько из них достигли хотя бы одной цели-обращения:
+        визит с двумя целями считается один раз. Полная выборка: при семплировании Метрика отдаёт дробные оценки."""
         _check_counter_id(counter_id)
         if not goal_ids or len(goal_ids) > MAX_GOALS:
             raise ValueError(f"Нужно от одной до {MAX_GOALS} целей.")
-        metrics = ["ym:s:visits", *(f"ym:s:goal{goal_id}visits" for goal_id in goal_ids)]
+        goals = ",".join(f"'{goal_id}'" for goal_id in goal_ids)
+        visits, reached = [
+            await self._visits(counter_id, filters)
+            for filters in (DIRECT_VISITS, f"{DIRECT_VISITS} AND EXISTS(ym:s:goal=.({goals}))")
+        ]
+        return visits, min(reached, visits)
+
+    async def _visits(self, counter_id: int, filters: str) -> int:
         data = await self._get(
             "/stat/v1/data",
             params={
                 "ids": counter_id,
-                "metrics": ",".join(metrics),
-                "filters": "ym:s:lastsignTrafficSource=='ad'",
+                "metrics": "ym:s:visits",
+                "filters": filters,
                 "date1": "90daysAgo",
                 "date2": "yesterday",
+                "accuracy": "full",
             },
         )
         totals = data.get("totals")
-        if not isinstance(totals, list) or len(totals) != len(metrics):
+        if not isinstance(totals, list) or len(totals) != 1:
             raise MetricaResponseError()
-        visits, *reached = map(_total, totals)
-        return visits, min(sum(reached), visits)
+        # Без Метрики Про большой счётчик семплируется и при accuracy=full: оценка дробная, берём ближайшее целое.
+        if data.get("sampled") is True and type(totals[0]) is float and isfinite(totals[0]):
+            return _total(float(round(totals[0])))
+        return _total(totals[0])
 
     async def is_alive(self, counter_id: int) -> bool:
         return await self.get_visits(counter_id) > 0

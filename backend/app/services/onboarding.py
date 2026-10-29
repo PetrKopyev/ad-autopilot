@@ -40,6 +40,9 @@ LAUNCHED = "Реклама уже запущена. Сведения о бизн
 METRICA_LAUNCHED = "Реклама уже запущена. Счётчик и цели Метрики после запуска не меняются."
 CHECK_TTL = timedelta(minutes=10)
 MAX_FIELD = 2000
+# Строка цены длиннее — не цена; потолки держат разбор поля за миллисекунды.
+MAX_PRICE_LINE = 200
+MAX_SERVICES = 200
 QUESTIONS = {
     "services": "Какие услуги вы оказываете?",
     "prices": "Сколько стоят ваши услуги?",
@@ -303,15 +306,21 @@ def owner_price(name: str, prices: list[str]) -> int | None:
 
 NUMBER = r"\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+"
 PRICE_TAIL = re.compile(
-    rf"(?:^|(?P<sep>\s*[—–:-]\s*|\s+))(?P<start>от\s+)?(?P<num>{NUMBER})(?:[,.](?P<kop>\d{{2}}))?"
-    rf"(?:\s*[—–-]\s*(?P<to>{NUMBER}))?\s*(?P<cur>₽|руб(?:\.|лей|ля|ль)?|р\.?)?\s*$",
+    rf"(?:^|(?P<sep>\s*+[—–:-]\s*+|\s++))(?P<start>от\s++)?(?P<num>{NUMBER})(?:[,.](?P<kop>\d{{2}}))?"
+    rf"(?:\s*+[—–-]\s*+(?P<to>{NUMBER}))?\s*+(?P<cur>₽|руб(?:\.|лей|ля|ль)?|р\.?)?\s*+$",
     re.IGNORECASE,
 )
 DASH = re.compile(r"\s+[—–-]\s+|:\s+")
 
 
 def split_price(item: str) -> tuple[str, int | None, bool]:
+    if len(item) > MAX_PRICE_LINE:
+        return item, None, False
     for position in range(len(item)):
+        # Цена начинается с начала строки или с разделителя; внутри пробелов разбор начат с первого из них.
+        char = item[position]
+        if position and (char not in "—–:-" and not char.isspace() or item[position - 1 : position + 1].isspace()):
+            continue
         if not (match := PRICE_TAIL.match(item, position)):
             continue
         head, spaced = item[:position], match["sep"] is not None and DASH.fullmatch(match["sep"])
@@ -328,25 +337,30 @@ def price_line(name: str, price: int, start: bool = False) -> str:
     return f"{name} — {'от ' if start else ''}{rubles(price)} ₽"
 
 
-def priced_line(name: str, prices: list[str]) -> str | None:
+def priced_lines(prices: list[str]) -> dict[str, str]:
+    """Строки цен по названию услуги: разбираются один раз на всё поле, первая строка услуги главная."""
+    found: dict[str, str] = {}
     for line in prices:
-        found, price, _ = split_price(line)
-        if price is not None and found.casefold() == name.casefold():
-            return line
-    return None
+        name, price, _ = split_price(line)
+        if price is not None:
+            found.setdefault(name.casefold(), line)
+    return found
 
 
 def split_services(value: str, prices: str) -> tuple[str, str]:
-    old = lines(prices)
+    items, old = service_names(value), lines(prices)
+    if len(items) > MAX_SERVICES or len(old) > MAX_SERVICES:
+        raise OnboardingError(f"Слишком много услуг и цен: оставьте не больше {MAX_SERVICES} строк.")
+    known = priced_lines(old)
     names: dict[str, str] = {}
     priced = []
-    for item in service_names(value):
+    for item in items:
         name, price, start = split_price(item)
         if not name:
             priced.append(item)
         elif name.casefold() not in names:
             names[name.casefold()] = name
-            line = priced_line(name, old) if price is None else price_line(name, price, start)
+            line = known.get(name.casefold()) if price is None else price_line(name, price, start)
             priced += [line] if line else []
     return "\n".join(names.values()), "\n".join(priced)
 
@@ -356,7 +370,8 @@ def owner_fields(fields: dict) -> dict:
     if not services:
         return fields
     old = lines(prices.get("value", ""))
-    shown = [priced_line(name, old) or name for name in service_names(services["value"])]
+    known = priced_lines(old)
+    shown = [known.get(name.casefold(), name) for name in service_names(services["value"])]
     shown += [line for line in old if line not in shown]
     quote = services.get("quote") or prices.get("quote")
     return fields | {"services": services | {"value": "\n".join(shown), "quote": quote}}

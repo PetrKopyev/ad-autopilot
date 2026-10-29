@@ -3,7 +3,6 @@
 В v5 прогноза нет. Отчёт готовится до минуты и хранится на стороне Яндекса пять часов, у пользователя одновременно
 не больше пяти отчётов: шестой даёт ошибку 31, поэтому готовый отчёт удаляется сразу после чтения."""
 
-import asyncio
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import TracebackType
@@ -21,6 +20,8 @@ MAX_REPORTS = 5
 CURRENCY = "RUB"
 ACCESS_DENIED = 58
 REPORTS_LIMIT = 31
+# Отчёты, заказанные этим процессом API: освобождая место, сервис удаляет только их, а не отчёты владельца кабинета.
+CREATED: set[int] = set()
 
 type ForecastStatus = Literal["Done", "Pending", "Failed"]
 
@@ -30,6 +31,16 @@ class ForecastAccessDenied(PlatformError):
 
     def __init__(self) -> None:
         super().__init__("Прогноз появится, когда Яндекс одобрит доступ к API Директа.")
+
+
+class ReportsBusy(PlatformError):
+    """Ошибка 31, а все пять мест заняты не нашими отчётами."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "в Яндекс Директе все пять мест под отчёты прогноза заняты отчётами, которые заказали не мы. Директ "
+            "удаляет их сам не позже чем через пять часов — попробуйте позже."
+        )
 
 
 @dataclass(frozen=True)
@@ -72,8 +83,6 @@ class DirectForecastClient:
         config: Any = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
-        attempts: int = 3,
-        delay: float = 2.0,
     ) -> None:
         if config is None:
             from app.config import settings
@@ -84,8 +93,6 @@ class DirectForecastClient:
         self._client = client if client is not None else httpx.AsyncClient()
         self._owns_client = client is None
         self._timeout = timeout
-        self._attempts = attempts
-        self._delay = delay
 
     async def __aenter__(self) -> "DirectForecastClient":
         return self
@@ -139,7 +146,7 @@ class DirectForecastClient:
         return data["data"]
 
     async def create(self, phrases: list[str], region_ids: list[int]) -> int:
-        """Новый отчёт; при занятых пяти местах освобождает их от готовых и упавших отчётов и пробует ещё раз."""
+        """Новый отчёт; при занятых пяти местах освобождает место от своих отчётов и пробует ещё раз."""
         param = {"Phrases": list(dict.fromkeys(phrases))[:MAX_PHRASES], "GeoID": region_ids, "Currency": CURRENCY}
         try:
             forecast_id = await self._call("CreateNewForecast", param)
@@ -148,13 +155,17 @@ class DirectForecastClient:
                 raise
             await self._free_slot()
             forecast_id = await self._call("CreateNewForecast", param)
-        return _count(forecast_id)
+        forecast_id = _count(forecast_id)
+        CREATED.add(forecast_id)
+        return forecast_id
 
     async def _free_slot(self) -> None:
-        reports = await self.statuses()
+        reports = {id_: status for id_, status in (await self.statuses()).items() if id_ in CREATED}
         finished = [id_ for id_, status in reports.items() if status != "Pending"]
-        # Все пять ещё готовятся: освобождаем самый старый, его владелец закажет отчёт заново.
-        for forecast_id in finished or sorted(reports)[:1]:
+        # Свои ещё готовятся: освобождаем самый старый, его прогноз закажется заново.
+        if not (doomed := finished or sorted(reports)[:1]):
+            raise ReportsBusy()
+        for forecast_id in doomed:
             await self.delete(forecast_id)
 
     async def statuses(self) -> dict[int, ForecastStatus]:
@@ -171,13 +182,6 @@ class DirectForecastClient:
     async def status(self, forecast_id: int) -> ForecastStatus:
         """Отчёта нет в списке — он удалён или истёк: для вызывающего это неудача, отчёт заказывается заново."""
         return (await self.statuses()).get(forecast_id, "Failed")
-
-    async def wait(self, forecast_id: int) -> ForecastStatus:
-        for _ in range(self._attempts - 1):
-            if (status := await self.status(forecast_id)) != "Pending":
-                return status
-            await asyncio.sleep(self._delay)
-        return await self.status(forecast_id)
 
     async def get(self, forecast_id: int) -> list[PhraseForecast]:
         data = await self._call("GetForecast", forecast_id)
@@ -204,3 +208,4 @@ class DirectForecastClient:
 
     async def delete(self, forecast_id: int) -> None:
         await self._call("DeleteForecastReport", forecast_id)
+        CREATED.discard(forecast_id)

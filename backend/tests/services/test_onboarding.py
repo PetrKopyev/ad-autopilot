@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import json
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from app.services.changes import ChangeConflict
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
     LOCK_WAITERS,
+    MAX_SERVICES,
     SAVING,
     SITE_CHECKS,
     AiLimits,
@@ -1095,6 +1097,23 @@ def test_owner_services_take_price_from_prices_field() -> None:
 )
 def test_owner_line_is_split_into_service_and_price(line: str, expected: tuple[str, int | None, bool]) -> None:
     assert split_price(line) == expected
+
+
+def test_long_lines_and_many_services_are_parsed_quickly() -> None:
+    evil = [f"1{' ' * 2000}x{index}" for index in range(600)]
+    started = time.perf_counter()
+    with pytest.raises(OnboardingError, match="Слишком много услуг"):
+        split_services("\n".join(evil), "")
+    names, prices = split_services("\n".join(evil[:MAX_SERVICES]), "\n".join(evil[:MAX_SERVICES]))
+    shown = owner_fields({"services": {"value": names}, "prices": {"value": "\n".join(evil[:MAX_SERVICES])}})
+    assert time.perf_counter() - started < 0.5
+    assert names == "\n".join(evil[:MAX_SERVICES]) and prices == "" and shown["services"]["value"] == names
+    assert split_price(f"Маникюр{' ' * 300}1 500 ₽") == (f"Маникюр{' ' * 300}1 500 ₽", None, False)
+
+
+def test_extra_spaces_do_not_turn_a_number_in_the_name_into_a_price() -> None:
+    assert split_price("Тренировка 1  — 2") == ("Тренировка 1  — 2", None, False)
+    assert split_price("Маникюр   —   1 500 ₽") == ("Маникюр", 150_000, False)
 
 
 def test_services_and_prices_field_is_stored_as_separate_fields() -> None:

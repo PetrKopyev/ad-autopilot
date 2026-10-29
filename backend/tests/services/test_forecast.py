@@ -11,7 +11,7 @@ import respx
 from app.content.yandexgpt import CompletionResult
 from app.db.models import Business, LLMCall, Plan
 from app.domain.settings import DomainSettings
-from app.platforms.direct_forecast import LIVE_URL, PhraseForecast
+from app.platforms.direct_forecast import CREATED, LIVE_URL, PhraseForecast
 from app.platforms.metrica import FakeMetrica, MetricaAccessError, MetricaCounter
 from app.services import forecast as module
 from app.services.forecast import (
@@ -42,6 +42,7 @@ def row(clicks: int, first: int, low: str, high: str) -> PhraseForecast:
 def fresh_cache() -> Iterator[None]:
     yield
     module.clear()
+    CREATED.clear()
 
 
 def test_clicks_limited_by_budget() -> None:
@@ -75,7 +76,7 @@ def test_measured_conversion_needs_enough_visits() -> None:
     conversion = measured(400, 12)
     assert conversion.source == "metrica"
     assert conversion.min < Decimal("0.03") < conversion.max
-    assert "12 обращений на 400 визитов" in conversion.label
+    assert "12 из 400 визитов с рекламы Яндекс Директа (поиск и сети)" in conversion.label
     assert measured(150, 0).min == 0
 
 
@@ -85,12 +86,27 @@ def test_ai_text_without_new_numbers() -> None:
     allowed = numbers(text)
     assert {Decimal(3000), Decimal(27600), Decimal(600), Decimal(1000), Decimal(6), Decimal(30)} <= allowed
 
-    good = "Яндекс видит до 3 000 кликов в месяц, на ваш бюджет 27 600 ₽ — от 600 до 1 000. Это прогноз."
-    assert ai_text(json.dumps({"text": good}), allowed) == good
-    assert ai_text(json.dumps({"text": "Будет 45 обращений."}), allowed) is None
-    assert ai_text(json.dumps({"text": "Конверсия 2,5%."}), allowed) is None
-    assert ai_text("не JSON", allowed) is None
-    assert ai_text(json.dumps({"text": "а" * 900}), allowed) is None
+    range_ = leads(clicks, BENCHMARK)
+    assert range_ == (6, 30)
+    good = "Яндекс видит до 3 000 кликов в месяц, на ваш бюджет 27 600 ₽ — от 600 до 1 000. Обращений от 6 до 30."
+    assert ai_text(json.dumps({"text": good}), allowed, range_) == good
+    assert ai_text(json.dumps({"text": "Будет 45 обращений."}), allowed, range_) is None
+    assert ai_text(json.dumps({"text": "Конверсия 2,5%."}), allowed, range_) is None
+    assert ai_text("не JSON", allowed, range_) is None
+    assert ai_text(json.dumps({"text": "а" * 900}), allowed, range_) is None
+
+
+def test_ai_text_must_name_leads_range_and_no_other_number_of_leads() -> None:
+    clicks = Clicks(600, 1000, 3000, Decimal(30), Decimal(50))
+    allowed = numbers(template(clicks, Decimal(27_600), BENCHMARK, (6, 30)))
+
+    def check(text: str) -> str | None:
+        return ai_text(json.dumps({"text": text}), allowed, (6, 30))
+
+    assert check("До 1 000 кликов в месяц, это от 6 до 30 обращений.") is not None
+    assert check("До 1 000 кликов в месяц. Это прогноз.") is None
+    assert check("От 6 до 30 кликов, а обращений 600.") is None
+    assert check("Ждите 1 000 обращений, а в плохой месяц от 6 до 30.") is None
 
 
 class Geo:
@@ -157,16 +173,17 @@ def world(
         "groups": [group for group in groups if group["platform"] in platforms],
     }
     repository.add(Plan(business_id=business.id, version=1, status="draft", payload=payload))
+    accounts = {"direct": AccountInfo("ok", "", None, False, "test-only")}
     registry = SimpleNamespace(
         mode=mode,
         config=SimpleNamespace(direct_sandbox=False),
         http=http,
-        load=lambda business_id, platform: AccountInfo("ok", "", None, False, "test-only"),
+        load=lambda business_id, platform: accounts[platform],
         resolve=lambda business_id, platform: Geo(),
         metrica=lambda business_id: metrica or FakeMetrica(),
     )
     service = ForecastService(repository, registry, llm, LIMITS, DOMAIN)
-    return SimpleNamespace(service=service, business=business, repository=repository)
+    return SimpleNamespace(service=service, business=business, repository=repository, accounts=accounts)
 
 
 def done(direct: Direct, forecast_id: int = 7, phrase: dict = PHRASE) -> None:
@@ -182,6 +199,9 @@ async def test_ready_forecast_is_cached(http: httpx.AsyncClient, direct: Direct)
     done(direct)
     case = world(http)
 
+    pending = await case.service.forecast(case.business, NOW, TODAY)
+    # Первый запрос только заказывает отчёт и не ждёт его: готовность спросит следующий опрос экрана.
+    assert pending["status"] == "pending" and direct.methods() == ["CreateNewForecast"]
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     # Директу — 70% из 60 000 ₽, без запаса 8%: 38 640 ₽. Потенциал фразы меньше бюджета: 120 и 180 кликов.
@@ -197,6 +217,10 @@ async def test_ready_forecast_is_cached(http: httpx.AsyncClient, direct: Direct)
     }
     assert [source["what"] for source in result["sources"]] == ["Клики и цена клика", "Бюджет", "Доля обращений"]
     assert result["sources"][2]["url"] == BENCHMARK.url
+    assert result["sources"][2]["source"] == (
+        "ориентир по рынку услуг, не измерение, на визит. Своей доли нет: в Метрике не выбраны цели обращений."
+    )
+    assert "визитов на сайт бывает меньше, чем кликов" in result["explanation"]
     assert result["vk"] == {"status": "unavailable", "label": VK_NOTE}
     assert result["computed_at"] == NOW.isoformat() and result["demo"] is False
     assert "Это прогноз, он может ошибаться" in result["explanation"] and not result["explanation_by_ai"]
@@ -212,9 +236,11 @@ async def test_changed_budget_asks_again(http: httpx.AsyncClient, direct: Direct
     done(direct)
     case = world(http)
     await case.service.forecast(case.business, NOW, TODAY)
+    await case.service.forecast(case.business, NOW, TODAY)
     done(direct, 8)
     case.repository.rows(Plan)[0].payload["month_budget_kop"] = 9_000_000
 
+    await case.service.forecast(case.business, NOW, TODAY)
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["budget_rub"] == 57960.0
@@ -225,20 +251,46 @@ async def test_pending_then_ready(http: httpx.AsyncClient, direct: Direct) -> No
     pending = {"data": [{"ForecastID": 7, "StatusForecast": "Pending"}]}
     direct.answers = {
         "CreateNewForecast": [{"data": 7}],
-        "GetForecastList": [pending] * 3 + [{"data": [{"ForecastID": 7, "StatusForecast": "Done"}]}],
+        "GetForecastList": [pending, {"data": [{"ForecastID": 7, "StatusForecast": "Done"}]}],
         "GetForecast": [{"data": {"Phrases": [PHRASE]}}],
         "DeleteForecastReport": [{"data": 1}],
     }
     case = world(http)
-    case.service.poll_delay = 0
 
     first = await case.service.forecast(case.business, NOW, TODAY)
-    second = await case.service.forecast(case.business, NOW + timedelta(seconds=10), TODAY)
+    second = await case.service.forecast(case.business, NOW + timedelta(seconds=5), TODAY)
+    third = await case.service.forecast(case.business, NOW + timedelta(seconds=10), TODAY)
 
-    assert first["status"] == "pending" and first["leads_min"] is None
-    assert second["status"] == "ready"
-    assert direct.methods().count("CreateNewForecast") == 1
-    assert direct.methods()[-1] == "DeleteForecastReport"
+    assert first["status"] == second["status"] == "pending" and first["leads_min"] is None
+    assert third["status"] == "ready"
+    assert direct.methods() == [
+        "CreateNewForecast",
+        "GetForecastList",
+        "GetForecastList",
+        "GetForecast",
+        "DeleteForecastReport",
+    ]
+    assert case.service.client(case.accounts["direct"])._timeout == module.DIRECT_TIMEOUT == 10.0
+
+
+async def test_report_no_longer_needed_is_deleted(http: httpx.AsyncClient, direct: Direct) -> None:
+    direct.answers = {
+        "CreateNewForecast": [{"data": 7}, {"data": 8}, {"data": 9}],
+        "GetForecastList": [{"error_code": 500, "error_str": "Сбой"}],
+        "DeleteForecastReport": [{"data": 1}] * 3,
+    }
+    case = world(http)
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    case.repository.rows(Plan)[0].payload["month_budget_kop"] = 9_000_000
+    await case.service.forecast(case.business, NOW, TODAY)
+    await case.service.forecast(case.business, NOW + module.TTL["pending"], TODAY)
+    failed = await case.service.forecast(case.business, NOW + module.TTL["pending"], TODAY)
+
+    # Заменённый входом, истёкший и упавший на ошибке отчёты удалены — места в Директе не утекают.
+    deleted = [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"]
+    assert deleted == [7, 8, 9] and not CREATED
+    assert failed["status"] == "unavailable" and "Сбой" in failed["explanation"]
 
 
 async def test_access_not_approved_is_honest_and_cached(http: httpx.AsyncClient, direct: Direct) -> None:
@@ -252,6 +304,12 @@ async def test_access_not_approved_is_honest_and_cached(http: httpx.AsyncClient,
     assert result["explanation"] == "Прогноз появится, когда Яндекс одобрит доступ к API Директа."
     assert again == result and len(direct.calls) == 1
 
+    # Кабинет подключили заново: прежний отказ не ждёт истечения часа.
+    case.accounts["direct"] = AccountInfo("ok", "", None, False, "new-token")
+    done(direct)
+    fresh = await case.service.forecast(case.business, NOW + timedelta(minutes=31), TODAY)
+    assert fresh["status"] == "pending" and direct.calls[-1]["token"] == "new-token"
+
 
 async def test_failed_report_is_removed(http: httpx.AsyncClient, direct: Direct) -> None:
     direct.answers = {
@@ -261,6 +319,7 @@ async def test_failed_report_is_removed(http: httpx.AsyncClient, direct: Direct)
     }
     case = world(http)
 
+    await case.service.forecast(case.business, NOW, TODAY)
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["status"] == "unavailable" and "не смог посчитать" in result["explanation"]
@@ -272,11 +331,13 @@ async def test_conversion_from_metrica(http: httpx.AsyncClient, direct: Direct) 
     metrica = FakeMetrica([MetricaCounter(COUNTER, "Сайт", "salon.example")], conversions={COUNTER: (400, 20)})
     case = world(http, metrica=metrica, goals=[5])
 
+    await case.service.forecast(case.business, NOW, TODAY)
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     conversion = result["conversion"]
     assert conversion["source"] == "metrica" and conversion["min"] < 0.05 < conversion["max"]
-    assert "20 обращений на 400 визитов" in conversion["label"]
+    assert "20 из 400 визитов с рекламы Яндекс Директа" in conversion["label"]
+    assert result["sources"][2]["source"] == f"{conversion['label']}, на визит."
     assert result["leads_min"] == int(result["clicks_min"] * conversion["min"])
 
 
@@ -289,14 +350,32 @@ async def test_metrica_failure_falls_back_to_benchmark(http: httpx.AsyncClient, 
 
     case = world(http, metrica=Broken(), goals=[5])
 
-    assert (await case.service.forecast(case.business, NOW, TODAY))["conversion"]["source"] == "benchmark"
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert result["conversion"]["source"] == "benchmark"
+    reason = "Свою долю по Метрике посчитать не удалось: Нет доступа к данным Яндекс Метрики."
+    assert reason in result["sources"][2]["source"] and reason in result["explanation"]
+
+
+async def test_few_metrica_visits_say_why_benchmark(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct)
+    metrica = FakeMetrica([MetricaCounter(COUNTER, "Сайт", "salon.example")], conversions={COUNTER: (57, 3)})
+    case = world(http, metrica=metrica, goals=[5])
+
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    assert result["conversion"]["source"] == "benchmark"
+    assert "за 90 дней 57 визитов с рекламы Яндекс Директа, а нужно не меньше 100" in result["sources"][2]["source"]
 
 
 async def test_ai_explanation_is_used_only_without_new_numbers(http: httpx.AsyncClient, direct: Direct) -> None:
     done(direct)
-    writer = Writer("Яндекс видит в Самаре до 180 кликов в месяц. Это прогноз, он может ошибаться.")
+    writer = Writer("В Самаре до 180 кликов в месяц, обращений от 1 до 6. Это прогноз, он может ошибаться.")
     case = world(http, llm=writer)
 
+    await case.service.forecast(case.business, NOW, TODAY)
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["explanation_by_ai"] and result["explanation"].startswith(writer.text)
@@ -306,6 +385,7 @@ async def test_ai_explanation_is_used_only_without_new_numbers(http: httpx.Async
     module.clear()
     done(direct, 8)
     writer.text = "Ждите 25 обращений в месяц."
+    await case.service.forecast(case.business, NOW, TODAY)
     result = await case.service.forecast(case.business, NOW, TODAY)
     assert not result["explanation_by_ai"] and "25" not in result["explanation"]
 

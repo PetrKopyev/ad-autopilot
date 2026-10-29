@@ -9,11 +9,13 @@ import respx
 
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.direct_forecast import (
+    CREATED,
     LIVE_URL,
     SANDBOX_URL,
     DirectForecastClient,
     ForecastAccessDenied,
     PhraseForecast,
+    ReportsBusy,
 )
 
 PHRASE = {
@@ -54,13 +56,19 @@ def direct() -> Iterator[Direct]:
         yield handler
 
 
+@pytest.fixture(autouse=True)
+def own_reports() -> Iterator[None]:
+    yield
+    CREATED.clear()
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[DirectForecastClient]:
-    async with DirectForecastClient("test-only", config=SimpleNamespace(direct_sandbox=False), delay=0) as forecast:
+    async with DirectForecastClient("test-only", config=SimpleNamespace(direct_sandbox=False)) as forecast:
         yield forecast
 
 
-async def test_create_wait_get_delete(client: DirectForecastClient, direct: Direct) -> None:
+async def test_create_status_get_delete(client: DirectForecastClient, direct: Direct) -> None:
     direct.answers = {
         "CreateNewForecast": [{"data": 7}],
         "GetForecastList": [
@@ -72,7 +80,9 @@ async def test_create_wait_get_delete(client: DirectForecastClient, direct: Dire
     }
 
     forecast_id = await client.create(["маникюр самара", "маникюр самара"], [51])
-    assert await client.wait(forecast_id) == "Done"
+    assert CREATED == {7}
+    assert await client.status(forecast_id) == "Pending"
+    assert await client.status(forecast_id) == "Done"
     rows = await client.get(forecast_id)
     await client.delete(forecast_id)
 
@@ -87,14 +97,7 @@ async def test_create_wait_get_delete(client: DirectForecastClient, direct: Dire
         "GetForecast",
         "DeleteForecastReport",
     ]
-    assert direct.calls[-1]["param"] == 7
-
-
-async def test_wait_gives_up_while_pending(client: DirectForecastClient, direct: Direct) -> None:
-    direct.answers = {"GetForecastList": [{"data": [{"ForecastID": 7, "StatusForecast": "Pending"}]}] * 3}
-
-    assert await client.wait(7) == "Pending"
-    assert direct.methods() == ["GetForecastList"] * 3
+    assert direct.calls[-1]["param"] == 7 and not CREATED
 
 
 async def test_missing_report_is_failed(client: DirectForecastClient, direct: Direct) -> None:
@@ -110,7 +113,8 @@ async def test_access_not_approved(client: DirectForecastClient, direct: Direct)
         await client.create(["маникюр"], [51])
 
 
-async def test_reports_limit_frees_finished_reports(client: DirectForecastClient, direct: Direct) -> None:
+async def test_reports_limit_frees_own_finished_reports(client: DirectForecastClient, direct: Direct) -> None:
+    CREATED.update({1, 2, 3})
     direct.answers = {
         "CreateNewForecast": [{"error_code": 31, "error_str": "Превышен лимит"}, {"data": 9}],
         "GetForecastList": [
@@ -119,6 +123,7 @@ async def test_reports_limit_frees_finished_reports(client: DirectForecastClient
                     {"ForecastID": 1, "StatusForecast": "Done"},
                     {"ForecastID": 2, "StatusForecast": "Pending"},
                     {"ForecastID": 3, "StatusForecast": "Failed"},
+                    {"ForecastID": 4, "StatusForecast": "Done"},
                 ]
             }
         ],
@@ -127,10 +132,11 @@ async def test_reports_limit_frees_finished_reports(client: DirectForecastClient
 
     assert await client.create(["маникюр"], [51]) == 9
     deleted = [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"]
-    assert deleted == [1, 3]
+    assert deleted == [1, 3] and CREATED == {2, 9}
 
 
-async def test_reports_limit_all_pending_frees_oldest(client: DirectForecastClient, direct: Direct) -> None:
+async def test_reports_limit_all_pending_frees_oldest_own(client: DirectForecastClient, direct: Direct) -> None:
+    CREATED.update({8, 6, 7})
     pending = [{"ForecastID": id_, "StatusForecast": "Pending"} for id_ in (8, 4, 6, 5, 7)]
     direct.answers = {
         "CreateNewForecast": [{"error_code": 31}, {"data": 9}],
@@ -139,7 +145,16 @@ async def test_reports_limit_all_pending_frees_oldest(client: DirectForecastClie
     }
 
     assert await client.create(["маникюр"], [51]) == 9
-    assert [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"] == [4]
+    assert [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"] == [6]
+
+
+async def test_reports_limit_never_deletes_foreign_reports(client: DirectForecastClient, direct: Direct) -> None:
+    done = [{"ForecastID": id_, "StatusForecast": "Done"} for id_ in range(1, 6)]
+    direct.answers = {"CreateNewForecast": [{"error_code": 31}], "GetForecastList": [{"data": done}]}
+
+    with pytest.raises(ReportsBusy, match="заняты отчётами, которые заказали не мы"):
+        await client.create(["маникюр"], [51])
+    assert "DeleteForecastReport" not in direct.methods()
 
 
 @pytest.mark.parametrize(
