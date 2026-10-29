@@ -49,12 +49,13 @@ REPLACED = (
 
 def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) -> bool:
     """Откат вернул бы включённой кампанию прежнего плана: реклама с устаревшими объявлениями, без доли бюджета и без
-    присмотра шагов воркера (Worker.current_campaigns). Откат к остановленной кампании разрешён."""
+    присмотра шагов воркера (Worker.current_campaigns). Откат к остановленной кампании разрешён. В старых записях
+    журнала у операций есть не все ключи: такая запись не роняет журнал."""
     return any(
-        op["entity_type"] == "campaign"
-        and op["field"] == "status"
-        and op["before"] == "active"
-        and (change.platform, op["entity_id"]) in replaced
+        op.get("entity_type") == "campaign"
+        and op.get("field") == "status"
+        and op.get("before") == "active"
+        and (change.platform, op.get("entity_id")) in replaced
         for op in change.operations
     )
 
@@ -68,7 +69,8 @@ def superseded(changes: Sequence[ChangeLog]) -> set[int]:
     later: set[tuple[str | None, str]] = set()
     result = set()
     for change in reversed(changes):
-        entities = {(change.platform, op["entity_id"]) for op in change.operations if op["field"] == "status"}
+        # В старых записях журнала у операций есть не все ключи: такая запись не должна ронять журнал.
+        entities = {(change.platform, op.get("entity_id")) for op in change.operations if op.get("field") == "status"}
         if change.kind in {"pause", "resume"} and entities & later:
             result.add(change.id)
         later |= entities
@@ -211,7 +213,7 @@ class RollbackService:
             business = self.repository.business(business_id)
             replaced = self.repository.replaced_entities(business_id)
             reverts = self.repository.reverts(original.id)
-            overridden = superseded(self.repository.status_changes(business_id))
+            overridden = superseded(self.repository.status_changes(business_id, original.id))
             if not can_revert(
                 original, business, actor=actor, reverts=reverts, replaced=replaced, overridden=overridden
             ):

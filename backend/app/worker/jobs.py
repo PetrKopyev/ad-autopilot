@@ -352,12 +352,12 @@ class MemoryWorkerRepository(WorkerRepository):
         campaigns = self.rows(Campaign, business_id, id=ids)
         return {(item.platform, item.external_id) for item in campaigns if item.external_id}
 
-    def status_changes(self, business_id: int) -> list[ChangeLog]:
+    def status_changes(self, business_id: int, since: int = 0) -> list[ChangeLog]:
         return sorted(
             (
                 row
                 for row in self.rows(ChangeLog, business_id, status="applied")
-                if any(op.get("field") == "status" for op in row.operations)
+                if row.id >= since and any(op.get("field") == "status" for op in row.operations)
             ),
             key=lambda row: row.id,
         )

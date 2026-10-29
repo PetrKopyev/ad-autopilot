@@ -554,6 +554,26 @@ async def test_demo_regenerate_takes_scenes_not_yet_in_the_plan(world: World, mo
     assert len(labels) == len(set(labels)), labels
 
 
+def test_labels_are_only_short_image_scenes(world: World) -> None:
+    """Ключ видео «услуга — сегмент» и длинное описание кадра ранних картинок — не сцены: в used для ИИ они не идут."""
+    scene = Asset(business_id=world.business.id, kind="image", idea_text="Френч с золотой фольгой", file_path="a.jpg")
+    frame = Asset(business_id=world.business.id, kind="image", idea_text="Крупный план " * 10, file_path="b.jpg")
+    video = Asset(business_id=world.business.id, kind="video", idea_text="Маникюр — Молодые мамы", file_path="c.mp4")
+    for asset in (scene, frame, video):
+        world.repository.add(asset)
+    assert world.plans.labels(world.business.id, {"Маникюр — Молодые мамы": [scene.id, frame.id, video.id]}) == [
+        "Френч с золотой фольгой"
+    ]
+
+
+async def test_demo_ideas_without_used() -> None:
+    from app.services.registry import DemoLLM
+
+    user = json.dumps({"items": [{"segment": "мамы"}]}, ensure_ascii=False)
+    answer = json.loads(await DemoLLM().complete_json("визуальные идеи", user))
+    assert len(answer["ideas"]) == 1
+
+
 async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> None:
     world = make_world(tmp_path, limits=AiLimits(onboarding_kop=8 * ART_COST_KOP + 100, weekly_kop=2500))
     plan = await build(world)

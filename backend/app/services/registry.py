@@ -161,7 +161,7 @@ class DemoLLM:
         if "визуальные идеи" in system:
             data = json.loads(user)
             # Сначала сцены, которых в плане ещё нет: экземпляр живёт один запрос, и счётчик сам их не помнит.
-            fresh = [scene for scene in DEMO_SCENES if scene not in data["used"]]
+            fresh = [scene for scene in DEMO_SCENES if scene not in data.get("used", [])]
             ideas = []
             for item in data["items"]:
                 scene = fresh.pop(0) if fresh else DEMO_SCENES[self.scenes % len(DEMO_SCENES)]

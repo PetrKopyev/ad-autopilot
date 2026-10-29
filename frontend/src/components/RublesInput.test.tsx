@@ -2,6 +2,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, expect, it } from 'vitest';
+import { moneyError, rublesToKopecks } from '../api/setup';
+import { copy } from '../copy';
 import { RublesInput, rublesValue } from './RublesInput';
 
 afterEach(cleanup);
@@ -68,7 +70,8 @@ it('точка и запятая — копейки, не лишние цифр�
   expect(digits).toBe('1500.5');
   expect(input().value).toBe('1 500.5');
   fireEvent.change(input(), { target: { value: '1 500,555' } });
-  expect(digits).toBe('1500,55');
+  expect(digits).toBe('1500,555');
+  expect(moneyError(digits)).toBe(copy.launchFlow.moneyError);
   fireEvent.change(input(), { target: { value: ',5' } });
   expect(input().value).toBe('0,5');
 });
@@ -137,5 +140,39 @@ it('набор по клавише «1.500.000» и копейки через т
   typeKeys('0.50');
   expect(digits).toBe('0.50');
   typeKeys('0');
-  expect(digits).toBe('0.50');
+  expect(digits).toBe('0.500');
+});
+
+it('точка — разряды, только если до неё 1–3 цифры и после ровно три, иначе копейки', () => {
+  render(<Field />);
+  typeKeys('1500.55');
+  expect(digits).toBe('1500.55');
+  expect(input().value).toBe('1 500.55');
+  cleanup();
+  render(<Field />);
+  typeKeys('50.000');
+  expect(digits).toBe('50000');
+  expect(input().value).toBe('50 000');
+  cleanup();
+  render(<Field />);
+  typeKeys('1.500,50');
+  expect(digits).toBe('1500,50');
+  expect(input().value).toBe('1 500,50');
+});
+
+it('три знака после точки-копеек — ошибка формы, а не сумма в тысячу раз больше', () => {
+  render(<Field />);
+  typeKeys('1500.555');
+  expect(digits).toBe('1500.555');
+  expect(input().value).toBe('1 500.555');
+  expect(rublesToKopecks(digits)).toBeNull();
+  expect(moneyError(digits)).toBe(copy.launchFlow.moneyError);
+  fireEvent.change(input(), { target: { value: '1500.555' } });
+  expect(digits).toBe('1500.555');
+  cleanup();
+  render(<Field />);
+  typeKeys('1.500');
+  typeAt('1 50', 4);
+  typeKeys('0.555');
+  expect(digits).toBe('1500.555');
 });

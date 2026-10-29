@@ -799,8 +799,14 @@ class PlanService:
         return created
 
     def labels(self, business_id: int, assets: dict[str, list[int]]) -> list[str]:
+        """Подписи картинок плана. У видео в idea_text ключ «услуга — сегмент», у ранних картинок — длинное описание
+        кадра: это не сцены, и ИИ их не получает."""
         ids = {id_ for items in assets.values() for id_ in items}
-        return [asset.idea_text for asset in self.repository.assets(business_id) if asset.id in ids and asset.idea_text]
+        return [
+            asset.idea_text
+            for asset in self.repository.assets(business_id)
+            if asset.id in ids and asset.kind == "image" and asset.idea_text and len(asset.idea_text) <= TITLE_LIMIT
+        ]
 
     def store(self, business_id: int, name: str, suffix: str, data: bytes) -> str:
         return store(self.media_root, business_id, name, suffix, data)

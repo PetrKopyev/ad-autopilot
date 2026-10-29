@@ -82,7 +82,12 @@ def history(
     businesses = {business_id: repository.business(business_id) for business_id in {item.business_id for item in items}}
     replaced = {business_id: repository.replaced_entities(business_id) for business_id in businesses}
     campaigns = {business_id: repository.campaign_names(business_id) for business_id in businesses}
-    overridden = {business_id: superseded(repository.status_changes(business_id)) for business_id in businesses}
+    overridden = {
+        business_id: superseded(
+            repository.status_changes(business_id, min(item.id for item in items if item.business_id == business_id))
+        )
+        for business_id in businesses
+    }
     return {
         "items": [
             history_item(

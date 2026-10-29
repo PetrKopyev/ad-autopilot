@@ -15,7 +15,13 @@ from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment
 from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
-from app.services.rollback import ConfirmationRequired, RollbackService, inverse_operations
+from app.services.rollback import (
+    ConfirmationRequired,
+    RollbackService,
+    inverse_operations,
+    superseded,
+    turns_on_replaced,
+)
 
 
 @pytest.fixture
@@ -661,5 +667,35 @@ async def test_stop_resumed_later_is_not_offered_to_resume_again(client, reposit
     resolver.return_value = adapter
     items = http.get("/api/history").json()["items"]
     assert [item["can_revert"] for item in items] == [True, True, False]
+    assert repository.status_changes.call_args.args == (1, paused.id)
     response = http.post(f"/api/history/{paused.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
     assert response.status_code == 409 and response.json()["detail"] == SUPERSEDED
+    assert repository.status_changes.call_args.args == (1, paused.id)
+
+
+def test_status_changes_skip_evidence_and_earlier_changes():
+    """Для superseded() нужны лишь вид, площадка и операции изменений не раньше самого старого на странице."""
+    db = MagicMock(spec=Session)
+    db.scalars.return_value = []
+    ChangesRepository(db).status_changes(1, 42)
+    sql = db.scalars.call_args.args[0].compile(dialect=dialect())
+    columns = str(sql).split(" FROM ")[0]
+    assert "change_log.operations" in columns and "evidence" not in columns and "reason_text" not in columns
+    assert "change_log.id >=" in str(sql) and 42 in sql.params.values()
+
+
+def test_superseded_tolerates_old_operations_without_keys():
+    """Старые записи журнала без field или entity_id в операциях не роняют журнал."""
+    old = ChangeLog(id=1, kind="pause", platform="fake", operations=[{"action": "set_status"}])
+    paused = ChangeLog(id=2, kind="pause", platform="fake", operations=[{"field": "status"}, {"entity_id": "c1"}])
+    resumed = ChangeLog(id=3, kind="resume", platform="fake", operations=[{"field": "status", "entity_id": "c1"}])
+    assert superseded([old, paused, resumed]) == set()
+
+
+def test_turns_on_replaced_tolerates_old_operations_without_keys():
+    """Старые записи журнала без entity_type, field или entity_id в операциях не роняют журнал."""
+    old = ChangeLog(id=1, kind="pause", platform="fake", operations=[{"action": "set_status"}])
+    stop = {"entity_type": "campaign", "field": "status", "before": "active", "entity_id": "c1"}
+    new = ChangeLog(id=2, kind="pause", platform="fake", operations=[{"entity_id": "c1"}, stop])
+    assert not turns_on_replaced(old, {("fake", "c1")})
+    assert turns_on_replaced(new, {("fake", "c1")})

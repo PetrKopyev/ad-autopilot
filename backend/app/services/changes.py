@@ -9,7 +9,7 @@ from time import monotonic, sleep
 from cryptography.fernet import InvalidToken
 from sqlalchemy import Connection, and_, func, select, text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
     AD_STATUSES,
@@ -300,14 +300,21 @@ class ChangesRepository:
         )
         return {(platform, external_id) for platform, external_id in rows}
 
-    def status_changes(self, business_id: int) -> list[ChangeLog]:
-        """Применённые изменения бизнеса, которые меняли статус объектов, по порядку."""
+    def status_changes(self, business_id: int, since: int = 0) -> list[ChangeLog]:
+        """Применённые изменения бизнеса с id не меньше since, которые меняли статус объектов, по порядку: superseded()
+        смотрит только на более поздние. Без доказательств и пояснений — нужны лишь вид, площадка и операции."""
         return list(
             self.db.scalars(
                 select(ChangeLog)
+                .options(
+                    load_only(
+                        ChangeLog.id, ChangeLog.kind, ChangeLog.platform, ChangeLog.operations, ChangeLog.created_at
+                    )
+                )
                 .where(
                     ChangeLog.business_id == business_id,
                     ChangeLog.status == "applied",
+                    ChangeLog.id >= since,
                     ChangeLog.operations.contains([{"field": "status"}]),
                 )
                 .order_by(ChangeLog.id)
