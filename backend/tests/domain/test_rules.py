@@ -352,7 +352,25 @@ def test_first_decision_days_follow_thresholds():
 
 def test_generous_check_does_not_hide_ads_far_worse_than_the_rest(make_ad, now):
     """Чек окупает любую цену из рекламы: опора — цена обращения самих объявлений, худшее останавливается."""
-    ads = [make_ad(id=str(index), spend=spend) for index, spend in enumerate((1_000, 2_000, 9_000))]
+    ads = [make_ad(id=str(index), spend=spend, leads=4) for index, spend in enumerate((4_000, 8_000, 36_000))]
     assert ref_cpl(250_000, ads, now.date()) == 2_000
     assert ref_cpl(250_000, (), now.date()) == 22_500
     assert ref_cpl(10_000, ads, now.date()) == 900
+
+
+def test_few_leads_with_check_keep_payback_reference(make_ad, now):
+    """Три обращения на всю рекламу: цена по ним случайна, опора — окупаемость по чеку, «дорогое» не останавливается."""
+    ads = [
+        make_ad(id="a", group_id="a", spend=1_000),
+        make_ad(id="b", group_id="b", spend=2_000),
+        make_ad(id="dear", group_id="dear", spend=60_000),
+    ]
+    reference = ref_cpl(250_000, ads, now.date())
+    assert reference == 22_500
+    groups = [GroupSnapshot(id, "direct", 10_000) for id in ("a", "b", "dear")]
+    assert not [item for item in decide(ads, groups, now, reference) if item.target_id == "dear"]
+    assert [item.reason_code for item in decide(ads, groups, now, 2_000) if item.target_id == "dear"] == [
+        "PAUSE_TOO_EXPENSIVE"
+    ]
+    two = [make_ad(id="a", spend=1_000, leads=2), make_ad(id="b", spend=2_000)]
+    assert ref_cpl(250_000, two, now.date()) == 22_500

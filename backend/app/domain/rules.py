@@ -85,14 +85,18 @@ def ref_cpl(
 ) -> int | None:
     """Средний чек задаёт потолок — цену обращения, которая окупается. Если реклама обходится дешевле, объявления
     сравниваются между собой, как без чека: опора — меньшая из двух цен. Иначе при щедром чеке все объявления
-    «дёшевы», и автопилот не отключает худшие и не переносит бюджет к лучшим."""
+    «дёшевы», и автопилот не отключает худшие и не переносит бюджет к лучшим. Цена по нескольким обращениям
+    случайна, поэтому при чеке она становится опорой только с check_reference_min_leads обращений."""
     market = market_cpl(ads, today, settings)
     if avg_check is None:
         return market
     nonnegative_int(avg_check, "avg_check")
     known = [answer for answer in answers if answer.week_end <= today]
     payback = int(avg_check * client_conversion(known, settings) * settings.check_ad_share)
-    return payback if market is None else min(payback, market)
+    leads = sum(total_metrics(settled_days(ad.days, today, settings)).leads for ad in ads)
+    if market is None or leads < settings.check_reference_min_leads:
+        return payback
+    return min(payback, market)
 
 
 def first_decision_days(

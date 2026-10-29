@@ -68,29 +68,24 @@ for (const width of [390, 1280]) {
     await expect(page.getByRole('heading', { name: new RegExp(`^(Вы отменили|${labels.resumedAfterStop})`) }).first()).toBeVisible();
 
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.home, exact: true }).click();
+    // Одна кнопка: «Остановить всю рекламу» с подтверждением, после остановки на её месте «Продолжить рекламу».
     await page.getByRole('button', { name: copy.home.stopAll, exact: true }).click();
-    await page.getByRole('button', { name: copy.screens.confirmStop, exact: true }).click();
+    await page.getByRole('dialog', { name: copy.screens.stopTitle }).getByRole('button', { name: copy.screens.confirmStop, exact: true }).click();
     await expect(page.getByText(copy.home.pausedLine, { exact: true })).toBeVisible();
-    // Режим автопилота — переключатель «Работает / Пауза»: после остановки нажата «Пауза», продолжает «Работает».
-    const homeMode = page.getByRole('group', { name: copy.autopilotMode.label });
-    await expect(homeMode.getByRole('button', { name: copy.autopilotMode.paused, exact: true })).toHaveAttribute('aria-pressed', 'true');
-    await homeMode.getByRole('button', { name: copy.autopilotMode.working, exact: true }).click();
+    await page.getByRole('button', { name: copy.home.resumeAll, exact: true }).click();
     await expect(page.getByText(/^Работает,/)).toBeVisible();
-    await expect(homeMode.getByRole('button', { name: copy.autopilotMode.working, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: copy.home.stopAll, exact: true })).toBeEnabled();
 
     const consoleErrors: string[] = [];
     page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.settings, exact: true }).click();
     await expect(page.getByRole('heading', { name: copy.settings.title, exact: true })).toBeVisible();
-    // В настройках тот же переключатель: реклама продолжена — нажата «Работает»; «Пауза» останавливает, «Работает» продолжает.
-    const settingsMode = page.getByRole('group', { name: copy.autopilotMode.label });
-    await expect(settingsMode.getByRole('button', { name: copy.autopilotMode.working, exact: true })).toHaveAttribute('aria-pressed', 'true');
-    // «Пауза» — та же остановка всей рекламы, что на главной, с тем же подтверждением.
-    await settingsMode.getByRole('button', { name: copy.autopilotMode.paused, exact: true }).click();
+    // В настройках те же кнопки и то же подтверждение, что на главной.
+    await expect(page.getByText(copy.settingsScreen.autopilotRunning, { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: copy.home.stopAll, exact: true }).click();
     await page.getByRole('dialog', { name: copy.screens.stopTitle }).getByRole('button', { name: copy.screens.confirmStop, exact: true }).click();
     await expect(page.getByText(copy.settingsScreen.autopilotPaused, { exact: true })).toBeVisible();
-    await expect(settingsMode.getByRole('button', { name: copy.autopilotMode.paused, exact: true })).toHaveAttribute('aria-pressed', 'true');
-    await settingsMode.getByRole('button', { name: copy.autopilotMode.working, exact: true }).click();
+    await page.getByRole('button', { name: copy.home.resumeAll, exact: true }).click();
     await expect(page.getByText(copy.settingsScreen.autopilotRunning, { exact: true })).toBeVisible();
     await expect(page.getByText(copy.settingsScreen.metricaLocked, { exact: true })).toBeVisible();
     const budgetField = page.getByLabel(copy.settingsScreen.budgetLabel);

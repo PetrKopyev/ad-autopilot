@@ -89,3 +89,22 @@ it('минус в начале остаётся, чтобы форма пока�
   expect(input().value).toBe('-1 000');
   expect(digits).toBe('-1000');
 });
+
+it('отрицательные копейки — один минус перед суммой', () => {
+  expect(rublesValue(-150)).toBe('-1,50');
+  expect(rublesValue(-50)).toBe('-0,50');
+  expect(rublesValue(-1_500_000)).toBe('-15000');
+});
+
+it('точка и запятая вместе: первый знак делит разряды, копейки после последнего', () => {
+  render(<Field />);
+  fireEvent.change(input(), { target: { value: '1.500,50' } });
+  expect(digits).toBe('1500,50');
+  expect(input().value).toBe('1 500,50');
+  fireEvent.change(input(), { target: { value: '1,500.5' } });
+  expect(digits).toBe('1500,5');
+  fireEvent.change(input(), { target: { value: '1.500.000,25' } });
+  expect(digits).toBe('1500000,25');
+  fireEvent.change(input(), { target: { value: '1,5,' } });
+  expect(digits).toBe('1,5');
+});

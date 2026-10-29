@@ -393,6 +393,19 @@ async def test_api_confirmation_and_revert(client, repository, tree):
     assert http.post(url + "?confirm=true", headers=headers).status_code == 409
 
 
+def test_revert_response_names_campaign_like_history(client, repository, monkeypatch):
+    http, _, _ = client
+    repository.get_owned.return_value = ChangeLog(id=9, business_id=1, platform="fake")
+    change = ChangeLog(
+        id=10, business_id=1, platform="fake", kind="revert", entity_type="campaign", entity_id="c-1", operations=[]
+    )
+    monkeypatch.setattr(RollbackService, "revert", AsyncMock(return_value=change))
+    repository.campaign_names.return_value = {("fake", "c-1"): "Маникюр"}
+    response = http.post("/api/history/9/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 200 and response.json()["campaign"] == "Маникюр"
+    repository.campaign_names.assert_called_once_with(1)
+
+
 @pytest.mark.parametrize(
     "error,status",
     [(ServerBusy(), 503), (ChangeConflict("Изменение этого бизнеса уже выполняется. Попробуйте позже."), 409)],

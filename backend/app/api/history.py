@@ -130,4 +130,4 @@ async def revert(
         raise HTTPException(422, "Не удалось подготовить безопасный откат изменения.") from error
     except PlatformError as error:
         raise HTTPException(502, "Не удалось прочитать состояние площадки. Попробуйте позже.") from error
-    return history_item(change)
+    return history_item(change, campaigns=repository.campaign_names(change.business_id))

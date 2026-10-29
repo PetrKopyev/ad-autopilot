@@ -7,16 +7,22 @@ const maxWholeDigits = 12;
 /** Рубли и копейки из набранного: точка и запятая — разделитель, до двух знаков после него, лишние нули слева убираются. */
 // Разделитель — точка или запятая сразу после цифры: точка в «567 руб.» копейками не считается.
 // Минус в начале остаётся: «-100» не должно молча стать 100 ₽, форма покажет ошибку.
+// Точка и запятая вместе — «1.500,50» или «1,500.50»: копейки после последнего, первый делит разряды.
 function normalize(raw: string): string {
   const sign = /^\s*[-−–]/.test(raw) ? '-' : '';
-  const match = /(?:^|\d)[.,]/.exec(raw);
-  const at = match ? match.index + match[0].length - 1 : -1;
+  const separators = [...raw.matchAll(/(?:^|\d)([.,])/g)].map((match) => match.index + match[0].length - 1);
+  const mixed = new Set(separators.map((index) => raw[index])).size > 1;
+  const at = separators.length ? separators[mixed ? separators.length - 1 : 0] : -1;
   const whole = (at < 0 ? raw : raw.slice(0, at)).replace(/\D/g, '').replace(/^0+/, '').slice(0, maxWholeDigits);
   if (at < 0) return sign + whole;
   return `${sign}${whole || '0'},${raw.slice(at + 1).replace(/\D/g, '').slice(0, 2)}`;
 }
 /** Значение поля из копеек: 5 000 050 → «50000,50», без округления. */
-export const rublesValue = (kopecks: number) => kopecks % 100 ? `${Math.trunc(kopecks / 100)},${String(kopecks % 100).padStart(2, '0')}` : String(kopecks / 100);
+export const rublesValue = (kopecks: number) => {
+  const sign = kopecks < 0 ? '-' : '';
+  const amount = Math.abs(kopecks);
+  return amount % 100 ? `${sign}${Math.trunc(amount / 100)},${String(amount % 100).padStart(2, '0')}` : String(kopecks / 100);
+};
 const display = (value: string) => {
   const sign = value.startsWith('-') ? '-' : '';
   const [whole, fraction] = value.slice(sign.length).split(',');
