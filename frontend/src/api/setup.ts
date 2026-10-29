@@ -66,6 +66,8 @@ export async function disconnectAccount(id: number): Promise<StopResult> {
 }
 export async function connectAccount(platform: 'login' | 'direct' | 'vk', businessId?: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect(platform); return; }
+  // Демо работает на условных площадках: вход в настоящий кабинет там некуда принять, и сервер отвечает голым текстом.
+  if (platform !== 'login' && (await getAuthConfig()).demo) throw new ApiError(copy.errors.demoConnect);
   const params = new URLSearchParams();
   if (platform !== 'vk') params.set('purpose', platform);
   if (businessId) params.set('business_id', String(businessId));
@@ -132,8 +134,10 @@ export function validInn(value: string): boolean {
 export const maxBudgetRubles = 10_000_000;
 // Parse decimal rubles without floating point rounding.
 export function rublesToKopecks(value: string): number | null {
-  if (!/^\d+(?:[.,]\d{1,2})?$/.test(value)) return null;
+  if (!/^\d+(?:[.,]\d{0,2})?$/.test(value)) return null;
   const [whole, fraction = ''] = value.replace(',', '.').split('.');
   const result = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
   return Number.isSafeInteger(result) && result > 0 ? result : null;
 }
+/** Сумма больше предела сервера: поле её принимает, чтобы не обрезать молча, а форма объясняет. */
+export const tooMuchMoney = (kopecks: number | null) => kopecks !== null && kopecks > maxBudgetRubles * 100;

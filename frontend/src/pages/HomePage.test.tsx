@@ -18,12 +18,12 @@ vi.mock('../api/screens', () => ({
   getExperiments: async () => ({ items: [] }),
   getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })),
 }));
-vi.mock('../api/history', () => ({ getHistoryPage: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 5 })), revertChange: vi.fn() }));
-vi.mock('../api/clients', () => ({ getClientQuestions: vi.fn(async () => ({ items: [], cost_per_client_kop: null })), answerClientQuestion: vi.fn() }));
+vi.mock('../api/history', async (original) => ({ ...await original<typeof import('../api/history')>(), getHistoryPage: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 5 })), revertChange: vi.fn() }));
+vi.mock('../api/clients', async (original) => ({ ...await original<typeof import('../api/clients')>(), getClientQuestions: vi.fn(async () => ({ items: [], cost_per_client_kop: null })), answerClientQuestion: vi.fn() }));
 vi.mock('../api/period', () => ({ getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-27' }) }));
 vi.mock('../api/notifications', () => ({ getNotifications: async () => [], readNotification: vi.fn() }));
 vi.mock('../api/useBusinessNow', () => ({ useBusinessNow: () => Date.parse('2026-10-27T10:05:00Z') }));
-vi.mock('../api/settings', () => ({ resumeAutopilot: vi.fn() }));
+vi.mock('../api/settings', () => ({ resumeAutopilot: vi.fn(), getBusiness: vi.fn(async () => ({ avg_check_kop: null })) }));
 vi.mock('../components/DemoPanel', () => ({ DemoPanel: () => null }));
 
 const raw = { normalizer: (text: string) => text };
@@ -137,6 +137,30 @@ it('сводит объявления в кампании: статус по р�
   expect(trend.querySelectorAll('polyline.sparkline__dashed')).toHaveLength(1);
 });
 
+it('кабинет отключили — кампании остановлены: строка кампании не «Работает», а главная не пишет «Всё идёт по плану»', async () => {
+  const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
+    image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) };
+  vi.mocked(getAds).mockResolvedValue({ items: [ad], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'paused_owner', daily: [] }] });
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, has_plan: true,
+    needs_attention: [{ id: 'platform', title: 'Ошибка площадки', description: 'Проверьте подключение кабинета.', destination: 'settings' }] });
+  await show(0, 0);
+  const row = within(await screen.findByRole('table')).getAllByRole('row')[1];
+  expect(within(row).getByText(copy.status.stoppedOwner)).toBeTruthy();
+  expect(within(row).queryByText(copy.status.working)).toBeNull();
+  expect(await screen.findByText(copy.home.noShows)).toBeTruthy();
+  expect(screen.queryByText(copy.home.onTrack)).toBeNull();
+  expect(document.querySelector('.home-state--success')).toBeNull();
+});
+
+it('одна услуга и два объявления: блок сравнений объясняет, почему автопилот молчит, и советует указать средний чек', async () => {
+  const ad = (id: number): Ad => ({ id, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Маникюр', title: 'Маникюр',
+    text: `Текст ${id}`, image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) });
+  vi.mocked(getAds).mockResolvedValue({ items: [ad(1), ad(2)], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'active', daily: [] }] });
+  await show(0, 0);
+  expect(await screen.findByText(copy.screens.fewAds(2, false))).toBeTruthy();
+  expect(screen.queryByText(copy.screens.experimentHint)).toBeNull();
+});
+
 it('кампания без ряда по дням показывается без графика', async () => {
   const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
     image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) };
@@ -173,9 +197,15 @@ it('спрашивает о клиентах прямо на главной', as
   const need = await screen.findByRole('region', { name: copy.home.needYou });
   expect(within(need).getByText(copy.clients.question(24), { exact: false })).toBeTruthy();
   const send = within(need).getByRole('button', { name: copy.clientsScreen.send }) as HTMLButtonElement;
-  fireEvent.change(within(need).getByRole('spinbutton', { name: copy.clientsScreen.countLabel }), { target: { value: '30' } });
+  const count = within(need).getByRole('textbox', { name: copy.clientsScreen.countLabel });
+  fireEvent.change(count, { target: { value: '30' } });
   expect(send.disabled).toBe(true);
-  fireEvent.change(within(need).getByRole('spinbutton', { name: copy.clientsScreen.countLabel }), { target: { value: '9' } });
+  expect(within(need).getByText(copy.clientsScreen.tooMany(24))).toBeTruthy();
+  expect(count.getAttribute('aria-invalid')).toBe('true');
+  fireEvent.change(count, { target: { value: '1,5' } });
+  expect(within(need).getByText(copy.clientsScreen.wholeNumber)).toBeTruthy();
+  fireEvent.change(count, { target: { value: '9' } });
+  expect(within(need).queryByText(copy.clientsScreen.wholeNumber)).toBeNull();
   fireEvent.click(send);
   await vi.waitFor(() => expect(answerClientQuestion).toHaveBeenCalledWith('w1', 9));
 });

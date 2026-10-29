@@ -11,6 +11,7 @@ import { AdsPage } from './AdsPage';
 
 vi.mock('../api/screens', () => ({ mockEnabled: false, getAds: vi.fn(), getExperiments: vi.fn(), setAdStatus: vi.fn(),
   getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
+vi.mock('../api/settings', () => ({ getBusiness: vi.fn(async () => ({ avg_check_kop: 150000 })) }));
 vi.mock('../api/period', async (original) => ({ ...await original<typeof import('../api/period')>(), getBusinessToday: vi.fn(async () => '2026-11-03') }));
 
 afterEach(() => { cleanup(); vi.mocked(getAds).mockReset(); vi.mocked(getExperiments).mockReset(); vi.mocked(getBusinessToday).mockRestore(); });
@@ -110,4 +111,24 @@ it('до запуска без плана ведёт в мастер, как р�
   render(<MemoryRouter><AdsPage /></MemoryRouter>);
   expect(await screen.findByRole('heading', { name: copy.screens.noAds })).toBeTruthy();
   expect(screen.getByRole('link', { name: copy.prelaunch.setup }).getAttribute('href')).toBe('/setup');
+});
+
+it('кампания остановлена — её включённые объявления не «Работает», переключать их нечего', async () => {
+  const live: Ad = { ...ad, id: 8, status: 'active', reason: null };
+  vi.mocked(getAds).mockResolvedValue({ items: [live], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания', status: 'paused_owner', daily: [] }] });
+  vi.mocked(getExperiments).mockResolvedValue({ items: [] });
+  render(<MemoryRouter><AdsPage /></MemoryRouter>);
+  expect(await screen.findByText(copy.ads.campaignStoppedLine)).toBeTruthy();
+  expect(screen.getByText(copy.screens.because(copy.status.stoppedOwner, copy.ads.campaignStopped))).toBeTruthy();
+  expect(screen.queryByText(copy.status.working)).toBeNull();
+  expect((screen.getByRole('button', { name: copy.common.stop }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('одинаковые объявления с разными картинками подписаны номером картинки', async () => {
+  const image = (id: number, url: string): Ad => ({ ...ad, id, status: 'active', reason: null, image_url: url });
+  vi.mocked(getAds).mockResolvedValue({ items: [image(1, '/a.png'), image(2, '/b.png')], campaigns: [] });
+  vi.mocked(getExperiments).mockResolvedValue({ items: [] });
+  render(<MemoryRouter><AdsPage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.screens.adImageVariant(`Маникюр — «${text}»`, 1) })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: copy.screens.adImageVariant(`Маникюр — «${text}»`, 2) })).toBeTruthy();
 });

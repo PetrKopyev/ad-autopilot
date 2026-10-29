@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 import { Button, ErrorBanner, Field, Icon, PageHeader, PanelCard, describedBy } from '../components';
 import { connectAccount, connectVkKey, getAuthConfig, logout } from '../api/setup';
+import { getBusiness } from '../api/settings';
 import { useSession } from '../api/session';
 import { copy } from '../copy';
 import './Service.css';
@@ -18,12 +19,16 @@ export function ServiceVkPage() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [oauth, setOauth] = useState(false);
-  const id = businessId();
+  // Из настроек сюда приходят с адресом возврата; черновика мастера в этой вкладке может не быть — бизнес берём с сервера.
+  const back = (useLocation().state as { back?: string } | null)?.back ?? '/setup/2';
+  const [id, setId] = useState(businessId);
+  const hasBusiness = me.data?.has_business;
   useEffect(() => {
     const controller = new AbortController();
     void getAuthConfig(controller.signal).then((config) => { if (!controller.signal.aborted) setOauth(config.vk_oauth); }).catch(() => {});
+    if (!id && hasBusiness) void getBusiness(controller.signal).then((value) => { if (!controller.signal.aborted) setId(value.id); }).catch(() => {});
     return () => controller.abort();
-  }, []);
+  }, [id, hasBusiness]);
   async function connect(manual: boolean) {
     if (busy) return; setBusy(true); setError('');
     try {
@@ -38,14 +43,14 @@ export function ServiceVkPage() {
     <section className="panel service-panel service-done">
       <span className="service-done__mark" aria-hidden="true"><Icon name="check" /></span>
       <p role="status"><strong>{copy.launchFlow.vkConnected}</strong></p><p className="muted">{copy.launchFlow.vkConnectedHint}</p>
-      <div className="actions"><Link className="button button--primary" to="/setup/2">{copy.launchFlow.backToSetup}</Link></div>
+      <div className="actions"><Link className="button button--primary" to={back}>{back === '/setup/2' ? copy.launchFlow.backToSetup : copy.launchFlow.backToSettings}</Link></div>
     </section>
   </div>;
   const vkReady = me.data?.accounts.some((account) => account.platform === 'vk' && account.status === 'ok');
   return <div className="page-stack service"><PageHeader title={copy.service.vkTitle} description={copy.service.vkDescription} />
     {(error || me.error) && <ErrorBanner message={error || me.error!} />}
     {vkReady && <p className="service-ok" role="status"><Icon name="check" />{copy.launchFlow.vkConnected}</p>}
-    {!id && <div className="notice"><p>{copy.launchFlow.needBusiness}</p></div>}
+    {!id && me.data && !hasBusiness && <div className="notice"><p>{copy.launchFlow.needBusiness}</p></div>}
     <div className={`service-grid${oauth ? ' service-grid--aside' : ''}`}>
       <PanelCard title={copy.launchFlow.keyTitle} titleId="vk-key-title">
         <form className="page-stack" onSubmit={(event) => { event.preventDefault(); void connect(true); }}>
@@ -67,7 +72,7 @@ export function ServiceVkPage() {
           <div className="actions"><Button variant="secondary" disabled={busy || !id} onClick={() => void connect(false)}>{copy.launchFlow.vkOauth}</Button></div></div>
       </PanelCard>}
     </div>
-    <Link className="service-back" to="/setup/2"><Icon name="back" />{copy.common.back}</Link>
+    <Link className="service-back" to={back}><Icon name="back" />{copy.common.back}</Link>
   </div>;
 }
 export function ServicePolicyPage() {

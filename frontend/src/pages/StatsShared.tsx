@@ -3,7 +3,7 @@ import { copy } from '../copy';
 import type { PeriodChoice } from '../api/period';
 import { displayDate, displayDateTime } from '../format';
 import { mockEnabled } from '../api/screens';
-import type { Ad, Source, Summary } from '../api/types';
+import type { Ad, AdStatus, Campaign, Source, Summary } from '../api/types';
 import './Stats.css';
 
 export function DemoNotice() { return mockEnabled ? <p className="stats-demo">{copy.screens.demo}</p> : null; }
@@ -54,6 +54,20 @@ export function Sources({ sources }: { sources: Source[] }) {
   </div>;
 }
 
+const stoppedCampaign = new Set(['paused_owner', 'paused_auto', 'archived']);
+/** Остановленная кампания не показывает ни одного своего объявления: включённые в ней объявления — со статусом кампании. */
+export function shownStatus(ad: Ad, campaigns: Campaign[]): AdStatus {
+  const campaign = campaigns.find((item) => item.id === ad.campaign_id);
+  return campaign && stoppedCampaign.has(campaign.status) && (ad.status === 'active' || ad.status === 'moderation') ? campaign.status as AdStatus : ad.status;
+}
+export const campaignStopped = (id: number, campaigns: Campaign[]) => stoppedCampaign.has(campaigns.find((item) => item.id === id)?.status ?? '');
+
+/** Меньше трёх работающих объявлений — сравнивать цену обращения не с чем: почему автопилот молчит (как min_reference_units). */
+export function fewAdsReason(ads: Ad[], campaigns: Campaign[], avgCheck: number | null): string | null {
+  const live = ads.filter((ad) => shownStatus(ad, campaigns) === 'active').length;
+  return live > 0 && live < 3 ? copy.screens.fewAds(live, avgCheck !== null) : null;
+}
+
 function excerpt(text: string): string {
   const clean = text.trim().replace(/\s+/g, ' ');
   if (clean.length <= 40) return clean;
@@ -72,6 +86,7 @@ export function adLabels(ads: Ad[]): Map<number, string> {
     if (texts.get(key) === 1) return [ad.id, label];
     const index = (seen.get(key) ?? 0) + 1;
     seen.set(key, index);
-    return [ad.id, copy.screens.adVariant(label, index)];
+    // Текст тот же, а картинки разные — так их и различаем: это варианты сравнения картинок.
+    return [ad.id, (ad.image_url ? copy.screens.adImageVariant : copy.screens.adVariant)(label, index)];
   }));
 }

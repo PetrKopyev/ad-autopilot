@@ -1,21 +1,21 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { AdStatusBadge, BudgetRing, Button, EmptyState, ErrorBanner, MetricTile, PageHeader, PanelCard, PlatformBadge, SegmentedControl, Sparkline, StatusBadge } from '../components';
+import { AdStatusBadge, BudgetRing, Button, ConfirmDialog, EmptyState, ErrorBanner, MetricTile, PageHeader, PanelCard, PlatformBadge, SegmentedControl, Sparkline, StatusBadge } from '../components';
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { getAds, getAutopilotStatus, getDaily, getExperiments, getSummary, stopAllAds } from '../api/screens';
-import { getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
-import { answerClientQuestion, getClientQuestions, type ClientQuestion } from '../api/clients';
+import { entryTitle, getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
+import { answerClientQuestion, getClientQuestions, parseClients, type ClientQuestion } from '../api/clients';
 import { getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
 import type { Ad, AdStatus, AdsResponse, Daily, Experiment, Summary } from '../api/types';
 import { displayClock, displayDate, displayDateTime, justNow } from '../format';
-import { DemoNotice, NullableMoney, platformName } from './StatsShared';
+import { DemoNotice, NullableMoney, campaignStopped, fewAdsReason, platformName, shownStatus } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { formatMoney } from '../components/Money';
-import { resumeAutopilot } from '../api/settings';
+import { getBusiness, resumeAutopilot } from '../api/settings';
 import { PrelaunchEmpty, PrelaunchLink, beforeLaunch } from './Prelaunch';
 import './Home.css';
 
@@ -94,34 +94,34 @@ function ClientQuestionRow({ question, answered }: { question: ClientQuestion; a
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const number = value.trim() === '' ? NaN : Number(value);
-  const valid = Number.isInteger(number) && number >= 0 && number <= question.leads_count;
+  const { number, error: invalid } = parseClients(value, question.leads_count);
   async function send(answer: number | 'unknown') {
     setBusy(true); setError(undefined);
     try { await answerClientQuestion(question.id, answer); answered(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); setBusy(false); }
   }
-  return <form className="home-need__row" onSubmit={(event) => { event.preventDefault(); if (valid) void send(number); }}>
+  return <form className="home-need__row" onSubmit={(event) => { event.preventDefault(); if (number !== undefined) void send(number); }}>
     <p className="home-need__text">{copy.clients.question(question.leads_count)}
       <small>{copy.clientsScreen.week(displayDate(question.week_start), displayDate(question.week_end))}. {copy.home.clientsWhy}</small></p>
-    <input className="input mono home-need__input" type="number" inputMode="numeric" min={0} max={question.leads_count} step={1} value={value}
-      aria-label={copy.clientsScreen.countLabel} aria-describedby={`home-range-${question.id}`} aria-invalid={value !== '' && !valid}
+    <input className="input mono home-need__input" inputMode="numeric" autoComplete="off" value={value}
+      aria-label={copy.clientsScreen.countLabel} aria-describedby={`home-range-${question.id}${invalid ? ` home-invalid-${question.id}` : ''}`} aria-invalid={!!invalid}
       onChange={(event) => setValue(event.target.value)} />
-    <Button type="submit" disabled={busy || !valid}>{busy ? copy.clientsScreen.sending : copy.clientsScreen.send}</Button>
+    <Button type="submit" disabled={busy || number === undefined}>{busy ? copy.clientsScreen.sending : copy.clientsScreen.send}</Button>
     <Button variant="secondary" disabled={busy} onClick={() => void send('unknown')}>{copy.clients.unknown}</Button>
     <p className="visually-hidden" id={`home-range-${question.id}`}>{copy.clientsScreen.range(question.leads_count)}</p>
+    {invalid && <p className="field__error home-need__error" id={`home-invalid-${question.id}`}>{invalid}</p>}
     {error && <div className="home-need__error"><ErrorBanner message={error} onDismiss={() => setError(undefined)} /></div>}
   </form>;
 }
 
-function campaignRows({ items: ads }: AdsResponse) {
+function campaignRows({ items: ads, campaigns }: AdsResponse) {
   const byCampaign = ads.reduce((map, ad) => map.set(ad.campaign_id, [...(map.get(ad.campaign_id) ?? []), ad]), new Map<number, Ad[]>());
   return [...byCampaign.entries()].map(([id, items]) => {
-    const status = statusOrder.find((value) => items.some((ad) => ad.status === value)) ?? 'draft';
+    const status = statusOrder.find((value) => items.some((ad) => shownStatus(ad, campaigns) === value)) ?? 'draft';
     const cost = items.reduce((sum, ad) => sum + ad.metrics.cost_kop, 0);
     const leads = items.reduce((sum, ad) => sum + ad.metrics.leads, 0);
     return { id, name: items[0].campaign_name, platform: items[0].platform, status, cost, leads, price: leads ? Math.round(cost / leads) : null,
-      reason: status === 'active' ? null : items.find((ad) => ad.status === status && ad.reason)?.reason ?? null };
+      reason: status === 'active' || campaignStopped(id, campaigns) ? null : items.find((ad) => ad.status === status && ad.reason)?.reason ?? null };
   });
 }
 
@@ -148,8 +148,8 @@ function Campaigns({ data, prelaunch }: { data: AdsResponse; prelaunch: { hasPla
   </table></div>;
 }
 
-function Experiments({ items }: { items: Experiment[] }) {
-  if (!items.length) return <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />;
+function Experiments({ items, quiet }: { items: Experiment[]; quiet: string | null }) {
+  if (!items.length) return <EmptyState title={copy.screens.noExperiments} description={quiet ?? copy.screens.experimentHint} />;
   return <ul className="home-ab">{items.map((experiment) => <li key={experiment.id} className="home-ab__item">
     <div className="home-ab__head"><h3>{experiment.title}</h3>
       <StatusBadge tone={experimentTone[experiment.status]}>{copy.screens.experimentStates[experiment.status]}</StatusBadge></div>
@@ -164,14 +164,6 @@ function Experiments({ items }: { items: Experiment[] }) {
   </li>)}</ul>;
 }
 
-function entryTitle(entry: HistoryEntry, all: HistoryEntry[]): string {
-  if (entry.kind !== 'revert') return labels.kinds[entry.kind];
-  const original = all.find((item) => item.id === entry.reverts_id);
-  if (!original) return labels.revertedPlain;
-  if (original.kind === 'pause') return labels.resumedAfterStop;
-  const text = labels.kinds[original.kind];
-  return labels.revertedLine(text.charAt(0).toLowerCase() + text.slice(1));
-}
 function figures(entry: HistoryEntry): string[] {
   return (Object.keys(labels.numberLabels) as (keyof typeof labels.numberLabels)[])
     .filter((key) => typeof entry.evidence[key] === 'number')
@@ -259,7 +251,8 @@ export function HomePage() {
   const experiments = useResource(getExperiments);
   const questions = useResource(getClientQuestions);
   const notifications = useResource(getNotifications);
-  const dialog = useRef<HTMLDialogElement>(null);
+  const business = useResource(getBusiness);
+  const [asking, setAsking] = useState(false);
   const stopLock = useRef(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string>();
@@ -276,18 +269,22 @@ export function HomePage() {
   const stale = status?.status === 'running' && now !== null && (minutes === null || minutes > 15);
   const working = !status?.last_check_at ? copy.screens.heartbeatMissing
     : minutes === null ? copy.home.checkedAt(displayDateTime(status.last_check_at)) : copy.home.working(minutes);
-  const statusText = status?.status === 'running' ? working
+  // Автопилот работает, а показов нет: все кампании остановлены (например, кабинет отключили) — «всё по плану» не пишем.
+  const noShows = status?.status === 'running' && !!ads.data?.items.length
+    && ads.data.items.every((ad) => !['active', 'moderation'].includes(shownStatus(ad, ads.data!.campaigns)));
+  const statusText = noShows ? copy.home.noShows : status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
       : status?.status === 'draft' ? copy.screens.draft : copy.home.pausedLine;
-  const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at);
-  const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' ? 'success' : 'warning';
+  const platformTrouble = !!status?.needs_attention.some((item) => item.id === 'platform');
+  const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at) && !noShows && !platformTrouble;
+  const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' && !noShows ? 'success' : 'warning';
   const question = questions.data?.items.find((item) => !item.answered_at);
   // Строка о бюджете дублирует строку состояния и плитку бюджета; от владельца она нужна, только когда реклама стоит до его решения.
   const waitsOwner = status?.status === 'draft' || (status?.status === 'budget_stop' && !status.auto_continue);
   const attention = status?.needs_attention.filter((item) => !(question && item.destination === 'clients') && (item.id !== 'budget' || waitsOwner)) ?? [];
   const canSwitch = (status?.status === 'running' || status?.status === 'paused') && !stopping && !resuming;
   function reloadAll() { board.reload(); ads.reload(); autopilot.reload(); history.reload(); experiments.reload(); questions.reload(); notifications.reload(); }
-  function askStop() { setStopError(undefined); dialog.current?.showModal(); }
+  function askStop() { setStopError(undefined); setAsking(true); }
   function resume() {
     setResuming(true); setResumeError(''); setResumeWarning(null);
     void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); autopilot.reload(); history.reload(); ads.reload(); })
@@ -297,7 +294,7 @@ export function HomePage() {
   async function stop() {
     if (stopLock.current) return;
     stopLock.current = true; setStopping(true); setStopError(undefined);
-    try { await stopAllAds(); setStopped(true); dialog.current?.close(); autopilot.reload(); history.reload(); ads.reload(); }
+    try { await stopAllAds(); setStopped(true); setAsking(false); autopilot.reload(); history.reload(); ads.reload(); }
     catch (error) { setStopError(error instanceof Error ? error.message : copy.errors.generic); }
     finally { stopLock.current = false; setStopping(false); }
   }
@@ -361,7 +358,8 @@ export function HomePage() {
         {!prelaunch && <PanelCard title={copy.ads.experiments} titleId="home-ab-title">
           {experiments.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
           {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
-          {experiments.data && <Experiments items={experiments.data.items} />}
+          {experiments.data && <Experiments items={experiments.data.items}
+            quiet={ads.data && business.data ? fewAdsReason(ads.data.items, ads.data.campaigns, business.data.avg_check_kop) : null} />}
         </PanelCard>}
       </div>
       <PanelCard title={copy.home.journal} titleId="home-log-title" flush
@@ -372,12 +370,7 @@ export function HomePage() {
       </PanelCard>
     </div>
     {summary && !prelaunch && <Sources summary={summary} />}
-    <dialog ref={dialog} className="home-confirm" aria-labelledby="stop-title" aria-describedby="stop-description" onCancel={(event) => { if (stopping) event.preventDefault(); }}>
-      <div className="page-stack"><h2 id="stop-title">{copy.screens.stopTitle}</h2><p id="stop-description">{copy.screens.stopDescription}</p>
-        {stopError && <ErrorBanner message={stopError} />}
-        <div className="actions"><Button autoFocus variant="secondary" disabled={stopping} onClick={() => dialog.current?.close()}>{copy.screens.cancel}</Button>
-          <Button variant="danger" disabled={stopping} onClick={() => void stop()}>{stopping ? copy.screens.stopping : copy.screens.confirmStop}</Button></div>
-      </div>
-    </dialog>
+    <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}
+      busy={stopping} error={stopError} onConfirm={() => void stop()} onClose={() => setAsking(false)}><p>{copy.screens.stopDescription}</p></ConfirmDialog>
   </div>;
 }

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Button, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, SegmentedControl, StatusBadge, describedBy } from '../components';
+import { Button, ConfirmDialog, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, SegmentedControl, StatusBadge, describedBy } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
-import { connectAccount, disconnectAccount, getGoals, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, validInn } from '../api/setup';
+import { connectAccount, disconnectAccount, getAuthConfig, getGoals, rublesToKopecks, saveDescription, saveMarking, tooMuchMoney, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
@@ -21,6 +21,8 @@ const emptyMarking: Marking = { subject_type: 'ip', inn: '', name: '', phone: ''
 const markingForm = (stored: StoredMarking | null): Marking => stored
   ? { subject_type: stored.subject_type, inn: '', name: stored.name, phone: '', confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...stored.confirmed_in_platform } }
   : emptyMarking;
+// Набранную сумму повторяем как есть: 1 500,50 ₽ не превращается в подписи в 1 501 ₽.
+const exactMoney = (kopecks: number) => kopecks % 100 ? `${(kopecks / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽` : formatMoney(kopecks);
 const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(Math.round(kopecks / 100));
 
 // One section with its own save status, so a failed save never hides the others.
@@ -50,16 +52,17 @@ function Block({ id, title, hint, danger, children }: { id: string; title: strin
   </PanelCard>;
 }
 
-function DescriptionBlock({ business }: { business: BusinessSettings }) {
+function DescriptionBlock({ business, launched }: { business: BusinessSettings; launched: boolean }) {
   const section = useSection();
   const [values, setValues] = useState<Record<DescriptionKey, string>>(() => Object.fromEntries(
     descriptionKeys.map((key) => [key, business.description?.fields[key].value ?? ''])) as Record<DescriptionKey, string>);
   function submit() {
     const description = Object.fromEntries(descriptionKeys.map((key) => [key,
       { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: key === 'prices' ? '' : values[key].trim(), verified: true }])) as Description;
-    void section.run(() => saveDescription(description), labels.saved);
+    void section.run(() => saveDescription(description), launched ? labels.savedLaunched : labels.saved);
   }
-  return <Block id="business" title={copy.settings.business} hint={labels.businessHint}>
+  // После запуска честно говорим, что объявления на площадках от правки не перестроятся.
+  return <Block id="business" title={copy.settings.business} hint={launched ? <>{labels.businessHint} {labels.businessLaunched}</> : labels.businessHint}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       {descriptionKeys.filter((key) => key !== 'prices').map((key) => {
         const id = `settings-${key}`;
@@ -83,29 +86,33 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   const budgetKop = budget === String(Math.round(savedBudget / 100)) ? savedBudget : rublesToKopecks(budget);
   const averageKop = average === '' ? null : average === rublesText(business.avg_check_kop) ? business.avg_check_kop : rublesToKopecks(average);
   function submit() {
-    if (budgetKop === null) return;
+    if (budgetKop === null || budgetError || averageError) return;
     // Неизменённый бюджет не отправляем: каждое сохранение бюджета — запись в истории и пересчёт лимитов.
     void section.run(async () => {
       if (budgetKop !== savedBudget) { setWarning(await saveBudget(budgetKop)); setSavedBudget(budgetKop); }
       await saveBusinessSettings(autoContinue, averageKop);
     }, labels.saved);
   }
-  const budgetHint = budgetKop === null ? undefined : `${formatMoney(budgetKop)}. ${copy.settings.budgetHint}`;
-  const budgetError = budgetKop === null ? labels.budgetError : undefined;
+  // До сохранения подпись говорит, что будет после него: сумма ещё не действует.
+  const budgetHint = budgetKop === null || tooMuchMoney(budgetKop) ? undefined
+    : budgetKop === savedBudget ? undefined : labels.budgetPending(exactMoney(budgetKop));
+  const budgetError = budgetKop === null ? labels.budgetError : tooMuchMoney(budgetKop) ? copy.launchFlow.moneyTooBig : undefined;
+  const averageError = average !== '' && (averageKop === null || tooMuchMoney(averageKop)) ? (averageKop === null ? copy.launchFlow.moneyError : copy.launchFlow.moneyTooBig) : undefined;
   return <Block id="budget" title={labels.budgetTitle} hint={<><Icon name="shield" />{copy.plan.promise}</>}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <Field id="settings-budget" label={labels.budgetLabel} hint={budgetHint} error={budgetError}>
-        <RublesInput id="settings-budget" className="input mono" required max={maxBudgetRubles} value={budget} aria-invalid={budgetKop === null}
+        <RublesInput id="settings-budget" className="input mono" required value={budget} aria-invalid={!!budgetError}
           aria-describedby={describedBy('settings-budget', budgetHint, budgetError)} onChange={setBudget} /></Field>
       <div className="settings-check">
         <label className="check"><input type="checkbox" checked={autoContinue} aria-describedby="continue-help" onChange={(event) => setAutoContinue(event.target.checked)} />{copy.settings.continueNextMonth}</label>
         <p className="field__hint" id="continue-help">{labels.nextMonth}</p>
       </div>
-      <Field id="settings-average" label={labels.averageLabel} hint={labels.averageHint}>
-        <RublesInput id="settings-average" className="input mono" max={maxBudgetRubles} value={average} aria-describedby={describedBy('settings-average', labels.averageHint)} onChange={setAverage} /></Field>
+      <Field id="settings-average" label={labels.averageLabel} hint={labels.averageHint} error={averageError}>
+        <RublesInput id="settings-average" className="input mono" value={average} aria-invalid={!!averageError}
+          aria-describedby={describedBy('settings-average', labels.averageHint, averageError)} onChange={setAverage} /></Field>
       <Status section={section} />
       {warning && <div className="notice" role="status"><p>{warning}</p></div>}
-      <div className="actions"><Button type="submit" disabled={section.busy || budgetKop === null}>{section.busy ? labels.saving : labels.save}</Button></div>
+      <div className="actions"><Button type="submit" disabled={section.busy || !!budgetError || !!averageError}>{section.busy ? labels.saving : labels.save}</Button></div>
     </form>
   </Block>;
 }
@@ -131,27 +138,46 @@ function AccountsBlock({ business, status }: { business: BusinessSettings; statu
   const section = useSection();
   const session = useSession();
   const [stopResult, setStopResult] = useState<StopResult>();
+  const [leaving, setLeaving] = useState<{ id: number; name: string }>();
+  const [demo, setDemo] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void getAuthConfig(controller.signal).then((config) => { if (!controller.signal.aborted) setDemo(config.demo); }).catch(() => {});
+    return () => controller.abort();
+  }, []);
   const me = session.data;
   const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
+  function disconnect(id: number) {
+    void section.run(async () => { setStopResult(await disconnectAccount(id)); setLeaving(undefined); session.reload(); status.reload(); });
+  }
   return <Block id="accounts" title={copy.settings.accounts} hint={labels.accountsHint}>
     {session.error && <ErrorBanner message={session.error} onRetry={session.reload} />}
-    <Status section={section} />
+    {!leaving && <Status section={section} />}
     {stopResult && <StopNotice result={stopResult} />}
     {me && <ul className="settings-accounts">{platforms.map((platform) => {
       const account = me.accounts.find((item) => item.platform === platform.id);
       const off = !account || account.status === 'revoked';
+      const connectLabel = off ? copy.settings.connect : copy.settings.reconnect;
       return <li key={platform.id} className="settings-account">
         <div className="settings-account__name"><h3><span className={`platform-badge__dot platform-badge--${platform.id}`} aria-hidden="true" />{platform.name}</h3>
           {off ? <StatusBadge>{copy.setup.accounts.disconnected}</StatusBadge>
             : account.status === 'ok' ? <StatusBadge tone="success">{copy.setup.accounts.connected(account.external_login)}</StatusBadge>
               : <StatusBadge tone="warning">{copy.setup.accounts.expired}</StatusBadge>}</div>
         <div className="actions">
-          <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); }); }}>{!account || account.status === 'revoked' ? copy.settings.connect : copy.settings.reconnect}</Button>
-          {account && account.status !== 'revoked' && <Button variant="secondary" disabled={section.busy}
-            onClick={() => { setStopResult(undefined); void section.run(async () => { setStopResult(await disconnectAccount(account.id)); session.reload(); }); }}>{copy.settings.disconnect}</Button>}
+          {/* ВКонтакте подключают ключом или входом на отдельной странице — как в мастере. */}
+          {platform.id === 'vk' && !demo ? <Link className="button button--secondary" to="/connect/vk" state={{ back: '/settings' }}>{connectLabel}</Link>
+            : <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); }); }}>{connectLabel}</Button>}
+          {account && !off && <Button variant="secondary" disabled={section.busy}
+            onClick={() => { setStopResult(undefined); section.clear(); setLeaving({ id: account.id, name: platform.name }); }}>{copy.settings.disconnect}</Button>}
         </div></li>;
     })}
       {status.data && <MetricaRow business={business} draft={status.data.status === 'draft'} />}</ul>}
+    <ConfirmDialog open={!!leaving} title={copy.settings.disconnectTitle(leaving?.name ?? '')} confirm={copy.settings.disconnectYes} confirming={copy.settings.disconnecting}
+      cancel={copy.screens.cancel} busy={section.busy} error={leaving && section.error} onConfirm={() => leaving && disconnect(leaving.id)}
+      onClose={() => { section.clear(); setLeaving(undefined); }}>
+      <ul>{copy.settings.disconnectSteps.map((text) => <li key={text}>{text}</li>)}</ul>
+      {demo && <p><strong>{copy.settings.disconnectDemo}</strong></p>}
+    </ConfirmDialog>
   </Block>;
 }
 
@@ -215,18 +241,23 @@ function AutopilotBlock({ status }: { status: StatusResource }) {
   const state = status.data?.status;
   const paused = state === 'paused' || state === 'budget_stop';
   const [warning, setWarning] = useState<string | null>(null);
-  function toggle() {
-    void section.run(async () => { if (paused) setWarning(await resumeAutopilot()); else { setWarning(null); await pauseAutopilot(); } status.reload(); });
+  const [asking, setAsking] = useState(false);
+  // «Пауза» здесь — то же, что на главной: остановка всей рекламы, с тем же подтверждением.
+  function resume() { void section.run(async () => { setWarning(await resumeAutopilot()); status.reload(); }); }
+  function pause() {
+    void section.run(async () => { setWarning(null); await pauseAutopilot(); setAsking(false); status.reload(); });
   }
   return <Block id="autopilot" title={labels.autopilot}>
     {status.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
     {state && state !== 'draft' && <SegmentedControl label={copy.autopilotMode.label} value={paused ? 'paused' : 'working'} disabled={section.busy}
-      onChange={(mode) => { if ((mode === 'paused') !== paused) toggle(); }}
+      onChange={(mode) => { if ((mode === 'paused') === paused) return; if (paused) resume(); else { section.clear(); setAsking(true); } }}
       options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]} />}
     {state && <p className="settings-hint">{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
-    <Status section={section} />
+    {!asking && <Status section={section} />}
     {warning && <div className="notice" role="status"><p>{warning}</p></div>}
+    <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}
+      busy={section.busy} error={asking ? section.error : undefined} onConfirm={pause} onClose={() => { section.clear(); setAsking(false); }}><p>{copy.screens.stopDescription}</p></ConfirmDialog>
   </Block>;
 }
 
@@ -262,7 +293,7 @@ export function SettingsPage() {
     {business.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {business.error && <ErrorBanner message={business.error} onRetry={business.reload} />}
     {business.data && <div className="settings-layout">
-      <div className="settings-column"><BudgetBlock business={business.data} /><DescriptionBlock business={business.data} /></div>
+      <div className="settings-column"><BudgetBlock business={business.data} /><DescriptionBlock business={business.data} launched={!!status.data && status.data.status !== 'draft' && status.data.status !== 'no_business'} /></div>
       <div className="settings-column">
         <AutopilotBlock status={status} /><AccountsBlock business={business.data} status={status} /><MarkingBlock business={business.data} />
         <Block id="license" title={copy.settings.license}><p className="settings-hint">{labels.licenseText}</p></Block>

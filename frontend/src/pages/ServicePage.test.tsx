@@ -19,6 +19,7 @@ beforeEach(() => {
       '/api/auth/config': { demo: false, vk_oauth: vkOauth },
       '/api/me': { id: 1, login: 'owner', email: null, has_business: true, accounts: [] },
       '/api/accounts/vk/key': { id: 2, business_id: 7, external_login: 'vk', status: 'ok' },
+      '/api/business': { id: 9 },
     };
     return new Response(JSON.stringify(answers[path]), { status: 200, headers: { 'Content-Type': 'application/json' } });
   });
@@ -54,6 +55,20 @@ it('после подключения по ключу формы скрываю�
   expect(screen.queryByLabelText(copy.launchFlow.clientIdLabel)).toBeNull();
   expect(screen.queryByRole('button', { name: copy.launchFlow.keyConnect })).toBeNull();
   expect(calls()).toContain('/api/accounts/vk/key');
+});
+
+it('из настроек в новой вкладке: бизнес берётся с сервера, форма доступна, возврат — в настройки', async () => {
+  sessionStorage.clear();
+  render(<MemoryRouter initialEntries={[{ pathname: '/connect/vk', state: { back: '/settings' } }]}><SessionProvider><ServiceVkPage /></SessionProvider></MemoryRouter>);
+  const clientId = await screen.findByLabelText(copy.launchFlow.clientIdLabel) as HTMLInputElement;
+  await waitFor(() => expect(clientId.disabled).toBe(false));
+  expect(screen.queryByText(copy.launchFlow.needBusiness)).toBeNull();
+  fireEvent.change(clientId, { target: { value: 'client' } });
+  fireEvent.change(screen.getByLabelText(copy.launchFlow.keyLabel), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.launchFlow.keyConnect }));
+  expect((await screen.findByRole('link', { name: copy.launchFlow.backToSettings })).getAttribute('href')).toBe('/settings');
+  const [, init] = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/api/accounts/vk/key'))!;
+  expect(JSON.parse(String(init!.body))).toMatchObject({ business_id: 9 });
 });
 
 it('ключ API — с подсказкой у поля, без неё поле не описано', async () => {

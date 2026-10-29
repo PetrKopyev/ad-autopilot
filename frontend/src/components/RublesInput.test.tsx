@@ -10,7 +10,7 @@ let digits = '';
 function Field({ initial = '' }: { initial?: string }) {
   const [value, setValue] = useState(initial);
   digits = value;
-  return <label>Бюджет<RublesInput max={10_000_000} value={value} onChange={setValue} /></label>;
+  return <label>Бюджет<RublesInput value={value} onChange={setValue} /></label>;
 }
 const input = () => screen.getByLabelText('Бюджет') as HTMLInputElement;
 // Как браузер: новое значение и курсор приходят вместе, затем событие ввода.
@@ -25,7 +25,7 @@ it('оставляет только цифры и делит разряды пр
   fireEvent.change(input(), { target: { value: '50000 фыв' } });
   expect(input().value).toBe('50 000');
   expect(digits).toBe('50000');
-  expect(input().inputMode).toBe('numeric');
+  expect(input().inputMode).toBe('decimal');
 });
 
 it('вставка с пробелами, буквами и ведущими нулями даёт число', () => {
@@ -48,11 +48,29 @@ it('буква посередине не сдвигает курсор, нова
   expect(input().selectionStart).toBe(5);
 });
 
-it('сумму больше предела не принимает', () => {
+it('сумму больше предела не обрезает: ошибку показывает форма', () => {
   render(<Field initial="9999999" />);
-  fireEvent.change(input(), { target: { value: '99999999' } });
-  expect(digits).toBe('9999999');
-  expect(input().value).toBe('9 999 999');
-  fireEvent.change(input(), { target: { value: '10000000' } });
-  expect(digits).toBe('10000000');
+  fireEvent.change(input(), { target: { value: '5000000000' } });
+  expect(digits).toBe('5000000000');
+  expect(input().value).toBe('5 000 000 000');
+});
+
+it('точка и запятая — копейки, не лишние цифры', () => {
+  render(<Field />);
+  fireEvent.change(input(), { target: { value: '1500.5' } });
+  expect(digits).toBe('1500,5');
+  expect(input().value).toBe('1 500,5');
+  fireEvent.change(input(), { target: { value: '1 500,555' } });
+  expect(digits).toBe('1500,55');
+  fireEvent.change(input(), { target: { value: ',5' } });
+  expect(input().value).toBe('0,5');
+});
+
+it('курсор после запятой остаётся за набранной цифрой', () => {
+  render(<Field initial="1500" />);
+  typeAt('15000,', 5);
+  expect(input().value).toBe('15 000,');
+  typeAt('1 500,7', 7);
+  expect(input().value).toBe('1 500,7');
+  expect(input().selectionStart).toBe(7);
 });

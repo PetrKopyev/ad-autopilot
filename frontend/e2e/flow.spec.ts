@@ -35,6 +35,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('button', { name: copy.plan.title, exact: true }).click();
     await expect(page).toHaveURL(/\/plan$/);
     await page.getByRole('button', { name: copy.plan.launch, exact: true }).click();
+    await page.getByRole('dialog', { name: copy.plan.launchTitle }).getByRole('button', { name: copy.plan.launchYes, exact: true }).click();
     await page.getByRole('link', { name: copy.launchFlow.openHome, exact: true }).click();
     await expect(page.getByText(/^Работает,/)).toBeVisible();
     const advance = page.waitForResponse((response) => response.url().endsWith('/api/demo/advance') && response.request().method() === 'POST');
@@ -84,7 +85,9 @@ for (const width of [390, 1280]) {
     // В настройках тот же переключатель: реклама продолжена — нажата «Работает»; «Пауза» останавливает, «Работает» продолжает.
     const settingsMode = page.getByRole('group', { name: copy.autopilotMode.label });
     await expect(settingsMode.getByRole('button', { name: copy.autopilotMode.working, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    // «Пауза» — та же остановка всей рекламы, что на главной, с тем же подтверждением.
     await settingsMode.getByRole('button', { name: copy.autopilotMode.paused, exact: true }).click();
+    await page.getByRole('dialog', { name: copy.screens.stopTitle }).getByRole('button', { name: copy.screens.confirmStop, exact: true }).click();
     await expect(page.getByText(copy.settingsScreen.autopilotPaused, { exact: true })).toBeVisible();
     await expect(settingsMode.getByRole('button', { name: copy.autopilotMode.paused, exact: true })).toHaveAttribute('aria-pressed', 'true');
     await settingsMode.getByRole('button', { name: copy.autopilotMode.working, exact: true }).click();

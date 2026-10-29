@@ -416,7 +416,7 @@ it('бюджет ниже минимума называет минимум и п
   const input = await screen.findByLabelText(copy.setup.business.budget);
   fireEvent.change(input, { target: { value: '12600' } });
   expect((await screen.findByRole('alert')).textContent?.replace(/ /g, ' ')).toBe('Минимальный бюджет — 12 700 ₽ в месяц. '
-    + 'Яндекс Директ требует не меньше 300 ₽ на кампанию в неделю, а мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца.');
+    + 'С меньшей суммой Яндекс Директ рекламу не показывает, а мы ещё берём небольшой запас, чтобы реклама не останавливалась в конце месяца.');
   fireEvent.change(input, { target: { value: '12700' } });
   expect(await screen.findByText(plain('На Директ придётся в среднем 410 ₽ в день.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
@@ -478,12 +478,30 @@ it('успешная проверка сайта показывает найде
   expect(retry.className).toContain('retry-small');
 });
 
-it('средний чек — только цифры с разрядами, как бюджет', async () => {
+it('средний чек — цифры с разрядами, как бюджет; копейки через запятую', async () => {
   renderStep(1);
   const average = await screen.findByLabelText(copy.setup.business.visitPrice) as HTMLInputElement;
   fireEvent.change(average, { target: { value: '2 500 руб.' } });
   expect(average.value).toBe('2 500');
-  expect(average.getAttribute('inputmode')).toBe('numeric');
+  expect(average.getAttribute('inputmode')).toBe('decimal');
+});
+
+it('бюджет с точкой — рубли и копейки, а не в десять раз больше; сумма больше предела — понятная ошибка у поля', async () => {
+  renderStep(1);
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.city), { target: { value: 'Москва' } });
+  const budget = screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement;
+  fireEvent.change(budget, { target: { value: '50000000' } });
+  expect(budget.value).toBe('50\u00a0000\u00a0000');
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  expect(await screen.findByText(copy.launchFlow.moneyTooBig)).toBeTruthy();
+  expect(calls()).not.toContain('POST /api/business');
+  fireEvent.change(budget, { target: { value: '30000.5' } });
+  expect(budget.value).toBe('30\u00a0000,5');
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  await waitFor(() => expect(calls()).toContain('POST /api/business'));
+  const [, init] = fetchMock.mock.calls.find(([url, request]) => request?.method === 'POST' && String(url).endsWith('/api/business'))!;
+  expect(JSON.parse(String(init!.body))).toMatchObject({ month_budget_kop: 3_000_050 });
 });
 
 it('услуги и цены — одно поле с одной цитатой; цены сервер разбирает сам, отдельное поле не отправляется', async () => {

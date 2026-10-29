@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { Button, EmptyState, ErrorBanner, PageHeader, PanelCard, PlatformBadge, StatusBadge } from '../components';
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
-import { getHistoryPage, revertChange } from '../api/history';
+import { entryTitle, getHistoryPage, revertChange } from '../api/history';
 import type { ChangeKind, HistoryEntry, HistoryFilter } from '../api/history';
 import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
@@ -22,14 +22,6 @@ const kindMark: Record<ChangeKind, string> = {
 };
 
 function author(entry: HistoryEntry): string { return labels.authors[entry.actor]; }
-function title(entry: HistoryEntry, all: HistoryEntry[]): string {
-  if (entry.kind !== 'revert') return labels.kinds[entry.kind];
-  const original = all.find((item) => item.id === entry.reverts_id);
-  if (!original) return labels.revertedPlain;
-  if (original.kind === 'pause') return labels.resumedAfterStop;
-  const text = labels.kinds[original.kind];
-  return labels.revertedLine(text.charAt(0).toLowerCase() + text.slice(1));
-}
 // Отменить остановку — значит продолжить рекламу: так кнопка и подписана.
 function revertLabels(entry: HistoryEntry) {
   return entry.kind === 'pause'
@@ -105,7 +97,7 @@ export function HistoryPage() {
         return <li key={entry.id} className={`journal__entry journal__entry--${reverted ? 'reverted' : entry.status === 'failed' ? 'failed' : kindMark[entry.kind]}`}>
           <time className="journal__time mono" dateTime={entry.created_at}>{justNow(entry.created_at, now) ? labels.justNow : displayClock(entry.created_at)}</time>
           <div className="journal__body">
-            <div className="journal__head"><h3>{title(entry, items)}</h3>
+            <div className="journal__head"><h3>{entryTitle(entry, items)}</h3>
               {entry.status in labels.statuses && <StatusBadge tone={statusTone[entry.status as keyof typeof labels.statuses]}>
                 {labels.statuses[entry.status as keyof typeof labels.statuses]}</StatusBadge>}</div>
             <p className="journal__meta">{author(entry)}{entry.platform && <> · <PlatformBadge platform={entry.platform} /></>}</p>

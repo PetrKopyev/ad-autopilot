@@ -5,6 +5,7 @@ export { BudgetRing } from './BudgetRing';
 export { Button } from './Button';
 export { Card, PanelCard } from './Card';
 export { CityCombobox } from './CityCombobox';
+export { ConfirmDialog } from './ConfirmDialog';
 export { EmptyState } from './EmptyState';
 export { ErrorBanner } from './ErrorBanner';
 export { Field, describedBy } from './Field';

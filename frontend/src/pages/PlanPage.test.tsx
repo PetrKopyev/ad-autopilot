@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { getForecast, type Forecast } from '../api/forecast';
 import { getPlan, launchPlan, regenerateImages, saveAssets, uploadPhoto, type Plan } from '../api/plan';
 import { getBusiness, type BusinessSettings } from '../api/settings';
+import { copy } from '../copy';
 import { PlanPage } from './PlanPage';
 
 vi.mock('../api/plan', async (original) => ({ ...await original<typeof import('../api/plan')>(), getPlan: vi.fn(), launchPlan: vi.fn(), regenerateImages: vi.fn(), saveAssets: vi.fn(), uploadPhoto: vi.fn() }));
@@ -48,9 +49,28 @@ it('после новой неудачи запуска объяснение п�
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   await screen.findByText(interrupted);
   fireEvent.click(screen.getByRole('button', { name: 'Запустить рекламу' }));
+  fireEvent.click(screen.getByRole('button', { name: copy.plan.launchYes }));
   expect(await screen.findByText(failed)).toBeTruthy();
   expect(screen.queryByText(interrupted)).toBeNull();
   expect(launchPlan).toHaveBeenCalledWith(3, false);
+});
+
+it('«Запустить рекламу» сначала говорит, что будет дальше; «Ещё посмотрю» ничего не запускает', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(saveAssets).mockResolvedValue(undefined);
+  vi.mocked(launchPlan).mockReset().mockResolvedValue(undefined as never);
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Запустить рекламу' }));
+  const dialog = within(screen.getByRole('dialog', { name: copy.plan.launchTitle }));
+  expect(dialog.getAllByRole('listitem')).toHaveLength(4);
+  expect(dialog.getByText(/^Отправим объявления в Яндекс Директ\./)).toBeTruthy();
+  fireEvent.click(dialog.getByRole('button', { name: copy.plan.launchNo }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(launchPlan).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Запустить рекламу' }));
+  fireEvent.click(screen.getByRole('button', { name: copy.plan.launchYes }));
+  expect(await screen.findByText(copy.launchFlow.launchReview)).toBeTruthy();
+  expect(launchPlan).toHaveBeenCalledTimes(1);
 });
 
 it.each([
@@ -62,6 +82,7 @@ it.each([
   vi.mocked(launchPlan).mockRejectedValue(new Error(refused));
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'Запустить рекламу' }));
+  fireEvent.click(screen.getByRole('button', { name: copy.plan.launchYes }));
   expect(await screen.findByText(refused)).toBeTruthy();
   expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Ваш план');
   expect(screen.queryByText('Реклама запущена')).toBeNull();

@@ -1,6 +1,7 @@
 import { api } from './client';
 import { mockEnabled } from './screens';
 import { setupGet } from './setup';
+import { copy } from '../copy';
 
 export interface ClientQuestion {
   id: string; week_start: string; week_end: string; leads_count: number;
@@ -16,4 +17,15 @@ export async function answerClientQuestion(id: string, clients: number | 'unknow
   const clients_count = clients === 'unknown' ? 'не знаю' : clients;
   if (mockEnabled) { (await import('./mocks')).mockClientAnswer(id, clients === 'unknown' ? null : clients); return; }
   await api(`/api/clients/questions/${encodeURIComponent(id)}/answer`, { method: 'POST', body: { clients_count } });
+}
+
+/** Ответ «сколько клиентов»: целое от 0 до числа обращений. number — ответ, error — почему ответить нельзя; пустое поле — ни того ни другого. */
+export function parseClients(value: string, leads: number): { number?: number; error?: string } {
+  const text = value.trim();
+  if (!text) return {};
+  if (!/^-?\d+$/.test(text)) return { error: copy.clientsScreen.wholeNumber };
+  const number = Number(text);
+  if (number < 0) return { error: copy.clientsScreen.negative };
+  if (number > leads) return { error: copy.clientsScreen.tooMany(leads) };
+  return { number };
 }

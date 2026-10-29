@@ -7,8 +7,9 @@ import { getAds, getExperiments, setAdStatus } from '../api/screens';
 import { getBusinessToday, lastDays } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
-import type { Ad, Experiment } from '../api/types';
-import { DemoNotice, NullableMoney, adLabels } from './StatsShared';
+import type { Ad, AdStatus, Experiment } from '../api/types';
+import { DemoNotice, NullableMoney, adLabels, campaignStopped, fewAdsReason, shownStatus } from './StatsShared';
+import { getBusiness } from '../api/settings';
 import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import './Ads.css';
 
@@ -31,13 +32,15 @@ function Arms({ experiment }: { experiment: Experiment }) {
   </li>)}</ul>;
 }
 
-function AdRow({ ad, name, changed }: { ad: Ad; name: string; changed: () => void }) {
+function AdRow({ ad, name, status, changed }: { ad: Ad; name: string; status: AdStatus; changed: () => void }) {
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState(false);
-  const canPause = ad.status === 'active';
-  const canResume = ad.status === 'paused_auto' || ad.status === 'paused_owner';
+  // Пока остановлена вся кампания, объявление не показывается, как его ни переключай: кнопка ждёт продолжения рекламы.
+  const held = status !== ad.status;
+  const canPause = ad.status === 'active' && !held;
+  const canResume = (ad.status === 'paused_auto' || ad.status === 'paused_owner') && !held;
   async function toggle() {
     if (lock.current) return;
     lock.current = true; setBusy(true); setError(undefined); setSuccess(false);
@@ -45,14 +48,14 @@ function AdRow({ ad, name, changed }: { ad: Ad; name: string; changed: () => voi
     catch (reason) { setError(reason instanceof Error ? reason.message : copy.errors.generic); }
     finally { lock.current = false; setBusy(false); }
   }
-  const stopped = ad.status !== 'active' && ad.status !== 'moderation';
+  const stopped = status !== 'active' && status !== 'moderation';
   return <article className={`ads-ad${stopped ? ' ads-ad--stopped' : ''}`}>
     <div className="ads-ad__main">
       {ad.image_url && <img className="ads-ad__image" src={ad.image_url} alt={ad.title} loading="lazy" />}
       <div className="ads-ad__text">
         <h4>{name}</h4>
         <p className="muted">{ad.text}</p>
-        <AdStatusBadge status={ad.status} reason={ad.reason} />
+        <AdStatusBadge status={status} reason={held ? copy.ads.campaignStopped : ad.reason} />
       </div>
     </div>
     <dl className="ads-metrics">
@@ -92,8 +95,10 @@ export function AdsPage() {
     return { ...await getAds(signal, period ?? undefined), period };
   }, []));
   const experiments = useResource(getExperiments);
+  const business = useResource(getBusiness);
   const prelaunch = usePrelaunch();
   const items = ads.data?.items ?? [];
+  const campaignList = ads.data?.campaigns ?? [];
   const platforms = [...new Set(items.map((item) => item.platform))];
   const names = adLabels(items);
   const period = ads.data?.period;
@@ -127,11 +132,12 @@ export function AdsPage() {
           const groups = [...new Set(campaignAds.map((ad) => ad.group_id))];
           return <section className="ads-campaign" key={campaignId} aria-labelledby={`campaign-${campaignId}`}>
             <h3 id={`campaign-${campaignId}`}><span className="ads-kicker">{copy.ads.campaign}</span>{campaignAds[0].campaign_name}</h3>
+            {campaignStopped(campaignId, campaignList) && <p className="ads-campaign__stopped">{copy.ads.campaignStoppedLine}</p>}
             {groups.map((groupId) => {
               const groupAds = campaignAds.filter((ad) => ad.group_id === groupId);
               return <div className="ads-group" key={groupId}>
                 <p className="ads-group__name"><span className="ads-kicker">{copy.ads.group}</span>{groupAds[0].group_name}</p>
-                {groupAds.map((ad) => <AdRow key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} changed={ads.reload} />)}
+                {groupAds.map((ad) => <AdRow key={ad.id} ad={ad} name={names.get(ad.id) ?? ad.title} status={shownStatus(ad, campaignList)} changed={ads.reload} />)}
               </div>;
             })}
           </section>;
@@ -145,7 +151,8 @@ export function AdsPage() {
         {experiments.error && <ErrorBanner message={experiments.error} onRetry={experiments.reload} />}
         {experiments.data && (experiments.data.items.length
           ? experiments.data.items.map((experiment) => <ExperimentCard key={experiment.id} experiment={experiment} />)
-          : <EmptyState title={copy.screens.noExperiments} description={copy.screens.experimentHint} />)}
+          : <EmptyState title={copy.screens.noExperiments}
+            description={(business.data && fewAdsReason(items, campaignList, business.data.avg_check_kop)) ?? copy.screens.experimentHint} />)}
       </div>
     </PanelCard>}
   </div>;

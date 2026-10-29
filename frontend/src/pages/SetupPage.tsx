@@ -5,7 +5,7 @@ import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, RublesInput,
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
-  getMe, maxBudgetRubles, rublesToKopecks, saveDescription, saveMarking, saveMetrica, validInn } from '../api/setup';
+  getMe, rublesToKopecks, saveDescription, saveMarking, saveMetrica, tooMuchMoney, validInn } from '../api/setup';
 import type { Account, AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { dailyAverage } from '../api/period';
 import { getBusiness } from '../api/settings';
@@ -142,7 +142,8 @@ export function SetupPage() {
     return () => controller.abort();
   }, [userId, attempt]);
   // Расчёт к бюджету — с сервера, по тем же правилам, что план и запуск; пока сумму вводят, запрос ждёт паузы.
-  const hintAmount = current === 1 ? rublesToKopecks(budget) : null;
+  const typedBudget = current === 1 ? rublesToKopecks(budget) : null;
+  const hintAmount = tooMuchMoney(typedBudget) ? null : typedBudget;
   useEffect(() => {
     setBudgetHint(undefined);
     if (!hintAmount) return;
@@ -233,7 +234,10 @@ export function SetupPage() {
       const chosen = cities ? cities.find((item) => cityKey(item) === cityKey(city)) : city.trim();
       if (!chosen) throw new FieldError('city', copy.setup.business.cityError);
       if (!month_budget_kop) throw new FieldError('budget', copy.launchFlow.moneyError);
+      if (tooMuchMoney(month_budget_kop)) throw new FieldError('budget', copy.launchFlow.moneyTooBig);
+      if (budgetHint && month_budget_kop < budgetHint.minimum_kop) throw new FieldError('budget', copy.setup.business.budgetMinimum(formatMoney(budgetHint.minimum_kop)));
       if (average && !avg_check_kop) throw new FieldError('average', copy.launchFlow.moneyError);
+      if (tooMuchMoney(avg_check_kop)) throw new FieldError('average', copy.launchFlow.moneyTooBig);
       const input = { site_url: url.href, city: chosen, month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }
       const business = await createBusiness(input);
@@ -303,12 +307,12 @@ export function SetupPage() {
           </SetupField>
           <CityCombobox id="city" label={copy.setup.business.city} hint={copy.setup.business.cityHint} error={errorFor('city')} cities={cities ?? []} value={city} onChange={setCity} required />
           <SetupField id="budget" label={copy.setup.business.budget} error={errorFor('budget')}
-            hint={<><p>{copy.setup.business.budgetHint}</p>{budgetHint && hintAmount && <BudgetNotes hint={budgetHint} amount={hintAmount} />}</>}>
-            <RublesInput id="budget" className="mono" required max={maxBudgetRubles} value={budget} aria-invalid={invalid(errorFor('budget'))}
+            hint={<><p>{copy.setup.business.budgetHint}</p>{budgetHint && hintAmount && !errorFor('budget') && <BudgetNotes hint={budgetHint} amount={hintAmount} />}</>}>
+            <RublesInput id="budget" className="mono" required value={budget} aria-invalid={invalid(errorFor('budget'))}
               aria-describedby={describedBy('budget', true, errorFor('budget'))} onChange={setBudget} />
           </SetupField>
           <SetupField id="average" label={copy.setup.business.visitPrice} hint={copy.setup.business.visitPriceHint} error={errorFor('average')}>
-            <RublesInput id="average" className="mono" max={maxBudgetRubles} value={average} aria-invalid={invalid(errorFor('average'))}
+            <RublesInput id="average" className="mono" value={average} aria-invalid={invalid(errorFor('average'))}
               aria-describedby={describedBy('average', true, errorFor('average'))} onChange={setAverage} />
           </SetupField>
         </>}

@@ -9,7 +9,7 @@ import { getAutopilotStatus } from '../api/screens';
 
 vi.mock('../api/screens', () => ({ mockEnabled: false,
   getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
-vi.mock('../api/history', () => ({ getHistoryPage: vi.fn(), revertChange: vi.fn() }));
+vi.mock('../api/history', async (original) => ({ ...await original<typeof import('../api/history')>(), getHistoryPage: vi.fn(), revertChange: vi.fn() }));
 vi.mock('../api/useBusinessNow', () => ({ useBusinessNow: () => null }));
 
 const labels = copy.historyScreen;
@@ -93,4 +93,12 @@ it('до запуска с готовым планом пустая истори
   expect(await screen.findByRole('heading', { name: copy.prelaunch.planReady })).toBeTruthy();
   expect(screen.getByText(copy.prelaunch.history)).toBeTruthy();
   expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
+});
+
+it('старт сравнения вариантов назван сравнением, а не «Запуском рекламы»; обычный запуск — как раньше', async () => {
+  serve([{ ...entry(1, 'launch'), evidence: { experiment_key: 'k' }, can_revert: false }, { ...entry(2, 'launch'), can_revert: false }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getByRole('heading', { name: labels.experimentStart })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: labels.kinds.launch })).toBeTruthy();
 });

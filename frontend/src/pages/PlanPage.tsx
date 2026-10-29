@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { Button, Card, ErrorBanner, Icon, PageHeader, PanelCard, PillSteps, PlatformBadge, StatusBadge } from '../components';
+import { Button, Card, ConfirmDialog, ErrorBanner, Icon, PageHeader, PanelCard, PillSteps, PlatformBadge, StatusBadge } from '../components';
 import { AdPreview } from '../components/AdPreview';
 import { formatMoney } from '../components/Money';
 import { getForecast } from '../api/forecast';
@@ -79,6 +79,7 @@ export function PlanPage() {
   const [error, setError] = useState('');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [chosen, setChosen] = useState<number>();
+  const [confirming, setConfirming] = useState(false);
   const [previewAd, setPreviewAd] = useState<Record<number, number>>({});
   // Сервер держит блокировку бизнеса всю генерацию: запросы картинок идут по одному, остальные ждут в очереди.
   const queue = useRef<Job[]>([]);
@@ -150,7 +151,7 @@ export function PlanPage() {
       actions={!launched && <PillSteps label={copy.plan.stepsLabel} steps={steps} current={5} />} />
     {resource.loading && <p className="loading" role="status">{copy.launchFlow.loading}</p>}
     {resource.error && <ErrorBanner message={resource.error} onRetry={resource.reload} />}
-    {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+    {error && !confirming && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {plan && <>
       {plan.off.map((item) => <div key={item.platform} className="notice" role="status">
         <p>{(launched ? copy.plan.platformOffLaunched : copy.plan.platformOff)(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>
@@ -210,9 +211,15 @@ export function PlanPage() {
           <p className="plan-total__promise"><Icon name="shield" />{copy.plan.promise}</p>
           <div className="plan-total__actions">
             <Link to="/setup/5" className="button button--secondary plan-total__back"><Icon name="back" />{copy.common.back}</Link>
-            <Button variant="accent" disabled={busy || jobs.length > 0 || !imagesReady || !plan.ready_to_launch || !plan.marking_confirmed || medical && !acknowledged} onClick={() => void act(() => launch(plan))}>{busy ? copy.launchFlow.saving : copy.plan.launch}</Button>
+            <Button variant="accent" disabled={busy || jobs.length > 0 || !imagesReady || !plan.ready_to_launch || !plan.marking_confirmed || medical && !acknowledged} onClick={() => { setError(''); setConfirming(true); }}>{busy ? copy.launchFlow.saving : copy.plan.launch}</Button>
           </div>
         </section>
+        <ConfirmDialog open={confirming} tone="accent" title={copy.plan.launchTitle} confirm={copy.plan.launchYes} confirming={copy.launchFlow.saving} cancel={copy.plan.launchNo}
+          busy={busy} error={confirming && error ? error : undefined} onClose={() => setConfirming(false)}
+          onConfirm={() => void act(async () => { await launch(plan); setConfirming(false); })}>
+          <ol>{copy.plan.launchNext((['direct', 'vk'] as const).filter((platform) => platformMonth(plan, platform) > 0).map((platform) => copy.setup.accounts[platform]).join(' и '),
+            formatMoney(plan.month_budget_kop)).map((text) => <li key={text}>{text}</li>)}</ol>
+        </ConfirmDialog>
       </>}
     </>}
   </div>;

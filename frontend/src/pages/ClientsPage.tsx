@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { Button, ErrorBanner, Field, Icon, MetricTile, PageHeader, PanelCard, describedBy } from '../components';
 import { copy } from '../copy';
-import { answerClientQuestion, getClientQuestions } from '../api/clients';
+import { answerClientQuestion, getClientQuestions, parseClients } from '../api/clients';
 import type { ClientQuestion } from '../api/clients';
 import { displayDate } from '../format';
 import { formatMoney } from '../components/Money';
@@ -15,8 +15,7 @@ function QuestionRow({ question, onAnswered }: { question: ClientQuestion; onAns
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const number = value.trim() === '' ? NaN : Number(value);
-  const valid = Number.isInteger(number) && number >= 0 && number <= question.leads_count;
+  const { number, error: invalid } = parseClients(value, question.leads_count);
   const id = `answer-${question.id}`;
   const range = labels.range(question.leads_count);
   async function send(answer: number | 'unknown') {
@@ -29,12 +28,13 @@ function QuestionRow({ question, onAnswered }: { question: ClientQuestion; onAns
       <h3>{copy.clients.question(question.leads_count)}</h3>
       <p className="muted mono">{labels.week(displayDate(question.week_start), displayDate(question.week_end))}</p>
     </div>
-    <form className="clients-question__form" onSubmit={(event) => { event.preventDefault(); if (valid) void send(number); }}>
-      <Field id={id} label={labels.countLabel} hint={range}>
-        <input id={id} className="input mono" type="number" inputMode="numeric" min={0} max={question.leads_count} step={1} value={value}
-          aria-describedby={describedBy(id, range)} aria-invalid={value !== '' && !valid} onChange={(event) => setValue(event.target.value)} />
+    <form className="clients-question__form" onSubmit={(event) => { event.preventDefault(); if (number !== undefined) void send(number); }}>
+      <Field id={id} label={labels.countLabel} hint={range} error={invalid}>
+        {/* Текстовое поле, а не числовое: браузер не выбрасывает молча запятую из «1,5», и ошибку видно. */}
+        <input id={id} className="input mono" inputMode="numeric" autoComplete="off" value={value}
+          aria-describedby={describedBy(id, range, invalid)} aria-invalid={!!invalid} onChange={(event) => setValue(event.target.value)} />
       </Field>
-      <div className="actions"><Button type="submit" disabled={busy || !valid}>{busy ? labels.sending : labels.send}</Button>
+      <div className="actions"><Button type="submit" disabled={busy || number === undefined}>{busy ? labels.sending : labels.send}</Button>
         <Button variant="secondary" disabled={busy} onClick={() => void send('unknown')}>{copy.clients.unknown}</Button></div>
     </form>
     {error && <div className="clients-question__error"><ErrorBanner message={error} onDismiss={() => setError(undefined)} /></div>}

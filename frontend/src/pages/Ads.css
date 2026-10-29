@@ -6,6 +6,7 @@
 
 .ads-campaign + .ads-campaign { border-top: 1px solid var(--color-border); }
 .ads-campaign > h3 { padding: 14px 16px 10px; background: var(--color-surface-muted); border-bottom: 1px solid var(--color-line); font-size: 1rem; }
+.ads-campaign__stopped { padding: 10px 16px; border-bottom: 1px solid var(--color-line); background: var(--color-warning-soft); font-size: .9rem; }
 .ads-group__name { padding: 10px 16px 6px; font-weight: 700; font-size: .93rem; }
 .ads-group + .ads-group { border-top: 1px dashed var(--color-line); }
 

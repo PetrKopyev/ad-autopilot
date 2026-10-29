@@ -27,3 +27,16 @@ export async function revertChange(id: number): Promise<HistoryEntry> {
   if (!result) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }
+
+const labels = copy.historyScreen;
+// Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».
+const kindTitle = (entry: HistoryEntry) => entry.kind === 'launch' && 'experiment_key' in entry.evidence ? labels.experimentStart : labels.kinds[entry.kind];
+/** Заголовок записи истории; отмена называет, что отменили, по записи из того же списка. */
+export function entryTitle(entry: HistoryEntry, all: HistoryEntry[]): string {
+  if (entry.kind !== 'revert') return kindTitle(entry);
+  const original = all.find((item) => item.id === entry.reverts_id);
+  if (!original) return labels.revertedPlain;
+  if (original.kind === 'pause') return labels.resumedAfterStop;
+  const text = kindTitle(original);
+  return labels.revertedLine(text.charAt(0).toLowerCase() + text.slice(1));
+}
