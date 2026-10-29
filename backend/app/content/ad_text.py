@@ -60,6 +60,32 @@ SEGMENT_HINTS = {
     "время для себя": "время для себя: отдых и забота о себе",
     "первое занятие": "первое занятие: легко начать, без обещаний результата",
 }
+# Заголовок — услуга и повод одной фразой: «Маникюр к празднику», «Педикюр: новый образ». Голый повод
+# («К празднику») без группы непонятен, а повод в именительном падеже, приклеенный к услуге («Педикюр новый дизайн»), —
+# бессмыслица.
+# Формы для каждого повода всех ниш. Пустая — повод в заголовок не идёт, заголовок — услуга: «Стрижка: уход за
+# бородой» и «Массаж: консультация» выдумывают услугу, «Йога: утренняя практика» — расписание.
+TITLE_FORMS = {
+    "к празднику": ("{} к празднику", "{}: праздничный образ", "{} к торжеству"),
+    NEAR_HOME: ("{} рядом с домом", "{} недалеко от дома"),
+    # Не «с новым дизайном»: услуги дизайна может не быть в фактах.
+    "новый дизайн": ("{}: новый образ", "{} для нового образа"),
+    "новый образ": ("{} для нового образа", "{}: новый образ"),
+    # «Маникюр: время для себя» читается как отдельная услуга «время для себя».
+    "время для себя": (),
+    "удобное расписание": ("{} в удобное время",),
+    "удобная запись": ("{} с удобной записью",),
+    "первое занятие": ("{}: первое занятие",),
+    "утренняя практика": (),
+    "уход за бородой": (),
+    "консультация": (),
+    "первое знакомство": (),
+}
+# Повод, который читается сразу после услуги без связки: «Маникюр к празднику», «Маникюр рядом с домом».
+JOINABLE = re.compile(r"(?:к|на|в|с|для|рядом)\s")
+# Общий заголовок — только когда ни одна форма названия услуги не проходит правила площадки.
+GENERIC_TITLE = "Услуги и запись"
+PREPOSITIONS = frozenset({"с", "со", "без", "для", "на", "в", "во", "по", "к", "от", "из", "под", "за"})
 LOCATION = re.compile(r"метро|минут|рядом|район|центр|остановк", re.IGNORECASE)
 PROPER_NAME = re.compile(r"\b[А-ЯЁ][а-яё-]{3,}")
 ENDING = "аеёиоуыэюяйь"
@@ -354,6 +380,59 @@ def _parts(fact: str) -> list[str]:
     return [part[:1].upper() + part[1:] for part in dict.fromkeys([fact.rstrip(" ."), *sentences, *clauses]) if part]
 
 
+def _names(service: Service) -> list[str]:
+    """Название услуги и его короткие формы для заголовка, от длинной к короткой: срез — слова до предлога,
+    «Окрашивание волос в один тон» — «Окрашивание волос». Срез не кончается числом, знаком или союзом: «Массаж спины
+    60 минут» и «Стрижка + борода» не режутся."""
+    words = service.name.split()
+    cuts = [
+        " ".join(words[:size])
+        for size in range(len(words) - 1, 0, -1)
+        if words[size].casefold() in PREPOSITIONS
+        and words[size - 1].casefold() not in PREPOSITIONS | {"и", "или"}
+        and re.fullmatch(r"[^\W\d_][\w-]*", words[size - 1])
+    ]
+    return [service.name, *cuts]
+
+
+def _titles(service: Service | None, segment: str) -> list[str]:
+    """Заголовки «услуга + повод» от полного названия к короткому, потом услуга без повода и, если название не проходит
+    правила площадки, общий; что не влезло в лимит, отбрасывает проверка. Связку с тем же предлогом, что в названии,
+    не берём: «Стрижка для детей для нового образа»."""
+    forms = TITLE_FORMS.get(segment, ())
+    names = _names(service) if service else ["Запись"]
+    titled = [
+        form.format(name)
+        for form in forms
+        for name in names
+        if _key(segment) not in _key(name) and form.split()[1].casefold() not in name.casefold().split()
+    ]
+    return list(dict.fromkeys([*titled, *(names if service else []), GENERIC_TITLE]))
+
+
+def _title_example(service: Service | None, segment: str, platform: Platform) -> str:
+    return next((title for title in _titles(service, segment) if len(title) <= LIMITS[platform][0]), "")
+
+
+def _bare_segment(title: str, services: list[Service]) -> bool:
+    """Заголовок — одно название повода любой ниши: «К празднику», «Рядом с домом!». Повод, который и есть название
+    услуги из описания («Консультация»), годится."""
+    segments = {_key(segment) for segments in SEGMENTS.values() for segment in segments}
+    return _key(title) in segments - {_key(service.name) for service in services}
+
+
+def _glued_segment(title: str, segment: str, service: Service | None) -> bool:
+    """Повод в именительном падеже сразу после названия услуги без связки и знака: «Педикюр с покрытием новый дизайн».
+    Повод в своей фразе («Создайте новый образ», «Профессиональный уход за бородой») — не склейка."""
+    if service is None or JOINABLE.match(segment):
+        return False
+    title = _normalize(title)
+    return any(
+        re.search(r"(?<!\w)" + re.escape(_normalize(name)) + r"\s+" + re.escape(segment), title)
+        for name in _names(service)
+    )
+
+
 def _fallback(
     description: DescriptionDraft,
     platform: Platform,
@@ -364,8 +443,7 @@ def _fallback(
 ) -> AdText:
     """Шаблон, если модель не справилась: заголовок не повторяет первое объявление группы, текст — не голый адрес,
     а адрес с ценой или отличием, без адреса — цена с отличием; что не влезло в лимит, отбрасывает проверка."""
-    named = [service.name, f"{service.name} {segment}"] if service else []
-    titles = list(dict.fromkeys([*named, segment[:1].upper() + segment[1:], "Услуги и запись"]))
+    titles = _titles(service, segment)
     location = _location(description, service) if segment == NEAR_HOME else []
     price = _price_line(service) if service else []
     advantages = [
@@ -390,6 +468,8 @@ def _fallback(
     ]
     if not safe:
         raise ValueError("No safe ad template available")
+    # Тот же заголовок с другим текстом лучше общего: объявления группы показываются разным людям.
+    safe = [ad for ad in safe if ad.title != GENERIC_TITLE] or safe
     differs = [ad for ad in safe if not _same(ad, other)]
     apart = [ad for ad in differs if not _same_title(ad, other)]
     return next((ad for ad in apart if not _soft(ad, other)), next(iter(apart), next(iter(differs), safe[0])))
@@ -429,6 +509,8 @@ ERRORS = {
     "similar_text": "текст почти повторяет первое объявление группы — напиши другой текст",
     "similar_title": "заголовок почти повторяет первое объявление группы — напиши другой заголовок",
     "text_repeats_title": "текст повторяет заголовок — напиши в тексте то, чего нет в заголовке",
+    "bare_segment": "заголовок — одно название повода — назови услугу и повод одной фразой, как title_example",
+    "glued_segment": "в заголовке повод приклеен к услуге без связи — напиши одной фразой, как title_example",
 }
 
 
@@ -483,6 +565,16 @@ def _explain(code: str, ad: AdText | None, description: DescriptionDraft, platfo
             f"текст «{ad.text}» повторяет заголовок «{ad.title}» — не повторяй в тексте слова заголовка, напиши то, "
             "чего в нём нет: отличие, цену или повод"
         )
+    if code == "bare_segment" and ad is not None:
+        return (
+            f"заголовок «{ad.title}» — одно название повода, без услуги он непонятен: назови услугу и повод одной "
+            "фразой, как title_example"
+        )
+    if code == "glued_segment" and ad is not None:
+        return (
+            f"в заголовке «{ad.title}» повод приклеен к услуге без связи — напиши услугу и повод одной фразой, "
+            "как title_example"
+        )
     if code == "all_caps":
         words = [word for word in re.findall(r"[^\W\d_]+", combined) if len(word) > 1 and word.isupper()]
         return f"слова заглавными: {', '.join(words)} — пиши обычными буквами"
@@ -496,8 +588,14 @@ def _check(
     medical: bool,
     location: list[str],
     other: AdText | None,
+    segment: str,
+    service: Service | None,
 ) -> list[str]:
     codes = validate_ad_text(ad, description, platform=platform, medical=medical)
+    if _bare_segment(ad.title, description.services):
+        codes.append("bare_segment")
+    if _glued_segment(ad.title, segment, service):
+        codes.append("glued_segment")
     if _misses_location(ad, location):
         codes.append("no_location")
     # Обе ошибки сразу: о второй модель иначе узнает на следующей попытке и вернёт исправленную первую.
@@ -552,6 +650,8 @@ async def generate_ad_text(
         "Если нужен мед. дисклеймер, оставь под него место в тексте: его добавит код. "
         "Пиши заходом angle_hint. Сегмент segment_hint отрази в заголовке или тексте: повод сегмента — не факт, "
         "его можно писать словами; адрес, числа и услуги — только из фактов. "
+        "Заголовок понятен без группы: услуга и повод одной фразой, как title_example, — не одно название повода "
+        "и не услуга с приклеенным поводом («Педикюр новый дизайн»). "
         "Текст не повторяет заголовок: в нём то, чего нет в заголовке. "
         "Если передано other_ad, это уже написанное объявление группы: не повторяй ни его заголовок, ни его текст, "
         "даже с другими знаками препинания или заменой слова, — другой заголовок, другой заход и другие слова. "
@@ -576,6 +676,7 @@ async def generate_ad_text(
                         "segment": segment,
                         "angle_hint": ANGLE_HINTS[angle],
                         "segment_hint": segment_hint,
+                        "title_example": _title_example(service, segment, platform),
                         "location": location,
                         "limits": limits,
                         "medical_disclaimer": MEDICAL_DISCLAIMER if medical else "",
@@ -598,7 +699,7 @@ async def generate_ad_text(
             parsed = _parse(response)
             answers.append(parsed)
             ad = _with_disclaimer(parsed, medical)
-            codes = _check(ad, description, platform, medical, location, other)
+            codes = _check(ad, description, platform, medical, location, other, segment, service)
         except (ValueError, TypeError, RecursionError):
             codes = ["invalid_json"]
         if not codes:
@@ -615,7 +716,7 @@ async def generate_ad_text(
     # складываются в объявление, если оно целиком проходит те же проверки.
     for head, body in permutations(answers, 2):
         ad = _with_disclaimer(AdText(head.title, body.text, head.title2), medical)
-        if not _check(ad, description, platform, medical, location, other):
+        if not _check(ad, description, platform, medical, location, other, segment, service):
             return AdVariant(angle, segment, ad, False, attempt, tuple(calls))
     if similar:
         ad, _ = min(

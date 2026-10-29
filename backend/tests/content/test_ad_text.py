@@ -12,9 +12,13 @@ from app.content.ad_text import (
     DIRECT_TITLE_LIMIT,
     MEDICAL_DISCLAIMER,
     SEGMENTS,
+    TITLE_FORMS,
     VK_TEXT_LIMIT,
     VK_TITLE_LIMIT,
     AdText,
+    _glued_segment,
+    _names,
+    _titles,
     generate_ad_text,
     generate_matrix,
     offer_matrix,
@@ -202,7 +206,7 @@ async def test_invalid_responses_fall_back_after_three_calls(description: Descri
     variant = await generate_ad_text(llm, description, platform="vk", angle="акция", segment="к празднику")
     assert variant.used_fallback
     assert variant.attempts == len(llm.calls) == 3
-    assert variant.ad == AdText(description.services[0].name, "Маникюр — 1 500,50 ₽. Работаем ежедневно.")
+    assert variant.ad == AdText("Маникюр к празднику", "Маникюр — 1 500,50 ₽. Работаем ежедневно.")
     assert not errors(variant.ad, description, "vk")
 
 
@@ -422,7 +426,8 @@ async def test_fallback_takes_group_service_and_differs_from_other(salon: Descri
                                     service=salon.services[2], other=first.ad)
     assert first.used_fallback and second.used_fallback
     assert first.ad == AdText("Наращивание ресниц", "Наращивание ресниц — 3 000 ₽. Стерильные инструменты.")
-    assert second.ad == AdText("К празднику", "Наращивание ресниц — 3 000 ₽")
+    # «Наращивание ресниц к празднику» не влезает в 25 знаков VK: тот же заголовок с другим текстом лучше голого повода.
+    assert second.ad == AdText("Наращивание ресниц", "Наращивание ресниц — 3 000 ₽")
     assert all("Гарантия" not in variant.ad.text for variant in (first, second))
     assert not errors(first.ad, salon, "vk") and not errors(second.ad, salon, "vk")
 
@@ -493,16 +498,16 @@ async def test_city_alone_is_not_a_location(sokolniki: DescriptionDraft, text: s
     assert "нет адреса" in json.loads(llm.calls[1][1])["previous_errors"][0]
 
 
-@pytest.mark.parametrize("service_index", [0, 1])
-async def test_near_home_fallback_is_not_bare_address_and_keeps_title_apart(
-    sokolniki: DescriptionDraft, service_index: int
+@pytest.mark.parametrize("service_index,title", [(0, "Снятие покрытия"), (1, "Маникюр рядом с домом")])
+async def test_near_home_fallback_is_not_bare_address_and_titles_service(
+    sokolniki: DescriptionDraft, service_index: int, title: str
 ) -> None:
     service = sokolniki.services[service_index]
     first = AdText(service.name, f"{service.name} в Москве, Сокольники")
     variant = await generate_ad_text(FakeLLM("{}"), sokolniki, platform="vk", angle="результат",
                                      segment="рядом с домом", service=service, other=first)
     assert variant.used_fallback
-    assert variant.ad.title != service.name and variant.ad.title == "Рядом с домом"
+    assert variant.ad.title == title
     assert variant.ad.text.startswith("Москва, Сокольники. ") and variant.ad.text != "Москва, Сокольники"
     assert not errors(variant.ad, sokolniki, "vk")
 
@@ -513,7 +518,7 @@ async def test_fallback_with_long_service_name_adds_advantage_to_price(sokolniki
     variant = await generate_ad_text(FakeLLM("{}"), sokolniki, platform="vk", angle="результат",
                                      segment="к празднику", service=service, other=first)
     assert variant.ad == AdText(
-        "К празднику", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет."
+        "Маникюр к празднику", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет."
     )
     assert len(variant.ad.text) <= VK_TEXT_LIMIT and not errors(variant.ad, sokolniki, "vk")
 
@@ -580,7 +585,9 @@ async def test_fallback_does_not_repeat_price_from_owner_facts(owner: Descriptio
     variant = await generate_ad_text(FakeLLM("{}"), owner, platform="vk", angle="результат", segment="новый дизайн",
                                      service=owner.services[0], other=first)
     assert variant.used_fallback
-    assert variant.ad == AdText("Новый дизайн", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет.")
+    assert variant.ad == AdText(
+        "Маникюр: новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Мастера со стажем от 4 лет."
+    )
     assert not errors(variant.ad, owner, "vk")
 
 
@@ -588,7 +595,7 @@ async def test_near_home_fallback_differs_from_first_beyond_punctuation(owner: D
     first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
     variant = await generate_ad_text(FakeLLM("{}"), owner, platform="vk", angle="результат", segment="рядом с домом",
                                      service=owner.services[1], other=first)
-    assert variant.used_fallback and variant.ad.title == "Рядом с домом"
+    assert variant.used_fallback and variant.ad.title == "Снятие покрытия"
     assert variant.ad.text == "Москва, Сокольники. Мастера со стажем от 4 лет, работаем по записи без очередей."
 
 
@@ -653,13 +660,15 @@ async def test_near_copy_of_first_ad_gets_one_retry_then_least_similar_answer(so
     llm = SequenceLLM(
         [
             response("Гель-лак на праздник", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите ваш стиль!"),
-            response("Новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей"),
+            response("Маникюр: новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей"),
         ]
     )
     variant = await generate_ad_text(llm, sokolniki, platform="vk", angle="результат", segment="новый дизайн",
                                      service=service, other=first)
     assert len(llm.calls) == 2 and not variant.used_fallback
-    assert variant.ad == AdText("Новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей")
+    assert variant.ad == AdText(
+        "Маникюр: новый образ", "Маникюр с покрытием гель-лаком — 2 200 ₽. Обновите образ ногтей"
+    )
     previous_errors = json.loads(llm.calls[1][1])["previous_errors"]
     assert "почти повторяет текст other_ad" in previous_errors[0]
     assert "почти повторяет заголовок other_ad" in previous_errors[1]
@@ -688,3 +697,125 @@ async def test_text_repeating_title_is_rewritten(sokolniki: DescriptionDraft) ->
         "текст «Маникюр с покрытием гель-лаком — 2 200 ₽» повторяет заголовок «Маникюр с покрытием гель-лаком к "
         "празднику» — не повторяй в тексте слова заголовка, напиши то, чего в нём нет: отличие, цену или повод"
     ]
+
+
+@pytest.mark.parametrize(
+    "title", ["К празднику", "рядом с домом!", "Новый дизайн", "Новый образ", "Консультация", "Первое занятие"]
+)
+async def test_bare_occasion_title_is_rewritten_with_service(salon: DescriptionDraft, title: str) -> None:
+    """Как на проде: заголовок VK — одно название повода, без группы непонятно, о чём объявление."""
+    llm = SequenceLLM(
+        [response(title, "Стерильные инструменты"), response("Педикюр к празднику", "Стерильные инструменты")]
+    )
+    variant = await generate_ad_text(llm, salon, platform="vk", angle="результат", segment="к празднику",
+                                     service=salon.services[1])
+    assert not variant.used_fallback and variant.ad.title == "Педикюр к празднику"
+    second = json.loads(llm.calls[1][1])
+    assert second["previous_errors"] == [
+        f"заголовок «{title}» — одно название повода, без услуги он непонятен: назови услугу и повод одной фразой, "
+        "как title_example"
+    ]
+    assert json.loads(llm.calls[0][1])["title_example"] == "Педикюр к празднику"
+
+
+async def test_occasion_glued_to_service_is_rewritten(salon: DescriptionDraft) -> None:
+    llm = SequenceLLM(
+        [
+            response("Педикюр новый дизайн", "Стерильные инструменты"),
+            response("Педикюр: новый образ", "Стерильные инструменты"),
+        ]
+    )
+    variant = await generate_ad_text(llm, salon, platform="direct", angle="результат", segment="новый дизайн",
+                                     service=salon.services[1])
+    assert variant.ad.title == "Педикюр: новый образ" and variant.attempts == 2
+    assert "повод приклеен к услуге" in json.loads(llm.calls[1][1])["previous_errors"][0]
+    assert json.loads(llm.calls[0][1])["title_example"] == "Педикюр: новый образ"
+
+
+@pytest.mark.parametrize(
+    "platform,name,segment,titles",
+    [
+        ("vk", "Маникюр с покрытием гель-лаком", "к празднику", ("Маникюр к празднику", "Маникюр к торжеству")),
+        ("vk", "Маникюр без покрытия", "рядом с домом", ("Маникюр рядом с домом", "Маникюр недалеко от дома")),
+        ("vk", "Педикюр с покрытием", "новый дизайн", ("Педикюр: новый образ", "Педикюр для нового образа")),
+        (
+            "direct",
+            "Наращивание ногтей",
+            "к празднику",
+            ("Наращивание ногтей к празднику", "Наращивание ногтей: праздничный образ"),
+        ),
+        (
+            "direct",
+            "Педикюр с покрытием",
+            "новый дизайн",
+            ("Педикюр с покрытием: новый образ", "Педикюр: новый образ"),
+        ),
+    ],
+)
+async def test_fallback_titles_name_service_and_occasion(
+    platform: str, name: str, segment: str, titles: tuple[str, str]
+) -> None:
+    """Группы плана с прода: шаблон давал «К празднику», «Рядом с домом», «Новый дизайн» и «Услуги и запись»."""
+    draft = DescriptionDraft(
+        services=[Service(name, 200000, name, "owner")],
+        address=Fact("Москва, Сокольники", "", "owner"),
+        advantages=[Fact("Мастера со стажем от 4 лет", "", "owner"), Fact("Стерильные инструменты", "", "owner")],
+    )
+    first = await generate_ad_text(FakeLLM("{}"), draft, platform=platform, angle="цена", segment=segment)
+    second = await generate_ad_text(FakeLLM("{}"), draft, platform=platform, angle="результат", segment=segment,
+                                    other=first.ad)
+    assert (first.ad.title, second.ad.title) == titles
+    assert not errors(first.ad, draft, platform) and not errors(second.ad, draft, platform)
+
+
+@pytest.mark.parametrize(
+    "title,segment,name",
+    [
+        ("Найдите время для себя", "время для себя", "Массаж"),
+        ("Создайте новый образ", "новый образ", "Стрижка"),
+        ("Запишитесь на первое занятие", "первое занятие", "Йога"),
+        ("Профессиональный уход за бородой", "уход за бородой", "Стрижка"),
+        ("Бесплатная консультация", "консультация", "Приём терапевта"),
+        ("Закажите новый дизайн ногтей", "новый дизайн", "Маникюр"),
+    ],
+)
+def test_occasion_in_own_phrase_is_not_glued(title: str, segment: str, name: str) -> None:
+    """Нормальные заголовки модели, которые первая версия проверки считала склейкой."""
+    assert not _glued_segment(title, segment, Service(name, None, name, "owner"))
+
+
+@pytest.mark.parametrize(
+    "title,segment,name",
+    [
+        ("Педикюр с покрытием новый дизайн", "новый дизайн", "Педикюр с покрытием"),
+        ("Педикюр новый дизайн", "новый дизайн", "Педикюр с покрытием"),
+        ("Стрижка уход за бородой", "уход за бородой", "Стрижка"),
+    ],
+)
+def test_occasion_right_after_service_is_glued(title: str, segment: str, name: str) -> None:
+    assert _glued_segment(title, segment, Service(name, None, name, "owner"))
+
+
+@pytest.mark.parametrize(
+    "name,names",
+    [
+        ("Окрашивание волос в один тон", ["Окрашивание волос в один тон", "Окрашивание волос"]),
+        ("Массаж спины 60 минут", ["Массаж спины 60 минут"]),
+        ("Абонемент на 8 занятий", ["Абонемент на 8 занятий", "Абонемент"]),
+        ("Стрижка + борода", ["Стрижка + борода"]),
+    ],
+)
+def test_service_name_is_cut_only_before_preposition(name: str, names: list[str]) -> None:
+    assert _names(Service(name, None, name, "owner")) == names
+
+
+@pytest.mark.parametrize("segment", sorted({segment for segments in SEGMENTS.values() for segment in segments}))
+def test_every_segment_has_checked_title_forms(segment: str) -> None:
+    """У каждого повода всех ниш — проверенные формы или явно пустые: тогда заголовок — услуга без повода."""
+    service = Service("Стрижка", None, "Стрижка", "owner")
+    assert segment in TITLE_FORMS
+    titles = _titles(service, segment)
+    if TITLE_FORMS[segment]:
+        assert titles[0] == TITLE_FORMS[segment][0].format("Стрижка")
+    else:
+        assert titles == ["Стрижка", "Услуги и запись"]

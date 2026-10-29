@@ -125,10 +125,6 @@ class AdapterRegistry:
         return MetricaClient(info.token, client=self.http)
 
 
-# Повод сегмента для заголовка демо-объявления: «новый дизайн» без выдуманной услуги дизайна.
-DEMO_OCCASIONS = {"новый дизайн": "новый образ"}
-
-
 class DemoLLM:
     """Ответы для демо без ключей YandexGPT: хватает на описание, идеи картинок и тексты по шаблону."""
 
@@ -140,13 +136,12 @@ class DemoLLM:
         if "Напиши объявление" in system:
             data = json.loads(user)
             facts = data.get("facts", [])
-            # Два объявления группы — разные заходы: через цену с названием услуги и через повод сегмента.
-            occasion = DEMO_OCCASIONS.get(data.get("segment", ""), data.get("segment", "")).capitalize()
+            # Два объявления группы — разные заходы: через цену с названием услуги и через услугу с поводом.
             if data.get("angle", "цена") == "цена":
                 title = next(iter(facts), "Услуги и запись")
                 text = next((fact for fact in facts if "₽" in fact), "Подробности и запись.")
             else:
-                title = occasion or "Услуги и запись"
+                title = data.get("title_example") or "Услуги и запись"
                 text = "Выберите время для записи."
             location = data.get("location")
             text = f"{location[0]}. {text}" if location else text
