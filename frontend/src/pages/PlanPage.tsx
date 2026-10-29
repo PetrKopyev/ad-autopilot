@@ -64,10 +64,19 @@ function ForecastPanel({ forecast, slow }: { forecast: Forecast; slow?: boolean 
   </PanelCard>;
 }
 
+// Среднее в день — бюджет на дни месяца, а лимиты групп автопилот ставит с запасом: строка говорит обе цифры и почему они разные.
 function BudgetRows({ plan }: { plan: Plan }) {
-  return <>{(['direct', 'vk'] as const).map((platform) => { const month = platformMonth(plan, platform); return month > 0 && <p key={platform} className="plan-budget__row">
-    {plan.daily_kop[platform] === undefined ? copy.plan.platformMonth(copy.setup.accounts[platform], formatMoney(month)) : copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(month), formatMoney(dailyAverage(month)))}
-  </p>; })}</>;
+  return <>{(['direct', 'vk'] as const).map((platform) => {
+    const month = platformMonth(plan, platform);
+    if (month <= 0) return null;
+    const average = dailyAverage(month);
+    const limits = plan.groups.filter((group) => group.platform === platform).reduce((sum, group) => sum + group.daily_limit_kop, 0);
+    return <p key={platform} className="plan-budget__row">
+      {plan.daily_kop[platform] === undefined ? copy.plan.platformMonth(copy.setup.accounts[platform], formatMoney(month))
+        : <>{copy.plan.platformBudget(copy.setup.accounts[platform], formatMoney(month), formatMoney(average))}
+          {limits > 0 && limits < average && <> {copy.plan.platformLimits(formatMoney(limits))}</>}</>}
+    </p>;
+  })}</>;
 }
 
 export function PlanPage() {

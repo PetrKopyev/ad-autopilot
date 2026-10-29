@@ -9,6 +9,7 @@ import { answerClientQuestion, getClientQuestions, parseClients, type ClientQues
 import { getPeriod, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
+import { useDemo } from '../api/useDemo';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
 import type { Ad, AdStatus, AdsResponse, Daily, Experiment, Summary } from '../api/types';
 import { displayClock, displayDate, displayDateTime, justNow } from '../format';
@@ -218,13 +219,15 @@ function Journal({ items, now, changed }: { items: HistoryEntry[]; now: number |
 
 function Sources({ summary }: { summary: Summary }) {
   const platforms = summary.sources.map((source) => source.platform);
+  const demo = useDemo();
   return <footer className="home-sources" aria-label={copy.home.sourcesTitle}>
     <p>{summary.sources.length
       ? summary.sources.map((source) => copy.statistics.source(platformName(source.platform), displayDateTime(source.fetched_at))).join(' · ')
       : copy.screens.noSources} · {copy.statistics.provisional}</p>
     <div className="home-sources__links">
-      {platforms.includes('direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}</a>}
-      {platforms.includes('vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}</a>}
+      {demo && platforms.length > 0 && <p>{copy.screens.compareDemo}</p>}
+      {!demo && platforms.includes('direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}</a>}
+      {!demo && platforms.includes('vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}</a>}
     </div>
   </footer>;
 }
@@ -283,7 +286,6 @@ export function HomePage() {
   // Строка о бюджете дублирует строку состояния и плитку бюджета; от владельца она нужна, только когда реклама стоит до его решения.
   const waitsOwner = status?.status === 'draft' || (status?.status === 'budget_stop' && !status.auto_continue);
   const attention = status?.needs_attention.filter((item) => !(question && item.destination === 'clients') && (item.id !== 'budget' || waitsOwner)) ?? [];
-  const canSwitch = (status?.status === 'running' || status?.status === 'paused') && !stopping && !resuming;
   function reloadAll() { board.reload(); ads.reload(); autopilot.reload(); history.reload(); experiments.reload(); questions.reload(); notifications.reload(); }
   function askStop() { setStopError(undefined); setAsking(true); }
   function resume() {
@@ -302,10 +304,10 @@ export function HomePage() {
   return <div className="page-stack home">
     <PageHeader title={copy.home.title} description={copy.screens.intro} actions={prelaunch ? <PrelaunchLink hasPlan={prelaunch.hasPlan} />
       : (status || autopilot.error) && <>
-      {status && <SegmentedControl label={copy.autopilotMode.label} value={status.status === 'running' ? 'working' : 'paused'} disabled={!canSwitch}
-        options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]}
-        onChange={(mode) => { if (mode === 'paused') askStop(); else resume(); }} />}
-      <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped || status?.status === 'paused'}>{copy.home.stopAll}</Button>
+      {/* Одно действие — одна кнопка: «Остановить» и «Пауза» рядом делали одно и то же. */}
+      {status?.status === 'paused'
+        ? <Button icon="play" onClick={resume} disabled={resuming}>{resuming ? copy.home.resumingAll : copy.home.resumeAll}</Button>
+        : <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped}>{copy.home.stopAll}</Button>}
     </>} />
     <DemoNotice />
     <DemoPanel changed={reloadAll} />

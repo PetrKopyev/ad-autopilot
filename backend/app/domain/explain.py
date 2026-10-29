@@ -38,7 +38,11 @@ TEMPLATES = {
     "EXPERIMENT_EXTEND": (
         "Данных пока мало для уверенного выбора. Один раз увеличим объём проверки на {extension_percent}%."
     ),
-    "EXPERIMENT_CLICKBAIT": "Нажимают чаще, но в обращения эти нажатия переходят реже. Оставили прежнее объявление.",
+    "EXPERIMENT_CLICKBAIT": (
+        "На объявление {clicker} нажимают чаще: {rate}% показов против {other_rate}% у {other}. Но в обращения эти "
+        "нажатия переходят реже: {conversion}% ({share}) против {other_conversion}% ({other_share}). "
+        "Оставили прежнее объявление А, Б остановили."
+    ),
     "EXPERIMENT_RUNNING": "Проверка идёт. Ждём достаточно показов и уточнения обращений за последние дни.",
     "EXPERIMENT_TOO_LONG": (
         "Для проверки нужно примерно {days}. За отведённый срок данных не хватит, её не запускаем."
@@ -117,12 +121,11 @@ def period(start: date, end: date) -> str:
 
 
 def rubles(kopecks: int) -> str:
-    """Как в интерфейсе: целые рубли, а суммы меньше 100 ₽ — с копейками («20 149», «1,57»)."""
+    """Как в интерфейсе: рубли, копейки — только если они есть («20 148,80», «100»). Не округляем: бюджет 60 000,75
+    не должен стать 60 001."""
     nonnegative_int(kopecks, "kopecks")
-    if kopecks >= 10_000:
-        return f"{(kopecks + 50) // 100:,}".replace(",", " ")
     whole, fraction = divmod(kopecks, 100)
-    return str(whole) + (f",{fraction:02}" if fraction else "")
+    return f"{whole:,}".replace(",", " ") + (f",{fraction:02}" if fraction else "")
 
 
 def plural(number: int | Decimal, forms: tuple[str, str, str]) -> str:
@@ -161,6 +164,11 @@ def undone(kind: str, entity_type: str, params: Mapping[str, object]) -> str:
         if entity_type != "ad":
             return "остановку рекламы"
         return f"остановку объявления «{params['ad']}»" if "ad" in params else "остановку объявления"
+    if kind == "launch" and "hypothesis" in params:
+        # Старт проверки пишется запуском объявления-варианта; владелец отменял сравнение, а не «запуск объявления».
+        return "сравнение вариантов"
+    if kind == "launch" and "campaign" in params:
+        return f"запуск рекламы «{params['campaign']}»"
     if kind == "budget" and "group" in params:
         return f"повышение дневного лимита группы «{params['group']}»"
     return UNDONE.get(kind, "изменение")
@@ -199,6 +207,8 @@ def explain_experiment(
     if result.verdict == Verdict.EXTEND:
         percent = format(((settings.test_extension_factor - 1) * 100).normalize(), "f").replace(".", ",")
         return explain(result.reason_code, extension_percent=percent)
+    if result.verdict == Verdict.CLICKBAIT:
+        return explain_clickbait(control, variant)
     if result.verdict not in (Verdict.CONTROL, Verdict.VARIANT):
         return explain(result.reason_code)
     if result.p_value is None:
@@ -218,6 +228,29 @@ def explain_experiment(
         rate=metrics.ctr * 100,
         other_rate=other.ctr * 100,
         confidence=confidence,
+    )
+
+
+def explain_clickbait(control: Metrics, variant: Metrics) -> str:
+    """Чаще нажимают, но реже обращаются — с цифрами обеих сторон, как в остальных выводах сравнения."""
+    (clicker, metrics), (other, rest) = sorted((("А", control), ("Б", variant)), key=lambda arm: -arm[1].ctr)
+
+    def conversion(arm: Metrics) -> Decimal:
+        return Decimal(arm.leads) / arm.clicks * 100 if arm.clicks else Decimal(0)
+
+    def share(arm: Metrics) -> str:
+        return f"{plural(arm.leads, PLURALS['leads'])} из {plural(arm.clicks, ('нажатия', 'нажатий', 'нажатий'))}"
+
+    return explain(
+        "EXPERIMENT_CLICKBAIT",
+        clicker=clicker,
+        other=other,
+        rate=metrics.ctr * 100,
+        other_rate=rest.ctr * 100,
+        conversion=conversion(metrics),
+        other_conversion=conversion(rest),
+        share=share(metrics),
+        other_share=share(rest),
     )
 
 

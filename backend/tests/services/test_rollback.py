@@ -41,6 +41,7 @@ def repository():
     repository.business.return_value = Business(id=1, settings={})
     repository.experiments.return_value = []
     repository.local_entities.return_value = {}
+    repository.campaign_names.return_value = {}
     repository.sync_local.side_effect = lambda change, operations: ChangesRepository.sync_local(
         repository, change, operations
     )
@@ -134,7 +135,10 @@ async def test_any_system_pause_is_protected_while_business_stopped(repository, 
     business.settings = {"_worker": {"kill_switch": stopped == "kill_switch"}}
     with pytest.raises(ChangeConflict, match="защита бюджета"):
         await RollbackService(repository, dry_run=False).revert(
-            original.id, business_id=1, adapter=adapter, confirm=True,
+            original.id,
+            business_id=1,
+            adapter=adapter,
+            confirm=True,
         )
 
 
@@ -588,6 +592,22 @@ async def test_history_does_not_offer_to_turn_on_campaign_of_replaced_plan(clien
     assert response.status_code == 409 and response.json()["detail"] == REPLACED
     repository.replaced_entities.return_value = {("vk", refs.campaign_id)}
     assert http.get("/api/history").json()["items"][0]["can_revert"] is True
+
+
+async def test_history_names_campaign_of_launch_and_stop(client, repository, tree):
+    """Запуск и остановка пишутся по записи на кампанию: в журнале у каждой своё название, а не N одинаковых строк."""
+    http, _, _ = client
+    adapter, refs = tree
+    stop = Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_owner")
+    campaign = await applied(
+        repository, adapter, refs, operations=[stop], entity_type="campaign", entity_id=refs.campaign_id
+    )
+    ad = await applied(repository, adapter, refs)
+    repository.history.return_value = ([campaign, ad], 2)
+    repository.campaign_names.return_value = {("fake", refs.campaign_id): "Маникюр"}
+    items = http.get("/api/history").json()["items"]
+    assert [item["campaign"] for item in items] == ["Маникюр", None]
+    repository.campaign_names.assert_called_once_with(1)
 
 
 async def test_history_lets_stop_launch_of_replaced_plan_campaign(client, repository, tree):

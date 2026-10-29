@@ -517,6 +517,26 @@ async def test_regenerate_adds_two_images_and_spends_quota(world: World) -> None
     assert world.repository.ai_spent(world.business.id) == 10 * ART_COST_KOP
 
 
+async def test_demo_regenerate_counts_down_and_labels_differ(world: World, monkeypatch) -> None:
+    """В демо ИИ бесплатный: счётчик «осталось» всё равно убывает, а новые картинки подписаны разными сценами."""
+    from app.content.art import ArtBudget
+    from app.services.registry import DemoArt, DemoLLM
+
+    await build(world)
+    # Как в демо: траты на ИИ не пишутся и всегда ноль.
+    monkeypatch.setattr(plan_module, "ai_budget", lambda *args: ArtBudget(world.plans.limits.onboarding_kop, 0))
+    world.plans.llm = DemoLLM()
+    world.plans.art_factory = lambda budget, record: DemoArt(budget)
+    plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    group = plan["groups"][0]
+    first = await world.plans.regenerate_images(world.business.id, group["id"], NOW, TODAY)
+    second = await world.plans.regenerate_images(world.business.id, group["id"], NOW, TODAY)
+    assert first["generations_remaining"] == plan["generations_remaining"] - 1
+    assert second["generations_remaining"] == plan["generations_remaining"] - 2
+    labels = [asset["label"] for asset in second["groups"][0]["assets"][len(group["assets"]) :]]
+    assert len(labels) == 4 and len(set(labels)) == 4 and not any(":" in label for label in labels)
+
+
 async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> None:
     world = make_world(tmp_path, limits=AiLimits(onboarding_kop=8 * ART_COST_KOP + 100, weekly_kop=2500))
     plan = await build(world)

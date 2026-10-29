@@ -64,6 +64,18 @@ def client_cac(answers: Sequence[ClientAnswer], today: date, settings: DomainSet
     return sum(answer.spend for answer in window) // clients if clients else None
 
 
+def market_cpl(ads: Sequence[AdSnapshot], today: date, settings: DomainSettings = DEFAULT_SETTINGS) -> int | None:
+    """Цена обращения, с которой объявления сравниваются между собой: медиана по объявлениям с обращениями."""
+    totals = [total_metrics(settled_days(ad.days, today, settings)) for ad in ads]
+    prices = [Decimal(item.spend) / item.leads for item in totals if item.leads]
+    if len(prices) >= settings.min_reference_units:
+        return int(median(prices))
+    # Одна-две услуги: медиану брать не из чего, опорой служит средняя цена обращения всей рекламы,
+    # как только обращений столько же, сколько нужно объявлений для медианы.
+    leads = sum(item.leads for item in totals)
+    return sum(item.spend for item in totals) // leads if leads >= settings.min_reference_units else None
+
+
 def ref_cpl(
     avg_check: int | None,
     ads: Sequence[AdSnapshot],
@@ -71,18 +83,16 @@ def ref_cpl(
     answers: Sequence[ClientAnswer] = (),
     settings: DomainSettings = DEFAULT_SETTINGS,
 ) -> int | None:
-    if avg_check is not None:
-        nonnegative_int(avg_check, "avg_check")
-        known = [answer for answer in answers if answer.week_end <= today]
-        return int(avg_check * client_conversion(known, settings) * settings.check_ad_share)
-    totals = [total_metrics(settled_days(ad.days, today, settings)) for ad in ads]
-    prices = [Decimal(item.spend) / item.leads for item in totals if item.leads]
-    if len(prices) >= settings.min_reference_units:
-        return int(median(prices))
-    # Одна-две услуги без среднего чека: медиану брать не из чего, опорой служит средняя цена обращения всей рекламы,
-    # как только обращений столько же, сколько нужно объявлений для медианы.
-    leads = sum(item.leads for item in totals)
-    return sum(item.spend for item in totals) // leads if leads >= settings.min_reference_units else None
+    """Средний чек задаёт потолок — цену обращения, которая окупается. Если реклама обходится дешевле, объявления
+    сравниваются между собой, как без чека: опора — меньшая из двух цен. Иначе при щедром чеке все объявления
+    «дёшевы», и автопилот не отключает худшие и не переносит бюджет к лучшим."""
+    market = market_cpl(ads, today, settings)
+    if avg_check is None:
+        return market
+    nonnegative_int(avg_check, "avg_check")
+    known = [answer for answer in answers if answer.week_end <= today]
+    payback = int(avg_check * client_conversion(known, settings) * settings.check_ad_share)
+    return payback if market is None else min(payback, market)
 
 
 def first_decision_days(

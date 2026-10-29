@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { formatMoney } from '../components/Money';
 import { getForecast, type Forecast } from '../api/forecast';
 import { getPlan, launchPlan, regenerateImages, saveAssets, uploadPhoto, type Plan } from '../api/plan';
 import { getBusiness, type BusinessSettings } from '../api/settings';
@@ -238,7 +239,7 @@ it('бюджет показан суммой на площадку, а выкл�
   vi.mocked(getPlan).mockResolvedValue({ ...plan(null), off: [{ platform: 'vk', from_kop: 4850000, min_daily_kop: 30000 }] });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   // В день — бюджет площадки на дни месяца (30 000 ₽ / 31), а не дневной лимит кампании из daily_kop.
-  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, в среднем 968 ₽ в день.'))).toBeTruthy();
+  expect(await screen.findByText(plain('Яндекс Директ — 30 000 ₽ в месяц, в среднем 967 ₽ в день.'))).toBeTruthy();
   expect(screen.getByText(plain('Площадка ВКонтакте выключена из-за бюджета: ей нужно минимум 300 ₽ в день, это бюджет от 48 500 ₽ в месяц. '
     + 'Пока весь бюджет идёт в Яндекс Директ. Поднимите бюджет — и площадка ВКонтакте появится в новом плане до запуска.'))).toBeTruthy();
   expect(screen.queryByText(/Дневной расход/)).toBeNull();
@@ -406,4 +407,14 @@ it('пять услуг — строки об обрезке нет', async () =
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   await screen.findByText('Услуга 1', { selector: 'h2' });
   expect(screen.queryByText(/В Директ вошли первые/)).toBeNull();
+});
+
+it('лимиты групп меньше среднего в день — план говорит обе цифры и почему лимиты меньше', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-28T12:00:00+03:00'));
+  const base = plan(null);
+  vi.mocked(getPlan).mockResolvedValue({ ...base, groups: base.groups.map((group) => ({ ...group, daily_limit_kop: 70_000 })) });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  const limits = base.groups.filter((group) => group.platform === 'direct').length * 70_000;
+  expect(await screen.findByText(plain(`Яндекс Директ — 30 000 ₽ в месяц, в среднем 967 ₽ в день. ${copy.plan.platformLimits(formatMoney(limits))}`.replace(/\u00a0/g, ' ')))).toBeTruthy();
 });

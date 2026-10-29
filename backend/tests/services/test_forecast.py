@@ -27,6 +27,7 @@ from app.services.forecast import (
     measured,
     numbers,
     percent,
+    rub,
     template,
 )
 from app.services.registry import AccountInfo
@@ -452,11 +453,14 @@ async def test_demo_forecast_without_yandex(http: httpx.AsyncClient, direct: Dir
 def test_demo_forecast_uses_simulator_numbers() -> None:
     groups = [{"phrases": ["маникюр самара"], "ads": [{}, {}]}, {"phrases": ["укладки самара"], "ads": [{}]}]
 
-    rows, conversion = demo_forecast(groups)
+    rows, conversion = demo_forecast(groups, Decimal(20_000))
 
     strong, weak = DEMO_TRUTHS[:2]
-    # 600 показов в час × 24 × 30 × кликабельность на каждое объявление группы.
-    assert [row.clicks for row in rows] == [round(600 * 720 * strong.ctr) * 2, round(600 * 720 * weak.ctr)]
+    # Каждой группе — половина бюджета по её цене клика, но не больше показов × кликабельность за 30 дней.
+    assert [row.clicks for row in rows] == [
+        min(round(3000 * 720 * strong.ctr) * 2, int(Decimal(10_000) / Decimal("0.25"))),
+        min(round(3000 * 720 * weak.ctr), int(Decimal(10_000) / Decimal("0.62"))),
+    ]
     assert [(row.min_cpc, row.max_cpc) for row in rows] == [(Decimal("0.25"), Decimal("0.25"))] + [
         (Decimal("0.62"), Decimal("0.62"))
     ]
@@ -471,14 +475,16 @@ async def test_demo_forecast_matches_simulator(http: httpx.AsyncClient, direct: 
 
     result = await case.service.forecast(case.business, NOW, TODAY)
 
-    rows, conversion = demo_forecast(case.repository.latest_plan(case.business.id).payload["groups"])
+    groups = case.repository.latest_plan(case.business.id).payload["groups"]
+    direct = [group for group in groups if group["platform"] == "direct" and group["phrases"]]
+    rows, conversion = demo_forecast(direct, Decimal(result["budget_rub"]))
     clicks = direct_clicks(rows, Decimal(result["budget_rub"]))
     assert (result["clicks_min"], result["clicks_max"]) == (clicks.min, clicks.max)
     assert result["cpc_rub"] == result["cpc_rub_max"] == float(clicks.cpc_min.quantize(Decimal("0.01")))
     assert (result["leads_min"], result["leads_max"]) == leads(clicks, conversion)
     assert result["conversion"]["min"] == result["conversion"]["max"] == float(conversion.min)
-    assert result["explanation"].startswith("Демо-кабинет за месяц наберёт до 75\xa0168 кликов.")
-    assert "цене клика около 0,28 ₽ выйдет примерно 75\xa0168 кликов" in result["explanation"]
+    assert result["explanation"].startswith("Бюджет делится между группами поровну")
+    assert f"наберёт примерно {rub(clicks.max)} кликов" in result["explanation"]
     assert f"Заявку оставляют {percent(conversion.min)} из 100" in result["explanation"]
 
 

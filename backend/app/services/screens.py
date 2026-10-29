@@ -170,21 +170,27 @@ class ScreensService:
         await stop_all(business, worker=self.worker, actor="owner")
         return self.status(business)
 
-    async def check_remaining(self, business: Business) -> None:
-        from app.config import get_domain_settings
-
+    async def month_spent(self, business: Business) -> int:
+        """Расход месяца, как в rebalance_budget: по каждой площадке большее из отчёта площадки и учёта бюджета.
+        Кабинет отключённой площадки спросить нечем: её расход — из учёта бюджета."""
         closed = closed_platforms(self.worker, business)
         spent, _ = await read_spend(
             self.worker,
             business,
             campaigns=[item for item in self.worker.campaigns(business) if item.platform not in closed],
         )
-        budget = self.budget(business)
+        for item in self.budget(business)["platforms"]:
+            spent[item["platform"]] = max(spent.get(item["platform"], 0), item["spent_kop"])
+        return sum(spent.values())
+
+    async def check_remaining(self, business: Business) -> None:
+        from app.config import get_domain_settings
+
         margin = stop_margin(
             sum(campaign.daily_limit_kop for campaign in self.worker.current_campaigns(business)),
             get_domain_settings(),
         )
-        if max(sum(spent.values()), budget["spent_kop"]) >= max(0, business.month_budget_kop - margin):
+        if await self.month_spent(business) >= max(0, business.month_budget_kop - margin):
             raise ChangeConflict(
                 "Остатка бюджета не хватает с учётом защитного запаса. "
                 "Рекламу можно возобновить с 1 числа или увеличить бюджет."
@@ -503,8 +509,7 @@ class ScreensService:
             if type(amount) is not int or not 0 < amount <= MAX_BUDGET_KOP:
                 raise OnboardingError(f"Бюджет должен быть больше нуля и не превышать {rubles(MAX_BUDGET_KOP)} ₽.")
             check_budget(amount)
-            spent, _ = await read_spend(self.worker, business)
-            if amount <= max(sum(spent.values()), self.budget(business)["spent_kop"]):
+            if amount <= await self.month_spent(business):
                 raise ChangeConflict("Этот бюджет уже потрачен. Укажите сумму больше расхода за месяц.")
             old = business.month_budget_kop
             effective = today(self.worker.clock) + timedelta(days=1)

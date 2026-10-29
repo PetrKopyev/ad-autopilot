@@ -16,7 +16,7 @@ export { Money, formatMoney } from './Money';
 export { PageHeader } from './PageHeader';
 export { Pill, PillSteps } from './Pill';
 export { PlatformBadge } from './PlatformBadge';
-export { RublesInput } from './RublesInput';
+export { RublesInput, rublesValue } from './RublesInput';
 export { SegmentedControl } from './SegmentedControl';
 export type { SegmentedOption } from './SegmentedControl';
 export { Sparkline } from './Sparkline';

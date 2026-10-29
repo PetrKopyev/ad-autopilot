@@ -210,7 +210,8 @@ async def resume_reconnected(worker: Worker, business: Business, platform: str) 
             continue
         states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
         state = states.get(campaign.external_id)
-        if state is None or state.status not in {"paused_owner", "paused_auto"}:
+        # Отключение кабинета ставит paused_owner; paused_auto — остановка площадкой или сервисом, её не трогаем.
+        if state is None or state.status != "paused_owner":
             continue
         await worker.apply(
             business,

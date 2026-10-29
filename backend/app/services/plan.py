@@ -829,12 +829,13 @@ class PlanService:
             business = self.locked_business(business_id)
             plan, group = self.draft_group(business_id, group_id)
             budget = ai_budget(self.repository, business, self.limits, today)
-            if self.generations_remaining(budget) == 0:
+            if self.generations_remaining(budget, plan) == 0:
                 raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
             pair = (group.get("service", ""), group["segment"])
             created = await self.generate_images(business, budget, [pair] * REGENERATE_COUNT)
             if not created:
                 raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")
+            plan.payload = plan.payload | {"regenerated": plan.payload.get("regenerated", 0) + len(created)}
             self.attach(plan, group_key(group), [asset for _, asset in created])
         return self.view(business, plan, today)
 
@@ -885,8 +886,11 @@ class PlanService:
     def build_videos(self, business_id: int, built: Built | None = None) -> bool:
         return build_videos(self.repository, self.media_root, business_id, self.font_path, built)
 
-    def generations_remaining(self, budget: ArtBudget) -> int:
-        return max(0, (budget.limit_kop - budget.spent_kop) // (REGENERATE_COUNT * ART_COST_KOP))
+    def generations_remaining(self, budget: ArtBudget, plan: Plan) -> int:
+        """Сколько раз ещё можно попросить картинки. По тратам на ИИ; в демо ИИ бесплатный и траты не растут —
+        поэтому считаем и сами картинки, попрошенные к этому плану: счётчик под кнопкой убывает и там."""
+        left = budget.limit_kop - max(budget.spent_kop, plan.payload.get("regenerated", 0) * ART_COST_KOP)
+        return max(0, left // (REGENERATE_COUNT * ART_COST_KOP))
 
     def view(self, business: Business, plan: Plan, today: date) -> dict:
         payload = plan.payload
@@ -945,7 +949,7 @@ class PlanService:
             else [],
             "direct_services_total": len(direct_services(description_draft(business).services, business.city, None)),
             "generations_remaining": self.generations_remaining(
-                ai_budget(self.repository, business, self.limits, today)
+                ai_budget(self.repository, business, self.limits, today), plan
             ),
             "medical_level": business.medical_level,
             "marking_confirmed": marking is not None

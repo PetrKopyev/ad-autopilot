@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
@@ -94,7 +94,7 @@ it('средний чек — только цифры, как бюджет; не
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
   const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('section') as HTMLElement);
   const average = block.getByLabelText(copy.settingsScreen.averageLabel) as HTMLInputElement;
-  expect(average.value).toBe('1 501');
+  expect(average.value).toBe('1 500,50');
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   await block.findByText(copy.settingsScreen.saved);
   expect(saveBusinessSettings).toHaveBeenLastCalledWith(true, 150050);
@@ -119,20 +119,20 @@ it('услуги и цены в описании — одно поле, отде
   expect([sent.services.value, sent.prices.value]).toEqual(['Маникюр — 1 500 ₽\nПедикюр', '']);
 });
 
-it('«Пауза» в настройках — та же остановка всей рекламы, что на главной: сначала подтверждение', async () => {
+it('остановка в настройках — та же остановка всей рекламы, что на главной: одна кнопка, сначала подтверждение', async () => {
   vi.mocked(pauseAutopilot).mockReset().mockResolvedValue();
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
-  const mode = within(await screen.findByRole('group', { name: copy.autopilotMode.label }));
-  expect(mode.getByRole('button', { name: copy.autopilotMode.working }).getAttribute('aria-pressed')).toBe('true');
-  fireEvent.click(mode.getByRole('button', { name: copy.autopilotMode.working }));
-  fireEvent.click(mode.getByRole('button', { name: copy.autopilotMode.paused }));
+  const stop = await screen.findByRole('button', { name: copy.home.stopAll });
+  expect(screen.getByText(copy.settingsScreen.autopilotRunning)).toBeTruthy();
+  expect(screen.queryByRole('group', { name: copy.autopilotMode.label })).toBeNull();
+  fireEvent.click(stop);
   const dialog = within(screen.getByRole('dialog', { name: copy.screens.stopTitle }));
   expect(dialog.getByText(copy.screens.stopDescription)).toBeTruthy();
   fireEvent.click(dialog.getByRole('button', { name: copy.screens.cancel }));
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(pauseAutopilot).not.toHaveBeenCalled();
-  fireEvent.click(mode.getByRole('button', { name: copy.autopilotMode.paused }));
+  fireEvent.click(stop);
   fireEvent.click(screen.getByRole('button', { name: copy.screens.confirmStop }));
   await vi.waitFor(() => expect(pauseAutopilot).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -184,7 +184,8 @@ it('«Отключить» кабинет — только после подтв
 
 it('в демо подтверждение отключения предупреждает, что подключить заново нельзя; ВКонтакте — кнопкой с понятной ошибкой', async () => {
   mockAccounts = [direct];
-  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false });
+  // Демо спрашивают и описание, и кабинеты.
+  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false }).mockResolvedValueOnce({ demo: true, vk_oauth: false });
   vi.mocked(connectAccount).mockRejectedValue(new Error(copy.errors.demoConnect));
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
@@ -199,7 +200,8 @@ it('в демо подтверждение отключения предупре
 
 it('в демо отключённый Директ подключается заново кнопкой «Подключить»', async () => {
   mockAccounts = [{ ...direct, status: 'revoked' }];
-  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false });
+  // Демо спрашивают и описание, и кабинеты.
+  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false }).mockResolvedValueOnce({ demo: true, vk_oauth: false });
   vi.mocked(connectAccount).mockResolvedValue(undefined);
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
@@ -235,4 +237,15 @@ it('после запуска описание честно говорит, чт
   expect(await block.findByText(new RegExp(copy.settingsScreen.businessLaunched))).toBeTruthy();
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   expect(await block.findByText(copy.settingsScreen.savedLaunched)).toBeTruthy();
+});
+
+it('в демо после правки описания подсказывает перемотать время: без неё убранная услуга не остановится', async () => {
+  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false }).mockResolvedValueOnce({ demo: true, vk_oauth: false });
+  vi.mocked(saveDescription).mockResolvedValue();
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.business })).closest('section') as HTMLElement);
+  await act(async () => {});
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText(copy.settingsScreen.savedLaunchedDemo)).toBeTruthy();
 });

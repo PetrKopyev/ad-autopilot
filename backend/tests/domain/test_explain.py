@@ -27,13 +27,14 @@ PERIOD = {"period_start": "2026-11-01", "period_end": "2026-11-14", "ad": "Ма�
         (100, "1"),
         (9_999, "99,99"),
         (10_000, "100"),
-        (10_049, "100"),
-        (10_050, "101"),
-        (2_014_880, "20 149"),
-        (123_456, "1 235"),
+        (10_049, "100,49"),
+        (10_050, "100,50"),
+        (2_014_880, "20 148,80"),
+        (123_456, "1 234,56"),
+        (6_000_075, "60 000,75"),
     ],
 )
-def test_ruble_format_whole_rubles_and_kopecks_below_hundred(kopecks, expected):
+def test_ruble_format_keeps_kopecks_and_never_rounds_up(kopecks, expected):
     assert rubles(kopecks) == expected
 
 
@@ -148,6 +149,16 @@ def test_experiment_copy_is_derived_from_the_winning_arm():
     assert "Разница, скорее всего, не случайна" in explain_experiment(reverse, b, a)
 
 
+def test_clickbait_verdict_shows_click_and_lead_rates_of_both_arms():
+    result = ExperimentResult(Verdict.CLICKBAIT, "EXPERIMENT_CLICKBAIT", 0.001, 0.5, 0.01)
+    a, b = Metrics(10_000, 10_000, 100, 20), Metrics(10_000, 10_000, 200, 5)
+    assert explain_experiment(result, a, b) == (
+        "На объявление Б нажимают чаще: 2,0% показов против 1,0% у А. Но в обращения эти нажатия переходят реже: "
+        "2,5% (5 обращений из 200 нажатий) против 20,0% (20 обращений из 100 нажатий). "
+        "Оставили прежнее объявление А, Б остановили."
+    )
+
+
 def test_hypothesis_names_and_extension_are_plain_russian():
     text = explain("EXPERIMENT_START", hypothesis="image", n_per_arm=1_000, days=10)
     assert "Проверяем другую картинку" in text
@@ -188,3 +199,11 @@ def test_audience_verdict_names_both_audiences_with_lead_prices():
     vk = explain_audience(win, control, variant, ("все возрасты", "25–54 года"), overlap=True)
     assert "Аудитории пересекаются" in vk and "сравнение настройки показа" in vk
     assert "пересекаются" not in explain_audience(win, control, variant, labels)
+
+
+def test_undone_names_experiment_and_campaign_launch():
+    assert undone("launch", "ad", {"hypothesis": "text", "n_per_arm": 100, "days": 7}) == "сравнение вариантов"
+    assert undone("launch", "campaign", {"budget": 100, "campaign": "Маникюр"}) == "запуск рекламы «Маникюр»"
+    assert explain("REVERT", change=undone("launch", "ad", {"hypothesis": "image"})) == (
+        "Вы отменили сравнение вариантов. Вернули прежние настройки."
+    )

@@ -24,10 +24,11 @@ export async function getBusinessToday(signal?: AbortSignal): Promise<string> {
   return demoDate ?? new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow' }).format(new Date());
 }
 /** Средний расход за день: бюджет месяца на дни текущего месяца по Москве. Дневной лимит кампании ниже среднего —
- * площадки перерасходуют его, поэтому владельцу показываем среднее. */
+ * площадки перерасходуют его, поэтому владельцу показываем среднее. От 100 ₽ — целые рубли вниз: среднее не больше бюджета. */
 export function dailyAverage(monthKop: number, now = new Date()): number {
   const [year, month] = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow' }).format(now).split('-').map(Number);
-  return Math.round(monthKop / new Date(year, month, 0).getDate());
+  const kopecks = Math.floor(monthKop / new Date(year, month, 0).getDate());
+  return kopecks >= 10_000 ? kopecks - kopecks % 100 : kopecks;
 }
 export async function getPeriod(choice: PeriodChoice, signal?: AbortSignal): Promise<Period> {
   return periodFor(choice, new Date(`${await getBusinessToday(signal)}T12:00:00`));

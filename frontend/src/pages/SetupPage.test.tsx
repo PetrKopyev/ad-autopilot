@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { SessionProvider, useSession } from '../api/session';
 import { SetupPage } from './SetupPage';
+import { formatMoney } from '../components/Money';
 
 const fetchMock = vi.fn<typeof fetch>();
 let hasBusiness = false;
@@ -402,7 +403,7 @@ it('под бюджетом — расчёт сервера: сколько пр
   renderStep(1);
   fireEvent.change(await screen.findByLabelText(copy.setup.business.budget), { target: { value: '30000' } });
   // В день — доля площадки на дни месяца (30 000 ₽ / 31), а не дневной лимит кампании из daily_kop.
-  expect(await screen.findByText(plain('На Директ придётся в среднем 968 ₽ в день.'))).toBeTruthy();
+  expect(await screen.findByText(plain('На Директ придётся в среднем 967 ₽ в день.'))).toBeTruthy();
   expect(screen.getByText(plain('Площадка ВКонтакте подключится от 48 500 ₽ в месяц: ей нужно минимум 300 ₽ в день, мы считаем с запасом.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(calls()).toContain('GET /api/business/budget-hint');
@@ -419,7 +420,7 @@ it('бюджет ниже минимума называет минимум и п
   expect((await screen.findByRole('alert')).textContent?.replace(/ /g, ' ')).toBe('Минимальный бюджет — 12 700 ₽ в месяц. '
     + 'С меньшей суммой Яндекс Директ рекламу не показывает, а мы ещё берём небольшой запас, чтобы реклама не останавливалась в конце месяца.');
   fireEvent.change(input, { target: { value: '12700' } });
-  expect(await screen.findByText(plain('На Директ придётся в среднем 410 ₽ в день.'))).toBeTruthy();
+  expect(await screen.findByText(plain('На Директ придётся в среднем 409 ₽ в день.'))).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByRole('status')).toBeNull();
 });
@@ -523,4 +524,39 @@ it('услуги и цены — одно поле с одной цитатой;
   const [, init] = fetchMock.mock.calls.find(([url, request]) => request?.method === 'PUT' && String(url).endsWith('/api/business/description'))!;
   const { description: sent } = JSON.parse(String(init!.body));
   expect([sent.services.value, sent.prices.value]).toEqual(['Маникюр — 1 500 ₽\nПедикюр', '']);
+});
+
+it('бюджет ниже минимума, «Далее» раньше расчёта — ошибка один раз у поля, без баннера и запроса', async () => {
+  budgetHint({ minimum_kop: 1550000, month_kop: { direct: 10000 }, daily_kop: { direct: 300 }, off: vkOff });
+  renderStep(1);
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.city), { target: { value: 'Москва' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '100' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  const message = copy.setup.business.budgetMinimum(formatMoney(1_550_000));
+  const shown = () => document.body.textContent!.split(message).length - 1;
+  await waitFor(() => expect(shown()).toBe(1));
+  // Расчёт под полем приходит позже (через 300 мс) — второй раз тот же текст не появляется.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(shown()).toBe(1);
+  expect(calls()).not.toContain('POST /api/business');
+});
+
+it('цена визита «-100» не становится молча 100 ₽: ошибка у поля', async () => {
+  renderStep(1);
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.city), { target: { value: 'Москва' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '30000' } });
+  const average = screen.getByLabelText(copy.setup.business.visitPrice) as HTMLInputElement;
+  fireEvent.change(average, { target: { value: '-100' } });
+  expect(average.value).toBe('-100');
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  expect(await screen.findByText(copy.launchFlow.moneyNegative)).toBeTruthy();
+  fireEvent.change(average, { target: { value: '0,0' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  expect(await screen.findByText(copy.launchFlow.moneyZero)).toBeTruthy();
+  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '0' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  await waitFor(() => expect(screen.getAllByText(copy.launchFlow.moneyZero)).toHaveLength(1));
+  expect(calls()).not.toContain('POST /api/business');
 });

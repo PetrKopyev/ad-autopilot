@@ -3,6 +3,7 @@ import { copy } from '../copy';
 import type { PeriodChoice } from '../api/period';
 import { displayDate, displayDateTime } from '../format';
 import { mockEnabled } from '../api/screens';
+import { useDemo } from '../api/useDemo';
 import type { Ad, AdStatus, Campaign, Experiment, Source, Summary } from '../api/types';
 import './Stats.css';
 
@@ -41,6 +42,7 @@ export function platformName(platform: string): string {
   return copy.screens.platforms[platform as keyof typeof copy.screens.platforms] ?? platform;
 }
 export function Sources({ sources }: { sources: Source[] }) {
+  const demo = useDemo();
   return <div className="stats-sources">
     <div className="stats-sources__text">
       <p className="stats-sources__pending"><Icon name="history" />{copy.statistics.provisional}</p>
@@ -48,8 +50,9 @@ export function Sources({ sources }: { sources: Source[] }) {
       {sources.map((source) => <p key={source.platform}>{copy.statistics.source(platformName(source.platform), displayDateTime(source.fetched_at))}</p>)}
     </div>
     <div className="stats-sources__links">
-      {sources.some((source) => source.platform === 'direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}<Icon name="arrow" /></a>}
-      {sources.some((source) => source.platform === 'vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}<Icon name="arrow" /></a>}
+      {demo && sources.length > 0 && <p className="muted">{copy.screens.compareDemo}</p>}
+      {!demo && sources.some((source) => source.platform === 'direct') && <a href="https://direct.yandex.ru/" target="_blank" rel="noreferrer">{copy.screens.compareDirect}<Icon name="arrow" /></a>}
+      {!demo && sources.some((source) => source.platform === 'vk') && <a href="https://ads.vk.com/" target="_blank" rel="noreferrer">{copy.screens.compareVk}<Icon name="arrow" /></a>}
     </div>
   </div>;
 }

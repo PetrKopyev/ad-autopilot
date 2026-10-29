@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, expect, it } from 'vitest';
-import { RublesInput } from './RublesInput';
+import { RublesInput, rublesValue } from './RublesInput';
 
 afterEach(cleanup);
 
@@ -73,4 +73,19 @@ it('курсор после запятой остаётся за набранн�
   typeAt('1 500,7', 7);
   expect(input().value).toBe('1 500,7');
   expect(input().selectionStart).toBe(7);
+});
+
+it('копейки из сохранённой суммы попадают в поле без округления', () => {
+  expect(rublesValue(5_000_050)).toBe('50000,50');
+  expect(rublesValue(6_000_075)).toBe('60000,75');
+  expect(rublesValue(1_500_000)).toBe('15000');
+  render(<Field initial={rublesValue(5_000_050)} />);
+  expect(input().value).toBe('50 000,50');
+});
+
+it('минус в начале остаётся, чтобы форма показала ошибку, а не приняла 100 ₽', () => {
+  render(<Field />);
+  typeAt('-1000', 5);
+  expect(input().value).toBe('-1 000');
+  expect(digits).toBe('-1000');
 });

@@ -300,6 +300,15 @@ class ChangesRepository:
         )
         return {(platform, external_id) for platform, external_id in rows}
 
+    def campaign_names(self, business_id: int) -> dict[tuple[str, str], str]:
+        """Названия кампаний бизнеса по (площадка, внешний id) — для заголовков журнала."""
+        rows = self.db.execute(
+            select(Campaign.platform, Campaign.external_id, Campaign.name).where(
+                Campaign.business_id == business_id, Campaign.external_id.is_not(None)
+            )
+        )
+        return {(platform, external_id): name for platform, external_id, name in rows}
+
     def experiments(self, change: ChangeLog) -> list[Experiment]:
         condition = Experiment.change_id == change.id
         if change.entity_type == "experiment" and change.entity_id.isdecimal():

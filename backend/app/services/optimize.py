@@ -259,7 +259,11 @@ async def optimize(worker: Worker, business: Business) -> None:
             if share_after == share_before or not share_before:
                 continue
             if lifetime is None:
-                _, lifetime = await read_spend(worker, business, campaigns=campaigns)
+                # Кабинет отключённой площадки спросить нечем: расход нужен только кампании растущей группы.
+                closed = closed_platforms(worker, business)
+                _, lifetime = await read_spend(
+                    worker, business, campaigns=[item for item in campaigns if item.platform not in closed]
+                )
             state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
                 campaign.external_id
             ]

@@ -144,5 +144,11 @@ export function rublesToKopecks(value: string): number | null {
   const result = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
   return Number.isSafeInteger(result) && result > 0 ? result : null;
 }
+/** Почему сумма не подходит: минус, ноль или не число — каждому своё объяснение. */
+export function moneyError(value: string): string {
+  if (value.startsWith('-')) return copy.launchFlow.moneyNegative;
+  // Поле убирает нули слева: набранный «0» приходит пустым.
+  return /^0*(?:[.,]0*)?$/.test(value) ? copy.launchFlow.moneyZero : copy.launchFlow.moneyError;
+}
 /** Сумма больше предела сервера: поле её принимает, чтобы не обрезать молча, а форма объясняет. */
 export const tooMuchMoney = (kopecks: number | null) => kopecks !== null && kopecks > maxBudgetRubles * 100;

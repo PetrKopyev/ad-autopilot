@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
-import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, RublesInput, StatusBadge, Stepper, describedBy } from '../components';
+import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, RublesInput, StatusBadge, Stepper, describedBy, rublesValue } from '../components';
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
-  getMe, rublesToKopecks, saveDescription, saveMarking, saveMetrica, tooMuchMoney, validInn } from '../api/setup';
+  getMe, moneyError, rublesToKopecks, saveDescription, saveMarking, saveMetrica, tooMuchMoney, validInn } from '../api/setup';
 import type { Account, AccountCheck, BudgetHint, Business, Counter, Description, DescriptionKey, Goal, Marking, SiteCheck, StopResult } from '../api/setup';
 import { dailyAverage } from '../api/period';
 import { getBusiness } from '../api/settings';
@@ -57,8 +57,8 @@ export function SetupPage() {
   const [restoring, setRestoring] = useState(!stored?.business);
   const [website, setWebsite] = useState(draft.business?.site_url ?? '');
   const [city, setCity] = useState(draft.business?.city ?? '');
-  const [budget, setBudget] = useState(draft.business ? String(Math.round(draft.business.month_budget_kop / 100)) : '');
-  const [average, setAverage] = useState(draft.business?.avg_check_kop ? String(Math.round(draft.business.avg_check_kop / 100)) : '');
+  const [budget, setBudget] = useState(draft.business ? rublesValue(draft.business.month_budget_kop) : '');
+  const [average, setAverage] = useState(draft.business?.avg_check_kop ? rublesValue(draft.business.avg_check_kop) : '');
   const [noSite, setNoSite] = useState(false);
   const [budgetHint, setBudgetHint] = useState<BudgetHint>();
   const [cities, setCities] = useState<string[]>();
@@ -110,8 +110,8 @@ export function SetupPage() {
   function fill(value: Draft, saved: StoredMarking | null = null) {
     const business = value.business;
     setDraft(value);
-    setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? String(Math.round(business.month_budget_kop / 100)) : '');
-    setAverage(business?.avg_check_kop ? String(Math.round(business.avg_check_kop / 100)) : '');
+    setWebsite(business?.site_url ?? ''); setCity(business?.city ?? ''); setBudget(business ? rublesValue(business.month_budget_kop) : '');
+    setAverage(business?.avg_check_kop ? rublesValue(business.avg_check_kop) : '');
     setNoSite(false); setCounters([]); setCountersLoaded(false); setGoals([]); setSavedMarking(saved); setMarking(markingForm(saved)); setInnTouched(false); setChecks(undefined);
   }
   // Сессия пропадает на время перечитывания: сохранённое спрашиваем один раз на пользователя.
@@ -205,6 +205,8 @@ export function SetupPage() {
   }
   // Ошибка поля держится, пока его не поправят; курсор сразу ставим в поле с ошибкой.
   useEffect(() => setFieldError(undefined), [current, website, city, budget, average, noSite, draft.counter, draft.goals, draft.description, marking]);
+  // Ответ сервера про прежние сведения о бизнесе после правки уже неправда: баннер не висит рядом с новым расчётом.
+  useEffect(() => setError(''), [website, city, budget, average, noSite]);
   useEffect(() => { if (fieldError) document.getElementById(fieldError.field)?.focus(); }, [fieldError]);
   const errorFor = (field: string) => fieldError?.field === field ? fieldError.message : undefined;
   // Проверка не перечитывает сессию: карточки кабинетов не пропадают на время запроса, итог — текстом под кнопкой.
@@ -233,10 +235,13 @@ export function SetupPage() {
       if (!['http:', 'https:'].includes(url.protocol)) throw new FieldError('website', copy.setup.business.websiteError);
       const chosen = cities ? cities.find((item) => cityKey(item) === cityKey(city)) : city.trim();
       if (!chosen) throw new FieldError('city', copy.setup.business.cityError);
-      if (!month_budget_kop) throw new FieldError('budget', copy.launchFlow.moneyError);
+      if (!month_budget_kop) throw new FieldError('budget', moneyError(budget));
       if (tooMuchMoney(month_budget_kop)) throw new FieldError('budget', copy.launchFlow.moneyTooBig);
-      if (budgetHint && month_budget_kop < budgetHint.minimum_kop) throw new FieldError('budget', copy.setup.business.budgetMinimum(formatMoney(budgetHint.minimum_kop)));
-      if (average && !avg_check_kop) throw new FieldError('average', copy.launchFlow.moneyError);
+      // Минимум проверяем здесь, даже если расчёт под полем ещё не пришёл: иначе тот же текст пришёл бы с сервера
+      // баннером, а через миг — и под полем. Расчёт не получили — минимум проверит сервер.
+      const hint = budgetHint ?? await getBudgetHint(month_budget_kop, !!vk).catch(() => undefined);
+      if (hint && month_budget_kop < hint.minimum_kop) throw new FieldError('budget', copy.setup.business.budgetMinimum(formatMoney(hint.minimum_kop)));
+      if (average && !avg_check_kop) throw new FieldError('average', moneyError(average));
       if (tooMuchMoney(avg_check_kop)) throw new FieldError('average', copy.launchFlow.moneyTooBig);
       const input = { site_url: url.href, city: chosen, month_budget_kop, avg_check_kop };
       if (draft.business && Object.entries(input).every(([key, value]) => draft.business![key as keyof Business] === value)) { next(); return; }

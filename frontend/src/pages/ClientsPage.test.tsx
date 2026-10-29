@@ -50,7 +50,7 @@ it('неверное число объясняется у поля: дробь, 
   render(<ClientsPage />);
   const field = await screen.findByRole('textbox', { name: copy.clientsScreen.countLabel });
   const send = screen.getByRole('button', { name: copy.clientsScreen.send }) as HTMLButtonElement;
-  for (const [value, error] of [['4,5', copy.clientsScreen.wholeNumber], ['-5', copy.clientsScreen.negative], ['99', copy.clientsScreen.tooMany(40)]]) {
+  for (const [value, error] of [['4,5', copy.clientsScreen.wholeNumber], ['1,5', copy.clientsScreen.wholeNumber], ['abc', copy.clientsScreen.digitsOnly], ['-5', copy.clientsScreen.negative], ['99', copy.clientsScreen.tooMany(40)]]) {
     fireEvent.change(field, { target: { value } });
     expect(screen.getByText(error)).toBeTruthy();
     expect(field.getAttribute('aria-invalid')).toBe('true');

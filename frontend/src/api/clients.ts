@@ -23,6 +23,7 @@ export async function answerClientQuestion(id: string, clients: number | 'unknow
 export function parseClients(value: string, leads: number): { number?: number; error?: string } {
   const text = value.trim();
   if (!text) return {};
+  if (!/\d/.test(text)) return { error: copy.clientsScreen.digitsOnly };
   if (!/^-?\d+$/.test(text)) return { error: copy.clientsScreen.wholeNumber };
   const number = Number(text);
   if (number < 0) return { error: copy.clientsScreen.negative };

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Button, ConfirmDialog, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, SegmentedControl, StatusBadge, describedBy } from '../components';
+import { Button, ConfirmDialog, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, StatusBadge, describedBy, rublesValue } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
-import { connectAccount, disconnectAccount, getAuthConfig, getGoals, rublesToKopecks, saveDescription, saveMarking, tooMuchMoney, validInn } from '../api/setup';
+import { connectAccount, disconnectAccount, getGoals, moneyError, rublesToKopecks, saveDescription, saveMarking, tooMuchMoney, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
 import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import type { AutopilotStatus } from '../api/types';
+import { useDemo } from '../api/useDemo';
 import { useResource } from '../api/useResource';
 import { StopNotice } from './SetupShared';
 import './Settings.css';
@@ -21,9 +22,7 @@ const emptyMarking: Marking = { subject_type: 'ip', inn: '', name: '', phone: ''
 const markingForm = (stored: StoredMarking | null): Marking => stored
   ? { subject_type: stored.subject_type, inn: '', name: stored.name, phone: '', confirmed_in_platform: { ...emptyMarking.confirmed_in_platform, ...stored.confirmed_in_platform } }
   : emptyMarking;
-// Набранную сумму повторяем как есть: 1 500,50 ₽ не превращается в подписи в 1 501 ₽.
-const exactMoney = (kopecks: number) => kopecks % 100 ? `${(kopecks / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽` : formatMoney(kopecks);
-const rublesText = (kopecks: number | null) => kopecks === null ? '' : String(Math.round(kopecks / 100));
+const rublesText = (kopecks: number | null) => kopecks === null ? '' : rublesValue(kopecks);
 
 // One section with its own save status, so a failed save never hides the others.
 function useSection() {
@@ -54,12 +53,13 @@ function Block({ id, title, hint, danger, children }: { id: string; title: strin
 
 function DescriptionBlock({ business, launched }: { business: BusinessSettings; launched: boolean }) {
   const section = useSection();
+  const demo = useDemo();
   const [values, setValues] = useState<Record<DescriptionKey, string>>(() => Object.fromEntries(
     descriptionKeys.map((key) => [key, business.description?.fields[key].value ?? ''])) as Record<DescriptionKey, string>);
   function submit() {
     const description = Object.fromEntries(descriptionKeys.map((key) => [key,
       { ...(business.description?.fields[key] ?? { quote: null, question: '' }), value: key === 'prices' ? '' : values[key].trim(), verified: true }])) as Description;
-    void section.run(() => saveDescription(description), launched ? labels.savedLaunched : labels.saved);
+    void section.run(() => saveDescription(description), launched ? (demo ? labels.savedLaunchedDemo : labels.savedLaunched) : labels.saved);
   }
   // После запуска честно говорим, что объявления на площадках от правки не перестроятся.
   return <Block id="business" title={copy.settings.business} hint={launched ? <>{labels.businessHint} {labels.businessLaunched}</> : labels.businessHint}>
@@ -78,12 +78,12 @@ function DescriptionBlock({ business, launched }: { business: BusinessSettings; 
 
 function BudgetBlock({ business }: { business: BusinessSettings }) {
   const section = useSection();
-  const [budget, setBudget] = useState(String(Math.round(business.month_budget_kop / 100)));
+  const [budget, setBudget] = useState(rublesValue(business.month_budget_kop));
   const [average, setAverage] = useState(rublesText(business.avg_check_kop));
   const [autoContinue, setAutoContinue] = useState(business.auto_continue);
   const [savedBudget, setSavedBudget] = useState(business.month_budget_kop);
   const [warning, setWarning] = useState<string | null>(null);
-  const budgetKop = budget === String(Math.round(savedBudget / 100)) ? savedBudget : rublesToKopecks(budget);
+  const budgetKop = budget === rublesValue(savedBudget) ? savedBudget : rublesToKopecks(budget);
   const averageKop = average === '' ? null : average === rublesText(business.avg_check_kop) ? business.avg_check_kop : rublesToKopecks(average);
   function submit() {
     if (budgetKop === null || budgetError || averageError) return;
@@ -95,9 +95,9 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
   }
   // До сохранения подпись говорит, что будет после него: сумма ещё не действует.
   const budgetHint = budgetKop === null || tooMuchMoney(budgetKop) ? undefined
-    : budgetKop === savedBudget ? undefined : labels.budgetPending(exactMoney(budgetKop));
-  const budgetError = budgetKop === null ? labels.budgetError : tooMuchMoney(budgetKop) ? copy.launchFlow.moneyTooBig : undefined;
-  const averageError = average !== '' && (averageKop === null || tooMuchMoney(averageKop)) ? (averageKop === null ? copy.launchFlow.moneyError : copy.launchFlow.moneyTooBig) : undefined;
+    : budgetKop === savedBudget ? undefined : labels.budgetPending(formatMoney(budgetKop));
+  const budgetError = budgetKop === null ? (budget.startsWith('-') ? copy.launchFlow.moneyNegative : labels.budgetError) : tooMuchMoney(budgetKop) ? copy.launchFlow.moneyTooBig : undefined;
+  const averageError = average !== '' && (averageKop === null || tooMuchMoney(averageKop)) ? (averageKop === null ? moneyError(average) : copy.launchFlow.moneyTooBig) : undefined;
   return <Block id="budget" title={labels.budgetTitle} hint={<><Icon name="shield" />{copy.plan.promise}</>}>
     <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <Field id="settings-budget" label={labels.budgetLabel} hint={budgetHint} error={budgetError}>
@@ -139,12 +139,7 @@ function AccountsBlock({ business, status }: { business: BusinessSettings; statu
   const session = useSession();
   const [stopResult, setStopResult] = useState<StopResult>();
   const [leaving, setLeaving] = useState<{ id: number; name: string }>();
-  const [demo, setDemo] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    void getAuthConfig(controller.signal).then((config) => { if (!controller.signal.aborted) setDemo(config.demo); }).catch(() => {});
-    return () => controller.abort();
-  }, []);
+  const demo = useDemo();
   const me = session.data;
   const platforms = [{ id: 'direct' as const, name: copy.setup.accounts.direct }, { id: 'vk' as const, name: copy.setup.accounts.vk }];
   function disconnect(id: number) {
@@ -242,7 +237,7 @@ function AutopilotBlock({ status }: { status: StatusResource }) {
   const paused = state === 'paused' || state === 'budget_stop';
   const [warning, setWarning] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
-  // «Пауза» здесь — то же, что на главной: остановка всей рекламы, с тем же подтверждением.
+  // Остановка здесь — та же, что на главной: вся реклама, с тем же подтверждением.
   function resume() { void section.run(async () => { setWarning(await resumeAutopilot()); status.reload(); }); }
   function pause() {
     void section.run(async () => { setWarning(null); await pauseAutopilot(); setAsking(false); status.reload(); });
@@ -250,10 +245,10 @@ function AutopilotBlock({ status }: { status: StatusResource }) {
   return <Block id="autopilot" title={labels.autopilot}>
     {status.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
-    {state && state !== 'draft' && <SegmentedControl label={copy.autopilotMode.label} value={paused ? 'paused' : 'working'} disabled={section.busy}
-      onChange={(mode) => { if ((mode === 'paused') === paused) return; if (paused) resume(); else { section.clear(); setAsking(true); } }}
-      options={[{ value: 'working', label: copy.autopilotMode.working }, { value: 'paused', label: copy.autopilotMode.paused }]} />}
     {state && <p className="settings-hint">{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
+    {state && state !== 'draft' && <div className="actions">{paused
+      ? <Button icon="play" onClick={resume} disabled={section.busy}>{copy.home.resumeAll}</Button>
+      : <Button variant="danger" icon="stop" onClick={() => { section.clear(); setAsking(true); }} disabled={section.busy}>{copy.home.stopAll}</Button>}</div>}
     {!asking && <Status section={section} />}
     {warning && <div className="notice" role="status"><p>{warning}</p></div>}
     <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}

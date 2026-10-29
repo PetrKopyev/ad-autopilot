@@ -134,13 +134,36 @@ class AdapterRegistry:
         return MetricaClient(info.token, client=self.http)
 
 
+# Сцены демо-картинок: у каждой картинки своя подпись, а не «Маникюр: к празднику» под всеми.
+DEMO_SCENES = (
+    "Нежный нюд на светлом мраморе",
+    "Яркий коралловый акцент",
+    "Мягкий утренний свет у окна",
+    "Глянец с золотыми искрами",
+    "Пастельные оттенки на льне",
+    "Глубокий винный оттенок",
+    "Минимализм на белом фоне",
+    "Сочный летний цвет",
+    "Матовое покрытие крупным планом",
+    "Тёплые осенние тона",
+    "Холодный серебристый блеск",
+    "Графичный узор на сером фоне",
+)
+
+
 class DemoLLM:
     """Ответы для демо без ключей YandexGPT: хватает на описание, идеи картинок и тексты по шаблону."""
 
+    def __init__(self) -> None:
+        self.scenes = 0
+
     async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if "визуальные идеи" in system:
-            titles = [(item["service"] or "Уютная сцена", item["segment"]) for item in json.loads(user)["items"]]
-            ideas = [{"title": title, "visual": f"{title}: {segment}"} for title, segment in titles]
+            ideas = []
+            for item in json.loads(user)["items"]:
+                scene = DEMO_SCENES[self.scenes % len(DEMO_SCENES)]
+                self.scenes += 1
+                ideas.append({"title": scene, "visual": f"{scene.lower()}, {item['segment']}"})
             return json.dumps({"ideas": ideas}, ensure_ascii=False)
         if "Напиши объявление" in system:
             data = json.loads(user)

@@ -7,6 +7,8 @@ export type ChangeKind = 'pause' | 'resume' | 'budget' | 'text' | 'image' | 'lau
 export interface HistoryEntry {
   id: number; business_id: number; created_at: string; actor: 'autopilot' | 'owner' | 'system' | 'external';
   kind: ChangeKind; platform: string | null; entity_type: string; entity_id: string;
+  /** Название кампании, если запись о кампании: запуск и остановка пишутся по записи на каждую. */
+  campaign?: string | null;
   reason_text: string; evidence: Record<string, unknown>; status: 'proposed' | 'pending' | 'applied' | 'failed' | 'reverted';
   reverts_id: number | null; can_revert: boolean; revert_warning: string | null;
 }
@@ -30,13 +32,17 @@ export async function revertChange(id: number): Promise<HistoryEntry> {
 
 const labels = copy.historyScreen;
 // Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».
-const kindTitle = (entry: HistoryEntry) => entry.kind === 'launch' && 'experiment_key' in entry.evidence ? labels.experimentStart : labels.kinds[entry.kind];
+function kindTitle(entry: HistoryEntry): string {
+  if (entry.kind === 'launch' && 'experiment_key' in entry.evidence) return labels.experimentStart;
+  return entry.campaign ? labels.withCampaign(labels.kinds[entry.kind], entry.campaign) : labels.kinds[entry.kind];
+}
 /** Заголовок записи истории; отмена называет, что отменили, по записи из того же списка. */
 export function entryTitle(entry: HistoryEntry, all: HistoryEntry[]): string {
   if (entry.kind !== 'revert') return kindTitle(entry);
   const original = all.find((item) => item.id === entry.reverts_id);
   if (!original) return labels.revertedPlain;
   if (original.kind === 'pause') return labels.resumedAfterStop;
+  if (original.kind === 'launch' && 'experiment_key' in original.evidence) return labels.revertedExperiment;
   const text = kindTitle(original);
   return labels.revertedLine(text.charAt(0).toLowerCase() + text.slice(1));
 }

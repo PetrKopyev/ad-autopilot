@@ -68,7 +68,7 @@ class Conversion:
     note: str | None = None
 
 
-DEMO_LABEL = "так настроен демо-кабинет: столько же обращений он и покажет после запуска"
+DEMO_LABEL = "так настроен демо-кабинет: после запуска у групп будут те же цены клика и доли обращений"
 BENCHMARK = Conversion(Decimal("0.01"), Decimal("0.03"), "benchmark", "средняя цифра для сайтов услуг", BENCHMARK_URL)
 
 
@@ -206,10 +206,11 @@ def template(
     count = f"от {rub(clicks.min)} до {rub(clicks.max)}" if clicks.min != clicks.max else rub(clicks.min)
     if demo:
         return (
-            f"Демо-кабинет за месяц наберёт до {rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в "
-            f"месяц и цене клика {cpc} выйдет примерно {count} кликов.{budget_note} {rate} Итого примерно от "
-            f"{leads_range[0]} до {leads_range[1]} обращений в месяц. Это демо: настоящий прогноз Яндекс Директа "
-            "будет после подключения кабинета."
+            f"Бюджет делится между группами поровну: при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} "
+            f"демо-кабинет наберёт примерно {count} кликов.{budget_note} {rate} Итого примерно от "
+            f"{leads_range[0]} до {leads_range[1]} обращений в месяц — это без решений автопилота: перенос бюджета к "
+            "лучшим группам обычно добавляет обращений. Это демо: настоящий прогноз Яндекс Директа будет после "
+            "подключения кабинета."
         )
     rate += f" {conversion.note}" if conversion.note else ""
     return (
@@ -252,15 +253,17 @@ def ai_text(response: str, allowed: set[Decimal], leads_range: tuple[int, int]) 
     return text.strip()
 
 
-def demo_forecast(groups: list[dict]) -> tuple[list[PhraseForecast], Conversion]:
-    """Прогноз демо из чисел симулятора демо-кабинета, без запросов к Яндексу: группа за месяц даёт столько кликов,
-    сколько её объявления наберут при своих показах и кликабельности, по цене клика симулятора; доля обращений —
-    средняя по группам, взвешенная по этим кликам."""
+def demo_forecast(groups: list[dict], budget_rub: Decimal) -> tuple[list[PhraseForecast], Conversion]:
+    """Прогноз демо из чисел симулятора демо-кабинета, без запросов к Яндексу. Как в кабинете после запуска, бюджет
+    Директа делится между группами поровну: группа за месяц набирает столько кликов, сколько оплатит её доля по цене
+    клика симулятора, но не больше, чем дадут показы её объявлений. Доля обращений — средняя по группам, взвешенная по
+    этим кликам. Без доли бюджета дешёвые группы считались бы со всем спросом, а дорогие — с бюджетом всех групп."""
     rows = []
     reached = Decimal(0)
+    share = budget_rub / len(groups)
     for group, truth in zip(groups, demo_truths(len(groups)), strict=True):
-        clicks = round(truth.impressions_per_hour * 24 * 30 * truth.ctr) * len(group["ads"])
         price = Decimal(truth.cpc_kop) / 100
+        clicks = min(round(truth.impressions_per_hour * 24 * 30 * truth.ctr) * len(group["ads"]), int(share / price))
         rows.append(PhraseForecast(group["phrases"][0], round(clicks / truth.ctr), clicks, clicks, price, price))
         reached += clicks * Decimal(str(truth.conversion_rate))
     total = sum(row.clicks for row in rows)
@@ -373,7 +376,7 @@ class ForecastService:
     ) -> Entry:
         """Один шаг без ожидания: заказать отчёт или спросить его готовность; готовый прочитать и удалить."""
         if self.demo:
-            rows, conversion = demo_forecast(groups)
+            rows, conversion = demo_forecast(groups, budget_rub)
             return await self.ready(business, key, rows, budget_rub, budget_note, now, today, conversion)
         forecast_id = entry.forecast_id if entry else None
         try:

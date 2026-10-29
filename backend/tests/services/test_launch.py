@@ -2212,6 +2212,7 @@ async def test_platform_share_floor_counts_every_direct_campaign(tmp_path: Path,
     await optimize.rebalance_budget(recovery_worker(world, dry_run=False), world.business, force=True)
     assert counted == [{"direct": 3, "vk": 1}]
 
+
 async def test_scale_leaves_donor_campaign_its_platform_minimum(tmp_path: Path, monkeypatch) -> None:
     from math import ceil
 
@@ -2240,6 +2241,7 @@ async def test_scale_leaves_donor_campaign_its_platform_minimum(tmp_path: Path, 
     assert floor == 2_000
     limits = worker.metadata(world.business)["group_limits"]
     assert limits == {target: 100_000 - floor, donor: floor, other: 50_000}
+
 
 async def test_direct_budget_below_campaign_minimums_shares_campaigns_between_services(tmp_path: Path) -> None:
     services = ["Маникюр", "Педикюр", "Наращивание ресниц", "Дизайн ногтей"]
@@ -2299,6 +2301,8 @@ async def test_service_removed_from_shared_campaign_stops_only_its_ads(tmp_path:
     assert (
         change.status == "applied" and "Наращивание ресниц" in change.reason_text and shared.name in change.reason_text
     )
+    # Услугу убрал владелец («Вы»), а объявления по его правке остановил автопилот — так и написано.
+    assert change.reason_text.startswith("Вы убрали из описания") and "Автопилот остановил" in change.reason_text
 
 
 async def shared_campaign_world(tmp_path: Path) -> tuple[World, Worker, Campaign]:
@@ -2346,6 +2350,9 @@ async def test_service_returned_to_shared_campaign_resumes_only_ads_stopped_for_
     assert states[other.external_id].status == "paused_owner"
     (returned,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "SERVICE_RETURNED"]
     assert returned.status == "applied" and "Наращивание ресниц" in returned.reason_text
+    assert (
+        returned.reason_text.startswith("Вы вернули в описание") and "Автопилот снова включил" in returned.reason_text
+    )
     assert {op["entity_id"] for op in returned.operations} == {ad.external_id for ad in own}
 
 

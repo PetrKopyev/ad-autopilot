@@ -93,13 +93,13 @@ it('рисует графики обращений из ряда по дням',
   expect(document.querySelectorAll('.sparkline')).toHaveLength(2);
 });
 
-it('объясняет, почему реклама не включилась после переключения на «Работает»', async () => {
+it('объясняет, почему реклама не включилась после «Продолжить рекламу»', async () => {
   const warning = 'Реклама не включилась: при текущем бюджете площадкам не хватает минимума. Увеличьте бюджет в настройках.';
   vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'paused', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(resumeAutopilot).mockResolvedValue(warning);
   await show(0, 0);
-  const mode = await screen.findByRole('group', { name: copy.autopilotMode.label });
-  fireEvent.click(within(mode).getByRole('button', { name: copy.autopilotMode.working }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.home.resumeAll }));
+  expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
   expect(await screen.findByText(warning)).toBeTruthy();
 });
 
@@ -110,12 +110,13 @@ it('пишет, когда будут первые решения автопил
   expect(await screen.findByText(line)).toBeTruthy();
 });
 
-it('«Пауза» останавливает рекламу только после подтверждения', async () => {
+it('остановка всей рекламы — одна кнопка и только после подтверждения', async () => {
   vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(stopAllAds).mockResolvedValue();
   await show(0, 0);
-  const mode = await screen.findByRole('group', { name: copy.autopilotMode.label });
-  fireEvent.click(within(mode).getByRole('button', { name: copy.autopilotMode.paused }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.home.stopAll }));
+  expect(screen.queryByRole('group', { name: copy.autopilotMode.label })).toBeNull();
+  expect(screen.queryByRole('button', { name: copy.home.resumeAll })).toBeNull();
   expect(stopAllAds).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: copy.screens.confirmStop }));
   expect(await screen.findByText(copy.screens.stopped)).toBeTruthy();
@@ -261,9 +262,8 @@ it('до запуска без плана ведёт в мастер', async () 
   expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
 });
 
-it('после запуска остановка и переключатель на месте', async () => {
+it('после запуска остановка на месте', async () => {
   await show(0, 0);
   expect(await screen.findByRole('button', { name: copy.home.stopAll })).toBeTruthy();
-  expect(screen.getByRole('group', { name: copy.autopilotMode.label })).toBeTruthy();
   expect(screen.queryByRole('link', { name: copy.prelaunch.openPlan })).toBeNull();
 });

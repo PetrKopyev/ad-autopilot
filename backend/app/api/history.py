@@ -36,7 +36,7 @@ CurrentUser = Annotated[User, Depends(current_user)]
 Adapters = Annotated[AdapterResolver, Depends(get_adapter_resolver)]
 
 
-def history_item(change: ChangeLog, business=None, reverts=(), replaced=()) -> dict:
+def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), campaigns=None) -> dict:
     metadata = (change.evidence or {}).get("_service", {})
     return {
         "id": change.id,
@@ -47,6 +47,10 @@ def history_item(change: ChangeLog, business=None, reverts=(), replaced=()) -> d
         "platform": change.platform,
         "entity_type": change.entity_type,
         "entity_id": change.entity_id,
+        # Запуск и остановка пишутся по записи на кампанию: без названия в журнале N одинаковых строк.
+        "campaign": (campaigns or {}).get((change.platform, change.entity_id))
+        if change.entity_type == "campaign"
+        else None,
         "operations": change.operations,
         "reason_code": change.reason_code,
         "reason_params": change.reason_params,
@@ -77,9 +81,16 @@ def history(
     )
     businesses = {business_id: repository.business(business_id) for business_id in {item.business_id for item in items}}
     replaced = {business_id: repository.replaced_entities(business_id) for business_id in businesses}
+    campaigns = {business_id: repository.campaign_names(business_id) for business_id in businesses}
     return {
         "items": [
-            history_item(item, businesses[item.business_id], repository.reverts(item.id), replaced[item.business_id])
+            history_item(
+                item,
+                businesses[item.business_id],
+                repository.reverts(item.id),
+                replaced[item.business_id],
+                campaigns[item.business_id],
+            )
             for item in items
         ],
         "total": total,

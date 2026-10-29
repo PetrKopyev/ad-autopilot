@@ -102,3 +102,18 @@ it('старт сравнения вариантов назван сравнен
   expect(screen.getByRole('heading', { name: labels.experimentStart })).toBeTruthy();
   expect(screen.getByRole('heading', { name: labels.kinds.launch })).toBeTruthy();
 });
+
+it('запуск и остановка по кампаниям — с названием кампании, а не одинаковыми строками', async () => {
+  serve([{ ...entry(1, 'launch'), campaign: 'Маникюр' }, { ...entry(2, 'launch'), campaign: 'Педикюр' }, { ...entry(3, 'pause'), campaign: 'Маникюр' }]);
+  render(<HistoryPage />);
+  expect(await screen.findByRole('heading', { name: 'Запуск рекламы — «Маникюр»' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Запуск рекламы — «Педикюр»' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Остановка рекламы — «Маникюр»' })).toBeTruthy();
+});
+
+it('отмена старта сравнения — «Вы отменили сравнение вариантов», а не запуск объявления', async () => {
+  const start = { ...entry(1, 'launch'), evidence: { experiment_key: 'k' }, status: 'reverted' as const, can_revert: false };
+  serve([{ ...entry(2, 'revert'), reverts_id: 1, can_revert: false }, start]);
+  render(<HistoryPage />);
+  expect(await screen.findByRole('heading', { name: labels.revertedExperiment })).toBeTruthy();
+});

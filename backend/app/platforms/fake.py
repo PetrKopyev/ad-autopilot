@@ -113,8 +113,10 @@ def salon_scenario(
 
 
 # Демо-кабинет: группы Директа по порядку плана — сильная, слабая и пограничная, остальные — как по умолчанию.
-# Те же числа берёт прогноз в демо, чтобы прогноз плана и цифры после запуска не расходились.
-DEMO_TRUTHS = (AdTruth(0.08, 25, 0.2, 600), AdTruth(0.007, 62, 0.01, 600), AdTruth(0.035, 45, 0.06, 600))
+# Те же числа берёт прогноз в демо, чтобы прогноз плана и цифры после запуска не расходились. Показов хватает, чтобы
+# группы тратили свой дневной лимит, как на площадке: иначе бюджет недовыбирался из-за спроса демо, а не из-за правил.
+# Клики дешёвые нарочно: проверка вариантов по кликабельности набирает выборку в срок демо (30–40 дней) только так.
+DEMO_TRUTHS = (AdTruth(0.08, 25, 0.2, 3000), AdTruth(0.007, 62, 0.01, 3000), AdTruth(0.035, 45, 0.06, 3000))
 
 
 def demo_truths(count: int) -> list[AdTruth]:
@@ -424,8 +426,16 @@ class FakeAdapter:
             raise PlatformError("Дерево кампании не найдено.", status_code=404)
         resolved = {id_: tree.ads.get(id_, id_) for id_ in refs.entity_ids()}
         unresolved = {value for key, value in refs.ads.items() if key == value and value not in self._states}
-        self._check_refs(replace(refs, ads={key: resolved[value] for key, value in refs.ads.items()
-                                          if value not in unresolved or value in tree.ads}))
+        self._check_refs(
+            replace(
+                refs,
+                ads={
+                    key: resolved[value]
+                    for key, value in refs.ads.items()
+                    if value not in unresolved or value in tree.ads
+                },
+            )
+        )
         states = {key: self._states[value] for key, value in resolved.items() if value in self._states}
         states.update({state.entity_id: state for state in list(states.values())})
         return deepcopy(states)

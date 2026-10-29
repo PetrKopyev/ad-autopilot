@@ -352,6 +352,13 @@ class MemoryWorkerRepository(WorkerRepository):
         campaigns = self.rows(Campaign, business_id, id=ids)
         return {(item.platform, item.external_id) for item in campaigns if item.external_id}
 
+    def campaign_names(self, business_id: int) -> dict[tuple[str, str], str]:
+        return {
+            (item.platform, item.external_id): item.name
+            for item in self.rows(Campaign, business_id)
+            if item.external_id
+        }
+
     def local_entities(self, business_id: int, platform: str | None) -> dict:
         campaigns = self.rows(Campaign, business_id, platform=platform)
         groups = self.rows(AdGroup, business_id, campaign_id={item.id for item in campaigns})

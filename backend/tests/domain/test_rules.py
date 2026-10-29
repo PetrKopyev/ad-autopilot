@@ -348,3 +348,11 @@ def test_first_decision_days_follow_thresholds():
     # 2 клика в день: за 14 дней окна 40 не набрать.
     assert first_decision_days(3, Decimal(2)) is None
     assert first_decision_days(3, Decimal(0)) is None
+
+
+def test_generous_check_does_not_hide_ads_far_worse_than_the_rest(make_ad, now):
+    """Чек окупает любую цену из рекламы: опора — цена обращения самих объявлений, худшее останавливается."""
+    ads = [make_ad(id=str(index), spend=spend) for index, spend in enumerate((1_000, 2_000, 9_000))]
+    assert ref_cpl(250_000, ads, now.date()) == 2_000
+    assert ref_cpl(250_000, (), now.date()) == 22_500
+    assert ref_cpl(10_000, ads, now.date()) == 900

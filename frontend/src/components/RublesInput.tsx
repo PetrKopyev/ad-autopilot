@@ -6,16 +6,21 @@ const maxWholeDigits = 12;
 
 /** Рубли и копейки из набранного: точка и запятая — разделитель, до двух знаков после него, лишние нули слева убираются. */
 // Разделитель — точка или запятая сразу после цифры: точка в «567 руб.» копейками не считается.
+// Минус в начале остаётся: «-100» не должно молча стать 100 ₽, форма покажет ошибку.
 function normalize(raw: string): string {
+  const sign = /^\s*[-−–]/.test(raw) ? '-' : '';
   const match = /(?:^|\d)[.,]/.exec(raw);
   const at = match ? match.index + match[0].length - 1 : -1;
   const whole = (at < 0 ? raw : raw.slice(0, at)).replace(/\D/g, '').replace(/^0+/, '').slice(0, maxWholeDigits);
-  if (at < 0) return whole;
-  return `${whole || '0'},${raw.slice(at + 1).replace(/\D/g, '').slice(0, 2)}`;
+  if (at < 0) return sign + whole;
+  return `${sign}${whole || '0'},${raw.slice(at + 1).replace(/\D/g, '').slice(0, 2)}`;
 }
+/** Значение поля из копеек: 5 000 050 → «50000,50», без округления. */
+export const rublesValue = (kopecks: number) => kopecks % 100 ? `${Math.trunc(kopecks / 100)},${String(kopecks % 100).padStart(2, '0')}` : String(kopecks / 100);
 const display = (value: string) => {
-  const [whole, fraction] = value.split(',');
-  return fraction === undefined ? groupDigits(whole) : `${groupDigits(whole)},${fraction}`;
+  const sign = value.startsWith('-') ? '-' : '';
+  const [whole, fraction] = value.slice(sign.length).split(',');
+  return sign + (fraction === undefined ? groupDigits(whole) : `${groupDigits(whole)},${fraction}`);
 };
 
 export interface RublesInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'inputMode'> {

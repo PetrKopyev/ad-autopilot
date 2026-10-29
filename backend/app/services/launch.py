@@ -812,7 +812,7 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
         if campaign.external_id not in states:
             continue
         status = states[campaign.external_id].status
-        if len(gone) == len(ids):
+        if gone and len(gone) == len(ids):
             if status in STOPPED:
                 continue
             await worker.apply(
@@ -822,7 +822,9 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
                 actor="owner",
                 kind="pause",
                 reason_code="SERVICE_REMOVED",
-                reason_text=f"Убрали из описания: {', '.join(gone)} — остановили кампанию «{campaign.name}».",
+                # Запись от имени владельца («Вы»): услугу убрал он, а кампанию по его правке остановил автопилот.
+                reason_text=f"Вы убрали из описания: {', '.join(gone)}. "
+                f"Автопилот остановил кампанию «{campaign.name}».",
                 suffix=f"services:{campaign.id}:{','.join(gone)}",
             )
             continue
@@ -839,8 +841,8 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
                 actor="owner",
                 kind="pause",
                 reason_code="SERVICE_REMOVED",
-                reason_text=f"Убрали из описания: {', '.join(gone)} — остановили её объявления в кампании "
-                f"«{campaign.name}».",
+                reason_text=f"Вы убрали из описания: {', '.join(gone)}. Автопилот остановил объявления этих услуг "
+                f"в кампании «{campaign.name}».",
                 suffix=f"services:{campaign.id}:{','.join(gone)}",
             )
         if business.status != "running":
@@ -853,7 +855,7 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
                 actor="owner",
                 kind="resume",
                 reason_code="SERVICE_RETURNED",
-                reason_text="Услуга снова в описании — её кампания продолжила работу.",
+                reason_text=f"Вы вернули услугу в описание. Автопилот снова включил кампанию «{campaign.name}».",
                 suffix=f"services:{campaign.id}:returned",
             )
         resumed = [
@@ -873,7 +875,7 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
                 actor="owner",
                 kind="resume",
                 reason_code="SERVICE_RETURNED",
-                reason_text=f"Снова в описании: {', '.join(names)} — объявления в кампании «{campaign.name}» "
-                "снова работают.",
+                reason_text=f"Вы вернули в описание: {', '.join(names)}. Автопилот снова включил их объявления "
+                f"в кампании «{campaign.name}».",
                 suffix=f"services:{campaign.id}:returned-ads",
             )
