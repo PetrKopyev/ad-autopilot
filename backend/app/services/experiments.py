@@ -21,8 +21,9 @@ from app.domain.explain import explain
 from app.domain.rules import can_change
 from app.domain.settings import DEFAULT_SETTINGS
 from app.domain.types import AdSnapshot, ExperimentDesign
-from app.platforms.base import Operation, PlatformError
+from app.platforms.base import AdGroupSpec, AdSpec, Operation, PlatformError, TargetSpec
 from app.platforms.fake import FakeAdapter
+from app.platforms.regions import phrase_city
 from app.services.changes import PENDING, ChangeConflict
 from app.services.onboarding import AiLimits, Blocked, SpendLLM, ai_budget, description_draft
 from app.services.plan import PlanRepository, PlanService
@@ -164,11 +165,12 @@ async def _create_experiment(
         return None
     if not group_available(worker, business, group, ignore_change_id=existing.id if existing else None):
         return None
-    if hypothesis == "audience" and not worker.proposed(business):
+    audience = await audience_variant(worker, business, campaign, group) if hypothesis == "audience" else None
+    if hypothesis == "audience" and audience is None:
         worker.notice(
             business,
             "EXPERIMENT_UNSUPPORTED",
-            "Проверка другой аудитории требует отдельной группы и пока недоступна.",
+            "Другую аудиторию для этой группы подобрать не из чего, поэтому аудитории не сравниваем.",
             key=key,
             target_id=ad.id,
         )
@@ -176,6 +178,14 @@ async def _create_experiment(
     if not worker.proposed(business) and any(item is not existing for item in worker.pending(business.id)):
         raise ChangeConflict(PENDING)
     params = {"hypothesis": hypothesis, "n_per_arm": design.n_per_arm, "days": design.estimated_days}
+    if audience is not None:
+        control_label, variant_label = audience["labels"]
+        params |= {
+            "group": group.theme,
+            "control": control_label,
+            "variant": variant_label,
+            "days": DEFAULT_SETTINGS.test_max_days,
+        }
     proposal = existing or ChangeLog(
         business_id=business.id,
         actor="autopilot",
@@ -186,12 +196,12 @@ async def _create_experiment(
         operations=[],
         reason_code="EXPERIMENT_START",
         reason_params=params,
-        reason_text=explain("EXPERIMENT_START", params),
+        reason_text=explain("AUDIENCE_START" if audience is not None else "EXPERIMENT_START", params),
         evidence={
             "experiment_key": key,
             "design": asdict(design) | {"hypothesis": hypothesis},
             "min_effect": str(DEFAULT_SETTINGS.test_design_lift),
-            "metric": "ctr",
+            "metric": "cpl" if audience is not None else "ctr",
             "deadline": (worker.clock.now + timedelta(days=DEFAULT_SETTINGS.test_max_days)).isoformat(),
             "_service": {"dry_run": True, "refs": asdict(worker.refs(campaign))},
         },
@@ -202,6 +212,8 @@ async def _create_experiment(
     repository.save(proposal)
     if worker.proposed(business):
         return proposal
+    if audience is not None:
+        return await launch_audience(worker, business, campaign, group, control, proposal, design, audience)
     return await launch_variant(worker, business, campaign, group, control, proposal, design, hypothesis)
 
 
@@ -422,3 +434,138 @@ async def launch_variant(worker, business, campaign, group, control, change, des
     change.evidence = change.evidence | {"experiment_id": experiment.id}
     repository.save(control, variant, experiment, change)
     return change
+
+
+# Вторая аудитория VK: взрослые, которые чаще сами платят за услуги, вместо всех возрастов.
+AUDIENCE_AGES = (25, 54)
+
+
+async def audience_variant(worker: Worker, business: Business, campaign, group: AdGroup) -> dict | None:
+    """Другая аудитория для группы. Директ: те же фразы без названия города — люди того же региона, которые не пишут
+    город в запросе. VK: 25–54 года вместо всех возрастов. Отличить нечем — None."""
+    adapter = worker.resolve_adapter(business.id, campaign.platform)
+    targeting = (await adapter.get_state(worker.refs(campaign)))[group.external_id].targeting
+    if campaign.platform == "direct":
+        city = f" {phrase_city(business.city).lower()}"
+        phrases = [
+            target.value
+            for target in worker.repository.rows(Target, business.id, ad_group_id=group.id)
+            if target.kind == "phrase" and target.status == "active"
+        ]
+        wide = list(dict.fromkeys(phrase.removesuffix(city) for phrase in phrases))
+        if not phrases or wide == phrases:
+            return None
+        return {
+            "targeting": targeting,
+            "phrases": wide,
+            "name": "без города в запросе",
+            "labels": ["ищут с названием города", "ищут без названия города"],
+        }
+    if targeting.get("age_list"):
+        return None
+    low, high = AUDIENCE_AGES
+    return {
+        "targeting": {
+            key: value for key, value in targeting.items() if key in {"regions", "sex", "interests"} and value
+        }
+        | {"age_from": low, "age_to": high},
+        "phrases": [],
+        "name": f"{low}–{high} года",
+        "labels": ["все возрасты", f"{low}–{high} года"],
+    }
+
+
+async def launch_audience(worker, business, campaign, group, control, change, design, audience):
+    """Новая группа с копией пограничного объявления и другой аудиторией; объявление то же, отличается только
+    аудитория. Строки группы создаются один раз: повтор после сбоя площадки находит их в evidence."""
+    repository = worker.repository
+    adapter = worker.resolve_adapter(business.id, campaign.platform)
+    if "audience_group_id" not in change.evidence:
+        variant_group = AdGroup(
+            campaign_id=campaign.id, theme=f"{group.theme} — {audience['name']}", geo=group.geo, status="active"
+        )
+        repository.save(variant_group)
+        targets = [
+            Target(ad_group_id=variant_group.id, kind="phrase", value=value, status="active")
+            for value in audience["phrases"]
+        ]
+        variant = Ad(
+            ad_group_id=variant_group.id,
+            title=control.title,
+            text=control.text,
+            asset_id=control.asset_id,
+            status="moderation",
+            moderation_status="pending",
+            role="variant",
+        )
+        repository.save(variant, *targets)
+        change.evidence = change.evidence | {
+            "audience_group_id": variant_group.id,
+            "audience_ad_id": variant.id,
+            "audience": audience,
+        }
+        change.status = "pending"
+        repository.save(change)
+    variant_group = repository.find(AdGroup, business_id=business.id, id=change.evidence["audience_group_id"])
+    variant = repository.find(Ad, business_id=business.id, id=change.evidence["audience_ad_id"])
+    targets = repository.rows(Target, business.id, ad_group_id=variant_group.id)
+    source = (await adapter.get_state(worker.refs(campaign)))[control.external_id]
+    spec = AdGroupSpec(
+        str(variant_group.id),
+        variant_group.theme,
+        (AdSpec(str(variant.id), variant.title, variant.text, source.image_ref),),
+        tuple(TargetSpec(str(target.id), "phrase", target.value) for target in targets),
+        audience["targeting"],
+    )
+    try:
+        refs = await adapter.add_group(campaign.external_id, spec)
+    except PlatformError:
+        # Повтор найдёт группу и объявление по ключам ap-<id> и не создаст дублей.
+        raise ChangeConflict(VARIANT_UNCONFIRMED) from None
+    variant_group.external_id = refs.groups[spec.id]
+    variant.external_id = refs.ads[str(variant.id)]
+    for target in targets:
+        target.external_id = refs.targets[str(target.id)]
+    repository.save(variant_group, variant, *targets)
+    if demo_enabled() and isinstance(adapter, FakeAdapter):
+        # В демо новая аудитория обращается чаще: проверка доходит до вывода «новая аудитория дешевле».
+        truth = adapter._ad_truths[control.external_id]
+        adapter._ad_truths[variant.external_id] = replace(truth, conversion_rate=min(1, truth.conversion_rate * 2))
+    started = worker.clock.now
+    experiment = repository.find(Experiment, business_id=business.id, change_id=change.id)
+    if experiment is None:
+        experiment = Experiment(
+            business_id=business.id,
+            ad_group_id=group.id,
+            control_ad_id=control.id,
+            variant_ad_id=variant.id,
+            hypothesis="audience",
+            metric="cpl",
+            planned_n_per_arm=design.n_per_arm,
+            min_effect=Decimal(str(DEFAULT_SETTINGS.test_win_lift)),
+            started_at=started,
+            # Вывод — когда уточнятся цифры последнего дня проверки; день запаса на шаг воркера.
+            deadline=started + timedelta(days=DEFAULT_SETTINGS.test_max_days + DEFAULT_SETTINGS.settlement_days + 1),
+            status="running",
+            stats={"launch_change_id": change.id, "audiences": audience["labels"]},
+            change_id=change.id,
+        )
+        repository.save(experiment)
+    control.role = "control"
+    control.experiment_id = variant.experiment_id = experiment.id
+    change.status = "applied"
+    change.evidence = change.evidence | {
+        "experiment_id": experiment.id,
+        "_service": {"refs": asdict(worker.refs(campaign)), "dry_run": False},
+    }
+    repository.save(control, variant, experiment, change)
+    return change
+
+
+def testing_groups(worker: Worker, business: Business) -> set[int]:
+    """Группы идущих проверок; у проверки аудитории это и новая группа: автопилот не трогает их до вывода."""
+    running = worker.repository.rows(Experiment, business.id, status="running")
+    ads = {ad.id: ad for ad in worker.repository.rows(Ad, business.id)}
+    return {item.ad_group_id for item in running} | {
+        ads[item.variant_ad_id].ad_group_id for item in running if item.variant_ad_id in ads
+    }

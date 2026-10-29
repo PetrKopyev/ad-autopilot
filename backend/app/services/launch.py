@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from textwrap import shorten
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -40,14 +42,17 @@ from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import STOPPED
 from app.services.changes import CLOSED_ACCOUNT, AdapterResolver, ChangeConflict, ChangesService, ServerBusy
 from app.services.demo import configure_adapter
-from app.services.onboarding import DRAFT_STATUSES, NotFound
+from app.services.onboarding import DRAFT_STATUSES, NotFound, description_draft
 from app.services.plan import (
     IMAGE_KINDS,
     PlanRepository,
     budget_limits,
+    campaign_platform,
+    campaign_units,
     group_key,
     launch_blockers,
     launch_unsettled,
+    targeting,
 )
 from app.worker.jobs import NoticesRepository
 
@@ -94,6 +99,13 @@ def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], 
             f"{rubles(weekly)} ₽. Запустите рекламу {start} или увеличьте бюджет месяца."
         )
     return None
+
+
+def campaign_name(business: Business, key: str, groups: list[dict]) -> str:
+    services = [group["service"] for group in groups if group.get("service")]
+    if ":" not in key or not services:
+        return f"Автопилот: {business.city}"
+    return shorten(f"Автопилот: {', '.join(services)} — {business.city}", 150, placeholder="…")
 
 
 class LaunchBlocked(Exception):
@@ -224,16 +236,23 @@ class LaunchService:
                 if reasons:
                     raise LaunchBlocked(reasons)
                 limits = budget_limits(business, platforms, today, self.domain)
-                adapters, geo = await self.check_platforms(business, platforms, limits, today)
+                adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
             except LaunchBlocked:
                 # Повтора не будет: созданное прошлой попыткой останавливается сейчас, а не ждёт воркера.
                 if unsettled:
                     await self.stop_failed(plan, plan.payload["launch"].get("reason"), self.adapters(plan), now)
                 raise
-            self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
+            units = campaign_units(plan, platforms, limits, minimums, today)
+            self.save_launch(
+                plan,
+                started_at=now.isoformat(),
+                error=None,
+                reason=None,
+                batches={key: [group["id"] for group in groups] for key, (groups, _) in units.items()},
+            )
             try:
-                refs = await self.create_paused(business, plan, platforms, limits, adapters, geo)
-                await self.activate(business, plan, refs, adapters, limits, now)
+                refs = await self.create_paused(business, plan, units, adapters, geo)
+                await self.activate(business, plan, refs, adapters, units, now)
             except Exception as error:
                 await self.stop_failed(plan, failure_reason(error), adapters, now)
                 raise LaunchFailed(plan.payload["launch"]["error"]) from error
@@ -260,7 +279,7 @@ class LaunchService:
     def adapters(self, plan: Plan) -> dict[str, AdPlatform]:
         """Кабинеты кампаний плана; кабинет, который не открылся, пропускается: его кампанию остановит воркер."""
         adapters = {}
-        for platform in plan.payload["launch"]["campaigns"]:
+        for platform in {campaign_platform(key) for key in plan.payload["launch"]["campaigns"]}:
             try:
                 adapters[platform] = self.resolve_adapter(plan.business_id, platform)
             except CLOSED_ACCOUNT:
@@ -269,19 +288,19 @@ class LaunchService:
 
     async def check_platforms(
         self, business: Business, platforms: list[str], limits: dict[str, PlatformLimit], today: date
-    ) -> tuple[dict[str, AdPlatform], dict[str, dict]]:
+    ) -> tuple[dict[str, AdPlatform], dict[str, dict], dict[str, dict[str, int]]]:
         """До создания кампаний: кабинет доступен, бюджет не ниже минимумов площадки, город найден в её регионах.
 
         Площадки отвечают секундами: соединение с базой на это время возвращается в пул."""
         self.repository.commit()
-        adapters, geo = {}, {}
+        adapters, geo, minimums = {}, {}, {}
         for platform in platforms:
             # Нулевой дневной остаток ниже любого минимума: объясняем настоящую причину, а не «не хватает бюджета».
             if not limits[platform].daily_limit:
                 raise LaunchBlocked(["На сегодня бюджет месяца почти исчерпан: запустите рекламу с начала дня."])
             try:
                 adapters[platform] = self.resolve_adapter(business.id, platform)
-                minimum = await adapters[platform].min_budgets()
+                minimum = minimums[platform] = await adapters[platform].min_budgets()
             except CLOSED_ACCOUNT as error:
                 raise closed_account(platform, error) from error
             if reason := below_minimum(platform, limits[platform], minimum, today):
@@ -290,7 +309,7 @@ class LaunchService:
                 geo[platform] = await adapters[platform].geo_targeting(business.city)
             except PlatformError as error:
                 raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
-        return adapters, geo
+        return adapters, geo, minimums
 
     def save_launch(self, plan: Plan, status: str | None = None, **values: object) -> None:
         payload = dict(plan.payload)
@@ -304,8 +323,7 @@ class LaunchService:
         self,
         business: Business,
         plan: Plan,
-        platforms: list[str],
-        limits: dict[str, PlatformLimit],
+        units: dict[str, tuple[list[dict], PlatformLimit]],
         adapters: dict[str, AdPlatform],
         geo: dict[str, dict],
     ) -> dict[str, tuple[Campaign, ExternalRefs]]:
@@ -314,25 +332,31 @@ class LaunchService:
         accounts = {account.platform: account for account in self.repository.accounts(business.id)}
         assets = {asset.id: asset for asset in self.repository.assets(business.id)}
         known = plan.payload.get("launch", {}).get("campaigns", {})
-        for platform in platforms:
+        # Демо раздаёт объявлениям сильную, слабую и пограничную эффективность по порядку групп площадки.
+        configured = dict.fromkeys(adapters, 0)
+        for key, (groups, limit) in units.items():
+            platform = campaign_platform(key)
             adapter = adapters[platform]
-            groups = [group for group in plan.payload["groups"] if group["platform"] == platform]
             self.repository.commit()
             images = await self.upload_images(adapter, platform, groups, plan, assets)
-            campaign = self.repository.campaign(known[platform]) if platform in known else None
+            campaign = self.repository.campaign(known[key]) if key in known else None
             if campaign is None:
-                campaign = self.stage_rows(business, plan, platform, limits[platform], accounts[platform].id, groups)
-                self.save_launch(
-                    plan, campaigns=plan.payload.get("launch", {}).get("campaigns", {}) | {platform: campaign.id}
+                campaign = self.stage_rows(
+                    business, platform, campaign_name(business, key, groups), limit, accounts[platform].id, groups
                 )
-            spec = self.spec(business, campaign, groups, images, geo[platform])
+                known = known | {key: campaign.id}
+                self.save_launch(plan, campaigns=known)
+            spec = self.spec(
+                business, campaign, groups, images, lambda group: geo[platform] | targeting(plan, platform, group)
+            )
             # Картинка объявления сохраняется в строке: по ней экраны показывают миниатюру.
             self.repository.commit()
             if demo_enabled() and isinstance(adapter, FakeAdapter):
-                configure_adapter(adapter, spec)
+                configure_adapter(adapter, spec, configured[platform])
+                configured[platform] += len(spec.groups)
             refs = await adapter.create_campaign_tree(spec)
             self.bind(campaign, refs)
-            created[platform] = (campaign, refs)
+            created[key] = (campaign, refs)
             self.repository.commit()
         return created
 
@@ -376,8 +400,8 @@ class LaunchService:
     def stage_rows(
         self,
         business: Business,
-        plan: Plan,
         platform: str,
+        name: str,
         limit: PlatformLimit,
         account_id: int,
         groups: list[dict],
@@ -387,7 +411,7 @@ class LaunchService:
             platform_account_id=account_id,
             platform=platform,
             type=CAMPAIGN_TYPES[platform],
-            name=f"Автопилот: {business.city}",
+            name=name,
             status="paused_auto",
             daily_limit_kop=limit.daily_limit,
             period_cap_kop=limit.remaining_cap,
@@ -423,7 +447,7 @@ class LaunchService:
         campaign: Campaign,
         plan_groups: list[dict],
         images: dict[str, list[Asset]],
-        geo: dict,
+        group_targeting: Callable[[dict], dict],
     ) -> CampaignTreeSpec:
         """Внутренние id в дереве — id строк БД: по ним воркер собирает ExternalRefs. Объявления получают картинки
         группы по кругу; картинка запоминается в Ad.asset_id."""
@@ -461,7 +485,7 @@ class LaunchService:
                         for target in targets
                         if target.ad_group_id == group.id
                     ),
-                    geo,
+                    group_targeting(by_name[group.theme]),
                 )
                 for group in groups
             ),
@@ -481,11 +505,12 @@ class LaunchService:
         plan: Plan,
         created: dict[str, tuple[Campaign, ExternalRefs]],
         adapters: dict[str, AdPlatform],
-        limits: dict[str, PlatformLimit],
+        units: dict[str, tuple[list[dict], PlatformLimit]],
         now: datetime,
     ) -> None:
         # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
-        for platform, (campaign, refs) in created.items():
+        for key, (campaign, refs) in created.items():
+            platform, limit = campaign_platform(key), units[key][1]
             operations = [
                 Operation("set_status", "ad", external_id, "status", "paused_auto", "active")
                 for external_id in refs.ads.values()
@@ -499,11 +524,11 @@ class LaunchService:
                 kind="launch",
                 platform=platform,
                 reason_code="LAUNCH",
-                reason_params={"budget": business.month_budget_kop},
+                reason_params={"budget": business.month_budget_kop, "campaign": campaign.name},
                 evidence={
                     "plan_id": plan.id,
-                    "daily_limit_kop": limits[platform].daily_limit,
-                    "period_cap_kop": limits[platform].remaining_cap,
+                    "daily_limit_kop": limit.daily_limit,
+                    "period_cap_kop": limit.remaining_cap,
                 },
                 entity_type="campaign",
                 entity_id=refs.campaign_id,
@@ -531,7 +556,8 @@ class LaunchService:
         """Останавливает кампании плана; False — площадка не подтвердила остановку хотя бы одной или её кабинет не
         открылся."""
         stopped = True
-        for platform, campaign_id in plan.payload.get("launch", {}).get("campaigns", {}).items():
+        for key, campaign_id in plan.payload.get("launch", {}).get("campaigns", {}).items():
+            platform = campaign_platform(key)
             campaign = self.repository.campaign(campaign_id)
             if campaign is None or not campaign.external_id:
                 continue
@@ -558,14 +584,17 @@ class LaunchService:
         now: datetime,
         today: date,
     ) -> None:
-        for platform in platforms:
-            campaign = self.repository.campaign(plan.payload["launch"]["campaigns"][platform])
+        for key, campaign_id in plan.payload["launch"]["campaigns"].items():
+            if campaign_platform(key) not in platforms:
+                continue
+            campaign = self.repository.campaign(campaign_id)
             campaign.status = "active"
             groups, ads, _ = self.repository.tree_rows(campaign.id)
             for row in groups:
                 row.status = "active"
             for ad in ads:
                 ad.status = "moderation"
+        for platform in platforms:
             self.repository.save_ledger(
                 BudgetLedger(
                     business_id=business.id,
@@ -670,11 +699,11 @@ async def recover_launch(worker: Worker, business: Business) -> None:
         # следующий ход останавливает снова, а не находит прошлую остановку под тем же ключом.
         worker.step_key = f"launch_recovery:{plan.id}:{attempt}:{worker.clock.now.isoformat()}"
         stops = {
-            platform: await stop_interrupted(worker, business, campaign_id)
-            for platform, campaign_id in plan.payload["launch"]["campaigns"].items()
+            key: await stop_interrupted(worker, business, campaign_id)
+            for key, campaign_id in plan.payload["launch"]["campaigns"].items()
         }
-        failed = [platform for platform, result in stops.items() if result == "failed"]
-        revoked = [platform for platform, result in stops.items() if result == "revoked"]
+        failed = list(dict.fromkeys(campaign_platform(key) for key, result in stops.items() if result == "failed"))
+        revoked = list(dict.fromkeys(campaign_platform(key) for key, result in stops.items() if result == "revoked"))
         reason = plan.payload["launch"].get("reason")
         if failed:
             launch = {"error": interrupted_unstopped(failed, reason)}
@@ -730,3 +759,70 @@ async def stop_interrupted(worker: Worker, business: Business, campaign_id: int)
         # Кабинет требует входа заново, площадка не ответила или не подтвердила остановку: попробуем в следующий ход.
         return "failed"
     return "stopped"
+
+
+async def sync_removed_services(worker: Worker, business: Business) -> None:
+    """Описание поменяли после запуска: кампания Директа, все услуги которой из описания убраны, останавливается, а в
+    общей с другими услугами кампании останавливаются объявления групп убранных услуг. Услугу вернули — её
+    кампания, остановленная так, продолжает работать. Действие владельца: идёт и в пробном режиме."""
+    launched = [plan for plan in worker.repository.rows(Plan, business.id) if plan.status == "launched"]
+    if not launched:
+        return
+    plan = max(launched, key=lambda item: item.id)
+    services = {service.name for service in description_draft(business).services}
+    # Неподтверждённое описание сохраняется и без услуг: пустой список — не «убрали всё».
+    if not services:
+        return
+    groups = {
+        group["id"]: group for group in plan.payload["groups"] if group["platform"] == "direct" and "service" in group
+    }
+    removed = {id_ for id_, group in groups.items() if group["service"] not in services}
+    batches = plan.payload["launch"].get("batches", {})
+    current = {campaign.id: campaign for campaign in worker.current_campaigns(business)}
+    for key, campaign_id in plan.payload["launch"]["campaigns"].items():
+        campaign = current.get(campaign_id)
+        if campaign_platform(key) != "direct" or campaign is None or not campaign.external_id:
+            continue
+        ids = [id_ for id_ in batches.get(key, groups) if id_ in groups]
+        gone = [groups[id_]["service"] for id_ in ids if id_ in removed]
+        last = worker.repository.last_status_change(business.id, "direct", "campaign", campaign.external_id)
+        returned = not gone and last is not None and last.reason_code == "SERVICE_REMOVED" and last.kind == "pause"
+        if not gone and not returned:
+            continue
+        states = await worker.resolve_adapter(business.id, "direct").get_state(worker.refs(campaign))
+        status = states[campaign.external_id].status
+        if returned:
+            if status != "paused_owner" or business.status != "running":
+                continue
+            operations = [Operation("set_status", "campaign", campaign.external_id, "status", status, "active")]
+            text = "Услуга снова в описании — её кампания продолжила работу."
+        elif len(gone) == len(ids):
+            if status in STOPPED:
+                continue
+            operations = [Operation("set_status", "campaign", campaign.external_id, "status", status, "paused_owner")]
+            text = f"Убрали из описания: {', '.join(gone)} — остановили кампанию «{campaign.name}»."
+        else:
+            themes = {groups[id_]["name"] for id_ in ids if id_ in removed}
+            stale = {
+                row.id
+                for row in worker.repository.rows(AdGroup, business.id)
+                if row.campaign_id == campaign.id and row.theme in themes
+            }
+            operations = [
+                Operation("set_status", "ad", ad.external_id, "status", states[ad.external_id].status, "paused_owner")
+                for ad in worker.repository.rows(Ad, business.id)
+                if ad.ad_group_id in stale and states[ad.external_id].status not in STOPPED
+            ]
+            if not operations:
+                continue
+            text = f"Убрали из описания: {', '.join(gone)} — остановили её объявления в кампании «{campaign.name}»."
+        await worker.apply(
+            business,
+            campaign,
+            operations,
+            actor="owner",
+            kind="resume" if returned else "pause",
+            reason_code="SERVICE_RETURNED" if returned else "SERVICE_REMOVED",
+            reason_text=text,
+            suffix=f"services:{campaign.id}:{','.join(gone)}",
+        )

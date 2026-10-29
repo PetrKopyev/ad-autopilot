@@ -12,3 +12,4 @@ dist/
 *.log
 .tasks/
 !.env.demo.example
+.claude/worktrees/

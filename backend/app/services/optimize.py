@@ -20,8 +20,8 @@ from app.domain.budget import (
     rebalance_platform_shares,
     share_floors,
 )
-from app.domain.experiments import design_experiment, evaluate_experiment, select_borderline
-from app.domain.explain import explain_decision, explain_experiment, rubles
+from app.domain.experiments import design_experiment, evaluate_audience, evaluate_experiment, select_borderline
+from app.domain.explain import explain_audience, explain_decision, explain_experiment, rubles
 from app.domain.rules import decide, ref_cpl, settled_days
 from app.domain.types import (
     Action,
@@ -38,7 +38,7 @@ from app.domain.types import (
 from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import read_spend
 from app.services.changes import budget_operations
-from app.services.experiments import completed_hypotheses, group_available
+from app.services.experiments import completed_hypotheses, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
 
@@ -117,6 +117,15 @@ async def snapshot(
                 lifetime_impressions=sum(row.impressions for row in rows if row.ad_id == ad.id),
             )
         )
+    # Кампании, остановленные перед отключением кабинета, продолжат после его подключения: доля бюджета за ними.
+    revoked = {
+        campaign.id
+        for campaign in campaigns
+        if include_paused_campaigns
+        and campaign.status == "paused_owner"
+        and (last := repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id))
+        and last.reason_code == "ACCOUNT_REVOKE"
+    }
     group_snapshots = []
     for group in groups:
         if group.external_id not in states or group.campaign_id not in campaign_map:
@@ -134,7 +143,11 @@ async def snapshot(
                     states[campaign.external_id].status == "active"
                     or (
                         include_paused_campaigns
-                        and (campaign.status == "paused_auto" or campaign.id in meta.get("kill_switch_campaigns", []))
+                        and (
+                            campaign.status == "paused_auto"
+                            or campaign.id in meta.get("kill_switch_campaigns", [])
+                            or campaign.id in revoked
+                        )
                         and states[campaign.external_id].status in {"paused_auto", "paused_owner"}
                         and not campaign.owner_paused
                     )
@@ -162,9 +175,11 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
 
 async def optimize(worker: Worker, business: Business) -> None:
     from app.config import get_domain_settings
+    from app.services.launch import sync_removed_services
 
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
         return
+    await sync_removed_services(worker, business)
     ads, groups = await snapshot(worker, business)
     limits = {group.id: group.daily_limit for group in groups}
     # Освободившаяся доля остаётся доступной, но не доливается в пограничные объявления.
@@ -179,8 +194,9 @@ async def optimize(worker: Worker, business: Business) -> None:
     )
     campaigns = worker.campaigns(business)
     local_groups = worker.repository.rows(AdGroup, business.id)
-    testing = {item.ad_group_id for item in worker.repository.rows(Experiment, business.id, status="running")}
+    testing = testing_groups(worker, business)
     ad_map = {ad.id: ad for ad in ads}
+    lifetime = None
     titles = {ad.external_id: ad.title for ad in worker.repository.rows(Ad, business.id)}
     for decision in decisions:
         if decision.action == Action.NOTIFY:
@@ -217,21 +233,31 @@ async def optimize(worker: Worker, business: Business) -> None:
                 scaled[donor.id] -= take
                 scaled[group_id] += take
                 increment -= take
+            # Лимит кампании — доля её действующих групп (rebalance_budget): перенесённая доля сразу поднимает лимит
+            # кампании этой группы. Остановленные группы-доноры в лимиты кампаний не входили, их кампании не теряют.
+            own = {item.external_id for item in local_groups if item.campaign_id == campaign.id}
+            active = [item.id for item in groups if item.id in own and item.active]
+            share_before, share_after = sum(before[key] for key in active), sum(scaled[key] for key in active)
+            if share_after == share_before or not share_before:
+                continue
+            if lifetime is None:
+                _, lifetime = await read_spend(worker, business, campaigns=campaigns)
             state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
                 campaign.external_id
             ]
+            spent = lifetime.get(campaign.external_id, 0)
+            daily = state.daily_limit_kop * share_after // share_before
+            cap = spent + max(state.period_cap_kop - spent, 0) * share_after // share_before
             await worker.apply(
                 business,
                 campaign,
                 [
-                    Operation(
-                        "set_budget",
-                        "campaign",
-                        campaign.external_id,
-                        "daily_limit_kop",
-                        state.daily_limit_kop,
-                        campaign.daily_limit_kop,
+                    Operation("set_budget", "campaign", campaign.external_id, field, value, after)
+                    for field, value, after in (
+                        ("period_cap_kop", state.period_cap_kop, cap),
+                        ("daily_limit_kop", state.daily_limit_kop, daily),
                     )
+                    if value != after
                 ],
                 kind="budget",
                 reason_code=decision.reason_code,
@@ -488,7 +514,7 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
     campaigns = {campaign.id: campaign for campaign in worker.campaigns(business)}
     running = worker.repository.rows(Experiment, business.id, status="running")
     # Завершённая группа остаётся занята до следующего запуска этого шага.
-    occupied_groups = {local_groups[item.ad_group_id].external_id for item in running}
+    occupied_groups = {local_groups[item].external_id for item in testing_groups(worker, business)}
     for experiment in running:
         if worker.clock.now >= experiment.deadline:
             # Дедлайн освобождает группу даже после правок или отката владельца.
@@ -550,13 +576,18 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         started = experiment.started_at.astimezone(MOSCOW).date()
         control_days = tuple(day for day in control.days if started <= day.day <= end)
         variant_days = tuple(day for day in variant.days if started <= day.day <= end)
-        result = evaluate_experiment(
-            design,
-            control_days,
-            variant_days,
-            started,
-            today(worker.clock),
-            extended=experiment.stats.get("extended", False),
+        audience = experiment.metric == "cpl"
+        result = (
+            evaluate_audience(control_days, variant_days, started, today(worker.clock))
+            if audience
+            else evaluate_experiment(
+                design,
+                control_days,
+                variant_days,
+                started,
+                today(worker.clock),
+                extended=experiment.stats.get("extended", False),
+            )
         )
         if result.verdict == Verdict.RUNNING:
             continue
@@ -574,7 +605,11 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
         loser = control_id if result.verdict == Verdict.VARIANT else variant_id
         campaign = campaigns[local_groups[experiment.ad_group_id].campaign_id]
         control_metrics, variant_metrics = total_metrics(control_days), total_metrics(variant_days)
-        text = explain_experiment(result, control_metrics, variant_metrics)
+        text = (
+            explain_audience(result, control_metrics, variant_metrics, experiment.stats["audiences"])
+            if audience
+            else explain_experiment(result, control_metrics, variant_metrics)
+        )
         # Готовый текст содержит все параметры эксперимента и сохраняется единым откатываемым изменением.
         change = await worker.apply(
             business,

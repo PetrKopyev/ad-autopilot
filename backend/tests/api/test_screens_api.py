@@ -220,7 +220,14 @@ def test_status_contract_heartbeat_and_platform_error(setup):
         )
     )
     response = client.get("/api/autopilot/status").json()
-    assert set(response) == {"status", "last_check_at", "auto_continue", "needs_attention", "has_plan"}
+    assert set(response) == {
+        "status",
+        "last_check_at",
+        "auto_continue",
+        "needs_attention",
+        "has_plan",
+        "first_decisions",
+    }
     assert response["last_check_at"] is not None
     world.repository.save(
         WorkerRun(
@@ -243,6 +250,48 @@ def test_status_tells_whether_plan_is_ready_before_launch(setup):
         assert (response["status"], response["has_plan"]) == ("draft", has_plan)
     world.business.status = "running"
     assert client.get("/api/autopilot/status").json()["has_plan"] is True
+
+
+def test_status_tells_when_first_decisions_come(setup):
+    client, world = setup
+    world.business.status = "running"
+    world.business.settings = world.business.settings | {"_worker": {}}
+    assert (
+        client.get("/api/autopilot/status")
+        .json()["first_decisions"]
+        .startswith(
+            "Первые решения автопилота — не раньше чем через 5 дней после того, как площадка одобрит объявления."
+        )
+    )
+    approved = (world.clock.now - timedelta(days=3)).isoformat()
+    world.business.settings = world.business.settings | {"_worker": {"approvals": {"ad": approved}}}
+    ads = list(world.ads.values())
+    for ad in ads:
+        world.repository.save(
+            StatsDaily(
+                business_id=1,
+                campaign_id=world.campaign.id,
+                ad_id=ad.id,
+                platform=world.campaign.platform,
+                date=world.clock.now.date() - timedelta(days=2),
+                cost_kop=1000,
+                impressions=200,
+                clicks=5,
+                conversions={},
+                fetched_at=world.clock.now,
+                is_settled=True,
+            )
+        )
+    # 5 кликов в день: 40 кликов — 8 дней и 2 дня на уточнение; с одобрения прошло 3 дня.
+    assert client.get("/api/autopilot/status").json()["first_decisions"] == (
+        "Первые решения автопилота — примерно через 7 дней. Срок зависит от бюджета: каждому объявлению нужно "
+        "набрать 40 кликов, а цифры площадки уточняются ещё 2 дня."
+    )
+    for row in world.repository.rows(StatsDaily, 1):
+        row.clicks = 1
+    assert "Увеличьте бюджет" in client.get("/api/autopilot/status").json()["first_decisions"]
+    world.business.status = "paused"
+    assert client.get("/api/autopilot/status").json()["first_decisions"] is None
 
 
 def test_ads_period_metrics_and_contract(setup):
@@ -377,8 +426,18 @@ def test_experiments_and_safe_business(setup):
     # Картинку объявлению выбирает запуск; экран отдаёт ссылку на неё у каждого варианта.
     assert control.asset_id and variant.asset_id
     assert items[1]["arms"] == [
-        {"title": control.title, "text": control.text, "image": f"/api/plan/assets/{control.asset_id}/file"},
-        {"title": variant.title, "text": variant.text, "image": f"/api/plan/assets/{variant.asset_id}/file"},
+        {
+            "title": control.title,
+            "text": control.text,
+            "image": f"/api/plan/assets/{control.asset_id}/file",
+            "audience": None,
+        },
+        {
+            "title": variant.title,
+            "text": variant.text,
+            "image": f"/api/plan/assets/{variant.asset_id}/file",
+            "audience": None,
+        },
     ]
 
 
@@ -407,8 +466,9 @@ def test_experiment_arms_carry_own_text_and_missing_ad_is_empty(setup):
         "title": control.title,
         "text": "Другое начало текста",
         "image": f"/api/plan/assets/{variant.asset_id}/file",
+        "audience": None,
     }
-    assert running["arms"][1] == {"title": "", "text": "", "image": None}
+    assert running["arms"][1] == {"title": "", "text": "", "image": None, "audience": None}
     result = client.get("/api/business").json()
     assert result["marking"] == {
         "subject_type": "ip",
@@ -635,4 +695,59 @@ def test_concluded_experiment_shows_numbers_and_period_of_the_verdict(setup):
     assert running["period"] == {"from": first.isoformat(), "to": (first + timedelta(days=15)).isoformat()}
     assert concluded["conclusion"].startswith(
         "Объявление Б показывали 3 100 раз, на него нажали 62 раза (2,0%) против 1,0% у А."
+    )
+
+
+def test_audience_experiment_shows_audiences_and_lead_prices(setup):
+    client, world = setup
+    control, variant = list(world.ads.values())[:2]
+    labels = ["ищут с названием города", "ищут без названия города"]
+    for id_, status, stats in (
+        (1, "running", {"audiences": labels}),
+        (
+            2,
+            "concluded",
+            {"audiences": labels, "result": {"verdict": "variant", "reason_code": "EXPERIMENT_WIN", "p_value": 0.03}},
+        ),
+    ):
+        world.repository.save(
+            Experiment(
+                id=id_,
+                business_id=1,
+                ad_group_id=control.ad_group_id,
+                hypothesis="audience",
+                metric="cpl",
+                control_ad_id=control.id,
+                variant_ad_id=variant.id,
+                planned_n_per_arm=2000,
+                started_at=world.clock.now - timedelta(days=5),
+                deadline=world.clock.now + timedelta(days=12),
+                status=status,
+                stats=stats,
+            )
+        )
+    for ad, leads in ((control, 4), (variant, 8)):
+        world.repository.save(
+            StatsDaily(
+                business_id=1,
+                campaign_id=world.campaign.id,
+                ad_id=ad.id,
+                platform=world.campaign.platform,
+                date=world.clock.now.date() - timedelta(days=3),
+                cost_kop=80_000,
+                impressions=1000,
+                clicks=40,
+                conversions={"1": leads},
+                fetched_at=world.clock.now,
+                is_settled=True,
+            )
+        )
+    concluded, running = client.get("/api/experiments").json()["items"]
+    assert running["title"] == "Сравниваем аудитории" and running["remaining_impressions"] == 0
+    assert [arm["audience"] for arm in running["arms"]] == labels
+    assert running["comparing"].startswith("Меняем только аудиторию: то же объявление показываем в отдельной группе")
+    assert running["conclusion"].startswith("Проверка идёт. Цену обращения сравним за весь срок")
+    assert concluded["conclusion"].startswith(
+        "Сравнили аудитории: «ищут с названием города» — 4 обращения по 200 ₽, «ищут без названия города» — "
+        "8 обращений по 100 ₽. Разница, скорее всего, не случайна."
     )

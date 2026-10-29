@@ -8,6 +8,7 @@
 .home-state__text strong, .home-state__headline { color: var(--color-on-ink); font-weight: 700; }
 .home-state__text .loading { color: var(--color-on-ink-muted); }
 .home-state__check { white-space: nowrap; }
+.home-state__note { margin-top: var(--space-1); font-size: 0.875rem; }
 
 .home-tiles .metric-tile__chart { height: 30px; }
 .home-tiles .sparkline { display: block; width: 100%; height: 30px; }

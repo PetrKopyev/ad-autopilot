@@ -23,6 +23,7 @@ from app.domain.budget import allocate, platform_shares
 from app.domain.settings import DomainSettings
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.direct_forecast import DirectForecastClient, ForecastAccessDenied, PhraseForecast
+from app.platforms.fake import demo_truths
 from app.platforms.metrica import MAX_GOALS, MetricaError
 from app.services.onboarding import AiLimits, SpendLLM, ai_budget
 from app.services.plan import PlanRepository
@@ -67,6 +68,7 @@ class Conversion:
     note: str | None = None
 
 
+DEMO_LABEL = "так настроен демо-кабинет: столько же обращений он и покажет после запуска"
 BENCHMARK = Conversion(Decimal("0.01"), Decimal("0.03"), "benchmark", "средняя цифра для сайтов услуг", BENCHMARK_URL)
 
 
@@ -153,6 +155,11 @@ def leads(clicks: Clicks, conversion: Conversion) -> tuple[int, int]:
     return math.floor(clicks.min * conversion.min), math.ceil(clicks.max * conversion.max)
 
 
+def price(value: Decimal) -> str:
+    """Цена клика: дешевле 10 ₽ — с копейками, иначе в целых рублях."""
+    return f"{value.quantize(Decimal('0.01'), ROUND_HALF_UP)}".replace(".", ",") if value < 10 else rub(value)
+
+
 def rub(value: Decimal | int) -> str:
     text = f"{Decimal(value).quantize(Decimal(1), ROUND_HALF_UP):,}"
     return text.replace(",", " ")
@@ -167,33 +174,48 @@ def numbers(text: str) -> set[Decimal]:
 
 
 def template(
-    clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_range: tuple[int, int], budget_note: str = ""
+    clicks: Clicks,
+    budget_rub: Decimal,
+    conversion: Conversion,
+    leads_range: tuple[int, int],
+    budget_note: str = "",
+    demo: bool = False,
 ) -> str:
     if not clicks.potential:
         return (
             "Яндекс Директ не видит спроса по фразам плана в вашем регионе за прошлый месяц: прогноз обращений "
             "посчитать не из чего. Это прогноз, он может ошибаться."
         )
-    price = (
-        f"от {rub(clicks.cpc_min)} до {rub(clicks.cpc_max)} ₽"
-        if clicks.cpc_min is not None and clicks.cpc_max is not None
-        else f"около {rub(clicks.cpc_min or clicks.cpc_max or 0)} ₽"
+    cpc = (
+        f"от {price(clicks.cpc_min)} до {price(clicks.cpc_max)} ₽"
+        if clicks.cpc_min is not None and clicks.cpc_max is not None and clicks.cpc_min != clicks.cpc_max
+        else f"около {price(clicks.cpc_min or clicks.cpc_max or Decimal(0))} ₽"
     )
     if not clicks.max:
         return (
             f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
-            f"{rub(clicks.potential)} кликов. Но при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} не "
+            f"{rub(clicks.potential)} кликов. Но при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} не "
             f"выйдет ни одного клика, а значит, и обращений из Директа.{budget_note} Это прогноз, он может ошибаться."
         )
-    rate = (
-        f"Заявку оставляют от {percent(conversion.min)} до {percent(conversion.max)} из 100 посетителей сайта — "
-        f"{conversion.label}."
+    share = (
+        f"от {percent(conversion.min)} до {percent(conversion.max)}"
+        if conversion.min != conversion.max
+        else percent(conversion.min)
     )
+    rate = f"Заявку оставляют {share} из 100 посетителей сайта — {conversion.label}."
+    count = f"от {rub(clicks.min)} до {rub(clicks.max)}" if clicks.min != clicks.max else rub(clicks.min)
+    if demo:
+        return (
+            f"Демо-кабинет за месяц наберёт до {rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в "
+            f"месяц и цене клика {cpc} выйдет примерно {count} кликов.{budget_note} {rate} Итого примерно от "
+            f"{leads_range[0]} до {leads_range[1]} обращений в месяц. Это демо: настоящий прогноз Яндекс Директа "
+            "будет после подключения кабинета."
+        )
     rate += f" {conversion.note}" if conversion.note else ""
     return (
         f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
-        f"{rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} выйдет "
-        f"примерно от {rub(clicks.min)} до {rub(clicks.max)} кликов.{budget_note} {rate} "
+        f"{rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} выйдет "
+        f"примерно {count} кликов.{budget_note} {rate} "
         f"Итого примерно от {leads_range[0]} до {leads_range[1]} обращений в месяц. {VISITS_NOTE} "
         "Это прогноз, он может ошибаться: вся сумма не обязательно потратится, а после первой недели покажем цифры "
         "по вашему сайту."
@@ -230,18 +252,20 @@ def ai_text(response: str, allowed: set[Decimal], leads_range: tuple[int, int]) 
     return text.strip()
 
 
-def demo_rows(phrases: list[str]) -> list[PhraseForecast]:
-    """Правдоподобный отчёт для демо: стабильный для одной фразы, без запросов к Яндексу."""
+def demo_forecast(groups: list[dict]) -> tuple[list[PhraseForecast], Conversion]:
+    """Прогноз демо из чисел симулятора демо-кабинета, без запросов к Яндексу: группа за месяц даёт столько кликов,
+    сколько её объявления наберут при своих показах и кликабельности, по цене клика симулятора; доля обращений —
+    средняя по группам, взвешенная по этим кликам."""
     rows = []
-    for phrase in phrases:
-        seed = int(sha256(phrase.encode()).hexdigest()[:8], 16)
-        clicks = 40 + seed % 60
-        rows.append(
-            PhraseForecast(
-                phrase, clicks * 25, clicks, clicks * 3 // 2, Decimal(25 + seed % 15), Decimal(45 + seed % 25)
-            )
-        )
-    return rows
+    reached = Decimal(0)
+    for group, truth in zip(groups, demo_truths(len(groups)), strict=True):
+        clicks = round(truth.impressions_per_hour * 24 * 30 * truth.ctr) * len(group["ads"])
+        price = Decimal(truth.cpc_kop) / 100
+        rows.append(PhraseForecast(group["phrases"][0], round(clicks / truth.ctr), clicks, clicks, price, price))
+        reached += clicks * Decimal(str(truth.conversion_rate))
+    total = sum(row.clicks for row in rows)
+    rate = (reached / total).quantize(Decimal("0.0001")) if total else Decimal(0)
+    return rows, Conversion(rate, rate, "demo", DEMO_LABEL)
 
 
 def unavailable(message: str, vk: dict | None) -> dict:
@@ -294,11 +318,8 @@ class ForecastService:
         payload = plan.payload
         platforms = payload["platforms"]
         vk = {"status": "unavailable", "label": VK_NOTE} if "vk" in platforms else None
-        phrases = list(
-            dict.fromkeys(
-                phrase for group in payload["groups"] if group["platform"] == "direct" for phrase in group["phrases"]
-            )
-        )
+        groups = [group for group in payload["groups"] if group["platform"] == "direct" and group["phrases"]]
+        phrases = list(dict.fromkeys(phrase for group in groups for phrase in group["phrases"]))
         if "direct" not in platforms or not phrases:
             return unavailable("Для Яндекс Директа в плане нет ключевых фраз — прогнозировать нечего.", vk)
         shares = allocate(payload["month_budget_kop"], platform_shares(platforms, self.domain))
@@ -330,7 +351,9 @@ class ForecastService:
                 entry = None
             if entry is not None and entry.status != "pending":
                 return entry.response | {"vk": vk}
-            entry = await self.refresh(business, info, entry, key, phrases, city, budget_rub, budget_note, now, today)
+            entry = await self.refresh(
+                business, info, entry, key, groups, phrases, city, budget_rub, budget_note, now, today
+            )
             FORECASTS[business.id] = entry
             return entry.response | {"vk": vk}
 
@@ -340,6 +363,7 @@ class ForecastService:
         info: Any,
         entry: Entry | None,
         key: str,
+        groups: list[dict],
         phrases: list[str],
         city: str,
         budget_rub: Decimal,
@@ -349,7 +373,8 @@ class ForecastService:
     ) -> Entry:
         """Один шаг без ожидания: заказать отчёт или спросить его готовность; готовый прочитать и удалить."""
         if self.demo:
-            return await self.ready(business, key, demo_rows(phrases), budget_rub, budget_note, now, today)
+            rows, conversion = demo_forecast(groups)
+            return await self.ready(business, key, rows, budget_rub, budget_note, now, today, conversion)
         forecast_id = entry.forecast_id if entry else None
         try:
             client = self.client(info, business.id)
@@ -427,18 +452,19 @@ class ForecastService:
         budget_note: str,
         now: datetime,
         today: date,
+        conversion: Conversion | None = None,
     ) -> Entry:
         clicks = direct_clicks(rows, budget_rub)
         if clicks.potential and clicks.cpc_min is None and clicks.cpc_max is None:
             return self.failed(
                 key, "Яндекс Директ не назвал цену клика по фразам плана: прогноз посчитать не из чего.", now
             )
-        conversion = await self.conversion(business)
+        conversion = conversion or await self.conversion(business)
         leads_range = leads(clicks, conversion)
-        text = template(clicks, budget_rub, conversion, leads_range, budget_note)
+        text = template(clicks, budget_rub, conversion, leads_range, budget_note, self.demo)
         explanation = await self.explain(business, text, leads_range, today) if clicks.max else None
         forecast = (
-            "Демо: числа придуманы для показа, это не прогноз Яндекса"
+            "Демо: цена клика и доля обращений — те же, что у демо-кабинета после запуска; это не прогноз Яндекса"
             if self.demo
             else "Яндекс Директ, прогноз бюджета (API v4 Live): спрос по фразам плана в вашем регионе за прошлый месяц"
         )

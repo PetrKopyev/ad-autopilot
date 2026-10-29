@@ -1,5 +1,5 @@
 from calendar import monthrange
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, Decimal
 
@@ -238,6 +238,27 @@ def split_group_limits(limit: PlatformLimit, weights: Mapping[str, Decimal]) -> 
         GroupLimit(group_id, limit.platform, cap, min(daily[group_id], cap), min(weekly[group_id], cap))
         for group_id, cap in caps.items()
     )
+
+
+def split_campaign_limits(limit: PlatformLimit, batches: Sequence[Sequence[str]]) -> list[PlatformLimit]:
+    """Лимиты кампаний площадки: доля кампании — число её групп, сумма не превышает лимит площадки."""
+    weights = {str(index): Decimal(len(batch)) for index, batch in enumerate(batches)}
+    return [
+        PlatformLimit(limit.platform, part.remaining_cap, part.daily_limit, part.weekly_limit)
+        for part in split_group_limits(limit, weights)
+    ]
+
+
+def campaign_batches(
+    limit: PlatformLimit, groups: Sequence[str], fits: Callable[[PlatformLimit], bool]
+) -> list[list[str]]:
+    """Группы площадки по кампаниям: кампания на группу, если лимит площадки даёт каждой не меньше её минимума
+    (fits), иначе кампаний меньше и группы раскладываются по ним по кругу. Одна кампания — все группы вместе."""
+    for count in range(len(groups), 1, -1):
+        batches = [list(groups[index::count]) for index in range(count)]
+        if all(fits(part) for part in split_campaign_limits(limit, batches)):
+            return batches
+    return [list(groups)]
 
 
 def budget_guard(

@@ -12,6 +12,7 @@ from app.content.yandexgpt import CompletionResult
 from app.db.models import Business, LLMCall, Plan
 from app.domain.settings import DomainSettings
 from app.platforms.direct_forecast import LIVE_URL, PhraseForecast
+from app.platforms.fake import DEMO_TRUTHS
 from app.platforms.metrica import FakeMetrica, MetricaAccessError, MetricaCounter
 from app.services import forecast as module
 from app.services.forecast import (
@@ -20,10 +21,12 @@ from app.services.forecast import (
     Clicks,
     ForecastService,
     ai_text,
+    demo_forecast,
     direct_clicks,
     leads,
     measured,
     numbers,
+    percent,
     template,
 )
 from app.services.registry import AccountInfo
@@ -161,9 +164,9 @@ def world(
     )
     repository.add(business)
     groups = [
-        {"platform": "direct", "phrases": ["маникюр самара"]},
-        {"platform": "direct", "phrases": ["маникюр самара"]},
-        {"platform": "vk", "phrases": []},
+        {"platform": "direct", "phrases": ["маникюр самара"], "ads": [{}, {}]},
+        {"platform": "direct", "phrases": ["маникюр самара"], "ads": [{}, {}]},
+        {"platform": "vk", "phrases": [], "ads": [{}]},
     ]
     payload = {
         "city": "Самара",
@@ -444,6 +447,39 @@ async def test_demo_forecast_without_yandex(http: httpx.AsyncClient, direct: Dir
     assert result["clicks_max"] > 0 and result["leads_max"] > 0
     assert result["sources"][0]["source"].startswith("Демо") and result["sources"][0]["url"] is None
     assert not direct.calls
+
+
+def test_demo_forecast_uses_simulator_numbers() -> None:
+    groups = [{"phrases": ["маникюр самара"], "ads": [{}, {}]}, {"phrases": ["укладки самара"], "ads": [{}]}]
+
+    rows, conversion = demo_forecast(groups)
+
+    strong, weak = DEMO_TRUTHS[:2]
+    # 600 показов в час × 24 × 30 × кликабельность на каждое объявление группы.
+    assert [row.clicks for row in rows] == [round(600 * 720 * strong.ctr) * 2, round(600 * 720 * weak.ctr)]
+    assert [(row.min_cpc, row.max_cpc) for row in rows] == [(Decimal("0.25"), Decimal("0.25"))] + [
+        (Decimal("0.62"), Decimal("0.62"))
+    ]
+    expected = (rows[0].clicks * Decimal("0.2") + rows[1].clicks * Decimal("0.01")) / (rows[0].clicks + rows[1].clicks)
+    assert conversion.min == conversion.max == expected.quantize(Decimal("0.0001"))
+    assert conversion.source == "demo"
+
+
+async def test_demo_forecast_matches_simulator(http: httpx.AsyncClient, direct: Direct) -> None:
+    """Прогноз демо и симулятор считают одно и то же: цена клика в копейках, обращения — по доле симулятора."""
+    case = world(http, mode="fake", platforms=("direct",))
+
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    rows, conversion = demo_forecast(case.repository.latest_plan(case.business.id).payload["groups"])
+    clicks = direct_clicks(rows, Decimal(result["budget_rub"]))
+    assert (result["clicks_min"], result["clicks_max"]) == (clicks.min, clicks.max)
+    assert result["cpc_rub"] == result["cpc_rub_max"] == float(clicks.cpc_min.quantize(Decimal("0.01")))
+    assert (result["leads_min"], result["leads_max"]) == leads(clicks, conversion)
+    assert result["conversion"]["min"] == result["conversion"]["max"] == float(conversion.min)
+    assert result["explanation"].startswith("Демо-кабинет за месяц наберёт до 75\xa0168 кликов.")
+    assert "цене клика около 0,28 ₽ выйдет примерно 75\xa0168 кликов" in result["explanation"]
+    assert f"Заявку оставляют {percent(conversion.min)} из 100" in result["explanation"]
 
 
 async def test_vk_only_plan(http: httpx.AsyncClient, direct: Direct) -> None:

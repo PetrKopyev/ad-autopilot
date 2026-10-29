@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -31,6 +31,10 @@ TEMPLATES = {
         "Оставили {winner}, {loser} остановили."
     ),
     "EXPERIMENT_NO_DIFF": "Убедительной разницы между объявлениями нет. Оставили прежнее, новое остановили.",
+    "AUDIENCE_START": (
+        "Сравниваем аудитории группы «{group}»: {control} и {variant}. Объявление то же, для новой аудитории — "
+        "отдельная группа. Через {days} сравним цену обращения и оставим ту аудиторию, где обращения дешевле."
+    ),
     "EXPERIMENT_EXTEND": (
         "Данных пока мало для уверенного выбора. Один раз увеличим объём проверки на {extension_percent}%."
     ),
@@ -214,4 +218,42 @@ def explain_experiment(
         rate=metrics.ctr * 100,
         other_rate=other.ctr * 100,
         confidence=confidence,
+    )
+
+
+def audience_side(label: str, metrics: Metrics) -> str:
+    if not metrics.leads:
+        return f"«{label}» — ни одного обращения за {rubles(metrics.spend)} ₽"
+    return f"«{label}» — {plural(metrics.leads, PLURALS['leads'])} по {rubles(metrics.spend // metrics.leads)} ₽"
+
+
+def explain_audience(
+    result: ExperimentResult,
+    control: Metrics,
+    variant: Metrics,
+    labels: Sequence[str],
+    settings: DomainSettings = DEFAULT_SETTINGS,
+) -> str:
+    """Вывод проверки аудиторий словами: цена обращения каждой аудитории и что оставили."""
+    old, new = labels
+    numbers = f"{audience_side(old, control)}, {audience_side(new, variant)}"
+    if control.leads + variant.leads < settings.audience_min_leads:
+        return (
+            f"За две недели проверки аудиторий обращений слишком мало для честного сравнения: {numbers}. "
+            f"Оставили «{old}», объявление для «{new}» остановили."
+        )
+    if result.verdict not in (Verdict.CONTROL, Verdict.VARIANT):
+        return (
+            f"Сравнили аудитории: {numbers}. Убедительной разницы в цене обращения нет. "
+            f"Оставили «{old}», объявление для «{new}» остановили."
+        )
+    winner, loser = (new, old) if result.verdict == Verdict.VARIANT else (old, new)
+    confidence = (
+        "Разница почти наверняка не случайна"
+        if result.p_value is not None and result.p_value < 0.01
+        else "Разница, скорее всего, не случайна"
+    )
+    return (
+        f"Сравнили аудитории: {numbers}. {confidence}. Обращения дешевле у аудитории «{winner}» — "
+        f"её оставили, объявление для «{loser}» остановили."
     )

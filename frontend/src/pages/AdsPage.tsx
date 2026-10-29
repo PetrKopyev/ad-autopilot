@@ -28,7 +28,7 @@ function Arms({ experiment }: { experiment: Experiment }) {
     <strong className="ads-arm__letter">{copy.ads.arm(armLetters[index])}</strong>
     {arm.image ? <img src={arm.image} alt={copy.ads.armImage(armLetters[index])} loading="lazy" />
       : experiment.hypothesis === 'image' && <span className="muted">{copy.ads.armNoImage}</span>}
-    <span>«{arm.title}». {arm.text}</span>
+    <span>{arm.audience && <><strong>{copy.ads.armAudience(arm.audience)}</strong> </>}«{arm.title}». {arm.text}</span>
   </li>)}</ul>;
 }
 
@@ -81,7 +81,7 @@ function ExperimentCard({ experiment }: { experiment: Experiment }) {
       <StatusBadge tone={experimentTone[experiment.status]}>{copy.screens.experimentStates[experiment.status]}</StatusBadge></div>
     <p><strong>{copy.ads.comparison}: </strong>{experiment.comparing}</p>
     <Arms experiment={experiment} />
-    {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
+    {experiment.status === 'running' && experiment.hypothesis !== 'audience' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
     <p className={`ads-verdict${experiment.conclusion ? ' ads-verdict--done' : ''}`}><strong>{copy.ads.conclusion}: </strong>
       {experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
     {experimentPeriod(experiment) && <p className="muted">{experimentPeriod(experiment)}</p>}

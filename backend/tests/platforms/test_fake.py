@@ -441,3 +441,18 @@ async def test_group_and_campaign_statistics_sum_all_ads() -> None:
             tuple(sum(getattr(row, field) for row in rows) for field in ("impressions", "clicks", "cost_kop"))
         )
     assert totals[0] == totals[1] == totals[2]
+
+
+async def test_add_group_creates_group_in_existing_campaign_once() -> None:
+    adapter = make_adapter()
+    refs = await adapter.create_campaign_tree(single_plan())
+    group = AdGroupSpec("audience", "Другая аудитория", (AdSpec("copy", "Уход", "Запись"),), (), {"age_from": 25})
+    added = await adapter.add_group(refs.campaign_id, group)
+    assert added == await adapter.add_group(refs.campaign_id, group)
+    full = ExternalRefs(refs.campaign_id, refs.groups | added.groups, refs.ads | added.ads, {})
+    states = await adapter.get_state(full)
+    assert states[added.groups["audience"]].parent_id == refs.campaign_id
+    assert states[added.groups["audience"]].targeting == {"age_from": 25}
+    assert states[added.ads["copy"]].parent_id == added.groups["audience"]
+    with pytest.raises(PlatformError):
+        await adapter.add_group("missing", group)

@@ -1,4 +1,4 @@
-from math import ceil, erfc, exp, fsum, lgamma, sqrt
+from math import ceil, erfc, exp, fsum, lgamma, log, sqrt
 from statistics import NormalDist
 
 from app.domain.settings import DEFAULT_SETTINGS
@@ -62,6 +62,25 @@ def fisher_exact(successes_a: int, trials_a: int, successes_b: int, trials_b: in
         if (log_p := log_probability(a)) <= observed + 1e-9
     )
     return min(1.0, fsum(probabilities))
+
+
+def binomial_test(successes: int, trials: int, probability: float) -> float:
+    """Two-sided exact test: sum outcomes at least as unlikely as the observed one."""
+    _counts(successes, trials)
+    if not trials or probability in (0, 1):
+        return 1.0
+
+    def log_probability(k: int) -> float:
+        return (
+            lgamma(trials + 1)
+            - lgamma(k + 1)
+            - lgamma(trials - k + 1)
+            + k * log(probability)
+            + (trials - k) * log(1 - probability)
+        )
+
+    observed = log_probability(successes)
+    return min(1.0, fsum(exp(log_p) for k in range(trials + 1) if (log_p := log_probability(k)) <= observed + 1e-9))
 
 
 def proportion_test(

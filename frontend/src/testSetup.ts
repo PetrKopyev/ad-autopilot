@@ -1,3 +1,4 @@
+import { configure } from '@testing-library/react';
 // jsdom разбирает свою таблицу стилей по умолчанию при первом getComputedStyle: это десятки миллисекунд, а под нагрузкой
 // параллельных прогонов — больше секунды. Первым его вызывает поиск по роли (виден ли элемент), и разбор съедал секунду
 // ожидания findByRole у первого такого теста в файле. Разбираем её до тестов.
@@ -8,3 +9,6 @@ if (typeof HTMLDialogElement !== 'undefined') {
   HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) { this.open = true; };
   HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) { this.open = false; };
 }
+
+// Под нагрузкой полного прогона первый рендер страницы бывает дольше секунды — запаса по умолчанию не хватает.
+configure({ asyncUtilTimeout: 3000 });

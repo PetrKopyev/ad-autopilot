@@ -500,3 +500,22 @@ async def test_created_group_gets_vk_regions(adapter, api) -> None:
     await adapter.create_campaign_tree(tree(groups=(group,)))
     body = json.loads(route.calls.last.request.content)
     assert body["ad_groups"][0]["targetings"]["geo"] == {"regions": [2]}
+
+
+async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapter: VkAdapter, api) -> None:
+    group = tree().groups[0]
+    listing = api.get(f"{API}/ad_groups.json")
+    listing.side_effect = [
+        httpx.Response(200, json={"count": 1, "items": [{"id": 20, "name": "Чужая ap-g10"}]}),
+        httpx.Response(200, json={"count": 1, "items": [{"id": 21, "name": "Ищут маникюр ap-g1"}]}),
+    ]
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
+    api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
+    refs = await adapter.add_group("10", group)
+    assert (refs.campaign_id, refs.groups, refs.ads, refs.targets) == ("10", {"g1": "21"}, {"a1": "31"}, {"t1": "21"})
+    body = sent(create)
+    assert body["ad_plan_id"] == 10 and body["name"] == "Ищут маникюр ap-g1"
+    assert body["targetings"]["age"]["age_list"][0] == 25 and body["banners"][0]["name"] == "Маникюр рядом ap-a1"
+    assert (await adapter.add_group("10", group)).ads == {"a1": "31"}
+    assert create.call_count == 1

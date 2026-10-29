@@ -252,11 +252,14 @@ def test_partial_permissions_require_reauth_and_reconnect_updates_account(
     login(client, repository)
     mock_yandex.post("https://oauth.yandex.ru/token").respond(json={"access_token": "partial", "scope": "direct:api"})
     assert callback(client, start(client, "direct")["state"]).status_code == 303
-    assert repository.accounts[1].status == "needs_reauth"
+    assert repository.accounts[1].status == "needs_reauth" and repository.resumes == []
     mock_yandex.post("https://oauth.yandex.ru/token").respond(json={"access_token": "replacement"})
     assert callback(client, start(client, "direct")["state"], "new-code").status_code == 303
     assert len(repository.accounts) == 1
-    assert repository.accounts[1].status == "ok"
+    # Подключённый кабинет: кампании, остановленные при его отключении, продолжают работать.
+    assert repository.accounts[1].status == "ok" and repository.resumes == [
+        (repository.accounts[1].business_id, "direct")
+    ]
     assert repository.accounts[1].refresh_token_enc is None
 
 

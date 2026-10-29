@@ -2,6 +2,7 @@ from collections import Counter
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from math import ceil
 from statistics import median
 
 from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
@@ -82,6 +83,24 @@ def ref_cpl(
     # как только обращений столько же, сколько нужно объявлений для медианы.
     leads = sum(item.leads for item in totals)
     return sum(item.spend for item in totals) // leads if leads >= settings.min_reference_units else None
+
+
+def first_decision_days(
+    age_days: int | None, clicks_per_ad_day: Decimal | None, settings: DomainSettings = DEFAULT_SETTINGS
+) -> int | None:
+    """Через сколько дней объявления дойдут до первой оценки по цене: пройдёт разогрев и в окне решений наберётся
+    min_price_clicks уточнённых кликов. age_days — дни с одобрения (None — ещё на проверке), clicks_per_ad_day —
+    клики объявления в день (None — уточнённых дней ещё нет). 0 — срок прошёл, None — за окно решений кликов
+    не набрать."""
+    needed = settings.warmup_days
+    if clicks_per_ad_day is not None:
+        if not clicks_per_ad_day:
+            return None
+        collect = ceil(settings.min_price_clicks / clicks_per_ad_day)
+        if collect > settings.decision_window_days:
+            return None
+        needed = max(needed, settings.settlement_days + collect)
+    return max(needed - (age_days or 0), 0)
 
 
 def has_anomaly(days: Sequence[DaySpend], today: date, settings: DomainSettings = DEFAULT_SETTINGS) -> bool:

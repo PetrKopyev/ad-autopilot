@@ -33,6 +33,11 @@ class FakeRepository:
         self.stops: list[tuple[int, int | None, str | None]] = []
         self.stop_confirmed = True
         self.stop_error: Exception | None = None
+        # Включение кампаний после повторного подключения кабинета: (business_id, площадка).
+        self.resumes: list[tuple[int, str]] = []
+
+    async def resume_ads(self, business_id: int, platform: str) -> None:
+        self.resumes.append((business_id, platform))
 
     async def stop_ads(self, user_id: int, account_id: int | None, reason_text: str) -> list[str]:
         if self.stop_error:
@@ -219,7 +224,7 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
 
     from unittest.mock import AsyncMock
 
-    from app.api.auth import get_ad_stopper, get_demo_users
+    from app.api.auth import get_ad_resumer, get_ad_stopper, get_demo_users
     from app.auth import yandex
     from app.auth.sessions import get_repository
     from app.config import Settings
@@ -239,11 +244,13 @@ def client(monkeypatch: pytest.MonkeyPatch, repository: FakeRepository) -> Itera
     app.dependency_overrides[get_repository] = lambda: repository
     app.dependency_overrides[get_demo_users] = lambda: FakeDemoUsers(repository)
     app.dependency_overrides[get_ad_stopper] = lambda: repository.stop_ads
+    app.dependency_overrides[get_ad_resumer] = lambda: repository.resume_ads
     with TestClient(app, base_url="https://testserver", follow_redirects=False) as test_client:
         yield test_client
     app.dependency_overrides.pop(get_repository, None)
     app.dependency_overrides.pop(get_demo_users, None)
     app.dependency_overrides.pop(get_ad_stopper, None)
+    app.dependency_overrides.pop(get_ad_resumer, None)
 
 
 @pytest.fixture

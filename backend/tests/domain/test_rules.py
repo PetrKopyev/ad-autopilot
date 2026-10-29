@@ -13,6 +13,7 @@ from app.domain.rules import (
     client_cac,
     client_conversion,
     decide,
+    first_decision_days,
     has_anomaly,
     ref_cpl,
     settled_days,
@@ -334,3 +335,16 @@ def test_ad_without_settled_days_is_not_paused(make_ad, now):
     ads = [make_ad(id="0", group_id="0", days=fresh)] + [make_ad(id=str(i), group_id=str(i)) for i in (1, 2)]
     history = (DaySpend(now.date() - timedelta(days=3), impressions=1, clicks=1, leads=1),)
     assert not [item for item in decide(ads, groups, now, 10_000, history) if item.target_id == "0"]
+
+
+def test_first_decision_days_follow_thresholds():
+    # На проверке: только разогрев.
+    assert first_decision_days(None, None) == DEFAULT_SETTINGS.warmup_days
+    # 10 кликов в день: 40 кликов за 4 дня и ещё 2 дня на уточнение — 6 дней с одобрения, прошло 2.
+    assert first_decision_days(2, Decimal(10)) == 4
+    # Кликов много: срок задаёт разогрев.
+    assert first_decision_days(1, Decimal(100)) == DEFAULT_SETTINGS.warmup_days - 1
+    assert first_decision_days(9, Decimal(10)) == 0
+    # 2 клика в день: за 14 дней окна 40 не набрать.
+    assert first_decision_days(3, Decimal(2)) is None
+    assert first_decision_days(3, Decimal(0)) is None

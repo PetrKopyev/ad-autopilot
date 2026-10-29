@@ -323,6 +323,9 @@ def test_thirty_days_real_plan_budget_and_autopilot(demo, monkeypatch):
     assert any(row.reason_code == "SCALE_UP" for row in changes)
     # Журнал называет, какой группе подняли лимит и какое объявление остановили.
     assert all("группы «" in row.reason_text for row in changes if row.reason_code == "SCALE_UP")
+    # Рост лимита группы — настоящий рост лимита её кампании в кабинете.
+    scaled = [item for row in changes if row.reason_code == "SCALE_UP" for item in row.operations]
+    assert scaled and all(item["after"] > item["before"] for item in scaled)
     assert all("объявление «" in row.reason_text for row in changes if row.reason_code.startswith("PAUSE_"))
     assert any(row.status == "concluded" for row in worker.repository.rows(Experiment))
     assert not other.settings
@@ -671,7 +674,8 @@ def test_budget_limits_are_applied_in_trial_mode(demo):
     world.business.month_budget_kop = 2_000_000
     asyncio.run(rebalance_budget(worker, world.business))
     items = client.get("/api/history?page_size=100").json()["items"]
-    assert [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"] == ["applied"]
+    statuses = [item["status"] for item in items if item["reason_code"] == "BUDGET_REBALANCE"]
+    assert statuses and set(statuses) == {"applied"}
 
 
 def test_business_screen_gets_only_description_fields(demo):
@@ -765,3 +769,60 @@ def test_demo_reconnect_returns_account_and_resumes_campaigns_stopped_by_disconn
     assert client.get("/api/autopilot/status").json()["status"] == "running"
     assert all(campaign.status == "active" for campaign in worker.current_campaigns(world.business))
     assert any(row.reason_code == "OWNER_RESUME" and row.actor == "owner" for row in worker.repository.rows(ChangeLog))
+
+
+def test_continue_resumes_campaigns_stopped_by_disconnect_after_account_is_back(demo):
+    import asyncio
+    from time import monotonic
+
+    from app.services.budget_guard import resume_reconnected, stop_platform
+
+    client, world, worker = demo
+    launch(client)
+    assert client.post("/api/demo/advance", json={"days": 1}).status_code == 202
+    worker.step_key = "owner:revoke"
+    asyncio.run(
+        stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Отключение.", deadline=monotonic() + 30
+        )
+    )
+    # Реклама на паузе: подключение кабинета кампании не включает, их включает «Продолжить».
+    world.business.status = "paused"
+    asyncio.run(resume_reconnected(worker, world.business, "direct"))
+    assert all(campaign.status == "paused_owner" for campaign in worker.current_campaigns(world.business))
+    response = client.post("/api/autopilot/resume")
+    assert response.status_code == 200, response.text
+    assert world.business.status == "running"
+    assert all(campaign.status == "active" for campaign in worker.current_campaigns(world.business))
+
+
+def test_service_removed_from_description_stops_its_campaign_and_returns_with_it(demo):
+    import asyncio
+
+    from app.services.launch import sync_removed_services
+
+    client, world, worker = demo
+    launch(client)
+
+    def services(value: str) -> None:
+        fields = world.business.description["fields"]
+        world.business.description = world.business.description | {
+            "fields": fields | {"services": fields["services"] | {"value": value}}
+        }
+        worker.step_key = f"optimize:{value}"
+        asyncio.run(sync_removed_services(worker, world.business))
+
+    def statuses() -> dict[str, str]:
+        return {campaign.name: campaign.status for campaign in worker.current_campaigns(world.business)}
+
+    services("Маникюр\nНаращивание ногтей")
+    pedicure = next(name for name in statuses() if "Педикюр" in name)
+    assert statuses()[pedicure] == "paused_owner"
+    assert all(status == "active" for name, status in statuses().items() if name != pedicure)
+    removed = [row for row in worker.repository.rows(ChangeLog) if row.reason_code == "SERVICE_REMOVED"]
+    assert len(removed) == 1 and removed[0].actor == "owner" and "Педикюр" in removed[0].reason_text
+    services("Маникюр\nНаращивание ногтей")
+    assert len([row for row in worker.repository.rows(ChangeLog) if row.reason_code == "SERVICE_REMOVED"]) == 1
+    services("Маникюр\nПедикюр\nНаращивание ногтей")
+    assert set(statuses().values()) == {"active"}
+    assert any(row.reason_code == "SERVICE_RETURNED" for row in worker.repository.rows(ChangeLog))

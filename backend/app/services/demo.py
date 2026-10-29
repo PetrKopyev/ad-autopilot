@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from app.content.site_reader import Page, SiteReadResult
 from app.db.models import Business, PlatformAccount, User
 from app.demo_flags import AdvanceProgress, demo_now
-from app.platforms.base import Operation
-from app.platforms.fake import AdTruth, FakeAdapter, VirtualClock
+from app.platforms.fake import FakeAdapter, VirtualClock, demo_truths
+from app.services.budget_guard import resume_reconnected
 from app.services.changes import ChangeConflict
 from app.worker.jobs import Worker, WorkerRepository
 
@@ -48,13 +48,10 @@ def prepare_business(repository, business: Business) -> None:
         )
 
 
-def configure_adapter(adapter: FakeAdapter, spec) -> None:
-    """Три группы Директа из демо-плана, по услуге на группу: сильная, слабая и пограничная; события считает Fake."""
-    for group, truth in zip(
-        spec.groups,
-        (AdTruth(0.08, 25, 0.2, 600), AdTruth(0.007, 62, 0.01, 600), AdTruth(0.035, 45, 0.06, 600)),
-        strict=False,
-    ):
+def configure_adapter(adapter: FakeAdapter, spec, start: int = 0) -> None:
+    """Группы Директа из демо-плана, по услуге на группу: сильная, слабая и пограничная; события считает Fake.
+    start — сколько групп площадки получили эффективность в прошлых кампаниях запуска."""
+    for group, truth in zip(spec.groups, demo_truths(start + len(spec.groups))[start:], strict=True):
         for ad in group.ads:
             adapter._truths[ad.id] = truth
 
@@ -161,27 +158,6 @@ class DemoService:
             account.access_token_enc = "demo"
             account.scopes = ["direct:api", "metrika:read"]
             repository.save(account)
-            if business.status != "running":
-                return
             self.worker.step_key = f"owner:{uuid4()}"
             with self.worker.business_clock(business):
-                for campaign in self.worker.current_campaigns(business):
-                    last = repository.last_status_change(
-                        business.id, campaign.platform, "campaign", campaign.external_id
-                    )
-                    if campaign.platform != "direct" or last is None or last.reason_code != "ACCOUNT_REVOKE":
-                        continue
-                    await self.worker.apply(
-                        business,
-                        campaign,
-                        [
-                            Operation(
-                                "set_status", "campaign", campaign.external_id, "status", campaign.status, "active"
-                            )
-                        ],
-                        actor="owner",
-                        kind="resume",
-                        reason_code="OWNER_RESUME",
-                        reason_text="Вы снова подключили кабинет — реклама продолжилась.",
-                        suffix="reconnect",
-                    )
+                await resume_reconnected(self.worker, business, "direct")

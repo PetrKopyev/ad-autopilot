@@ -112,6 +112,15 @@ def salon_scenario(
     return FakeScenario(CampaignTreeSpec(id, "Салон", daily_limit_kop, period_cap_kop, tuple(groups)), truths)
 
 
+# Демо-кабинет: группы Директа по порядку плана — сильная, слабая и пограничная, остальные — как по умолчанию.
+# Те же числа берёт прогноз в демо, чтобы прогноз плана и цифры после запуска не расходились.
+DEMO_TRUTHS = (AdTruth(0.08, 25, 0.2, 600), AdTruth(0.007, 62, 0.01, 600), AdTruth(0.035, 45, 0.06, 600))
+
+
+def demo_truths(count: int) -> list[AdTruth]:
+    return [DEMO_TRUTHS[index] if index < len(DEMO_TRUTHS) else AdTruth() for index in range(count)]
+
+
 @dataclass
 class _Counters:
     impressions: int = 0
@@ -293,6 +302,34 @@ class FakeAdapter:
         self._trees[key] = refs
         self._finish_reviews(self.clock.now)
         return deepcopy(refs)
+
+    async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
+        """Новая группа в созданной кампании — проверка другой аудитории; повтор не создаёт вторую."""
+        self._request()
+        self._check_status(group.status)
+        tree = next((item for item in self._trees.values() if item.campaign_id == campaign_id), None)
+        if tree is None:
+            raise PlatformError("Кампания не найдена.", status_code=404)
+        if group.id not in tree.groups:
+            group_id = self._external_id(campaign_id, "group", group.id)
+            self._states[group_id] = EntityState(
+                group_id, "group", campaign_id, group.name, group.status, targeting=deepcopy(group.targeting)
+            )
+            for target in group.targets:
+                target_id = self._external_id(group_id, "target", target.id)
+                tree.targets[target.id] = target_id
+                self._states[target_id] = EntityState(target_id, "target", group_id, target.value, target.status)
+            tree.groups[group.id] = group_id
+        group_id = tree.groups[group.id]
+        for ad in group.ads:
+            content = {"group_id": group_id, "title": ad.title, "text": ad.text, "image_ref": ad.image_ref}
+            await self.apply(Operation("add_ad", "ad", ad.id, "creative", None, content))
+        return ExternalRefs(
+            campaign_id,
+            {group.id: group_id},
+            {ad.id: tree.ads[ad.id] for ad in group.ads},
+            {target.id: tree.targets[target.id] for target in group.targets},
+        )
 
     def _submit_review(self, ad_id: str) -> None:
         state = self._states[ad_id]

@@ -9,13 +9,15 @@ import pytest
 
 from app.content.ad_text import generate_ad_text
 from app.content.art import ART_COST_KOP
-from app.db.models import Ad, AdGroup, ArtCall, ChangeLog, Experiment, LLMCall, StatsDaily, WorkerRun
+from app.db.models import Ad, AdGroup, ArtCall, ChangeLog, Experiment, LLMCall, StatsDaily, Target, WorkerRun
 from app.domain.experiments import evaluate_experiment
 from app.domain.types import AdSnapshot, DaySpend, ExperimentDesign, Verdict
 from app.services.experiments import completed_hypotheses, create_experiment
 from app.services.onboarding import AiLimits, Blocked
 from app.services.optimize import experiments_tick
+from app.services.rollback import RollbackService
 from app.services.sync import sync_moderation
+from app.worker.clock import MOSCOW
 from tests.integration.harness import START, Crash, CrashingAdapter, make_world
 from tests.services.test_onboarding import make_world as make_content_world
 
@@ -101,9 +103,19 @@ async def test_pending_change_blocks_test_only_when_its_cabinet_can_be_reconcile
     world = experiment_world
     world.repository.save(
         ChangeLog(
-            business_id=world.business.id, actor="autopilot", kind="pause", platform=platform, entity_type="ad",
-            entity_id="x", operations=[], reason_code="CUSTOM", reason_params={}, reason_text="Т.", evidence={},
-            status="pending", created_at=world.clock.now,
+            business_id=world.business.id,
+            actor="autopilot",
+            kind="pause",
+            platform=platform,
+            entity_type="ad",
+            entity_id="x",
+            operations=[],
+            reason_code="CUSTOM",
+            reason_params={},
+            reason_text="Т.",
+            evidence={},
+            status="pending",
+            created_at=world.clock.now,
         )
     )
     prepare = AsyncMock(side_effect=Blocked("Генерация отклонена"))
@@ -218,6 +230,9 @@ async def test_proposals_follow_hypothesis_order_and_audience_budget(experiment_
     world = experiment_world
     for hypothesis in completed:
         running_experiment(world, hypothesis=hypothesis, status="concluded")
+    # Другую аудиторию Директа даёт фраза с городом: в новой группе та же фраза без него.
+    for target in world.repository.rows(Target):
+        target.value = f"{target.value} самара"
     worker = world.worker(dry_run=True)
     ad = control_snapshot(world)
     worker.remember(world.business, group_limits={ad.group_id: budget})
@@ -475,3 +490,93 @@ async def test_rewrite_without_a_checked_text_leaves_the_rejection_to_the_owner(
     content.llm.ad = json.dumps({"title": "Лучший салон №1", "text": "Гарантия 100%"})
     ad = world.ads["borderline-1"]
     assert await rewrite_rejected(world.worker(), world.business, world.campaign, ad, "Опечатка в тексте") == []
+
+
+async def test_audience_test_runs_in_new_group_and_concludes_by_lead_price(experiment_world):
+    world = experiment_world
+    for target in world.repository.rows(Target):
+        target.value = f"{target.value} самара"
+    for hypothesis in ("text", "image"):
+        running_experiment(world, hypothesis=hypothesis, status="concluded")
+    worker = world.worker()
+    ad = control_snapshot(world)
+    worker.remember(world.business, group_limits={ad.group_id: 70_000})
+    change = await create_experiment(worker, world.business, ad, design())
+    assert change.status == "applied"
+    assert change.reason_text == (
+        "Сравниваем аудитории группы «Уход за волосами»: ищут с названием города и ищут без названия города. "
+        "Объявление то же, для новой аудитории — отдельная группа. Через 14 дней сравним цену обращения и оставим "
+        "ту аудиторию, где обращения дешевле."
+    )
+    experiment = next(item for item in world.repository.rows(Experiment) if item.status == "running")
+    control, variant = (
+        world.repository.find(Ad, id=id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)
+    )
+    group = world.repository.find(AdGroup, id=variant.ad_group_id)
+    assert (experiment.metric, experiment.hypothesis) == ("cpl", "audience")
+    assert group.id != control.ad_group_id and group.theme == "Уход за волосами — без города в запросе"
+    assert [target.value for target in world.repository.rows(Target, ad_group_id=group.id)] == ["уход за волосами"]
+    assert (variant.title, variant.text) == (control.title, control.text)
+    states = await world.adapter.get_state(worker.refs(world.campaign))
+    assert states[group.external_id].parent_id == world.campaign.external_id
+    start = experiment.started_at.astimezone(MOSCOW).date()
+    for row, leads in ((control, 1), (variant, 2)):
+        for offset in range(14):
+            world.repository.save(
+                StatsDaily(
+                    business_id=world.business.id,
+                    platform="direct",
+                    campaign_id=world.campaign.id,
+                    ad_id=row.id,
+                    date=start + timedelta(days=offset),
+                    cost_kop=10_000,
+                    impressions=1000,
+                    clicks=30,
+                    conversions={"1": leads},
+                    is_settled=True,
+                )
+            )
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(experiment_factory=AsyncMock()), world.business)
+    assert experiment.status == "running"
+    world.clock.advance(days=1)
+    await experiments_tick(world.worker(experiment_factory=AsyncMock()), world.business)
+    assert (experiment.status, experiment.verdict) == ("concluded", "variant_wins")
+    verdict = world.changes(kind="experiment_verdict")[0]
+    assert "«ищут с названием города» — 14 обращений по 100 ₽" in verdict.reason_text
+    assert "Обращения дешевле у аудитории «ищут без названия города»" in verdict.reason_text
+    states = await world.adapter.get_state(worker.refs(world.campaign))
+    assert states[control.external_id].status == "paused_auto"
+    assert states[variant.external_id].status != "paused_auto"
+
+
+async def test_audience_is_not_compared_without_a_different_audience(experiment_world):
+    world = experiment_world
+    for hypothesis in ("text", "image"):
+        running_experiment(world, hypothesis=hypothesis, status="concluded")
+    worker = world.worker()
+    ad = control_snapshot(world)
+    worker.remember(world.business, group_limits={ad.group_id: 70_000})
+    assert await create_experiment(worker, world.business, ad, design()) is None
+    assert not any(item.status == "running" for item in world.repository.rows(Experiment))
+
+
+async def test_audience_launch_rolls_back_to_the_old_audience(experiment_world):
+    world = experiment_world
+    for target in world.repository.rows(Target):
+        target.value = f"{target.value} самара"
+    for hypothesis in ("text", "image"):
+        running_experiment(world, hypothesis=hypothesis, status="concluded")
+    worker = world.worker()
+    ad = control_snapshot(world)
+    worker.remember(world.business, group_limits={ad.group_id: 70_000})
+    change = await create_experiment(worker, world.business, ad, design())
+    experiment = next(item for item in world.repository.rows(Experiment) if item.status == "running")
+    variant = world.repository.find(Ad, id=experiment.variant_ad_id)
+    reverted = await RollbackService(world.repository, dry_run=False).revert(
+        change.id, business_id=world.business.id, adapter=world.adapter, now=world.clock.now
+    )
+    assert reverted.status == "applied" and change.status == "reverted" and experiment.status == "cancelled"
+    states = await world.adapter.get_state(worker.refs(world.campaign))
+    assert states[world.ads["borderline-1"].external_id].status == "active"
+    assert states[variant.external_id].status == "paused_owner"

@@ -103,6 +103,13 @@ it('объясняет, почему реклама не включилась п
   expect(await screen.findByText(warning)).toBeTruthy();
 });
 
+it('пишет, когда будут первые решения автопилота, пока реклама работает', async () => {
+  const line = 'Первые решения автопилота — примерно через 7 дней. Срок зависит от бюджета.';
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true, first_decisions: line });
+  await show(0, 0);
+  expect(await screen.findByText(line)).toBeTruthy();
+});
+
 it('«Пауза» останавливает рекламу только после подтверждения', async () => {
   vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true });
   vi.mocked(stopAllAds).mockResolvedValue();

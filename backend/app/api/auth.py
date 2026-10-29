@@ -1,7 +1,8 @@
+import logging
 import secrets
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Annotated
@@ -33,15 +34,16 @@ from app.auth.sessions import (
 )
 from app.db.models import Business, Campaign, PlatformAccount, Session, User
 from app.demo_flags import advance_jobs, demo_enabled, demo_now
-from app.platforms.base import AdPlatform
+from app.platforms.base import AdPlatform, PlatformError
 from app.platforms.fake import VirtualClock
-from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, stop_platform
-from app.services.changes import ChangeConflict, ServerBusy
+from app.services.budget_guard import LOCK_WAIT_SECONDS, STOPPED, resume_reconnected, stop_platform
+from app.services.changes import CLOSED_ACCOUNT, ChangeConflict, ServerBusy, wait_for_lock
 from app.services.connections import check_connections
 from app.services.demo import DEMO_UID_PREFIX, DemoUsers
 from app.services.launch import TITLES
 from app.worker.clock import SystemClock
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
 type AdStopper = Callable[[int, int | None, str], Awaitable[list[str]]]
@@ -128,6 +130,42 @@ def get_ad_stopper(request: Request) -> AdStopper:
 
 
 Stopper = Annotated[AdStopper, Depends(get_ad_stopper)]
+
+
+async def resume_account_ads(
+    db: DBSession, resolve: Callable[[int, str], AdPlatform], business_id: int, platform: str
+) -> None:
+    """Кабинет подключён снова: кампании, остановленные при его отключении, продолжают работать (resume_reconnected).
+    Не вышло — подключение всё равно сохранено, кампании включит «Продолжить» на главной."""
+    from app.worker.jobs import Worker, WorkerRepository
+
+    repository = WorkerRepository(db)
+    with ExitStack() as stack:
+        try:
+            await wait_for_lock(stack, repository, business_id, LOCK_WAIT_SECONDS)
+            business = repository.business(business_id)
+            worker = Worker(
+                repository, resolve, dry_run=False, clock=VirtualClock(demo_now(business, SystemClock().now))
+            )
+            worker.step_key = f"owner:{uuid4()}"
+            await resume_reconnected(worker, business, platform)
+        except (ChangeConflict, PlatformError, *CLOSED_ACCOUNT):
+            logger.warning(
+                "Campaigns of reconnected %s account were not resumed for business %s", platform, business_id
+            )
+
+
+def get_ad_resumer(request: Request) -> Callable[[int, str], Awaitable[None]]:
+    async def resume(business_id: int, platform: str) -> None:
+        from app.db.session import SessionLocal
+
+        with SessionLocal() as db:
+            await resume_account_ads(db, request.app.state.platform_adapters.resolve, business_id, platform)
+
+    return resume
+
+
+Resumer = Annotated[Callable[[int, str], Awaitable[None]], Depends(get_ad_resumer)]
 
 
 @contextmanager
@@ -248,6 +286,7 @@ async def yandex_callback(
     repository: Repository,
     session: Annotated[Session | None, Depends(optional_session)],
     state: Annotated[str, Query(min_length=1, max_length=1024)],
+    resume: Resumer,
     code: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
     error: Annotated[str | None, Query(max_length=256)] = None,
 ) -> Response:
@@ -280,8 +319,8 @@ async def yandex_callback(
         repository.save_session(new_session, request.cookies.get(SESSION_COOKIE))
         set_session_cookies(response, new_session)
         response.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
-    else:
-        repository.save_account(business_id, profile["login"], tokens)
+    elif repository.save_account(business_id, profile["login"], tokens).status == "ok":
+        await resume(business_id, "direct")
     return response
 
 

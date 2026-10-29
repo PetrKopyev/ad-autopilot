@@ -249,6 +249,7 @@ def test_reconnect_updates_same_account(client, repository, vk_api) -> None:
         state = start(client)["state"]
         assert client.get("/api/auth/vk/callback", params={"state": state, "code": f"code-{access}"}).status_code == 303
     assert list(repository.accounts) == [1] and repository.accounts[1].access_token_enc == "second"
+    assert repository.resumes == [(repository.accounts[1].business_id, "vk")] * 2
 
 
 def test_manual_key_requires_csrf_and_session(client, repository, vk_api) -> None:

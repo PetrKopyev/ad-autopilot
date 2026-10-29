@@ -133,6 +133,8 @@ async def test_each_direct_group_answers_only_its_service_and_ads_of_group_diffe
     plan = world.plans.view(world.business, world.repository.latest_plan(world.business.id), TODAY)
     assert plan["groups"][1]["audience"].startswith("Тем, кто ищет в Яндексе «педикюр». Регион: Самара.")
     assert plan["direct_services_total"] == len(services)
+    assert plan["direct_campaigns"] == [{"services": [name]} for name in services]
+    assert plan["direct_campaigns_note"] is None
     assert all(group["ads"][0]["text"] != group["ads"][1]["text"] for group in groups)
 
 
@@ -992,3 +994,41 @@ def test_group_slots_pair_services_and_segments_by_platform() -> None:
     assert group_slots("vk", ["Маникюр", "Педикюр", "Стрижка"], ["a", "b"]) == [("Маникюр", "a"), ("Педикюр", "b")]
     assert group_slots("vk", [""], ["a", "b"]) == [("", "a"), ("", "b")]
     assert group_slots("direct", [], ["a"]) == [] and group_slots("vk", ["Маникюр"], []) == []
+
+
+def direct_plan(budget_kop: int, services: int, status: str = "ready", **values) -> Plan:
+    groups = [{"id": index, "platform": "direct", "service": f"Услуга {index}"} for index in range(services)]
+    payload = {"platforms": ["direct"], "groups": groups, "month_budget_kop": budget_kop} | values
+    return Plan(business_id=1, status=status, payload=payload)
+
+
+def services_of(plan: Plan) -> list[list[str]]:
+    limits = plan_module.launch_limits(plan.payload["month_budget_kop"], ["direct"], TODAY, DEFAULT_SETTINGS)
+    return [[group["service"] for group in batch] for batch in plan_module.direct_campaigns(plan, limits, TODAY)]
+
+
+def test_plan_shows_campaign_per_service_when_budget_allows() -> None:
+    plan = direct_plan(5_000_000, 3)
+    limits = plan_module.launch_limits(5_000_000, ["direct"], TODAY, DEFAULT_SETTINGS)
+    campaigns = plan_module.direct_campaigns(plan, limits, TODAY)
+    assert services_of(plan) == [["Услуга 0"], ["Услуга 1"], ["Услуга 2"]]
+    assert plan_module.campaigns_note(campaigns) is None
+
+
+def test_plan_explains_services_sharing_campaign_on_small_budget() -> None:
+    plan = direct_plan(250_000, 3)
+    limits = plan_module.launch_limits(250_000, ["direct"], TODAY, DEFAULT_SETTINGS)
+    campaigns = plan_module.direct_campaigns(plan, limits, TODAY)
+    assert len(campaigns) < 3
+    note = plan_module.campaigns_note(campaigns)
+    assert note and f"кампаний: {len(campaigns)}, а услуг 3" in note and "366 ₽" in note
+
+
+def test_launched_plan_shows_campaigns_created_by_launch() -> None:
+    launch = {"campaigns": {"direct:1": 5, "direct:2": 6}, "batches": {"direct:1": [0, 2], "direct:2": [1]}}
+    assert services_of(direct_plan(250_000, 3, status="launched", launch=launch)) == [
+        ["Услуга 0", "Услуга 2"],
+        ["Услуга 1"],
+    ]
+    legacy = direct_plan(250_000, 2, status="launched", launch={"campaigns": {"direct": 5}})
+    assert services_of(legacy) == [["Услуга 0", "Услуга 1"]]

@@ -13,6 +13,7 @@ from PIL import Image, UnidentifiedImageError
 from app.auth.vk import API_URL, VkClient, invalid_response
 from app.platforms.base import (
     LEAD,
+    AdGroupSpec,
     CampaignTreeSpec,
     EntityState,
     ExternalRefs,
@@ -185,51 +186,81 @@ class VkAdapter(VkClient):
         self._trees[key] = refs
         return refs
 
+    def _state(self, value: str) -> str:
+        return "active" if self._marking_confirmed and API_FORMAT["statuses"].get(value) == "active" else "blocked"
+
+    def _group_body(self, group: AdGroupSpec, url: int) -> dict:
+        banners = []
+        for ad in group.ads:
+            banner = {
+                "name": _named(ad.title, f"ap-{ad.id}"),
+                "status": self._state(ad.status),
+                "urls": {"primary": {"id": url}},
+                "textblocks": {
+                    API_FORMAT["title_key"]: {"text": ad.title},
+                    API_FORMAT["text_key"]: {"text": ad.text},
+                },
+            }
+            if ad.image_ref:
+                banner["content"] = {API_FORMAT["image_key"]: {"id": _integer(ad.image_ref)}}
+            banners.append(banner)
+        body = {
+            "name": _named(group.name, f"ap-{group.id}"),
+            "status": self._state(group.status),
+            "targetings": _targetings(group.targeting),
+            "banners": banners,
+        }
+        interests = [_integer(target.value) for target in group.targets if target.status == "active"]
+        if interests:
+            body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
+        if self._package_id is not None:
+            body["package_id"] = self._package_id
+        return body
+
     async def _plan_body(self, plan: CampaignTreeSpec) -> dict:
         url = (await self._add("urls", {"url": self._href}))["id"]
-        status = API_FORMAT["statuses"]
-        live = self._marking_confirmed
-
-        def state(value: str) -> str:
-            return "active" if live and status.get(value) == "active" else "blocked"
-
-        groups = []
-        for group in plan.groups:
-            banners = []
-            for ad in group.ads:
-                banner = {
-                    "name": _named(ad.title, f"ap-{ad.id}"),
-                    "status": state(ad.status),
-                    "urls": {"primary": {"id": url}},
-                    "textblocks": {
-                        API_FORMAT["title_key"]: {"text": ad.title},
-                        API_FORMAT["text_key"]: {"text": ad.text},
-                    },
-                }
-                if ad.image_ref:
-                    banner["content"] = {API_FORMAT["image_key"]: {"id": _integer(ad.image_ref)}}
-                banners.append(banner)
-            body = {
-                "name": _named(group.name, f"ap-{group.id}"),
-                "status": state(group.status),
-                "targetings": _targetings(group.targeting),
-                "banners": banners,
-            }
-            interests = [_integer(target.value) for target in group.targets if target.status == "active"]
-            if interests:
-                body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
-            if self._package_id is not None:
-                body["package_id"] = self._package_id
-            groups.append(body)
         return {
             "name": _named(plan.name, plan.idempotency_key),
-            "status": state(plan.status),
+            "status": self._state(plan.status),
             "objective": API_FORMAT["objective"],
             "autobidding_mode": API_FORMAT["autobidding_mode"],
             "budget_limit_day": _rub(plan.daily_limit_kop),
             "budget_limit": _rub(plan.period_cap_kop),
-            "ad_groups": groups,
+            "ad_groups": [self._group_body(group, url) for group in plan.groups],
         }
+
+    async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
+        """Новая группа в работающей кампании — проверка другой аудитории; группа ищется по ключу ap-<id>."""
+        if not self._href:
+            raise PlatformError("Для объявлений нужна ссылка href.")
+        if any(target.kind != "interest" for target in group.targets):
+            raise PlatformError("VK принимает только интересы; фразы и аудитории задаются в targeting группы.")
+        key = f" ap-{group.id}"
+        found = [
+            item
+            for item in await self._items("ad_groups", {"_ad_plan_id": int(campaign_id), "fields": "id,name"})
+            if str(item.get("name", "")).endswith(key)
+        ]
+        if len(found) > 1:
+            raise PlatformError("Неоднозначный ключ группы в VK Рекламе.")
+        if found:
+            group_id = found[0]["id"]
+        else:
+            url = (await self._add("urls", {"url": self._href}))["id"]
+            group_id = (await self._add("ad_groups", self._group_body(group, url) | {"ad_plan_id": int(campaign_id)}))[
+                "id"
+            ]
+        banners = {
+            str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
+            for item in await self._items("banners", {"_ad_group_id": group_id, "fields": "id,name"})
+        }
+        try:
+            ads = {ad.id: banners[f"ap-{ad.id}"] for ad in group.ads}
+        except KeyError:
+            raise invalid_response() from None
+        return ExternalRefs(
+            campaign_id, {group.id: str(group_id)}, ads, {target.id: str(group_id) for target in group.targets}
+        )
 
     @staticmethod
     def _refs(spec: CampaignTreeSpec, plan: dict) -> ExternalRefs:

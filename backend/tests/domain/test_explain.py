@@ -3,7 +3,16 @@ from string import Formatter
 
 import pytest
 
-from app.domain.explain import MONEY_FIELDS, TEMPLATES, explain, explain_decision, explain_experiment, rubles, undone
+from app.domain.explain import (
+    MONEY_FIELDS,
+    TEMPLATES,
+    explain,
+    explain_audience,
+    explain_decision,
+    explain_experiment,
+    rubles,
+    undone,
+)
 from app.domain.types import Action, Decision, ExperimentResult, Metrics, Verdict
 
 PERIOD = {"period_start": "2026-11-01", "period_end": "2026-11-14", "ad": "Маникюр рядом с домом"}
@@ -160,3 +169,18 @@ def test_pause_reason_names_the_days_it_was_decided_on(start, end, expected):
         "PAUSE_TOO_EXPENSIVE", spend=21_100, leads=3, ref_cpl=5_000, period_start=start, period_end=end, ad="Маникюр"
     )
     assert text.startswith(f"{expected} на объявление «Маникюр» потратили 211 ₽, получили 3 обращения.")
+
+
+def test_audience_verdict_names_both_audiences_with_lead_prices():
+    labels = ("ищут с названием города", "ищут без названия города")
+    control, variant = Metrics(1_400_000, 9000, 300, 7), Metrics(1_400_000, 9000, 300, 14)
+    win = ExperimentResult(Verdict.VARIANT, "EXPERIMENT_WIN", 0.004, 1.0)
+    assert explain_audience(win, control, variant, labels) == (
+        "Сравнили аудитории: «ищут с названием города» — 7 обращений по 2 000 ₽, «ищут без названия города» — "
+        "14 обращений по 1 000 ₽. Разница почти наверняка не случайна. Обращения дешевле у аудитории «ищут без "
+        "названия города» — её оставили, объявление для «ищут с названием города» остановили."
+    )
+    same = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 0.4, 0.1)
+    assert "Убедительной разницы в цене обращения нет" in explain_audience(same, control, variant, labels)
+    few = explain_audience(same, Metrics(500_000, 900, 30, 0), Metrics(500_000, 900, 30, 3), labels)
+    assert "обращений слишком мало" in few and "ни одного обращения за 5 000 ₽" in few

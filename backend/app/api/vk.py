@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, SecretStr
 
+from app.api.auth import Resumer
 from app.api.limits import vk_key_limit, vk_start_limit
 from app.api.routing import ReleasingRoute
 from app.auth import vk
@@ -62,6 +63,7 @@ def vk_start(
 async def vk_callback(
     repository: Repository,
     accounts: Accounts,
+    resume: Resumer,
     session: Annotated[Session, Depends(current_session)],
     state: Annotated[str, Query(min_length=1, max_length=1024)],
     code: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
@@ -89,6 +91,7 @@ async def vk_callback(
     except PlatformError as failure:
         raise HTTPException(400, str(failure)) from None
     accounts.save(business_id, accounts.lock_account(business_id), tokens, auth_mode="oauth")
+    await resume(business_id, "vk")
     return _redirect()
 
 
@@ -98,6 +101,7 @@ async def vk_key(
     user: Annotated[User, Depends(current_user)],
     repository: Repository,
     accounts: Accounts,
+    resume: Resumer,
     response: Response,
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -120,6 +124,7 @@ async def vk_key(
         client_id=client_id,
         client_secret=client_secret,
     )
+    await resume(business.id, "vk")
     return {
         "id": account.id,
         "business_id": business.id,

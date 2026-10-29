@@ -15,6 +15,11 @@ export interface Plan {
   marking_confirmed: boolean; ready_to_launch: boolean; blockers: string[]; launch_error?: string | null; status: 'draft' | 'launched';
   /** Сколько групп Директа дало бы описание без потолка maxDirectGroups: больше — часть услуг в Директ не вошла. */
   direct_services_total: number;
+  /** Кампании Директа: услуги каждой; у каждой услуги своя, если бюджет даёт каждой недельный минимум Директа. */
+  direct_campaigns: { services: string[] }[];
+  direct_campaigns_note: string | null;
+  /** Минус-фразы Директа: по таким запросам объявления не показываются. */
+  negative_phrases: string[];
 }
 // Групп Директа не больше пяти: по одной на услугу описания, услуги с одинаковой ключевой фразой — одна группа.
 export const maxDirectGroups = 5;

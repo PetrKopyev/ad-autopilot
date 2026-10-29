@@ -56,6 +56,8 @@ export interface AutopilotStatus {
   needs_attention: { id: string; title: string; description: string; destination: 'clients' | 'ads' | 'settings' }[];
   /** План собран или уже запущен: до запуска экраны ведут в план, без плана — в мастер. */
   has_plan: boolean;
+  /** Когда автопилот примет первые решения по цене — пока срок не прошёл; только у работающей рекламы. */
+  first_decisions?: string | null;
 }
 export type AdStatus = 'draft' | 'moderation' | 'active' | 'paused_auto' | 'paused_owner' | 'rejected' | 'archived';
 export interface Ad {
@@ -83,7 +85,8 @@ export interface Experiment {
   hypothesis: 'text' | 'image' | 'audience';
   comparing: string;
   /** Варианты А и Б; image — ссылка на картинку варианта. */
-  arms: { title: string; text: string; image: string | null }[];
+  /** audience — какой аудитории показывают вариант; только у проверки аудиторий. */
+  arms: { title: string; text: string; image: string | null; audience?: string | null }[];
   remaining_impressions: number;
   /** За какие дни цифры в выводе: у завершённой — на момент вывода; null — устоявшихся дней ещё нет. */
   period: { from: string; to: string } | null;

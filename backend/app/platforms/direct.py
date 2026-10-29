@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.platforms.base import (
+    AdGroupSpec,
     AuthExpired,
     AuthSession,
     CampaignTreeSpec,
@@ -601,6 +602,54 @@ class DirectAdapter:
             await self.apply(Operation("set_status", "campaign", campaign_id, "status", "paused_owner", "archived"))
         self._trees[key] = deepcopy(refs)
         return refs
+
+    async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
+        """Новая группа в работающей кампании — проверка другой аудитории. Группа и фразы ищутся по ключу ap-<id>,
+        объявления добавляются как варианты (ap_ref в ссылке), поэтому повтор после сбоя не создаёт дублей."""
+        if any(target.kind != "phrase" for target in group.targets):
+            raise PlatformError("Поддерживаются ключевые фразы; минус-фразы задаются в negative_keywords группы.")
+        async with self._create_lock:
+            groups = await self._get(
+                "adgroups",
+                "AdGroups",
+                {"SelectionCriteria": {"CampaignIds": [int(campaign_id)]}, "FieldNames": ["Id", "Name"]},
+            )
+            matches = [item for item in groups if item.get("Name", "").endswith(f" ap-{group.id}")]
+            if len(matches) > 1:
+                raise PlatformError("Неоднозначный ключ группы в Директе.")
+            group_id = (
+                str(matches[0]["Id"])
+                if matches
+                else await self._add(
+                    "adgroups",
+                    "AdGroups",
+                    {
+                        "Name": _named(group.name, f"ap-{group.id}"),
+                        "CampaignId": int(campaign_id),
+                        **self._targeting(group.targeting),
+                        **({} if self._text_campaign else {"UnifiedAdGroup": {"OfferRetargeting": "NO"}}),
+                    },
+                )
+            )
+            keywords = await self._get(
+                "keywords",
+                "Keywords",
+                {"SelectionCriteria": {"AdGroupIds": [int(group_id)]}, "FieldNames": ["Id", "Keyword"]},
+            )
+            targets = {}
+            for target in group.targets:
+                match = next((item for item in keywords if item.get("Keyword") == target.value), None)
+                targets[target.id] = (
+                    str(match["Id"])
+                    if match
+                    else await self._add("keywords", "Keywords", {"AdGroupId": int(group_id), "Keyword": target.value})
+                )
+        ads = {}
+        for ad in group.ads:
+            content = {"group_id": group_id, "title": ad.title, "text": ad.text, "image_ref": ad.image_ref}
+            await self._add_ad(Operation("add_ad", "ad", ad.id, "creative", None, content))
+            ads[ad.id] = await self._find_added_ad(ad.id, [group_id])
+        return ExternalRefs(campaign_id, {group.id: group_id}, ads, targets)
 
     @staticmethod
     def _same_ad(remote: dict, content: dict) -> bool:

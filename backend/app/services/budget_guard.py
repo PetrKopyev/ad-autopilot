@@ -173,6 +173,33 @@ async def stop_platform(
         return stopped
 
 
+async def resume_reconnected(worker: Worker, business: Business, platform: str) -> None:
+    """Кабинет подключили снова: кампании площадки, остановленные при его отключении (stop_platform), продолжают
+    работать, если реклама не на паузе. Кампании без бюджета (ниже минимума площадки, нулевой лимит) не включаются."""
+    if business.status != "running" or worker.metadata(business).get("kill_switch"):
+        return
+    held = set(worker.metadata(business).get("below_minimum", []))
+    for campaign in worker.current_campaigns(business):
+        if campaign.platform != platform or campaign.id in held or not campaign.daily_limit_kop:
+            continue
+        last = worker.repository.last_status_change(business.id, platform, "campaign", campaign.external_id)
+        if last is None or last.reason_code != "ACCOUNT_REVOKE":
+            continue
+        state = (await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign)))[
+            campaign.external_id
+        ]
+        await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
+            actor="owner",
+            kind="resume",
+            reason_code="OWNER_RESUME",
+            reason_text="Вы снова подключили кабинет — реклама продолжилась.",
+            suffix="reconnect",
+        )
+
+
 async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = False) -> None:
     from app.config import get_domain_settings
 

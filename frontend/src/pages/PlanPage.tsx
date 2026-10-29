@@ -174,6 +174,9 @@ export function PlanPage() {
               </button>
             </li>)}</ul>
             {servicesCut && <p className="plan-groups__note">{copy.plan.directServicesCut(maxDirectGroups)}</p>}
+            {plan.direct_campaigns.length > 0 && <p className="plan-groups__note">{copy.plan.directCampaigns(plan.direct_campaigns.map((item) => item.services))}</p>}
+            {plan.direct_campaigns_note && <p className="plan-groups__note">{plan.direct_campaigns_note}</p>}
+            {plan.negative_phrases.length > 0 && <p className="plan-groups__note">{copy.plan.negativePhrases(plan.negative_phrases)}</p>}
             <div className="plan-budget">
               <p className="plan-label">{copy.plan.budgetTitle(formatMoney(plan.month_budget_kop))}</p>
               {plan.direct_budget_kop > 0 && plan.vk_budget_kop > 0 && <div className="plan-budget__split" aria-hidden="true">

@@ -551,8 +551,9 @@ async def test_groups_get_region_of_each_platform(tmp_path: Path) -> None:
     adapters = {"direct": Regions({"region_ids": [51]}), "vk": Regions({"regions": [123]})}
     world, plan = await ready(tmp_path, adapters=adapters)
     await launch(world, plan)
-    for platform, geo in (("direct", {"region_ids": [51]}), ("vk", {"regions": [123]})):
-        groups = adapters[platform].specs[0].groups
+    direct = {"region_ids": [51], "negative_keywords": plan["negative_phrases"]}
+    for platform, geo in (("direct", direct), ("vk", {"regions": [123]})):
+        groups = [group for spec in adapters[platform].specs for group in spec.groups]
         assert groups and all(group.targeting == geo for group in groups)
 
 
@@ -1863,7 +1864,7 @@ async def test_pending_of_platform_outside_plan_does_not_block_launch(tmp_path: 
     monkeypatch.setattr(world.launches, "resolve_adapter", closed)
     assert (await launch(world, plan))["status"] == "launched"
     launched = world.repository.latest_plan(world.business.id)
-    assert launched.payload["platforms"] == ["direct"] and list(launched.payload["launch"]["campaigns"]) == ["direct"]
+    assert launched.payload["platforms"] == ["direct"] and list(launched.payload["launch"]["campaigns"]) == ["direct:1"]
     assert [change.platform for change in pending_launches(world)] == ["vk"]
 
 
@@ -2154,3 +2155,100 @@ async def test_interrupted_retry_of_failed_plan_is_explained_and_continued(tmp_p
     assert (await launch(world, plan))["status"] == "launched" and len(campaigns(world)) == 2
     view = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert view["status"] == "launched" and view["launch_error"] is None
+
+
+class WeeklyMinimum(FakeAdapter):
+    def __init__(self, weekly: int) -> None:
+        super().__init__()
+        self.weekly = weekly
+
+    async def min_budgets(self) -> dict[str, int]:
+        return {"weekly_limit_kop": self.weekly}
+
+
+async def ready_with_services(tmp_path: Path, services: list[str], **kwargs) -> tuple[World, dict]:
+    world = make_world(tmp_path, **kwargs)
+    await onboard(world)
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "\n".join(services)}
+    fields["prices"] = {"value": "\n".join(f"{name} — 1 500 ₽" for name in services)}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    return world, await world.plans.get_plan(world.business.id, NOW, TODAY)
+
+
+async def test_direct_gets_campaign_per_service_with_share_of_platform_limit(tmp_path: Path) -> None:
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц"]
+    world, plan = await ready_with_services(tmp_path, services)
+    assert (await launch(world, plan))["status"] == "launched"
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    assert [item.name for item in direct] == [f"Автопилот: {name} — Самара" for name in services]
+    expected = budget_limits(world.business, ["direct", "vk"], TODAY)["direct"]
+    assert sum(item.daily_limit_kop for item in direct) <= expected.daily_limit
+    assert sum(item.period_cap_kop for item in direct) <= expected.remaining_cap
+    assert all(item.status == "active" for item in direct)
+    for item in direct:
+        assert len(world.repository.tree_rows(item.id)[0]) == 1
+    launched = world.repository.latest_plan(world.business.id).payload["launch"]
+    assert set(launched["campaigns"]) == {"direct:1", "direct:2", "direct:3", "vk"}
+    history = world.repository.rows(ChangeLog, business_id=world.business.id)
+    assert sorted(change.platform for change in history) == ["direct", "direct", "direct", "vk"]
+
+
+async def test_direct_budget_below_campaign_minimums_shares_campaigns_between_services(tmp_path: Path) -> None:
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц", "Дизайн ногтей"]
+    limit = budget_limits(make_world(tmp_path / "probe").business, ["direct", "vk"], TODAY)["direct"]
+    whole = weekly_limit(limit.daily_limit, limit.remaining_cap, TODAY)
+    adapters = {"direct": WeeklyMinimum(whole * 3 // 8), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, services, adapters=adapters)
+    assert (await launch(world, plan))["status"] == "launched"
+    names = sorted(item.name for item in campaigns(world) if item.platform == "direct")
+    assert names == ["Автопилот: Маникюр, Наращивание ресниц — Самара", "Автопилот: Педикюр, Дизайн ногтей — Самара"]
+
+
+def test_launch_started_before_campaigns_per_service_keeps_one_direct_campaign() -> None:
+    groups = [{"id": index, "platform": "direct", "service": f"Услуга {index}"} for index in (1, 2)]
+    plan = Plan(business_id=1, status="ready", payload={"groups": groups, "launch": {"campaigns": {"direct": 7}}})
+    limit = budget_limits(Business(city="Самара", month_budget_kop=BUDGET_KOP), ["direct"], TODAY)
+    units = plan_module.campaign_units(plan, ["direct"], limit, {"direct": {}}, TODAY)
+    assert list(units) == ["direct"] and [group["id"] for group in units["direct"][0]] == [1, 2]
+
+
+async def test_direct_groups_get_negative_phrases_without_words_of_their_own_service(tmp_path: Path) -> None:
+    adapters = {"direct": Regions({"region_ids": [51]}), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Курсы маникюра"], adapters=adapters)
+    assert {"курсы", "вакансия", "бесплатно", "купить"} <= set(plan["negative_phrases"])
+    await launch(world, plan)
+    groups = [group for spec in adapters["direct"].specs for group in spec.groups]
+    courses = [group.targeting["negative_keywords"] for group in groups if "Курсы" in group.name]
+    other = [group.targeting["negative_keywords"] for group in groups if "Курсы" not in group.name]
+    assert other == [plan["negative_phrases"]]
+    assert courses == [[phrase for phrase in plan["negative_phrases"] if phrase != "курсы"]]
+
+
+async def test_service_removed_from_shared_campaign_stops_only_its_ads(tmp_path: Path) -> None:
+    from app.services.launch import sync_removed_services
+
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц", "Дизайн ногтей"]
+    limit = budget_limits(make_world(tmp_path / "probe").business, ["direct", "vk"], TODAY)["direct"]
+    whole = weekly_limit(limit.daily_limit, limit.remaining_cap, TODAY)
+    adapters = {"direct": WeeklyMinimum(whole * 3 // 8), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, services, adapters=adapters)
+    await launch(world, plan)
+    fields = {key: {"value": item["value"]} for key, item in world.business.description["fields"].items()}
+    fields["services"] = {"value": "Маникюр\nПедикюр\nДизайн ногтей"}
+    world.onboarding.save_description(world.business.id, fields, True, NOW)
+    worker = recovery_worker(world, dry_run=True)
+    worker.step_key = "optimize:services"
+    await sync_removed_services(worker, world.business)
+    direct = [item for item in campaigns(world) if item.platform == "direct"]
+    assert all(item.status == "active" for item in direct)
+    shared = next(item for item in direct if "Наращивание ресниц" in item.name)
+    rows, ads, _ = world.repository.tree_rows(shared.id)
+    themes = {row.id: row.theme for row in rows}
+    stopped = {themes[ad.ad_group_id] for ad in ads if ad.status == "paused_owner"}
+    assert stopped and all("Наращивание ресниц" in theme for theme in stopped)
+    assert any(ad.status != "paused_owner" for ad in ads)
+    change = next(row for row in world.repository.rows(ChangeLog) if row.reason_code == "SERVICE_REMOVED")
+    assert (
+        change.status == "applied" and "Наращивание ресниц" in change.reason_text and shared.name in change.reason_text
+    )

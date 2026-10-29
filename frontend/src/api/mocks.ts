@@ -221,7 +221,7 @@ export function mockSetupPlan(): Plan {
   if (setupMock.plan?.month_budget_kop !== budget) setupMock.plan = undefined;
   if (!setupMock.plan) setupMock.plan = { id: 1, month_budget_kop: budget, direct_budget_kop: budget - vkBudget,
     vk_budget_kop: vkBudget, daily_kop: hint.daily_kop, off: hint.off, generations_remaining: 3, medical_level: mockSetupSite().medical_level,
-    marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: setupMock.launched ? 'launched' : 'draft', direct_services_total: 2,
+    marking_confirmed: marking, ready_to_launch: ready, blockers: [], status: setupMock.launched ? 'launched' : 'draft', direct_services_total: 2, direct_campaigns: [], direct_campaigns_note: null, negative_phrases: ['обучение', 'курсы', 'вакансия', 'бесплатно'],
     // Как на сервере: в Директе группа на услугу, во VK — на повод; дневной лимит площадки делится поровну.
     groups: copy.plan.mockGroups.filter((group) => vk || group.platform === 'direct').map((group, index, groups) => ({
       id: index + 1, name: group.name, platform: group.platform, audience: group.audience,

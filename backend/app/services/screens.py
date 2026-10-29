@@ -1,5 +1,6 @@
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 from app.db.models import (
@@ -15,9 +16,10 @@ from app.db.models import (
 )
 from app.db.query import Window
 from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum, daily_minimum, stop_margin
-from app.domain.explain import PLURALS, explain_experiment, plural, rubles
+from app.domain.explain import PLURALS, explain_audience, explain_experiment, plural, rubles
+from app.domain.rules import first_decision_days
 from app.domain.types import ExperimentResult, Metrics, Verdict
-from app.platforms.base import Operation, PlatformError
+from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import STOPPED, read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.launch import TITLES
@@ -27,10 +29,13 @@ from app.services.stats import aggregate, aggregate_budget, aggregate_daily
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
 
+AUDIENCE_RUNNING = (
+    "Проверка идёт. Цену обращения сравним за весь срок, когда площадка уточнит обращения за последние дни."
+)
 SAME_EXCEPT = {
     "text": "Меняем только текст объявления, картинка та же.",
     "image": "Меняем только картинку, текст объявления тот же.",
-    "audience": "Меняем только аудиторию, объявление то же.",
+    "audience": "Меняем только аудиторию: то же объявление показываем в отдельной группе другим людям.",
 }
 # Ярлык «Остановлено нами» уже говорит, что объявление остановили: причина рядом с ним не повторяет это последней
 # фразой. В истории изменений текст остаётся целиком.
@@ -120,7 +125,45 @@ class ScreensService:
             "needs_attention": attention,
             # План собран (plan_ready) или уже запущен: до запуска экраны ведут в план, а не в мастер.
             "has_plan": business.status != "draft",
+            "first_decisions": self.first_decisions(business) if status == "running" else None,
         }
+
+    def first_decisions(self, business: Business) -> str | None:
+        """Срок до первых решений по цене — из порогов автопилота и того, сколько кликов объявления набирают сейчас."""
+        from app.config import get_domain_settings
+
+        domain = get_domain_settings()
+        campaigns = {row.id for row in self.worker.current_campaigns(business)}
+        rows = [
+            row
+            for row in self.repository.rows(StatsDaily, business.id, is_settled=True)
+            if row.campaign_id in campaigns
+        ]
+        approvals = [
+            datetime.fromisoformat(value) for value in self.worker.metadata(business).get("approvals", {}).values()
+        ]
+        age = (self.worker.clock.now - min(approvals)).days if approvals else None
+        ads, days = len({row.ad_id for row in rows}), len({row.date for row in rows})
+        rate = Decimal(sum(row.clicks for row in rows)) / (ads * days) if rows else None
+        remaining = first_decision_days(age, rate, domain)
+        why = (
+            f"Срок зависит от бюджета: каждому объявлению нужно набрать {domain.min_price_clicks} кликов, "
+            f"а цифры площадки уточняются ещё {plural(domain.settlement_days, PLURALS['days'])}."
+        )
+        if remaining is None:
+            return (
+                f"Объявления набирают слишком мало кликов: за {plural(domain.decision_window_days, PLURALS['days'])} "
+                f"каждому не набрать {domain.min_price_clicks}, и автопилот не может сравнить их по цене обращения. "
+                "Увеличьте бюджет — тогда появятся первые решения."
+            )
+        if not remaining:
+            return None
+        if age is None:
+            return (
+                f"Первые решения автопилота — не раньше чем через {plural(remaining, PLURALS['days'])} после того, "
+                f"как площадка одобрит объявления. {why}"
+            )
+        return f"Первые решения автопилота — примерно через {plural(remaining, PLURALS['days'])}. {why}"
 
     async def pause(self, business: Business) -> dict:
         business = self.repository.business(business.id)
@@ -195,7 +238,10 @@ class ScreensService:
                     and last.actor == "system"
                     and last.reason_code in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
                 )
-                if not (owner_stop or protection_stop) or state.status not in {"paused_owner", "paused_auto"}:
+                # Кампанию остановили перед отключением кабинета; кабинет снова подключён — включаем.
+                revoke_stop = last is not None and last.reason_code == "ACCOUNT_REVOKE"
+                stopped_by_us = owner_stop or protection_stop or revoke_stop
+                if not stopped_by_us or state.status not in {"paused_owner", "paused_auto"}:
                     continue
                 await self.worker.apply(
                     business,
@@ -343,15 +389,32 @@ class ScreensService:
                 for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):
                     arm = [row for row in rows if row.ad_id == ad_id and started <= row.date <= end]
                     arms.append(
-                        Metrics(impressions=sum(row.impressions for row in arm), clicks=sum(row.clicks for row in arm))
+                        Metrics(
+                            spend=sum(row.cost_kop for row in arm),
+                            impressions=sum(row.impressions for row in arm),
+                            clicks=sum(row.clicks for row in arm),
+                            leads=sum(
+                                min(row.clicks, lead_count(row.conversions, business.lead_goal_ids)) for row in arm
+                            ),
+                        )
                     )
             result = experiment.stats.get("result")
-            conclusion = explain_experiment(ExperimentResult(**result), *arms) if result else None
+            audiences = experiment.stats.get("audiences") if experiment.metric == "cpl" else None
+            conclusion = (
+                (
+                    explain_audience(ExperimentResult(**result), *arms, audiences)
+                    if audiences
+                    else explain_experiment(ExperimentResult(**result), *arms)
+                )
+                if result
+                else None
+            )
             if experiment.status == "cancelled":
                 conclusion = "Проверку остановили. Победителя не выбирали."
-            remaining = sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
+            # Аудитории сравниваются за полный срок, а не по числу показов.
+            remaining = 0 if audiences else sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
             days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
-            hypothesis = {"text": "текст", "image": "картинку", "audience": "аудиторию"}[experiment.hypothesis]
+            hypothesis = {"text": "текст", "image": "картинку", "audience": "аудитории"}[experiment.hypothesis]
             variants = [ads.get(id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)]
             # Варианты (А и Б) экран показывает сам, из arms; строка comparing говорит только, что между ними меняется.
             contents = [
@@ -359,8 +422,9 @@ class ScreensService:
                     "title": ad.title if ad else "",
                     "text": ad.text if ad else "",
                     "image": f"/api/plan/assets/{ad.asset_id}/file" if ad and ad.asset_id else None,
+                    "audience": audiences[index] if audiences else None,
                 }
-                for ad in variants
+                for index, ad in enumerate(variants)
             ]
             comparing = SAME_EXCEPT[experiment.hypothesis]
             if experiment.status == "running":
@@ -377,7 +441,9 @@ class ScreensService:
                     "status": experiment.status,
                     "conclusion": conclusion
                     or (
-                        explain_experiment(ExperimentResult(Verdict.RUNNING, "EXPERIMENT_RUNNING"), *arms)
+                        AUDIENCE_RUNNING
+                        if audiences and experiment.status == "running"
+                        else explain_experiment(ExperimentResult(Verdict.RUNNING, "EXPERIMENT_RUNNING"), *arms)
                         if experiment.status == "running"
                         else "Данных для уверенного выбора не хватило."
                     ),

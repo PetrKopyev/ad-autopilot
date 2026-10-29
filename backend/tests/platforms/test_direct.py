@@ -1232,3 +1232,30 @@ async def test_group_without_regions_is_rejected_instead_of_targeting_whole_worl
     with pytest.raises(ValueError, match="RegionIds"):
         await adapter.create_campaign_tree(replace(plan, groups=(group,)))
     assert not api.calls
+
+
+async def test_add_group_into_running_campaign_is_idempotent(adapter, api, plan):
+    server = DirectServer()
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    adapter._marking_confirmed = True
+    refs = await adapter.create_campaign_tree(plan)
+    group = AdGroupSpec(
+        "nails-audience",
+        "Маникюр — другая аудитория",
+        (AdSpec("variant-1", "Маникюр", "Запишитесь", None),),
+        (TargetSpec("phrase-2", "phrase", "маникюр гель"),),
+        {"region_ids": [51]},
+    )
+    server.fail_keywords_once = True
+    with pytest.raises(PlatformError):
+        await adapter.add_group(refs.campaign_id, group)
+    added = await adapter.add_group(refs.campaign_id, group)
+    assert added == await adapter.add_group(refs.campaign_id, group)
+    groups = [row for row in server.rows["adgroups"] if row["Name"].endswith(" ap-nails-audience")]
+    assert len(groups) == 1 and added.groups == {"nails-audience": str(groups[0]["Id"])}
+    assert groups[0]["CampaignId"] == int(refs.campaign_id) and groups[0]["RegionIds"] == [51]
+    keywords = [row for row in server.rows["keywords"] if row["AdGroupId"] == groups[0]["Id"]]
+    ads = [row for row in server.rows["ads"] if row["AdGroupId"] == groups[0]["Id"]]
+    assert [row["Keyword"] for row in keywords] == ["маникюр гель"] and len(ads) == 1
+    assert added.ads == {"variant-1": str(ads[0]["Id"])} and "ap_ref=variant-1" in ads[0]["ResponsiveAd"]["Href"]
+    assert [write[:2] for write in server.writes].count(("adgroups", "add")) == 2

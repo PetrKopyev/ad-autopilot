@@ -22,7 +22,7 @@ const interrupted = 'Запуск рекламы не завершился. Вс
 function plan(launch_error: string | null): Plan {
   return {
     id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, daily_kop: { direct: 71225 }, off: [], generations_remaining: 2, medical_level: 'none',
-    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft', direct_services_total: 1,
+    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft', direct_services_total: 1, direct_campaigns: [], direct_campaigns_note: null, negative_phrases: [],
     groups: [{ id: 1, name: 'Маникюр', platform: 'direct', audience: 'Рядом', daily_limit_kop: 100000, ads: [{ title: 'Маникюр', text: 'Запись онлайн' }],
       assets: [{ id: 1, url: '/api/plan/assets/1/file', kind: 'image', alt: 'Френч с золотой фольгой', label: 'Френч с золотой фольгой', selected: true }] }],
   };
@@ -384,6 +384,20 @@ it('если услуг в описании больше пяти, план го
   vi.mocked(getPlan).mockResolvedValue({ ...base, direct_services_total: 6, groups: [1, 2, 3, 4, 5].map((id) => ({ ...base.groups[0], id, name: `Услуга ${id}` })) });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   expect(await screen.findByText('В Директ вошли первые 5 услуг из описания.')).toBeTruthy();
+});
+
+it('план называет кампании Директа и объясняет, почему услуги делят кампанию', async () => {
+  const note = 'Бюджета Директа хватает на кампаний: 1, а услуг 2.';
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), direct_campaigns: [{ services: ['Маникюр', 'Педикюр'] }], direct_campaigns_note: note });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText('В Директе 1 кампания: «Маникюр, Педикюр».')).toBeTruthy();
+  expect(screen.getByText(note)).toBeTruthy();
+});
+
+it('план показывает минус-фразы Директа', async () => {
+  vi.mocked(getPlan).mockResolvedValue({ ...plan(null), negative_phrases: ['курсы', 'вакансия'] });
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  expect(await screen.findByText(/по запросам со словами: курсы, вакансия —/)).toBeTruthy();
 });
 
 it('пять услуг — строки об обрезке нет', async () => {

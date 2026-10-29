@@ -29,12 +29,16 @@ from app.domain.budget import (
     allocate,
     budget_minimum,
     budget_platforms,
+    campaign_batches,
     launch_limits,
+    meets_minimum,
     platform_shares,
+    split_campaign_limits,
     split_group_limits,
 )
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
+from app.platforms.direct import weekly_limit
 from app.platforms.regions import phrase_city
 from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict
 from app.services.onboarding import (
@@ -56,6 +60,27 @@ ANGLES_PER_GROUP = 2
 # Групп Директа не больше пяти: при минимальном бюджете (около 300 ₽ в день на Директ) на группу и так приходится
 # по 60 ₽ в день, а каждая новая группа — ещё два текста и две картинки от ИИ.
 MAX_SERVICE_GROUPS = 5
+# Минус-фразы Директа: слова в начальной форме, Директ сам учитывает их словоформы.
+NEGATIVE_PHRASES = (
+    "обучение",
+    "курсы",
+    "вакансия",
+    "резюме",
+    "зарплата",
+    "бесплатно",
+    "своими руками",
+    "домашних условиях",
+    "видео",
+    "скачать",
+)
+NICHE_NEGATIVE_PHRASES = {
+    "nails": ("купить", "оптом", "материалы"),
+    "beauty": ("купить", "оптом", "материалы"),
+    "barbershop": ("купить", "машинка"),
+    "yoga": ("коврик", "асаны"),
+    "fitness": ("упражнения", "программа тренировок"),
+    "medical": ("симптомы", "народные средства", "форум"),
+}
 IMAGE_CANDIDATES = 8
 IMAGES_PER_KEY = 2
 REGENERATE_COUNT = 2
@@ -219,6 +244,99 @@ def audience(group: dict, city: str) -> str:
         return f"Регион: {city}. Ключевых фраз пока нет: добавьте услуги в описание бизнеса."
     quoted = ", ".join(f"«{theme}»" for theme in themes)
     return f"Тем, кто ищет в Яндексе {quoted}. Регион: {city}. Объявления — в поиске и на сайтах-партнёрах Яндекса."
+
+
+def campaign_platform(key: str) -> str:
+    """Ключ кампании плана — площадка или «площадка:номер»: у Директа своя кампания на услугу."""
+    return key.split(":")[0]
+
+
+def direct_batches(groups: list[dict], limit: PlatformLimit, minimum: dict[str, int], today: date) -> list[list[dict]]:
+    """Группы Директа по кампаниям: кампания на услугу, если лимит Директа даёт каждой не меньше недельного минимума
+    площадки, иначе кампаний меньше и в одной идут несколько услуг."""
+
+    def fits(part: PlatformLimit) -> bool:
+        weekly = weekly_limit(part.daily_limit, part.remaining_cap, today)
+        return meets_minimum(part, minimum) and weekly >= minimum.get("weekly_limit_kop", 0)
+
+    by_id = {str(group["id"]): group for group in groups}
+    return [[by_id[id_] for id_ in batch] for batch in campaign_batches(limit, list(by_id), fits)]
+
+
+def campaign_units(
+    plan: Plan,
+    platforms: list[str],
+    limits: dict[str, PlatformLimit],
+    minimums: dict[str, dict[str, int]],
+    today: date,
+) -> dict[str, tuple[list[dict], PlatformLimit]]:
+    """Кампании запуска: ключ, группы плана и лимиты. VK — одна кампания на площадку; Директ — «direct:номер» по
+    кампании на услугу (direct_batches). Повтор запуска берёт раскладку прошлой попытки (launch.batches), запуск,
+    начатый до кампаний по услугам, и план до групп по услугам (у групп нет service) — одну кампанию «direct»."""
+    launch = plan.payload.get("launch", {})
+    saved = launch.get("batches") or ({"direct": []} if "direct" in launch.get("campaigns", {}) else {})
+    units = {}
+    for platform in platforms:
+        groups = [group for group in plan.payload["groups"] if group["platform"] == platform]
+        if platform != "direct" or "direct" in saved or any("service" not in group for group in groups):
+            units[platform] = (groups, limits[platform])
+            continue
+        keys = sorted(key for key in saved if campaign_platform(key) == "direct")
+        batches = (
+            [[group for group in groups if group["id"] in saved[key]] for key in keys]
+            if keys
+            else direct_batches(groups, limits[platform], minimums[platform], today)
+        )
+        keys = keys or [f"direct:{index + 1}" for index in range(len(batches))]
+        parts = split_campaign_limits(limits[platform], [[group["id"] for group in batch] for batch in batches])
+        units |= {key: (batch, part) for key, batch, part in zip(keys, batches, parts, strict=True)}
+    return units
+
+
+def direct_campaigns(plan: Plan, limits: dict[str, PlatformLimit], today: date) -> list[list[dict]]:
+    """Группы Директа по кампаниям для экрана плана: запущенный план — как создал запуск, черновик — раскладка по
+    минимуму Директа без сети (запуск сверит её с живым минимумом)."""
+    if "direct" not in plan.payload["platforms"]:
+        return []
+    if plan.status != "launched":
+        units = campaign_units(plan, ["direct"], limits, {"direct": PLATFORM_MINIMUMS["direct"]}, today)
+        return [groups for groups, _ in units.values()]
+    groups = [group for group in plan.payload["groups"] if group["platform"] == "direct"]
+    batches = plan.payload.get("launch", {}).get("batches", {})
+    keys = sorted(key for key in batches if key.startswith("direct:"))
+    return [[group for group in groups if group["id"] in batches[key]] for key in keys] if keys else [groups]
+
+
+def campaigns_note(campaigns: list[list[dict]]) -> str | None:
+    """Почему услуг Директа больше, чем кампаний: недельный минимум Директа ставится на каждую кампанию."""
+    services = sum(1 for batch in campaigns for group in batch if group.get("service"))
+    if len(campaigns) >= services:
+        return None
+    minimum = PLATFORM_MINIMUMS["direct"]["weekly_limit_kop"] // 100
+    return (
+        f"Бюджета Директа хватает на кампаний: {len(campaigns)}, а услуг {services}. У каждой кампании Директа есть "
+        f"недельный минимум — {minimum} ₽, поэтому несколько услуг идут в одной кампании. С бюджетом побольше "
+        "у каждой услуги будет своя кампания."
+    )
+
+
+def negative_phrases(niche: str) -> list[str]:
+    """Минус-фразы Директа: запросы тех, кто ищет не услугу, а работу, обучение или бесплатную инструкцию."""
+    return [*NEGATIVE_PHRASES, *NICHE_NEGATIVE_PHRASES.get(niche, ())]
+
+
+def stem(word: str) -> str:
+    return word.lower()[:4]
+
+
+def targeting(plan: Plan, platform: str, group: dict) -> dict:
+    """Настройки группы сверх региона: Директу — минус-фразы плана без слов из фраз самой группы (у услуги «Курсы
+    маникюра» минус-слово «курсы» отрезало бы её же запросы)."""
+    if platform != "direct":
+        return {}
+    own = {stem(word) for phrase in group.get("phrases", []) for word in phrase.split()}
+    phrases = plan.payload.get("negative_phrases", negative_phrases(plan.payload.get("niche", "other")))
+    return {"negative_keywords": [phrase for phrase in phrases if not own & {stem(word) for word in phrase.split()}]}
 
 
 def launch_blockers(
@@ -566,6 +684,7 @@ class PlanService:
             "off": off,
             "niche": niche,
             "segments": segments,
+            "negative_phrases": negative_phrases(niche),
             "groups": groups,
             "assets": assets,
         }
@@ -806,6 +925,7 @@ class PlanService:
             }
             for group in payload["groups"]
         ]
+        campaigns = direct_campaigns(plan, limits, today)
         return {
             "id": plan.id,
             "month_budget_kop": payload["month_budget_kop"],
@@ -815,6 +935,14 @@ class PlanService:
             "off": off_view(payload.get("off", {})),
             "groups": groups,
             # Сколько групп Директа дало бы описание без потолка: больше MAX_SERVICE_GROUPS — часть услуг не вошла.
+            # Кампании Директа: у каждой услуги своя, если бюджет даёт каждой недельный минимум площадки.
+            "direct_campaigns": [
+                {"services": [group.get("service") or group["name"] for group in batch]} for batch in campaigns
+            ],
+            "direct_campaigns_note": campaigns_note(campaigns),
+            "negative_phrases": payload.get("negative_phrases", negative_phrases(payload.get("niche", "other")))
+            if "direct" in platforms
+            else [],
             "direct_services_total": len(direct_services(description_draft(business).services, business.city, None)),
             "generations_remaining": self.generations_remaining(
                 ai_budget(self.repository, business, self.limits, today)

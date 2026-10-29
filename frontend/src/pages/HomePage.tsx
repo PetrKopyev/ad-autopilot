@@ -157,9 +157,9 @@ function Experiments({ items, quiet }: { items: Experiment[]; quiet: string | nu
     <ol className="home-ab__arms">{experiment.arms.map((arm, index) => <li key={armLetters[index]}>
       <span className="home-ab__letter" aria-label={copy.ads.arm(armLetters[index])}>{armLetters[index]}</span>
       {arm.image && <img src={arm.image} alt={copy.ads.armImage(armLetters[index])} loading="lazy" />}
-      <span>«{arm.title}». {arm.text}</span>
+      <span>{arm.audience && <><strong>{copy.ads.armAudience(arm.audience)}</strong> </>}«{arm.title}». {arm.text}</span>
     </li>)}</ol>
-    {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
+    {experiment.status === 'running' && experiment.hypothesis !== 'audience' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
     {experiment.conclusion && <p className="home-ab__verdict"><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion}</p>}
     {experiment.conclusion && experimentPeriod(experiment) && <p className="muted">{experimentPeriod(experiment)}</p>}
   </li>)}</ul>;
@@ -316,6 +316,7 @@ export function HomePage() {
         {status && <p>{onTrack && <><strong>{copy.home.onTrack}</strong>{' '}</>}
           {onTrack && summary && pace(summary) && <><span>{pace(summary)}</span>{' '}</>}
           <span className={onTrack ? 'home-state__check' : 'home-state__headline'}>{statusText}</span></p>}
+        {status?.status === 'running' && status.first_decisions && <p className="home-state__note">{status.first_decisions}</p>}
       </div>
       {!prelaunch && <SegmentedControl dark label={copy.statistics.period} value={choice} onChange={setChoice}
         options={(Object.keys(copy.screens.periods) as PeriodChoice[]).map((value) => ({ value, label: copy.screens.periods[value], shortLabel: copy.screens.shortPeriods[value] }))} />}

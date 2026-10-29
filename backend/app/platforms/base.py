@@ -277,6 +277,10 @@ class AdPlatform(Protocol):
 
     async def create_campaign_tree(self, plan_part: CampaignTreeSpec) -> ExternalRefs: ...
 
+    async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
+        """Новая группа в созданной кампании; повтор с теми же id не создаёт вторую."""
+        ...
+
     async def apply(self, operation: Operation) -> None:
         """Установить after; повтор безопасен. before хранится для отката, сверку делает вызывающий код."""
         ...

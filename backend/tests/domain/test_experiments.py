@@ -8,6 +8,7 @@ import pytest
 from app.domain import experiments
 from app.domain.experiments import (
     design_experiment,
+    evaluate_audience,
     evaluate_experiment,
     extended_target,
     next_hypothesis,
@@ -215,3 +216,37 @@ def test_aa_thousand_runs_including_the_extension_have_at_most_six_percent_false
 def test_invalid_experiment_is_rejected(design, now):
     with pytest.raises(ValueError):
         evaluate_experiment(replace(design, accepted=False), (), (), now.date(), now.date())
+
+
+def audience_days(start, spend, leads):
+    return tuple(DaySpend(start + timedelta(days=offset), spend, 1000, 30, leads) for offset in range(14))
+
+
+def test_audience_verdict_waits_for_the_full_settled_period(now):
+    start = now.date()
+    control, variant = audience_days(start, 10_000, 0), audience_days(start, 10_000, 2)
+    # Последний день проверки — 14-й, его цифры уточняются ещё 2 дня.
+    assert evaluate_audience(control, variant, start, start + timedelta(days=14)).verdict == Verdict.RUNNING
+    result = evaluate_audience(control, variant, start, start + timedelta(days=15))
+    assert (result.verdict, result.reason_code) == (Verdict.VARIANT, "EXPERIMENT_WIN")
+    assert result.p_value < DEFAULT_SETTINGS.test_alpha
+
+
+def test_audience_needs_enough_leads_and_a_real_price_gap(now):
+    start = now.date()
+    end = start + timedelta(days=16)
+    # 9 обращений на две аудитории — мало для вывода.
+    few = evaluate_audience(audience_days(start, 10_000, 0), audience_days(start, 10_000, 0), start, end)
+    assert few.verdict == Verdict.NO_DIFFERENCE
+    control = audience_days(start, 10_000, 1)
+    # 14 против 28 обращений при равном расходе: вдвое дешевле и надёжно.
+    assert evaluate_audience(control, audience_days(start, 10_000, 2), start, end).verdict == Verdict.VARIANT
+    assert evaluate_audience(audience_days(start, 10_000, 2), control, start, end).verdict == Verdict.CONTROL
+    # 14 против 15: разница в цене меньше порога — вывод «разницы нет».
+    close = audience_days(start, 10_000, 1)[:13] + (DaySpend(start + timedelta(days=13), 10_000, 1000, 30, 2),)
+    assert evaluate_audience(control, close, start, end).verdict == Verdict.NO_DIFFERENCE
+
+
+def test_audience_design_runs_the_full_period():
+    design = design_experiment(0.05, 4000, 80_000, ("text", "image"))
+    assert (design.hypothesis, design.estimated_days, design.accepted) == ("audience", 14, True)

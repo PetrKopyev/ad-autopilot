@@ -14,12 +14,14 @@ from app.domain.budget import (
     budget_guard,
     budget_minimum,
     budget_platforms,
+    campaign_batches,
     launch_limits,
     meets_minimum,
     plan_budget,
     platform_shares,
     rebalance_platform_shares,
     share_floors,
+    split_campaign_limits,
     split_group_limits,
     stop_margin,
 )
@@ -288,3 +290,25 @@ def test_rebalance_does_not_push_platform_below_its_floor():
     assert rebalance_platform_shares(low, cheap_direct, 14, floors=vk_floor) == low
     expected = {"direct": Decimal("0.7"), "vk": Decimal("0.3")}
     assert rebalance_platform_shares(low, {"direct": 10_000, "vk": 100}, 14, floors=vk_floor) == expected
+
+
+def test_campaign_per_group_when_budget_allows():
+    limit = PlatformLimit("direct", 500_000, 100_000, 500_000)
+    batches = campaign_batches(limit, ["1", "2", "3"], lambda part: part.daily_limit >= 30_000)
+    assert batches == [["1"], ["2"], ["3"]]
+    parts = split_campaign_limits(limit, batches)
+    assert sum(part.daily_limit for part in parts) == 100_000
+    assert sum(part.remaining_cap for part in parts) == 500_000
+
+
+def test_fewer_campaigns_when_minimum_not_met():
+    limit = PlatformLimit("direct", 500_000, 100_000, 500_000)
+    batches = campaign_batches(limit, ["1", "2", "3", "4", "5"], lambda part: part.daily_limit >= 30_000)
+    # Три кампании дали бы последней одну группу и 200 ₽ в день — ниже минимума.
+    assert batches == [["1", "3", "5"], ["2", "4"]]
+    assert [part.daily_limit for part in split_campaign_limits(limit, batches)] == [60_000, 40_000]
+
+
+def test_single_campaign_when_budget_is_small():
+    limit = PlatformLimit("direct", 50_000, 10_000, 50_000)
+    assert campaign_batches(limit, ["1", "2"], lambda part: part.daily_limit >= 30_000) == [["1", "2"]]

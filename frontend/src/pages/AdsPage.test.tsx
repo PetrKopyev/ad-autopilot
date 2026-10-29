@@ -52,6 +52,15 @@ it('о недоступной картинке говорит только в п
   expect(screen.queryByText(copy.ads.armNoImage)).toBeNull();
 });
 
+it('в проверке аудиторий подписывает, кому показывают каждый вариант, и не считает показы', async () => {
+  const list = await show('audience', [{ title: 'Маникюр', text, image: null, audience: 'ищут с названием города' },
+    { title: 'Маникюр', text, image: null, audience: 'ищут без названия города' }]);
+  const [first, second] = within(list).getAllByRole('listitem');
+  expect(first.textContent).toBe(`${copy.ads.arm('А')}${copy.ads.armAudience('ищут с названием города')} «Маникюр». ${text}`);
+  expect(second.textContent).toContain(copy.ads.armAudience('ищут без названия города'));
+  expect(screen.queryByText(copy.screens.remainingShows(1200))).toBeNull();
+});
+
 it('строку «Что сравниваем» выводит как есть и варианты в ней не повторяет', async () => {
   await show('image', [{ title: 'Маникюр', text, image: null }, { title: 'Маникюр', text, image: null }]);
   expect(screen.getByText(experiment('image', []).comparing)).toBeTruthy();

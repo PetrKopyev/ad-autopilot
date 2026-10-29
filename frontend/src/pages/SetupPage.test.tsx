@@ -36,13 +36,14 @@ it('после первого шага сессия перечитывается
     <Route path="setup/:step" element={<SetupPage />} />
   </Routes><Probe /></SessionProvider></MemoryRouter>);
   await waitFor(() => expect(screen.getByTestId('business').textContent).toBe('false'));
-  fireEvent.change(screen.getByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
   fireEvent.change(screen.getByLabelText(copy.setup.business.city), { target: { value: 'Москва' } });
   fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '30000' } });
   fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
   await waitFor(() => expect(screen.getByTestId('path').textContent).toBe('/setup/2'));
   await waitFor(() => expect(screen.getByTestId('business').textContent).toBe('true'));
-  expect(calls().slice(-2)).toEqual(['POST /api/business', 'GET /api/me']);
+  // Расчёт к бюджету уходит по таймеру и под нагрузкой может прийти между ними — он к порядку не относится.
+  expect(calls().filter((call) => !call.endsWith('/budget-hint')).slice(-2)).toEqual(['POST /api/business', 'GET /api/me']);
 });
 
 it('город сохраняется только из списка: свободный текст не отправляется, выбранный — уходит названием из списка', async () => {

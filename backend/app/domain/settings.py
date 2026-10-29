@@ -45,6 +45,7 @@ class DomainSettings:
     max_tests_per_group: int = 1
     max_tests_per_business: int = 2
     audience_min_daily_budget: int = 70_000
+    audience_min_leads: int = 10
     test_budget_share: Decimal = Decimal("0.25")
     test_alpha: float = 0.05
     test_power: float = 0.8
