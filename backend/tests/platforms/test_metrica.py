@@ -179,6 +179,42 @@ async def test_invalid_counters(metrica: MetricaClient, mock_api: respx.MockRout
         await metrica.list_counters()
 
 
+async def test_ad_conversions(metrica: MetricaClient, mock_api: respx.MockRouter) -> None:
+    route = mock_api.get(
+        f"{BASE_URL}/stat/v1/data",
+        params={
+            "ids": 1,
+            "metrics": "ym:s:visits,ym:s:goal12visits,ym:s:goal13visits",
+            "filters": "ym:s:lastsignTrafficSource=='ad'",
+            "date1": "90daysAgo",
+            "date2": "yesterday",
+        },
+    ).respond(json={"totals": [240.0, 5, 2]})
+
+    assert await metrica.get_ad_conversions(1, [12, 13]) == (240, 7)
+    assert route.called
+
+
+async def test_ad_conversions_never_exceed_visits(metrica: MetricaClient, mock_api: respx.MockRouter) -> None:
+    mock_api.get(f"{BASE_URL}/stat/v1/data").respond(json={"totals": [3, 2, 2]})
+
+    assert await metrica.get_ad_conversions(1, [12, 13]) == (3, 3)
+
+
+@pytest.mark.parametrize("totals", [[10], [10, -1], [10, 1.5]])
+async def test_invalid_ad_conversions(metrica: MetricaClient, mock_api: respx.MockRouter, totals: list) -> None:
+    mock_api.get(f"{BASE_URL}/stat/v1/data").respond(json={"totals": totals})
+
+    with pytest.raises(MetricaResponseError):
+        await metrica.get_ad_conversions(1, [12])
+
+
+@pytest.mark.parametrize("goal_ids", [[], list(range(1, 21))])
+async def test_ad_conversions_goal_count(metrica: MetricaClient, goal_ids: list[int]) -> None:
+    with pytest.raises(ValueError):
+        await metrica.get_ad_conversions(1, goal_ids)
+
+
 @pytest.mark.parametrize("goal", [{"id": 1, "name": "Заявка"}, {"id": True, "name": "Цель", "type": "action"}])
 async def test_invalid_goals(metrica: MetricaClient, mock_api: respx.MockRouter, goal: dict) -> None:
     mock_api.get(f"{BASE_URL}/management/v1/counter/1/goals").respond(json={"goals": [goal]})

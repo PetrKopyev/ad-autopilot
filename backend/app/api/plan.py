@@ -9,15 +9,16 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.types import Message
 
 from app.api.business import human_errors
-from app.api.limits import assets_limit, regenerate_limit, upload_limit
+from app.api.limits import assets_limit, forecast_limit, regenerate_limit, upload_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import require_csrf
 from app.content.images import MAX_BYTES, DecodeBusy, run_upload_decoding
+from app.services.forecast import ForecastService
 from app.services.launch import LaunchBlocked, LaunchFailed, LaunchRepository, LaunchService
 from app.services.onboarding import AiLimits
 from app.services.plan import VIDEO_QUEUE, Built, PlanRepository, PlanService, build_videos
-from app.services.registry import build_art_factory, build_llm
+from app.services.registry import build_art_factory, build_llm, llm_mode
 
 router = APIRouter(prefix="/api/plan", route_class=ReleasingRoute)
 MAX_UPLOAD = MAX_BYTES + 64 * 1024
@@ -71,6 +72,19 @@ async def get_launch_service(request: Request) -> AsyncIterator[LaunchService]:
         )
 
 
+async def get_forecast_service(request: Request) -> AsyncIterator[ForecastService]:
+    from app.config import get_domain_settings, settings
+
+    with request_session() as db:
+        yield ForecastService(
+            PlanRepository(db),
+            request.app.state.platform_adapters,
+            None if llm_mode(settings) == "demo" else build_llm(settings, request.app.state.http),
+            AiLimits.from_settings(settings),
+            get_domain_settings(settings),
+        )
+
+
 def get_video_builder() -> Callable[[int, Built], bool]:
     """Сборка роликов идёт после ответа в своём сеансе БД: сеанс запроса к этому времени уже закрыт."""
 
@@ -85,6 +99,7 @@ def get_video_builder() -> Callable[[int, Built], bool]:
 
 Plans = Annotated[PlanService, Depends(get_plan_service)]
 Launches = Annotated[LaunchService, Depends(get_launch_service)]
+Forecasts = Annotated[ForecastService, Depends(get_forecast_service)]
 VideoBuilder = Annotated[Callable[[int, Built], bool], Depends(get_video_builder)]
 
 
@@ -121,6 +136,11 @@ class LimitedBody(ReleasingRoute):
 async def get_plan(business: CurrentBusiness, service: Plans, today: Today) -> dict:
     with human_errors():
         return await service.get_plan(business.id, datetime.now(UTC), today)
+
+
+@router.get("/forecast", dependencies=[Depends(forecast_limit)])
+async def forecast(business: CurrentBusiness, service: Forecasts, today: Today) -> dict:
+    return await service.forecast(business, datetime.now(UTC), today)
 
 
 @router.post("/regenerate-images", dependencies=[Depends(regenerate_limit), Depends(require_csrf)])

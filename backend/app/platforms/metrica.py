@@ -7,6 +7,8 @@ import httpx
 
 BASE_URL = "https://api-metrika.yandex.net"
 PAGE_SIZE = 1000
+# Метрика принимает до 20 метрик в запросе; одна из них — визиты.
+MAX_GOALS = 19
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,17 @@ class Metrica(Protocol):
 
     async def get_visits(self, counter_id: int) -> int: ...
 
+    async def get_ad_conversions(self, counter_id: int, goal_ids: list[int]) -> tuple[int, int]: ...
+
     async def is_alive(self, counter_id: int) -> bool: ...
+
+
+def _total(value: object) -> int:
+    if type(value) not in (int, float) or value < 0:
+        raise MetricaResponseError()
+    if isinstance(value, float) and (not isfinite(value) or not value.is_integer()):
+        raise MetricaResponseError()
+    return int(value)
 
 
 def _check_counter_id(counter_id: int) -> None:
@@ -161,12 +173,30 @@ class MetricaClient:
         totals = data.get("totals")
         if not isinstance(totals, list) or len(totals) != 1:
             raise MetricaResponseError()
-        visits = totals[0]
-        if type(visits) not in (int, float) or visits < 0:
+        return _total(totals[0])
+
+    async def get_ad_conversions(self, counter_id: int, goal_ids: list[int]) -> tuple[int, int]:
+        """Визиты с рекламы за 90 дней до вчера и сколько из них достигли целей-обращений (по последнему значимому
+        источнику). Визит, достигший двух целей, считается дважды, поэтому сумма не больше числа визитов."""
+        _check_counter_id(counter_id)
+        if not goal_ids or len(goal_ids) > MAX_GOALS:
+            raise ValueError(f"Нужно от одной до {MAX_GOALS} целей.")
+        metrics = ["ym:s:visits", *(f"ym:s:goal{goal_id}visits" for goal_id in goal_ids)]
+        data = await self._get(
+            "/stat/v1/data",
+            params={
+                "ids": counter_id,
+                "metrics": ",".join(metrics),
+                "filters": "ym:s:lastsignTrafficSource=='ad'",
+                "date1": "90daysAgo",
+                "date2": "yesterday",
+            },
+        )
+        totals = data.get("totals")
+        if not isinstance(totals, list) or len(totals) != len(metrics):
             raise MetricaResponseError()
-        if isinstance(visits, float) and (not isfinite(visits) or not visits.is_integer()):
-            raise MetricaResponseError()
-        return int(visits)
+        visits, *reached = map(_total, totals)
+        return visits, min(sum(reached), visits)
 
     async def is_alive(self, counter_id: int) -> bool:
         return await self.get_visits(counter_id) > 0
@@ -177,6 +207,7 @@ class FakeMetrica:
     counters: list[MetricaCounter] = field(default_factory=list)
     goals: dict[int, list[MetricaGoal]] = field(default_factory=dict)
     visits: dict[int, int] = field(default_factory=dict)
+    conversions: dict[int, tuple[int, int]] = field(default_factory=dict)
 
     def _check_access(self, counter_id: int) -> None:
         _check_counter_id(counter_id)
@@ -193,6 +224,10 @@ class FakeMetrica:
     async def get_visits(self, counter_id: int) -> int:
         self._check_access(counter_id)
         return self.visits.get(counter_id, 0)
+
+    async def get_ad_conversions(self, counter_id: int, goal_ids: list[int]) -> tuple[int, int]:
+        self._check_access(counter_id)
+        return self.conversions.get(counter_id, (0, 0))
 
     async def is_alive(self, counter_id: int) -> bool:
         return await self.get_visits(counter_id) > 0
