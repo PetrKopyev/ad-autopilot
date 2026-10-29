@@ -11,6 +11,7 @@ for (const width of [390, 1280]) {
     await page.goto('/login');
     await expect(page.getByRole('heading', { name: copy.login.title, exact: true })).toBeVisible();
     await expect(page.getByRole('navigation', { name: copy.navigation.label })).toHaveCount(0);
+    await page.getByRole('checkbox', { name: copy.login.consent }).check();
     await page.getByRole('button', { name: 'Войти в демо', exact: true }).click();
     await expect(page.getByLabel(copy.setup.business.website)).toHaveValue('https://salon.example/');
     await expect(page.getByLabel(copy.setup.business.city, { exact: true })).toHaveValue('Москва');
@@ -57,10 +58,10 @@ for (const width of [390, 1280]) {
     await expect(page.getByText(/Остановлено нами/).first()).toBeVisible();
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.history, exact: true }).click();
     await page.getByLabel(copy.historyScreen.filterAuthor).selectOption('autopilot');
-    await expect(page.locator('.history-entry').first()).toContainText('Автопилот');
+    await expect(page.locator('.journal__entry').first()).toContainText('Автопилот');
     // Отмена остановки подписана «Продолжить», остальных изменений — «Отменить».
     const labels = copy.historyScreen;
-    await page.locator('.history-entry').getByRole('button', { name: new RegExp(`^(${copy.history.undo}|${labels.resume})$`) }).first().click();
+    await page.locator('.journal__entry').getByRole('button', { name: new RegExp(`^(${copy.history.undo}|${labels.resume})$`) }).first().click();
     await page.getByRole('button', { name: new RegExp(`^(${labels.confirmYes}|${labels.resumeYes})$`) }).click();
     await page.getByLabel(copy.historyScreen.filterAuthor).selectOption('');
     await expect(page.getByRole('heading', { name: new RegExp(`^(Вы отменили|${labels.resumedAfterStop})`) }).first()).toBeVisible();
