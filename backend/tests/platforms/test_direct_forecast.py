@@ -9,7 +9,6 @@ import respx
 
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.direct_forecast import (
-    CREATED,
     LIVE_URL,
     SANDBOX_URL,
     DirectForecastClient,
@@ -56,19 +55,19 @@ def direct() -> Iterator[Direct]:
         yield handler
 
 
-@pytest.fixture(autouse=True)
-def own_reports() -> Iterator[None]:
-    yield
-    CREATED.clear()
+@pytest.fixture
+def owned() -> set[int]:
+    return set()
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[DirectForecastClient]:
-    async with DirectForecastClient("test-only", config=SimpleNamespace(direct_sandbox=False)) as forecast:
+async def client(owned: set[int]) -> AsyncIterator[DirectForecastClient]:
+    config = SimpleNamespace(direct_sandbox=False)
+    async with DirectForecastClient("test-only", config=config, owned=owned) as forecast:
         yield forecast
 
 
-async def test_create_status_get_delete(client: DirectForecastClient, direct: Direct) -> None:
+async def test_create_status_get_delete(client: DirectForecastClient, direct: Direct, owned: set[int]) -> None:
     direct.answers = {
         "CreateNewForecast": [{"data": 7}],
         "GetForecastList": [
@@ -80,7 +79,7 @@ async def test_create_status_get_delete(client: DirectForecastClient, direct: Di
     }
 
     forecast_id = await client.create(["маникюр самара", "маникюр самара"], [51])
-    assert CREATED == {7}
+    assert owned == {7}
     assert await client.status(forecast_id) == "Pending"
     assert await client.status(forecast_id) == "Done"
     rows = await client.get(forecast_id)
@@ -97,7 +96,7 @@ async def test_create_status_get_delete(client: DirectForecastClient, direct: Di
         "GetForecast",
         "DeleteForecastReport",
     ]
-    assert direct.calls[-1]["param"] == 7 and not CREATED
+    assert direct.calls[-1]["param"] == 7 and not owned
 
 
 async def test_missing_report_is_failed(client: DirectForecastClient, direct: Direct) -> None:
@@ -113,8 +112,10 @@ async def test_access_not_approved(client: DirectForecastClient, direct: Direct)
         await client.create(["маникюр"], [51])
 
 
-async def test_reports_limit_frees_own_finished_reports(client: DirectForecastClient, direct: Direct) -> None:
-    CREATED.update({1, 2, 3})
+async def test_reports_limit_frees_own_finished_reports(
+    client: DirectForecastClient, direct: Direct, owned: set[int]
+) -> None:
+    owned.update({1, 2, 3, 5})
     direct.answers = {
         "CreateNewForecast": [{"error_code": 31, "error_str": "Превышен лимит"}, {"data": 9}],
         "GetForecastList": [
@@ -132,11 +133,14 @@ async def test_reports_limit_frees_own_finished_reports(client: DirectForecastCl
 
     assert await client.create(["маникюр"], [51]) == 9
     deleted = [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"]
-    assert deleted == [1, 3] and CREATED == {2, 9}
+    # Пятого в списке нет — истёк: его id больше не держится.
+    assert deleted == [1, 3] and owned == {2, 9}
 
 
-async def test_reports_limit_all_pending_frees_oldest_own(client: DirectForecastClient, direct: Direct) -> None:
-    CREATED.update({8, 6, 7})
+async def test_reports_limit_all_pending_frees_oldest_own(
+    client: DirectForecastClient, direct: Direct, owned: set[int]
+) -> None:
+    owned.update({8, 6, 7})
     pending = [{"ForecastID": id_, "StatusForecast": "Pending"} for id_ in (8, 4, 6, 5, 7)]
     direct.answers = {
         "CreateNewForecast": [{"error_code": 31}, {"data": 9}],
@@ -152,9 +156,25 @@ async def test_reports_limit_never_deletes_foreign_reports(client: DirectForecas
     done = [{"ForecastID": id_, "StatusForecast": "Done"} for id_ in range(1, 6)]
     direct.answers = {"CreateNewForecast": [{"error_code": 31}], "GetForecastList": [{"data": done}]}
 
-    with pytest.raises(ReportsBusy, match="заняты отчётами, которые заказали не мы"):
+    with pytest.raises(ReportsBusy) as busy:
         await client.create(["маникюр"], [51])
     assert "DeleteForecastReport" not in direct.methods()
+    assert str(busy.value) == (
+        "все пять мест под отчёты прогноза в кабинете Яндекс Директа заняты. Директ освобождает их сам не позже "
+        "чем через пять часов — попробуйте позже."
+    )
+
+
+async def test_reports_of_another_owner_are_foreign(direct: Direct, owned: set[int]) -> None:
+    """Отчёт соседа по кабинету (другой набор своих) не удаляется, даже если он уже готов."""
+    owned.add(1)
+    done = [{"ForecastID": id_, "StatusForecast": "Done"} for id_ in range(1, 6)]
+    direct.answers = {"CreateNewForecast": [{"error_code": 31}], "GetForecastList": [{"data": done}]}
+
+    async with DirectForecastClient("test-only", config=SimpleNamespace(direct_sandbox=False)) as neighbour:
+        with pytest.raises(ReportsBusy):
+            await neighbour.create(["маникюр"], [51])
+    assert "DeleteForecastReport" not in direct.methods() and owned == {1}
 
 
 @pytest.mark.parametrize(

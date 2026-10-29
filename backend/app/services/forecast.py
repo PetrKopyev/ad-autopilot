@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -25,6 +26,8 @@ from app.platforms.direct_forecast import DirectForecastClient, ForecastAccessDe
 from app.platforms.metrica import MAX_GOALS, MetricaError
 from app.services.onboarding import AiLimits, SpendLLM, ai_budget
 from app.services.plan import PlanRepository
+
+logger = logging.getLogger(__name__)
 
 FORECAST_DOC = "https://yandex.ru/dev/direct/doc/dg-v4/ru/reference/CreateNewForecast.md"
 BENCHMARK_URL = "https://etodigital.ru/zametki/konversiya-sajta-uslug-norma/"
@@ -85,15 +88,20 @@ class Entry:
     expires: datetime
     forecast_id: int | None = None
     response: dict[str, Any] = field(default_factory=dict)
+    # Подключение, которым заказан отчёт: им же он и удаляется, даже если кабинет уже подключён заново.
+    info: Any = None
 
 
 FORECASTS: dict[int, Entry] = {}
 LOCKS: dict[int, asyncio.Lock] = {}
+# Отчёты Директа, заказанные для бизнеса: при занятых местах удаляются только они, а не отчёты соседа по кабинету.
+OWNED: dict[int, set[int]] = {}
 
 
 def clear() -> None:
     FORECASTS.clear()
     LOCKS.clear()
+    OWNED.clear()
 
 
 def weighted(pairs: list[tuple[int, Decimal]]) -> Decimal | None:
@@ -307,7 +315,7 @@ class ForecastService:
             entry = FORECASTS.get(business.id)
             if entry is not None and (entry.key != key or entry.expires <= now):
                 # Заказанный и уже ненужный отчёт удаляется: у пользователя Директа всего пять мест под отчёты.
-                await self.drop(info, entry.forecast_id)
+                await self.drop(business.id, entry.info, entry.forecast_id)
                 entry = None
             if entry is not None and entry.status != "pending":
                 return entry.response | {"vk": vk}
@@ -332,7 +340,7 @@ class ForecastService:
             return await self.ready(business, key, demo_rows(phrases), budget_rub, now, today)
         forecast_id = entry.forecast_id if entry else None
         try:
-            client = self.client(info)
+            client = self.client(info, business.id)
             if forecast_id is None:
                 region = await self.registry.resolve(business.id, "direct").geo_targeting(city)
                 forecast_id = await client.create(phrases, region["region_ids"])
@@ -341,28 +349,33 @@ class ForecastService:
                 state = await client.status(forecast_id)
             if state == "Pending":
                 expires = entry.expires if entry else now + TTL["pending"]
-                return Entry(key, "pending", expires, forecast_id, status("pending", PENDING, None))
+                return Entry(key, "pending", expires, forecast_id, status("pending", PENDING, None), info)
             rows = await client.get(forecast_id) if state == "Done" else None
         except PlatformError as error:
-            await self.drop(info, forecast_id)
+            await self.drop(business.id, info, forecast_id)
             return self.failure(key, error, now)
-        await self.drop(info, forecast_id)
+        await self.drop(business.id, info, forecast_id)
         if rows is None:
             return self.failed(key, "Яндекс Директ не смог посчитать прогноз. Попробуем ещё раз позже.", now)
         return await self.ready(business, key, rows, budget_rub, now, today)
 
-    def client(self, info: Any) -> DirectForecastClient:
+    def client(self, info: Any, business_id: int) -> DirectForecastClient:
         if info is None or info.status != "ok":
             raise PlatformError("подключите кабинет Яндекс Директа.")
         return DirectForecastClient(
-            info.token, config=self.registry.config, client=self.registry.http, timeout=DIRECT_TIMEOUT
+            info.token,
+            config=self.registry.config,
+            client=self.registry.http,
+            timeout=DIRECT_TIMEOUT,
+            owned=OWNED.setdefault(business_id, set()),
         )
 
-    async def drop(self, info: Any, forecast_id: int | None) -> None:
+    async def drop(self, business_id: int, info: Any, forecast_id: int | None) -> None:
+        """Не удалился — id остаётся в своих: при ошибке 31 его удалит следующий заказ или Директ через пять часов."""
         if forecast_id is None:
             return
         try:
-            await self.client(info).delete(forecast_id)
+            await self.client(info, business_id).delete(forecast_id)
         except PlatformError:
             pass
 
@@ -387,7 +400,8 @@ class ForecastService:
                 business.metrica_counter_id, list(business.lead_goal_ids)[:MAX_GOALS]
             )
         except (MetricaError, PlatformError) as error:
-            return replace(BENCHMARK, note=f"Свою долю по Метрике посчитать не удалось: {error}")
+            logger.warning("Доля обращений бизнеса %s по Метрике не посчитана: %s", business.id, error)
+            return replace(BENCHMARK, note="Свою долю по Метрике посчитать не удалось: Метрика ответила ошибкой.")
         return measured(visits, reached) or replace(
             BENCHMARK,
             note=f"Своей доли нет: в Метрике за 90 дней {visits} визитов с рекламы Яндекс Директа, а нужно не меньше "

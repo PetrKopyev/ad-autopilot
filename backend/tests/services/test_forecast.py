@@ -11,7 +11,7 @@ import respx
 from app.content.yandexgpt import CompletionResult
 from app.db.models import Business, LLMCall, Plan
 from app.domain.settings import DomainSettings
-from app.platforms.direct_forecast import CREATED, LIVE_URL, PhraseForecast
+from app.platforms.direct_forecast import LIVE_URL, PhraseForecast
 from app.platforms.metrica import FakeMetrica, MetricaAccessError, MetricaCounter
 from app.services import forecast as module
 from app.services.forecast import (
@@ -42,7 +42,6 @@ def row(clicks: int, first: int, low: str, high: str) -> PhraseForecast:
 def fresh_cache() -> Iterator[None]:
     yield
     module.clear()
-    CREATED.clear()
 
 
 def test_clicks_limited_by_budget() -> None:
@@ -270,7 +269,7 @@ async def test_pending_then_ready(http: httpx.AsyncClient, direct: Direct) -> No
         "GetForecast",
         "DeleteForecastReport",
     ]
-    assert case.service.client(case.accounts["direct"])._timeout == module.DIRECT_TIMEOUT == 10.0
+    assert case.service.client(case.accounts["direct"], case.business.id)._timeout == module.DIRECT_TIMEOUT == 10.0
 
 
 async def test_report_no_longer_needed_is_deleted(http: httpx.AsyncClient, direct: Direct) -> None:
@@ -289,8 +288,38 @@ async def test_report_no_longer_needed_is_deleted(http: httpx.AsyncClient, direc
 
     # Заменённый входом, истёкший и упавший на ошибке отчёты удалены — места в Директе не утекают.
     deleted = [call["param"] for call in direct.calls if call["method"] == "DeleteForecastReport"]
-    assert deleted == [7, 8, 9] and not CREATED
+    assert deleted == [7, 8, 9] and not module.OWNED[case.business.id]
     assert failed["status"] == "unavailable" and "Сбой" in failed["explanation"]
+
+
+async def test_report_of_old_connection_is_deleted_with_old_token(http: httpx.AsyncClient, direct: Direct) -> None:
+    direct.answers = {"CreateNewForecast": [{"data": 7}, {"data": 8}], "DeleteForecastReport": [{"data": 1}]}
+    case = world(http)
+    await case.service.forecast(case.business, NOW, TODAY)
+
+    case.accounts["direct"] = AccountInfo("ok", "", None, False, "new-token")
+    result = await case.service.forecast(case.business, NOW, TODAY)
+
+    delete = next(call for call in direct.calls if call["method"] == "DeleteForecastReport")
+    assert (delete["param"], delete["token"]) == (7, "test-only")
+    assert result["status"] == "pending" and direct.calls[-1]["token"] == "new-token"
+    assert module.OWNED[case.business.id] == {8}
+
+
+async def test_reports_limit_spares_neighbour_with_same_cabinet(http: httpx.AsyncClient, direct: Direct) -> None:
+    direct.answers = {"CreateNewForecast": [{"data": 7}, {"error_code": 31}]}
+    first, second = world(http), world(http)
+    second.business.id = second.repository.rows(Plan)[0].business_id = first.business.id + 1
+    await first.service.forecast(first.business, NOW, TODAY)
+    reports = [{"ForecastID": id_, "StatusForecast": "Done"} for id_ in range(3, 8)]
+    direct.answers["GetForecastList"] = [{"data": reports}]
+
+    result = await second.service.forecast(second.business, NOW, TODAY)
+
+    # Готовый отчёт 7 заказан для соседнего бизнеса: его ждёт следующий опрос соседа, удалять его нельзя.
+    assert "DeleteForecastReport" not in direct.methods()
+    assert result["status"] == "unavailable" and "все пять мест под отчёты прогноза" in result["explanation"]
+    assert module.OWNED[first.business.id] == {7}
 
 
 async def test_access_not_approved_is_honest_and_cached(http: httpx.AsyncClient, direct: Direct) -> None:
@@ -341,7 +370,9 @@ async def test_conversion_from_metrica(http: httpx.AsyncClient, direct: Direct) 
     assert result["leads_min"] == int(result["clicks_min"] * conversion["min"])
 
 
-async def test_metrica_failure_falls_back_to_benchmark(http: httpx.AsyncClient, direct: Direct) -> None:
+async def test_metrica_failure_falls_back_to_benchmark(
+    http: httpx.AsyncClient, direct: Direct, caplog: pytest.LogCaptureFixture
+) -> None:
     done(direct)
 
     class Broken(FakeMetrica):
@@ -354,8 +385,11 @@ async def test_metrica_failure_falls_back_to_benchmark(http: httpx.AsyncClient, 
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["conversion"]["source"] == "benchmark"
-    reason = "Свою долю по Метрике посчитать не удалось: Нет доступа к данным Яндекс Метрики."
+    reason = "Свою долю по Метрике посчитать не удалось: Метрика ответила ошибкой."
     assert reason in result["sources"][2]["source"] and reason in result["explanation"]
+    # Текст ошибки Метрики пользователю не показывается — только в журнале.
+    assert "Нет доступа" not in result["explanation"] and "Нет доступа" not in result["sources"][2]["source"]
+    assert "Нет доступа к данным Яндекс Метрики" in caplog.text
 
 
 async def test_few_metrica_visits_say_why_benchmark(http: httpx.AsyncClient, direct: Direct) -> None:

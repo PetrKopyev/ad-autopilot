@@ -20,8 +20,6 @@ MAX_REPORTS = 5
 CURRENCY = "RUB"
 ACCESS_DENIED = 58
 REPORTS_LIMIT = 31
-# Отчёты, заказанные этим процессом API: освобождая место, сервис удаляет только их, а не отчёты владельца кабинета.
-CREATED: set[int] = set()
 
 type ForecastStatus = Literal["Done", "Pending", "Failed"]
 
@@ -34,12 +32,12 @@ class ForecastAccessDenied(PlatformError):
 
 
 class ReportsBusy(PlatformError):
-    """Ошибка 31, а все пять мест заняты не нашими отчётами."""
+    """Ошибка 31, а своих отчётов, которые можно удалить, в списке нет."""
 
     def __init__(self) -> None:
         super().__init__(
-            "в Яндекс Директе все пять мест под отчёты прогноза заняты отчётами, которые заказали не мы. Директ "
-            "удаляет их сам не позже чем через пять часов — попробуйте позже."
+            "все пять мест под отчёты прогноза в кабинете Яндекс Директа заняты. Директ освобождает их сам не позже "
+            "чем через пять часов — попробуйте позже."
         )
 
 
@@ -83,6 +81,7 @@ class DirectForecastClient:
         config: Any = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
+        owned: set[int] | None = None,
     ) -> None:
         if config is None:
             from app.config import settings
@@ -93,6 +92,8 @@ class DirectForecastClient:
         self._client = client if client is not None else httpx.AsyncClient()
         self._owns_client = client is None
         self._timeout = timeout
+        # Отчёты, заказанные через этот набор: освобождая место, клиент удаляет только их, а не чужие отчёты кабинета.
+        self._owned = owned if owned is not None else set()
 
     async def __aenter__(self) -> "DirectForecastClient":
         return self
@@ -156,11 +157,14 @@ class DirectForecastClient:
             await self._free_slot()
             forecast_id = await self._call("CreateNewForecast", param)
         forecast_id = _count(forecast_id)
-        CREATED.add(forecast_id)
+        self._owned.add(forecast_id)
         return forecast_id
 
     async def _free_slot(self) -> None:
-        reports = {id_: status for id_, status in (await self.statuses()).items() if id_ in CREATED}
+        listed = await self.statuses()
+        # Отчёта нет в списке — он истёк или заказан в другом кабинете: держать его id незачем.
+        self._owned.intersection_update(listed)
+        reports = {id_: status for id_, status in listed.items() if id_ in self._owned}
         finished = [id_ for id_, status in reports.items() if status != "Pending"]
         # Свои ещё готовятся: освобождаем самый старый, его прогноз закажется заново.
         if not (doomed := finished or sorted(reports)[:1]):
@@ -208,4 +212,4 @@ class DirectForecastClient:
 
     async def delete(self, forecast_id: int) -> None:
         await self._call("DeleteForecastReport", forecast_id)
-        CREATED.discard(forecast_id)
+        self._owned.discard(forecast_id)
