@@ -499,7 +499,8 @@ it('бюджет с точкой — рубли и копейки, а не в д
   expect(await screen.findByText(copy.launchFlow.moneyTooBig)).toBeTruthy();
   expect(calls()).not.toContain('POST /api/business');
   fireEvent.change(budget, { target: { value: '30000.5' } });
-  expect(budget.value).toBe('30\u00a0000,5');
+  // Набранная точка остаётся точкой: за ней могут быть и копейки, и разряды («1.500»).
+  expect(budget.value).toBe('30\u00a0000.5');
   fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
   await waitFor(() => expect(calls()).toContain('POST /api/business'));
   const [, init] = fetchMock.mock.calls.find(([url, request]) => request?.method === 'POST' && String(url).endsWith('/api/business'))!;

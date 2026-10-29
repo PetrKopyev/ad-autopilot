@@ -58,6 +58,20 @@ it('отмену остановки называет продолжением р
   expect(titles.slice(0, 3)).toEqual([labels.resumedAfterStop, labels.revertedLine('изменение бюджета'), labels.revertedPlain]);
 });
 
+it('отмена называет кампанию; отмена остановки одного объявления — «Вы вернули объявление»', async () => {
+  const revert = (id: number, reverts_id: number, campaign: string | null) => ({ ...entry(id, 'revert'), reverts_id, campaign, can_revert: false });
+  const ad = { ...entry(1, 'pause'), actor: 'autopilot' as const, entity_type: 'ad', campaign: 'Педикюр' };
+  serve([revert(4, 1, 'Педикюр'), revert(5, 2, null), revert(6, 99, 'Маникюр'), ad, { ...entry(2, 'budget'), campaign: 'Маникюр' }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 4');
+  const titles = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
+  expect(titles).toEqual([
+    labels.withCampaign(labels.resumedAd, 'Педикюр'), labels.revertedLine('изменение бюджета — «Маникюр»'),
+    labels.withCampaign(labels.revertedPlain, 'Маникюр'), labels.withCampaign(labels.kinds.pause, 'Педикюр'),
+    labels.withCampaign(labels.kinds.budget, 'Маникюр'),
+  ]);
+});
+
 it('кнопки отката нет, если сервер не разрешает откат (кампания прежнего плана, защита бюджета)', async () => {
   serve([{ ...entry(1, 'pause'), can_revert: false }, { ...entry(2, 'budget'), can_revert: false }, entry(3, 'budget')]);
   render(<HistoryPage />);

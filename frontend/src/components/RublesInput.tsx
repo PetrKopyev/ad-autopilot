@@ -7,15 +7,18 @@ const maxWholeDigits = 12;
 /** Рубли и копейки из набранного: точка и запятая — разделитель, до двух знаков после него, лишние нули слева убираются. */
 // Разделитель — точка или запятая сразу после цифры: точка в «567 руб.» копейками не считается.
 // Минус в начале остаётся: «-100» не должно молча стать 100 ₽, форма покажет ошибку.
+// Точка перед ровно тремя цифрами делит разряды: «1.500» — 1 500 ₽. Поэтому набранная точка остаётся точкой, пока не
+// ясно, копейки ли за ней: иначе при наборе «1.500,50» по клавише «1.50» становилось «1,50» и ноль терялся.
 // Точка и запятая вместе — «1.500,50» или «1,500.50»: копейки после последнего, первый делит разряды.
 function normalize(raw: string): string {
   const sign = /^\s*[-−–]/.test(raw) ? '-' : '';
-  const separators = [...raw.matchAll(/(?:^|\d)([.,])/g)].map((match) => match.index + match[0].length - 1);
-  const mixed = new Set(separators.map((index) => raw[index])).size > 1;
+  const text = raw.replace(/(\d+)\.(?=\d{3}(?!\d))/g, (match, digits: string) => /^0+$/.test(digits) ? match : digits);
+  const separators = [...text.matchAll(/(?:^|\d)([.,])/g)].map((match) => match.index + match[0].length - 1);
+  const mixed = new Set(separators.map((index) => text[index])).size > 1;
   const at = separators.length ? separators[mixed ? separators.length - 1 : 0] : -1;
-  const whole = (at < 0 ? raw : raw.slice(0, at)).replace(/\D/g, '').replace(/^0+/, '').slice(0, maxWholeDigits);
+  const whole = (at < 0 ? text : text.slice(0, at)).replace(/\D/g, '').replace(/^0+/, '').slice(0, maxWholeDigits);
   if (at < 0) return sign + whole;
-  return `${sign}${whole || '0'},${raw.slice(at + 1).replace(/\D/g, '').slice(0, 2)}`;
+  return `${sign}${whole || '0'}${mixed ? ',' : text[at]}${text.slice(at + 1).replace(/\D/g, '').slice(0, 2)}`;
 }
 /** Значение поля из копеек: 5 000 050 → «50000,50», без округления. */
 export const rublesValue = (kopecks: number) => {
@@ -25,12 +28,13 @@ export const rublesValue = (kopecks: number) => {
 };
 const display = (value: string) => {
   const sign = value.startsWith('-') ? '-' : '';
-  const [whole, fraction] = value.slice(sign.length).split(',');
-  return sign + (fraction === undefined ? groupDigits(whole) : `${groupDigits(whole)},${fraction}`);
+  const rest = value.slice(sign.length);
+  const at = rest.search(/[.,]/);
+  return sign + (at < 0 ? groupDigits(rest) : groupDigits(rest.slice(0, at)) + rest.slice(at));
 };
 
 export interface RublesInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'inputMode'> {
-  /** Рубли без пробелов, копейки через запятую: «1500», «1500,5». */
+  /** Рубли без пробелов, копейки через запятую или набранную точку: «1500», «1500,5», «1500.5». */
   value: string;
   onChange: (value: string) => void;
 }

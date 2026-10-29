@@ -12,7 +12,7 @@ import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from hashlib import sha256
 from typing import Any
 
@@ -20,6 +20,7 @@ from app.content.llm import LLMClient
 from app.content.yandexgpt import YandexGPTError
 from app.db.models import Business
 from app.domain.budget import allocate, platform_shares
+from app.domain.explain import plural
 from app.domain.settings import DomainSettings
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.direct_forecast import DirectForecastClient, ForecastAccessDenied, PhraseForecast
@@ -45,6 +46,7 @@ NUMBER = re.compile(r"\d+(?:[   ]\d{3})*(?:[.,]\d+)?")
 LEADS_WORD = re.compile(r"обращени", re.IGNORECASE)
 # Число в стольких знаках от слова «обращения» нейросеть выдаёт за число обращений.
 LEADS_NEAR = 12
+LEADS_FORMS = ("обращение", "обращения", "обращений")
 PENDING = "Яндекс Директ готовит прогноз, обычно это занимает до минуты."
 VISITS_NOTE = (
     "Не каждый, кто нажал на объявление, доходит до сайта: часть людей уходит, пока страница загружается. "
@@ -165,8 +167,27 @@ def rub(value: Decimal | int) -> str:
     return text.replace(",", " ")
 
 
+def money(value: Decimal | int) -> str:
+    """Сумма бюджета: копейки — только если они есть, и без округления вверх: 50 000,50 не становится 50 001."""
+    whole, fraction = divmod(int((Decimal(value) * 100).to_integral_value(ROUND_FLOOR)), 100)
+    return rub(whole) + (f",{fraction:02}" if fraction else "")
+
+
 def percent(value: Decimal) -> str:
     return f"{(value * 100).quantize(Decimal('0.1'), ROUND_HALF_UP).normalize():f}".replace(".", ",")
+
+
+def bounds(leads_range: tuple[int, int]) -> tuple[int, ...]:
+    """Границы, которые отличаются меньше чем на 1%, — одно число, нижнее: «от 14560 до 14561» читается как ошибка."""
+    low, high = leads_range
+    return (low,) if (high - low) * 100 <= high else (low, high)
+
+
+def leads_text(leads_range: tuple[int, int]) -> str:
+    shown = bounds(leads_range)
+    if len(shown) == 1:
+        return f"примерно {rub(shown[0])} {plural(shown[0], LEADS_FORMS).rsplit(' ', 1)[1]}"
+    return f"примерно от {rub(shown[0])} до {rub(shown[1])} обращений"
 
 
 def numbers(text: str) -> set[Decimal]:
@@ -194,7 +215,7 @@ def template(
     if not clicks.max:
         return (
             f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
-            f"{rub(clicks.potential)} кликов. Но при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} не "
+            f"{rub(clicks.potential)} кликов. Но при бюджете {money(budget_rub)} ₽ в месяц и цене клика {cpc} не "
             f"выйдет ни одного клика, а значит, и обращений из Директа.{budget_note} Это прогноз, он может ошибаться."
         )
     share = (
@@ -206,18 +227,18 @@ def template(
     count = f"от {rub(clicks.min)} до {rub(clicks.max)}" if clicks.min != clicks.max else rub(clicks.min)
     if demo:
         return (
-            f"Бюджет делится между группами поровну: при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} "
-            f"демо-кабинет наберёт примерно {count} кликов.{budget_note} {rate} Итого примерно от "
-            f"{leads_range[0]} до {leads_range[1]} обращений в месяц — это без решений автопилота: перенос бюджета к "
+            f"Бюджет делится между группами поровну: при бюджете {money(budget_rub)} ₽ в месяц и цене клика {cpc} "
+            f"демо-кабинет наберёт примерно {count} кликов.{budget_note} {rate} Итого {leads_text(leads_range)} в "
+            "месяц — это без решений автопилота: перенос бюджета к "
             "лучшим группам обычно добавляет обращений. Это демо: настоящий прогноз Яндекс Директа будет после "
             "подключения кабинета."
         )
     rate += f" {conversion.note}" if conversion.note else ""
     return (
         f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
-        f"{rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в месяц и цене клика {cpc} выйдет "
+        f"{rub(clicks.potential)} кликов. При бюджете {money(budget_rub)} ₽ в месяц и цене клика {cpc} выйдет "
         f"примерно {count} кликов.{budget_note} {rate} "
-        f"Итого примерно от {leads_range[0]} до {leads_range[1]} обращений в месяц. {VISITS_NOTE} "
+        f"Итого {leads_text(leads_range)} в месяц. {VISITS_NOTE} "
         "Это прогноз, он может ошибаться: вся сумма не обязательно потратится, а после первой недели покажем цифры "
         "по вашему сайту."
     )
@@ -237,8 +258,8 @@ def near_leads(text: str) -> set[Decimal]:
 
 
 def ai_text(response: str, allowed: set[Decimal], leads_range: tuple[int, int]) -> str | None:
-    """Текст нейросети годится, только если в нём нет чисел, которых не было во входе, есть обе границы обращений
-    и рядом со словом «обращения» нет чисел вне их вилки."""
+    """Текст нейросети годится, только если в нём нет чисел, которых не было во входе, есть границы обращений из
+    шаблона (bounds) и рядом со словом «обращения» нет чисел вне их вилки."""
     try:
         text = json.loads(response)["text"]
     except (ValueError, KeyError, TypeError):
@@ -246,7 +267,7 @@ def ai_text(response: str, allowed: set[Decimal], leads_range: tuple[int, int]) 
     if not isinstance(text, str) or not text.strip() or len(text) > EXPLANATION_LIMIT:
         return None
     low, high = leads_range
-    if not numbers(text) <= allowed or not {Decimal(low), Decimal(high)} <= numbers(text):
+    if not numbers(text) <= allowed or not {Decimal(value) for value in bounds(leads_range)} <= numbers(text):
         return None
     if any(not low <= number <= high for number in near_leads(text)):
         return None
@@ -331,11 +352,11 @@ class ForecastService:
         reserve = f"{percent(self.domain.budget_reserve)}% оставляем запасом, чтобы расход не вышел за бюджет"
         if shares["direct"] < payload["month_budget_kop"]:
             budget_note = (
-                f" Из бюджета {rub(Decimal(payload['month_budget_kop']) / 100)} ₽ на Яндекс Директ приходится "
-                f"{rub(Decimal(shares['direct']) / 100)} ₽, остальное — на ВКонтакте; {reserve}."
+                f" Из бюджета {money(Decimal(payload['month_budget_kop']) / 100)} ₽ на Яндекс Директ приходится "
+                f"{money(Decimal(shares['direct']) / 100)} ₽, остальное — на ВКонтакте; {reserve}."
             )
         else:
-            budget_note = f" Это не весь бюджет {rub(Decimal(payload['month_budget_kop']) / 100)} ₽: {reserve}."
+            budget_note = f" Это не весь бюджет {money(Decimal(payload['month_budget_kop']) / 100)} ₽: {reserve}."
         city = payload.get("city", business.city)
         goals = list(business.lead_goal_ids or [])[:MAX_GOALS]
         info = None if self.demo else self.registry.load(business.id, "direct")
@@ -475,7 +496,7 @@ class ForecastService:
             {"what": "Клики и цена клика", "source": forecast, "url": None if self.demo else FORECAST_DOC},
             {
                 "what": "Бюджет",
-                "source": f"Ваш план: {rub(budget_rub)} ₽ в месяц на Яндекс Директ.{budget_note}",
+                "source": f"Ваш план: {money(budget_rub)} ₽ в месяц на Яндекс Директ.{budget_note}",
                 "url": None,
             },
             {

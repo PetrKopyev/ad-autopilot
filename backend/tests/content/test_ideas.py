@@ -102,6 +102,15 @@ async def test_two_ideas_of_a_pair_differ() -> None:
     assert all(idea.prompt.startswith("Женские ступни") for idea in ideas)
 
 
+async def test_new_ideas_do_not_repeat_scenes_already_in_the_plan() -> None:
+    pair = ("Маникюр с гель-лаком", "новый дизайн")
+    llm = FakeLLM(scenes(("Нежный нюд на светлом мраморе", "нюд на мраморе"), ("Графичный узор", "чёрный узор")))
+    ideas = await generate_ideas(llm, "nails", [pair] * 2, ["Нежный нюд на светлом мраморе"])
+    system, user = llm.calls[0]
+    assert json.loads(user)["used"] == ["Нежный нюд на светлом мраморе"] and "used" in system
+    assert ideas[0].label != "Нежный нюд на светлом мраморе" and ideas[1].label == "Графичный узор"
+
+
 async def test_ideas_of_a_pair_alternate_close_up_and_scene() -> None:
     pair = ("Маникюр с гель-лаком", "к празднику")
     llm = FakeLLM(answer(4))

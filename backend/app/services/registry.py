@@ -159,9 +159,12 @@ class DemoLLM:
 
     async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if "визуальные идеи" in system:
+            data = json.loads(user)
+            # Сначала сцены, которых в плане ещё нет: экземпляр живёт один запрос, и счётчик сам их не помнит.
+            fresh = [scene for scene in DEMO_SCENES if scene not in data["used"]]
             ideas = []
-            for item in json.loads(user)["items"]:
-                scene = DEMO_SCENES[self.scenes % len(DEMO_SCENES)]
+            for item in data["items"]:
+                scene = fresh.pop(0) if fresh else DEMO_SCENES[self.scenes % len(DEMO_SCENES)]
                 self.scenes += 1
                 ideas.append({"title": scene, "visual": f"{scene.lower()}, {item['segment']}"})
             return json.dumps({"ideas": ideas}, ensure_ascii=False)

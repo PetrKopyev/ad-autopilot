@@ -285,6 +285,18 @@ it('готовый прогноз: диапазон обращений с сер
   expect(screen.queryByText('демо')).toBeNull();
 });
 
+it('почти равные границы прогноза — одно число с разрядами, а не «≈ 14560–14561»', async () => {
+  vi.mocked(getPlan).mockResolvedValue(plan(null));
+  vi.mocked(getForecast).mockResolvedValue(forecast({ leads_min: 14_560, leads_max: 14_561 }));
+  render(<MemoryRouter><PlanPage /></MemoryRouter>);
+  await screen.findByRole('heading', { name: 'Прогноз на месяц' });
+  // Поиск по тексту сводит неразрывный пробел к обычному.
+  expect(forecastPanel().getByText('≈ 14 560').parentElement?.textContent).toBe('≈ 14\u00a0560 обращений за месяц');
+  expect(within(screen.getByRole('region', { name: 'Итог плана' })).getByText('≈ 14 560')).toBeTruthy();
+  expect(copy.plan.forecastLeads(1_200, 2_400)).toBe('≈ 1\u00a0200–2\u00a0400');
+  expect(copy.plan.forecastLeads(6, 7)).toBe('≈ 6–7');
+});
+
 it('пояснение от ИИ уже с пометкой — вторую не добавляем; демо-ответ помечен', async () => {
   vi.mocked(getPlan).mockResolvedValue(plan(null));
   vi.mocked(getForecast).mockResolvedValue(forecast({ explanation: 'Пересказ. Пояснение написал ИИ — это прогноз, он может ошибаться.', explanation_by_ai: true, demo: true }));

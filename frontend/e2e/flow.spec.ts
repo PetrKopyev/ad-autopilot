@@ -65,7 +65,7 @@ for (const width of [390, 1280]) {
     await page.locator('.journal__entry').getByRole('button', { name: new RegExp(`^(${copy.history.undo}|${labels.resume})$`) }).first().click();
     await page.getByRole('button', { name: new RegExp(`^(${labels.confirmYes}|${labels.resumeYes})$`) }).click();
     await page.getByLabel(copy.historyScreen.filterAuthor).selectOption('');
-    await expect(page.getByRole('heading', { name: new RegExp(`^(Вы отменили|${labels.resumedAfterStop})`) }).first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: new RegExp(`^(Вы отменили|${labels.resumedAfterStop}|${labels.resumedAd})`) }).first()).toBeVisible();
 
     await page.getByRole('navigation').getByRole('link', { name: copy.navigation.home, exact: true }).click();
     // Одна кнопка: «Остановить всю рекламу» с подтверждением, после остановки на её месте «Продолжить рекламу».

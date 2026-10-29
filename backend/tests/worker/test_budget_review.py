@@ -13,7 +13,7 @@ from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
-from app.services.optimize import rebalance_budget, snapshot
+from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
 from app.services.rollback import RollbackService
 from app.services.screens import ScreensService
 from app.worker.clock import today
@@ -340,6 +340,17 @@ async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_
     assert [op["after"] for op in resume.operations if op["field"] == "status"] == ["active"]
     assert world.campaign.status == "active"
     assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+async def test_rebalance_says_campaign_stopped_because_all_its_ads_are_stopped():
+    """Автопилот остановил все объявления кампании: запись контроля бюджета говорит это, а не «бюджета нет»."""
+    world = await make_world()
+    world.clock.advance(days=2)
+    for ad in world.repository.rows(Ad):
+        await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto"))
+    await rebalance_budget(world.worker(), world.business)
+    (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
+    assert pause.reason_text == NO_ACTIVE_ADS and "бюджета нет" not in pause.reason_text
 
 
 async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():

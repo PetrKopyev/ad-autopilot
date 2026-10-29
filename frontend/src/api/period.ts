@@ -27,8 +27,12 @@ export async function getBusinessToday(signal?: AbortSignal): Promise<string> {
  * площадки перерасходуют его, поэтому владельцу показываем среднее. От 100 ₽ — целые рубли вниз: среднее не больше бюджета. */
 export function dailyAverage(monthKop: number, now = new Date()): number {
   const [year, month] = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow' }).format(now).split('-').map(Number);
-  const kopecks = Math.floor(monthKop / new Date(year, month, 0).getDate());
-  return kopecks >= 10_000 ? kopecks - kopecks % 100 : kopecks;
+  return perDay(monthKop, new Date(year, month, 0).getDate());
+}
+/** Сумма за days дней в среднем на день — как dailyAverage: план и главная показывают одно и то же число. */
+export function perDay(kopecks: number, days: number): number {
+  const average = Math.floor(kopecks / days);
+  return average >= 10_000 ? average - average % 100 : average;
 }
 export async function getPeriod(choice: PeriodChoice, signal?: AbortSignal): Promise<Period> {
   return periodFor(choice, new Date(`${await getBusinessToday(signal)}T12:00:00`));

@@ -9,7 +9,7 @@ from app.db.models import ChangeLog, User
 from app.demo_flags import demo_now
 from app.platforms.base import PlatformError
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository, ServerBusy
-from app.services.rollback import ConfirmationRequired, RollbackService, can_revert
+from app.services.rollback import ConfirmationRequired, RollbackService, can_revert, superseded
 from app.worker.clock import SystemClock
 
 router = APIRouter(prefix="/api/history", route_class=ReleasingRoute)
@@ -36,8 +36,10 @@ CurrentUser = Annotated[User, Depends(current_user)]
 Adapters = Annotated[AdapterResolver, Depends(get_adapter_resolver)]
 
 
-def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), campaigns=None) -> dict:
+def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), campaigns=None, overridden=()) -> dict:
     metadata = (change.evidence or {}).get("_service", {})
+    # Объявление и группа называются по кампании из ссылок изменения: «Остановка рекламы» без названия не говорит, где.
+    campaign_id = change.entity_id if change.entity_type == "campaign" else metadata.get("refs", {}).get("campaign_id")
     return {
         "id": change.id,
         "business_id": change.business_id,
@@ -48,9 +50,7 @@ def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), camp
         "entity_type": change.entity_type,
         "entity_id": change.entity_id,
         # Запуск и остановка пишутся по записи на кампанию: без названия в журнале N одинаковых строк.
-        "campaign": (campaigns or {}).get((change.platform, change.entity_id))
-        if change.entity_type == "campaign"
-        else None,
+        "campaign": (campaigns or {}).get((change.platform, campaign_id)),
         "operations": change.operations,
         "reason_code": change.reason_code,
         "reason_params": change.reason_params,
@@ -59,7 +59,7 @@ def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), camp
         "status": "proposed" if metadata.get("dry_run") else change.status,
         "error": metadata.get("error"),
         "reverts_id": change.reverts_id,
-        "can_revert": can_revert(change, business, reverts=reverts, replaced=replaced),
+        "can_revert": can_revert(change, business, reverts=reverts, replaced=replaced, overridden=overridden),
         "revert_warning": "Созданное объявление будет остановлено и убрано в архив."
         if any(not op.get("invertible", True) for op in change.operations)
         else None,
@@ -82,6 +82,7 @@ def history(
     businesses = {business_id: repository.business(business_id) for business_id in {item.business_id for item in items}}
     replaced = {business_id: repository.replaced_entities(business_id) for business_id in businesses}
     campaigns = {business_id: repository.campaign_names(business_id) for business_id in businesses}
+    overridden = {business_id: superseded(repository.status_changes(business_id)) for business_id in businesses}
     return {
         "items": [
             history_item(
@@ -90,6 +91,7 @@ def history(
                 repository.reverts(item.id),
                 replaced[item.business_id],
                 campaigns[item.business_id],
+                overridden[item.business_id],
             )
             for item in items
         ],

@@ -6,7 +6,7 @@ import { copy } from '../copy';
 import { getAds, getAutopilotStatus, getDaily, getExperiments, getSummary, stopAllAds } from '../api/screens';
 import { entryTitle, getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
 import { answerClientQuestion, getClientQuestions, parseClients, type ClientQuestion } from '../api/clients';
-import { getPeriod, type PeriodChoice } from '../api/period';
+import { getPeriod, perDay, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { useDemo } from '../api/useDemo';
@@ -238,7 +238,7 @@ function pace(summary: Summary) {
   const days = new Date(year, month, 0).getDate();
   const passed = days - summary.budget.days_remaining + 1;
   if (passed < 1 || summary.budget.budget_kop === 0) return null;
-  return copy.home.pace(formatMoney(Math.round(summary.budget.spent_kop / passed)), formatMoney(Math.round(summary.budget.budget_kop / days)));
+  return copy.home.pace(formatMoney(perDay(summary.budget.spent_kop, passed)), formatMoney(perDay(summary.budget.budget_kop, days)));
 }
 
 export function HomePage() {

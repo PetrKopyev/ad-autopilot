@@ -4,7 +4,7 @@ import json
 import logging
 import secrets
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime
@@ -670,7 +670,7 @@ class PlanService:
         if missing:
             count = IMAGES_PER_KEY * len(missing) if assets else max(IMAGE_CANDIDATES, IMAGES_PER_KEY * len(missing))
             targets = [missing[index % len(missing)] for index in range(count)]
-            for key, asset in await self.generate_images(business, budget, targets):
+            for key, asset in await self.generate_images(business, budget, targets, self.labels(business.id, assets)):
                 ids = assets.setdefault(key, [])
                 asset.selected = len(ids) < 2
                 ids.append(asset.id)
@@ -756,9 +756,10 @@ class PlanService:
         self.repository.save_art_call(record)
 
     async def generate_images(
-        self, business: Business, budget: ArtBudget, targets: list[tuple[str, str]]
+        self, business: Business, budget: ArtBudget, targets: list[tuple[str, str]], used: Sequence[str] = ()
     ) -> list[tuple[str, Asset]]:
-        """По картинке на каждую пару (услуга, сегмент) из targets; возвращает созданные с ключом их пары."""
+        """По картинке на каждую пару (услуга, сегмент) из targets; возвращает созданные с ключом их пары. used —
+        подписи картинок плана: новые сцены их не повторяют."""
         llm = SpendLLM(self.llm, self.repository, business.id, budget, "image_ideas")
         art = self.art_factory(budget, self.record_art)
         hashes = [asset.phash for asset in self.repository.assets(business.id) if asset.phash]
@@ -766,7 +767,7 @@ class PlanService:
         # (вызов ИИ, картинка) сама завершается commit.
         self.repository.commit()
         try:
-            ideas = await generate_ideas(llm, business.niche_class or "other", targets)
+            ideas = await generate_ideas(llm, business.niche_class or "other", targets, used)
         except (YandexGPTError, ValueError):
             return []
         created = []
@@ -796,6 +797,10 @@ class PlanService:
             hashes.append(checked.phash)
             created.append((assets_key(idea.service, idea.segment), asset))
         return created
+
+    def labels(self, business_id: int, assets: dict[str, list[int]]) -> list[str]:
+        ids = {id_ for items in assets.values() for id_ in items}
+        return [asset.idea_text for asset in self.repository.assets(business_id) if asset.id in ids and asset.idea_text]
 
     def store(self, business_id: int, name: str, suffix: str, data: bytes) -> str:
         return store(self.media_root, business_id, name, suffix, data)
@@ -832,7 +837,8 @@ class PlanService:
             if self.generations_remaining(budget, plan) == 0:
                 raise Blocked("Лимит генерации картинок исчерпан. Загрузите своё фото.")
             pair = (group.get("service", ""), group["segment"])
-            created = await self.generate_images(business, budget, [pair] * REGENERATE_COUNT)
+            used = self.labels(business_id, plan.payload["assets"])
+            created = await self.generate_images(business, budget, [pair] * REGENERATE_COUNT, used)
             if not created:
                 raise Blocked("Не удалось получить новые картинки. Попробуйте позже или загрузите своё фото.")
             plan.payload = plan.payload | {"regenerated": plan.payload.get("regenerated", 0) + len(created)}

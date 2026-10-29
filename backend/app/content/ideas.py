@@ -1,6 +1,7 @@
 import json
 import re
 import textwrap
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.content.llm import LLMClient
@@ -136,12 +137,14 @@ def _title(title: str, visual: str, service: str, segment: str) -> str:
     return textwrap.shorten(title, TITLE_LIMIT, placeholder="…")
 
 
-def _distinct(ideas: list[tuple[str, str]], targets: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Идеи одной пары не повторяют друг друга: почти одинаковая сцена, сцена с теми же предметами обстановки или с
-    предметом в руках заменяется запасной."""
+def _distinct(
+    ideas: list[tuple[str, str]], targets: list[tuple[str, str]], used: Sequence[str] = ()
+) -> list[tuple[str, str]]:
+    """Идеи одной пары не повторяют друг друга и подписи картинок, которые уже есть в плане: почти одинаковая сцена,
+    сцена с теми же предметами обстановки или с предметом в руках заменяется запасной."""
 
     def repeats(title: str, visual: str, taken: list[tuple[str, str]]) -> bool:
-        return any(
+        return any(_similar(title, seen) for seen in used) or any(
             _similar(visual, seen) or _similar(title, seen_title) or _props(visual) & _props(seen)
             for seen_title, seen in taken
         )
@@ -158,8 +161,11 @@ def _distinct(ideas: list[tuple[str, str]], targets: list[tuple[str, str]]) -> l
     return result
 
 
-async def generate_ideas(llm: LLMClient, niche_class: str, targets: list[tuple[str, str]]) -> list[ImageIdea]:
-    """targets — пары (услуга, сегмент) по одной на картинку; одинаковые пары получают разные идеи."""
+async def generate_ideas(
+    llm: LLMClient, niche_class: str, targets: list[tuple[str, str]], used: Sequence[str] = ()
+) -> list[ImageIdea]:
+    """targets — пары (услуга, сегмент) по одной на картинку; одинаковые пары получают разные идеи. used — подписи
+    картинок, которые уже есть в плане: новые варианты их не повторяют."""
     if not 1 <= len(targets) <= MAX_IDEAS:
         raise ValueError(f"Generate between one and {MAX_IDEAS} candidates")
     response = await llm.complete_json(
@@ -180,6 +186,7 @@ async def generate_ideas(llm: LLMClient, niche_class: str, targets: list[tuple[s
         "\"visual\": \"вид сверху, бордовый гель-лак с золотыми искрами, ступни на гладком тёмно-бордовом фоне, "
         "мягкий ровный свет\"}; сцена той же пары: {\"title\": \"Вечер у ёлки\", \"visual\": \"ступни на "
         "пушистом ковре у наряженной ёлки, рядом еловая ветка с шишками, огни гирлянды в боке, вечерний свет\"}. "
+        "used — сцены, которые уже есть в плане: не повторяй их. "
         "Не добавляй рекламный текст. "
         f"Нельзя предлагать: {banned(niche_class)}.",
         json.dumps(
@@ -195,6 +202,7 @@ async def generate_ideas(llm: LLMClient, niche_class: str, targets: list[tuple[s
                     }
                     for index, (service, segment) in enumerate(targets)
                 ],
+                "used": list(used),
             },
             ensure_ascii=False,
         ),
@@ -209,7 +217,7 @@ async def generate_ideas(llm: LLMClient, niche_class: str, targets: list[tuple[s
             for idea in ideas
         ):
             raise ValueError("Ideas must have a title and a visual")
-        scenes = _distinct([(idea["title"], idea["visual"]) for idea in ideas], targets)
+        scenes = _distinct([(idea["title"], idea["visual"]) for idea in ideas], targets, used)
         return [
             ImageIdea(
                 service,

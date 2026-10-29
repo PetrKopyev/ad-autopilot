@@ -562,10 +562,38 @@ def test_rub_and_percent_rounding() -> None:
     assert module.percent(Decimal("0.01449")) == "1,4" and module.percent(Decimal(0)) == "0"
 
 
+def test_money_keeps_kopecks_and_never_rounds_up() -> None:
+    assert module.money(Decimal("50000.5")) == "50\u00a0000,50"
+    assert module.money(Decimal("46000.469")) == "46\u00a0000,46"
+    assert module.money(Decimal("60000")) == "60\u00a0000" and module.money(Decimal("0.009")) == "0"
+
+
+async def test_budget_with_kopecks_is_not_rounded_up(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct)
+    case = world(http, platforms=("direct",))
+    case.repository.rows(Plan)[0].payload["month_budget_kop"] = 5_000_050
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+    assert "Это не весь бюджет 50\xa0000,50 ₽" in result["explanation"]
+    assert "50\xa0001" not in result["explanation"] and "При бюджете 46\xa0000,46 ₽" in result["explanation"]
+
+
 def test_leads_in_text_match_leads_in_numbers() -> None:
     for clicks in (Clicks(250, 410, 500, Decimal(30), Decimal(50)), Clicks(1, 1, 3000, Decimal(30), None)):
         low, high = leads(clicks, BENCHMARK)
         assert f"Итого примерно от {low} до {high} обращений" in template(clicks, Decimal(9000), BENCHMARK, (low, high))
+
+
+def test_nearly_equal_leads_are_one_number_with_thousands() -> None:
+    clicks = Clicks(250, 410, 500, Decimal(30), Decimal(50))
+    text = template(clicks, Decimal(9000), BENCHMARK, (14_560, 14_561))
+    assert "Итого примерно 14\u00a0560 обращений в месяц" in text and "14561" not in text
+    wide = template(clicks, Decimal(9000), BENCHMARK, (1200, 2400))
+    assert "Итого примерно от 1\u00a0200 до 2\u00a0400 обращений" in wide
+    assert module.bounds((6, 7)) == (6, 7) and module.bounds((5, 5)) == (5,)
+    assert module.leads_text((1, 1)) == "примерно 1 обращение"
+    answer = json.dumps({"text": f"Это прогноз: примерно 14 560 обращений. {text}"}, ensure_ascii=False)
+    assert ai_text(answer, numbers(text), (14_560, 14_561)) is not None
 
 
 def test_numbers_read_thousands_with_any_space_and_decimal_comma() -> None:

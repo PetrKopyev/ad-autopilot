@@ -94,6 +94,8 @@ it('средний чек — только цифры, как бюджет; не
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);
   const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('section') as HTMLElement);
   const average = block.getByLabelText(copy.settingsScreen.averageLabel) as HTMLInputElement;
+  // Поле названо так же, как на шаге 1 мастера: владелец узнаёт ту же сумму.
+  expect(copy.settingsScreen.averageLabel.startsWith(copy.setup.business.visitPrice)).toBe(true);
   expect(average.value).toBe('1 500,50');
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   await block.findByText(copy.settingsScreen.saved);

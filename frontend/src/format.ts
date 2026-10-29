@@ -7,6 +7,10 @@ export function plural(count: number, one: string, few: string, many: string): s
   return units > 1 && units < 5 ? few : many;
 }
 
+/** Границы прогноза, которые отличаются меньше чем на 1%, — одно число: «≈ 14 560–14 561» читается как ошибка.
+ * Берём нижнюю: прогноз не обещает больше. */
+export function forecastBounds(min: number, max: number): number[] { return (max - min) * 100 <= max ? [min] : [min, max]; }
+
 function parse(value: string): Date { return new Date(value.length === 10 ? `${value}T12:00:00` : value); }
 
 export function displayDate(value: string): string { return parse(value).toLocaleDateString('ru-RU'); }

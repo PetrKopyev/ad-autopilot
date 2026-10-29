@@ -19,6 +19,13 @@ function typeAt(value: string, caret: number) {
   input().setSelectionRange(caret, caret);
   fireEvent.input(input());
 }
+// Как userEvent.type: по клавише — знак встаёт у курсора в то, что сейчас показано в поле.
+function typeKeys(text: string) {
+  for (const key of text) {
+    const at = input().selectionStart ?? input().value.length;
+    typeAt(input().value.slice(0, at) + key + input().value.slice(at), at + 1);
+  }
+}
 
 it('оставляет только цифры и делит разряды пробелом', () => {
   render(<Field />);
@@ -58,8 +65,8 @@ it('сумму больше предела не обрезает: ошибку �
 it('точка и запятая — копейки, не лишние цифры', () => {
   render(<Field />);
   fireEvent.change(input(), { target: { value: '1500.5' } });
-  expect(digits).toBe('1500,5');
-  expect(input().value).toBe('1 500,5');
+  expect(digits).toBe('1500.5');
+  expect(input().value).toBe('1 500.5');
   fireEvent.change(input(), { target: { value: '1 500,555' } });
   expect(digits).toBe('1500,55');
   fireEvent.change(input(), { target: { value: ',5' } });
@@ -107,4 +114,28 @@ it('точка и запятая вместе: первый знак делит 
   expect(digits).toBe('1500000,25');
   fireEvent.change(input(), { target: { value: '1,5,' } });
   expect(digits).toBe('1,5');
+});
+
+it('набор по клавише «1.500,50» не теряет цифр: точка перед тремя цифрами делит разряды', () => {
+  render(<Field />);
+  typeKeys('1.50');
+  expect(input().value).toBe('1.50');
+  typeKeys('0');
+  expect(input().value).toBe('1 500');
+  typeKeys(',50');
+  expect(input().value).toBe('1 500,50');
+  expect(digits).toBe('1500,50');
+});
+
+it('набор по клавише «1.500.000» и копейки через точку', () => {
+  render(<Field />);
+  typeKeys('1.500.000');
+  expect(digits).toBe('1500000');
+  expect(input().value).toBe('1 500 000');
+  cleanup();
+  render(<Field />);
+  typeKeys('0.50');
+  expect(digits).toBe('0.50');
+  typeKeys('0');
+  expect(digits).toBe('0.50');
 });

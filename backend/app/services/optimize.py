@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Кампания без работающих объявлений: её останавливают не за нехватку бюджета, а потому что показывать нечего.
+NO_ACTIVE_ADS = "Все объявления кампании остановлены, поэтому остановили и саму кампанию: показывать в ней нечего."
+
+
 async def snapshot(
     worker: Worker, business: Business, *, include_paused_campaigns: bool = False
 ) -> tuple[list[AdSnapshot], list[GroupSnapshot]]:
@@ -459,7 +463,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     reason_code="BUDGET_REBALANCE",
                     kind="pause",
                     actor="system",
-                    reason_text="Доступного дневного бюджета нет: кампанию остановили."
+                    reason_text=NO_ACTIVE_ADS
+                    if not active
+                    else "Доступного дневного бюджета нет: кампанию остановили."
                     if not desired_daily
                     else f"До конца недели остаток бюджета меньше минимума площадки ({rubles(minimum)} ₽): "
                     "кампанию остановили. Возобновим, когда бюджета снова хватит."

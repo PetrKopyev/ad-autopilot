@@ -537,6 +537,23 @@ async def test_demo_regenerate_counts_down_and_labels_differ(world: World, monke
     assert len(labels) == 4 and len(set(labels)) == 4 and not any(":" in label for label in labels)
 
 
+async def test_demo_regenerate_takes_scenes_not_yet_in_the_plan(world: World, monkeypatch) -> None:
+    """В демо ИИ создаётся на каждый запрос: новые варианты всё равно берут сцены, которых в плане ещё нет."""
+    from app.content.art import ArtBudget
+    from app.services.registry import DemoArt, DemoLLM
+
+    monkeypatch.setattr(plan_module, "ai_budget", lambda *args: ArtBudget(world.plans.limits.onboarding_kop, 0))
+    world.plans.llm = DemoLLM()
+    world.plans.art_factory = lambda budget, record: DemoArt(budget)
+    plan = await build(world)
+    group = plan["groups"][0]
+    for _ in range(2):
+        world.plans.llm = DemoLLM()
+        plan = await world.plans.regenerate_images(world.business.id, group["id"], NOW, TODAY)
+    labels = list({asset["id"]: asset["label"] for item in plan["groups"] for asset in item["assets"]}.values())
+    assert len(labels) == len(set(labels)), labels
+
+
 async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> None:
     world = make_world(tmp_path, limits=AiLimits(onboarding_kop=8 * ART_COST_KOP + 100, weekly_kop=2500))
     plan = await build(world)

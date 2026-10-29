@@ -1,4 +1,4 @@
-import { plural } from './format';
+import { forecastBounds, plural } from './format';
 
 /** Статусы рекламы — одни слова на всех экранах. «Проверяем» не используем: его путают с проверкой площадкой. */
 const status = {
@@ -315,8 +315,8 @@ export const copy = {
     total: 'Итог плана',
     perMonth: '/мес',
     forecast: 'Прогноз на месяц',
-    forecastLeads: (min: number, max: number) => `≈ ${min === max ? min : `${min}–${max}`}`,
-    forecastUnit: (max: number) => `${plural(max, 'обращение', 'обращения', 'обращений')} за месяц`,
+    forecastLeads: (min: number, max: number) => `≈ ${forecastBounds(min, max).map((value) => value.toLocaleString('ru-RU')).join('–')}`,
+    forecastUnit: (min: number, max: number) => `${plural(forecastBounds(min, max).slice(-1)[0], 'обращение', 'обращения', 'обращений')} за месяц`,
     forecastShortUnit: 'обращ.',
     forecastPending: 'Считаем прогноз…',
     forecastSlow: 'Яндекс долго готовит прогноз, обновите страницу позже.',
@@ -513,6 +513,7 @@ export const copy = {
     revertedPlain: 'Вы отменили изменение',
     revertedExperiment: 'Вы отменили сравнение вариантов',
     resumedAfterStop: 'Вы продолжили рекламу',
+    resumedAd: 'Вы вернули объявление',
     justNow: 'только что',
     numbers: 'Цифры',
     numberLabels: { cost_kop: 'Потрачено', leads: 'Обращений', clicks: 'Кликов', impressions: 'Показов', cost_per_lead_kop: 'Цена обращения', budget_kop: 'Бюджет' },
@@ -571,7 +572,7 @@ export const copy = {
     budgetLabel: 'Бюджет на месяц, ₽',
     budgetError: 'Введите сумму в рублях, больше нуля.',
     budgetPending: (sum: string) => `После сохранения бюджет станет ${sum}. Новый бюджет действует с ближайшего дня, остаток месяца пересчитается.`,
-    averageLabel: 'Средний чек, ₽ (необязательно)',
+    averageLabel: 'Сколько в среднем стоит визит клиента, ₽ (необязательно)',
     averageHint: 'С ним мы точнее оцениваем, сколько стоит один клиент. Можно оставить пустым.',
     nextMonth: 'Новый месяц начнётся с того же бюджета, без нового запроса. Остановить можно в любой момент.',
     accountsHint: 'Если кабинет просит войти заново, переподключите его.',

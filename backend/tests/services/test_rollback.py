@@ -619,7 +619,8 @@ async def test_history_names_campaign_of_launch_and_stop(client, repository, tre
     repository.history.return_value = ([campaign, ad], 2)
     repository.campaign_names.return_value = {("fake", refs.campaign_id): "Маникюр"}
     items = http.get("/api/history").json()["items"]
-    assert [item["campaign"] for item in items] == ["Маникюр", None]
+    # Объявление называется по кампании из своих ссылок: «Остановка рекламы» без названия не говорит, где.
+    assert [item["campaign"] for item in items] == ["Маникюр", "Маникюр"]
     repository.campaign_names.assert_called_once_with(1)
 
 
@@ -639,3 +640,26 @@ async def test_history_lets_stop_launch_of_replaced_plan_campaign(client, reposi
     response = http.post(f"/api/history/{original.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
     assert response.status_code == 200
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_auto"
+
+
+async def test_stop_resumed_later_is_not_offered_to_resume_again(client, repository, tree):
+    """После «Продолжить» на главной старая остановка той же кампании в журнале без кнопки, и сервер её не отменяет;
+    остановка другого объекта остаётся отменяемой."""
+    from app.services.rollback import SUPERSEDED
+
+    http, resolver, _ = client
+    adapter, refs = tree
+    stop = Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_owner")
+    start = Operation("set_status", "campaign", refs.campaign_id, "status", "paused_owner", "active")
+    paused = await applied(repository, adapter, refs, operations=[stop], entity_type="campaign")
+    ad = await applied(repository, adapter, refs)
+    resumed = await applied(repository, adapter, refs, operations=[start], entity_type="campaign")
+    resumed.kind = "resume"
+    repository.history.return_value = ([resumed, ad, paused], 3)
+    repository.status_changes.return_value = [paused, ad, resumed]
+    repository.get_owned.return_value = paused
+    resolver.return_value = adapter
+    items = http.get("/api/history").json()["items"]
+    assert [item["can_revert"] for item in items] == [True, True, False]
+    response = http.post(f"/api/history/{paused.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 409 and response.json()["detail"] == SUPERSEDED

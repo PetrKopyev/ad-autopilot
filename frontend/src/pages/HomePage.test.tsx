@@ -20,7 +20,7 @@ vi.mock('../api/screens', () => ({
 }));
 vi.mock('../api/history', async (original) => ({ ...await original<typeof import('../api/history')>(), getHistoryPage: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 5 })), revertChange: vi.fn() }));
 vi.mock('../api/clients', async (original) => ({ ...await original<typeof import('../api/clients')>(), getClientQuestions: vi.fn(async () => ({ items: [], cost_per_client_kop: null })), answerClientQuestion: vi.fn() }));
-vi.mock('../api/period', () => ({ getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-27' }) }));
+vi.mock('../api/period', async (original) => ({ ...await original<typeof import('../api/period')>(), getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-27' }) }));
 vi.mock('../api/notifications', () => ({ getNotifications: async () => [], readNotification: vi.fn() }));
 vi.mock('../api/useBusinessNow', () => ({ useBusinessNow: () => Date.parse('2026-10-27T10:05:00Z') }));
 vi.mock('../api/settings', () => ({ resumeAutopilot: vi.fn(), getBusiness: vi.fn(async () => ({ avg_check_kop: null })) }));
@@ -59,11 +59,11 @@ it('без расхождения пояснения нет', async () => {
   expect(screen.queryByText(copy.budget.fresher(formatMoney(2_020_500)), raw)).toBeNull();
 });
 
-it('пишет темп расхода из бюджета месяца: за прошедшие 27 дней и по бюджету на 31 день', async () => {
+it('пишет темп расхода из бюджета месяца: за прошедшие 27 дней и по бюджету на 31 день, как в плане: целые рубли вниз', async () => {
   vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, needs_attention: [], has_plan: true });
   await show(2_700_000, 2_700_000);
   expect(await screen.findByText(copy.home.onTrack)).toBeTruthy();
-  expect(screen.getByText(copy.home.pace(formatMoney(100_000), formatMoney(96_774)), raw)).toBeTruthy();
+  expect(screen.getByText(copy.home.pace(formatMoney(100_000), formatMoney(96_700)), raw)).toBeTruthy();
 });
 
 it('без ряда по дням плитки показываются без графиков', async () => {

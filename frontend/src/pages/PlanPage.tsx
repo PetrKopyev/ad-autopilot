@@ -53,7 +53,7 @@ function useForecast(enabled: boolean) {
 function ForecastPanel({ forecast, slow }: { forecast: Forecast; slow?: boolean }) {
   const ready = forecast.status === 'ready' && forecast.leads_min !== null && forecast.leads_max !== null;
   return <PanelCard title={copy.plan.forecast} titleId="plan-forecast" className="plan-forecast" action={forecast.demo && <span className="plan-demo">{copy.plan.demo}</span>}>
-    {ready ? <p className="plan-forecast__value"><span className="mono">{copy.plan.forecastLeads(forecast.leads_min!, forecast.leads_max!)}</span> {copy.plan.forecastUnit(forecast.leads_max!)}</p>
+    {ready ? <p className="plan-forecast__value"><span className="mono">{copy.plan.forecastLeads(forecast.leads_min!, forecast.leads_max!)}</span> {copy.plan.forecastUnit(forecast.leads_min!, forecast.leads_max!)}</p>
       : forecast.status === 'pending' && <p className="loading" role="status">{slow ? copy.plan.forecastSlow : copy.plan.forecastPending}</p>}
     {forecast.explanation && <p>{forecast.explanation}</p>}
     {ready && !forecast.explanation_by_ai && <p className="muted">{copy.plan.forecastMayErr}</p>}

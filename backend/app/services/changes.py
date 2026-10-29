@@ -300,6 +300,20 @@ class ChangesRepository:
         )
         return {(platform, external_id) for platform, external_id in rows}
 
+    def status_changes(self, business_id: int) -> list[ChangeLog]:
+        """Применённые изменения бизнеса, которые меняли статус объектов, по порядку."""
+        return list(
+            self.db.scalars(
+                select(ChangeLog)
+                .where(
+                    ChangeLog.business_id == business_id,
+                    ChangeLog.status == "applied",
+                    ChangeLog.operations.contains([{"field": "status"}]),
+                )
+                .order_by(ChangeLog.id)
+            )
+        )
+
     def campaign_names(self, business_id: int) -> dict[tuple[str, str], str]:
         """Названия кампаний бизнеса по (площадка, внешний id) — для заголовков журнала."""
         rows = self.db.execute(

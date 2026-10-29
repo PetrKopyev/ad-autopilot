@@ -59,6 +59,22 @@ def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) 
     )
 
 
+SUPERSEDED = "Статус этой рекламы с тех пор уже меняли: возобновить или остановить её можно на главной."
+
+
+def superseded(changes: Sequence[ChangeLog]) -> set[int]:
+    """Остановки и возобновления, после которых статус тех же объектов менялся ещё раз; changes — по порядку
+    (ChangesRepository.status_changes). После «Продолжить» на главной старая остановка в журнале уже не отменяется."""
+    later: set[tuple[str | None, str]] = set()
+    result = set()
+    for change in reversed(changes):
+        entities = {(change.platform, op["entity_id"]) for op in change.operations if op["field"] == "status"}
+        if change.kind in {"pause", "resume"} and entities & later:
+            result.add(change.id)
+        later |= entities
+    return result
+
+
 def can_revert(
     change: ChangeLog,
     business=None,
@@ -66,11 +82,13 @@ def can_revert(
     actor: str = "owner",
     reverts: Sequence[ChangeLog] = (),
     replaced: Collection[tuple[str, str]] = (),
+    overridden: Collection[int] = (),
 ) -> bool:
-    """replaced — кампании прежних планов (ChangesRepository.replaced_entities)."""
+    """replaced — кампании прежних планов (ChangesRepository.replaced_entities), overridden — superseded()."""
     return (
         change.status == "applied"
         and change.kind != "revert"
+        and change.id not in overridden
         and not (change.evidence or {}).get("_service", {}).get("dry_run")
         and not budget_protection(change, business)
         and not turns_on_replaced(change, replaced)
@@ -193,11 +211,16 @@ class RollbackService:
             business = self.repository.business(business_id)
             replaced = self.repository.replaced_entities(business_id)
             reverts = self.repository.reverts(original.id)
-            if not can_revert(original, business, actor=actor, reverts=reverts, replaced=replaced):
+            overridden = superseded(self.repository.status_changes(business_id))
+            if not can_revert(
+                original, business, actor=actor, reverts=reverts, replaced=replaced, overridden=overridden
+            ):
                 if budget_protection(original, business):
                     raise ChangeConflict("Это защита бюджета, отменить нельзя.")
                 if turns_on_replaced(original, replaced):
                     raise ChangeConflict(REPLACED)
+                if original.id in overridden:
+                    raise ChangeConflict(SUPERSEDED)
                 if original.actor == "external" and actor != "owner":
                     raise ChangeConflict("Изменение в кабинете может отменить только владелец.")
                 raise ChangeConflict("Изменение недоступно для отката или откат уже выполняется.")
