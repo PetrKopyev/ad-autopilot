@@ -6,7 +6,17 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from app.db.models import Ad, BudgetLedger, Business, ChangeLog, Experiment, Session, User, WorkerRun
+from app.db.models import (
+    Ad,
+    BudgetLedger,
+    Business,
+    ChangeLog,
+    Experiment,
+    PlatformAccount,
+    Session,
+    User,
+    WorkerRun,
+)
 from app.demo_flags import ADVANCING, advance_jobs
 from app.platforms.fake import VirtualClock
 from app.services.changes import ChangeConflict
@@ -311,6 +321,9 @@ def test_thirty_days_real_plan_budget_and_autopilot(demo, monkeypatch):
     assert any(row.actor == "autopilot" and row.status == "applied" for row in changes)
     assert any(row.status == "paused_auto" for row in worker.repository.rows(Ad))
     assert any(row.reason_code == "SCALE_UP" for row in changes)
+    # Журнал называет, какой группе подняли лимит и какое объявление остановили.
+    assert all("группы «" in row.reason_text for row in changes if row.reason_code == "SCALE_UP")
+    assert all("объявление «" in row.reason_text for row in changes if row.reason_code.startswith("PAUSE_"))
     assert any(row.status == "concluded" for row in worker.repository.rows(Experiment))
     assert not other.settings
     assert not worker.repository.rows(WorkerRun, 999)
@@ -473,8 +486,10 @@ def test_business_locks_name_the_advance():
 
 @pytest.mark.parametrize(
     "error,message",
-    [(ChangeConflict("Сначала запустите рекламу."), "Сначала запустите рекламу."),
-     (RuntimeError("secret"), "Перемотка прервалась. Попробуйте ещё раз.")],
+    [
+        (ChangeConflict("Сначала запустите рекламу."), "Сначала запустите рекламу."),
+        (RuntimeError("secret"), "Перемотка прервалась. Попробуйте ещё раз."),
+    ],
 )
 def test_background_advance_failure_is_reported(demo, monkeypatch, error, message):
     client, _, _ = demo
@@ -721,3 +736,32 @@ async def test_advance_runs_only_its_business_and_writes_no_shared_heartbeat(db_
     assert second.settings == {}
     assert all(adapters[second.id, platform].clock.now == start for platform in ("direct", "vk"))
     assert WorkerRepository(db_session).last_check(second.id) is None
+
+
+def test_demo_reconnect_returns_account_and_resumes_campaigns_stopped_by_disconnect(demo):
+    import asyncio
+    from time import monotonic
+
+    from app.services.budget_guard import stop_platform
+
+    client, world, worker = demo
+    launch(client)
+    assert client.post("/api/demo/reconnect").status_code == 409
+    worker.step_key = "owner:revoke"
+    asyncio.run(
+        stop_platform(
+            world.business, worker=worker, platform="direct", reason_text="Отключение.", deadline=monotonic() + 30
+        )
+    )
+    assert all(campaign.status == "paused_owner" for campaign in worker.current_campaigns(world.business))
+    account = worker.repository.find(PlatformAccount, business_id=world.business.id, platform="direct")
+    account.status, account.access_token_enc = "revoked", ""
+    status = client.get("/api/autopilot/status").json()
+    assert status["status"] == "paused"
+    assert any(item["id"] == "revoked_direct" for item in status["needs_attention"])
+    response = client.post("/api/demo/reconnect")
+    assert response.status_code == 200, response.text
+    assert account.status == "ok" and account.access_token_enc == "demo"
+    assert client.get("/api/autopilot/status").json()["status"] == "running"
+    assert all(campaign.status == "active" for campaign in worker.current_campaigns(world.business))
+    assert any(row.reason_code == "OWNER_RESUME" and row.actor == "owner" for row in worker.repository.rows(ChangeLog))

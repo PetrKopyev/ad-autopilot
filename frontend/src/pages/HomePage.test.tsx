@@ -152,6 +152,17 @@ it('кабинет отключили — кампании остановлен�
   expect(document.querySelector('.home-state--success')).toBeNull();
 });
 
+it('один из кабинетов отключён: главная называет его и не пишет «Всё идёт по плану»', async () => {
+  const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
+    image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) };
+  vi.mocked(getAds).mockResolvedValue({ items: [ad], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'active', daily: [] }] });
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, has_plan: true,
+    needs_attention: [{ id: 'revoked_vk', title: 'Кабинет ВКонтакте отключён', description: 'Реклама там остановлена.', destination: 'settings' }] });
+  await show(0, 0);
+  expect(await screen.findByText('Кабинет ВКонтакте отключён')).toBeTruthy();
+  expect(screen.queryByText(copy.home.onTrack)).toBeNull();
+});
+
 it('одна услуга и два объявления: блок сравнений объясняет, почему автопилот молчит, и советует указать средний чек', async () => {
   const ad = (id: number): Ad => ({ id, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Маникюр', title: 'Маникюр',
     text: `Текст ${id}`, image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) });

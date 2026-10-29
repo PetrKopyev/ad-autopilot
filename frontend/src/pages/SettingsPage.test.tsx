@@ -197,6 +197,18 @@ it('в демо подтверждение отключения предупре
   expect(await block.findByText(copy.errors.demoConnect)).toBeTruthy();
 });
 
+it('в демо отключённый Директ подключается заново кнопкой «Подключить»', async () => {
+  mockAccounts = [{ ...direct, status: 'revoked' }];
+  vi.mocked(getAuthConfig).mockResolvedValueOnce({ demo: true, vk_oauth: false });
+  vi.mocked(connectAccount).mockResolvedValue(undefined);
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settings.accounts })).closest('section') as HTMLElement);
+  await vi.waitFor(() => expect(block.getAllByRole('button', { name: copy.settings.connect })).toHaveLength(2));
+  fireEvent.click(block.getAllByRole('button', { name: copy.settings.connect })[0]);
+  await vi.waitFor(() => expect(connectAccount).toHaveBeenCalledWith('direct', 1));
+});
+
 it('Метрика в кабинетах: счётчик и цели словами; после запуска их не меняют', async () => {
   vi.mocked(getBusiness).mockResolvedValue(business);
   render(<MemoryRouter><SettingsPage /></MemoryRouter>);

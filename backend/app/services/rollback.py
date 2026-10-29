@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Experiment
+from app.domain.explain import undone
 from app.platforms.base import AdPlatform, EntityState, Operation
 from app.services.changes import (
     ChangeConflict,
@@ -33,8 +34,10 @@ def budget_protection(change: ChangeLog, business=None) -> bool:
         "LAUNCH_INTERRUPTED",
     }:
         return True
-    return change.kind == "pause" and business is not None and (
-        business.status == "budget_stop" or business.settings.get("_worker", {}).get("kill_switch", False)
+    return (
+        change.kind == "pause"
+        and business is not None
+        and (business.status == "budget_stop" or business.settings.get("_worker", {}).get("kill_switch", False))
     )
 
 
@@ -258,7 +261,7 @@ class RollbackService:
                 entity_type=original.entity_type,
                 entity_id=original.entity_id,
                 reason_code="REVERT",
-                reason_params={"change": original.reason_text},
+                reason_params={"change": undone(original.kind, original.entity_type, original.reason_params)},
                 evidence={
                     "confirmed": confirm,
                     "conflicts": mismatches,

@@ -5,7 +5,7 @@ import pytest
 from app.platforms.base import AuthExpired, PlatformError, RateLimited
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaAccessError, MetricaAuthError, MetricaCounter
-from app.services.connections import RECONNECT, check_connections
+from app.services.connections import DIRECT_FAILED, NO_COUNTERS, RECONNECT, check_connections
 
 
 def keep(*_) -> None:
@@ -47,7 +47,7 @@ async def test_unknown_direct_error_is_logged_and_not_shown(caplog: pytest.LogCa
     error.direct_code = 9999
     with caplog.at_level(logging.WARNING, logger="app.services.connections"):
         items = await check_connections(1, {"direct": "ok"}, lambda *_: Failing(error), lambda _: FakeMetrica(), keep)
-    assert items[0]["message"] == "ответил ошибкой. Проверьте ещё раз позже."
+    assert items[0]["message"] == DIRECT_FAILED
     assert "9999" in caplog.text and "внутренняя подробность" in caplog.text
 
 
@@ -82,7 +82,10 @@ async def test_expired_direct_skips_metrica() -> None:
 
 @pytest.mark.parametrize(
     "error,text",
-    [(RateLimited(), "Проверьте ещё раз через минуту"), (MetricaAccessError(), "нет доступа. Подключите")],
+    [
+        (RateLimited(), "Проверьте ещё раз через минуту"),
+        (MetricaAccessError(), "Нет доступа к счётчикам сайта. Подключите"),
+    ],
 )
 async def test_metrica_failures_are_explained(error: Exception, text: str) -> None:
     items = await check_connections(1, {"direct": "ok"}, lambda *_: FakeAdapter(), lambda _: Failing(error), keep)
@@ -94,7 +97,7 @@ async def test_account_without_counters_is_not_ready() -> None:
     assert items[-1] == {
         "platform": "metrica",
         "ok": False,
-        "message": "на этом аккаунте Яндекса нет счётчиков.",
+        "message": NO_COUNTERS,
     }
 
 
@@ -105,4 +108,4 @@ async def test_missing_direct_is_reported_and_platforms_are_not_called() -> None
     items = await check_connections(
         1, {"vk": "revoked"}, resolve, lambda _: FakeMetrica([MetricaCounter(1, "С", "a.ru")]), keep
     )
-    assert items == [{"platform": "direct", "ok": False, "message": "не подключён — нажмите «Подключить Директ»."}]
+    assert items == [{"platform": "direct", "ok": False, "message": "Не подключён. Нажмите «Подключить Директ»."}]

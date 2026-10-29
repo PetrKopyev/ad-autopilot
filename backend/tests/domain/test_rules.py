@@ -51,6 +51,23 @@ def test_relative_reference_requires_three_units_with_leads(make_ad, now):
     assert ref_cpl(None, ads[:2] + [recent], now.date()) is None
 
 
+def test_few_ads_without_check_use_average_lead_price_once_three_leads(make_ad, now):
+    # Одна услуга: два объявления, медианы нет; опора — средняя цена обращения всей рекламы.
+    ads = [make_ad(id="a", spend=10_000, leads=1), make_ad(id="b", spend=30_000, leads=2)]
+    assert ref_cpl(None, ads[:1], now.date()) is None
+    assert ref_cpl(None, ads, now.date()) == 40_000 // 3
+    cheap, dear = (
+        make_ad(id="cheap", spend=60_000, clicks=200, leads=12),
+        make_ad(id="dear", spend=300_000, clicks=200, leads=1),
+    )
+    reference = ref_cpl(None, [cheap, dear], now.date())
+    assert reference == 360_000 // 13
+    groups = [GroupSnapshot("group", "direct", 10_000), GroupSnapshot("other", "direct", 10_000)]
+    other = make_ad(id="other", group_id="other", spend=0, clicks=0, leads=0, impressions=0)
+    decisions = decide([cheap, dear, other], groups, now, reference)
+    assert {(item.target_id, item.reason_code) for item in decisions} >= {("dear", "PAUSE_TOO_EXPENSIVE")}
+
+
 def test_client_cost_uses_last_four_weeks_and_unknown_is_not_zero(now):
     today = now.date()
     answers = (
@@ -291,11 +308,12 @@ def test_pauses_and_scales_share_a_single_change_limit(make_ad, now):
 
 
 def test_every_emitted_decision_can_be_explained(make_ad, now):
-    from app.domain.explain import explain_decision
+    from app.domain.explain import explain
 
     groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(4)]
     ads = [make_ad(id=str(i), group_id=str(i), spend=1_000_000) for i in range(4)]
-    assert all(explain_decision(item) for item in decide(ads, groups, now, 10_000))
+    names = {"ad": "Маникюр", "group": "Маникюр", "campaign": "Автопилот"}
+    assert all(explain(item.reason_code, item.numbers, **names) for item in decide(ads, groups, now, 10_000))
 
 
 def test_pause_names_the_settled_days_it_was_decided_on(make_ad, now):

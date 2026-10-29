@@ -1,11 +1,13 @@
 from contextlib import suppress
 from datetime import datetime
+from uuid import uuid4
 
 from sqlalchemy import func, select
 
 from app.content.site_reader import Page, SiteReadResult
 from app.db.models import Business, PlatformAccount, User
 from app.demo_flags import AdvanceProgress, demo_now
+from app.platforms.base import Operation
 from app.platforms.fake import AdTruth, FakeAdapter, VirtualClock
 from app.services.changes import ChangeConflict
 from app.worker.jobs import Worker, WorkerRepository
@@ -145,3 +147,41 @@ class DemoService:
                     # проверен в check под этой же блокировкой, а две перемотки одного бизнеса не идут.
                     self.remember(business, days=before + day)
                     progress.done = day
+
+    async def reconnect(self, business_id: int) -> None:
+        """Демо: кабинет, который владелец отключил, подключается снова без входа в Яндекс, и кампании, остановленные
+        при отключении, продолжают работать, если реклама не на паузе."""
+        repository = self.worker.repository
+        with repository.business_lock(business_id):
+            business = repository.business(business_id)
+            account = repository.find(PlatformAccount, business_id=business_id, platform="direct")
+            if account is None or account.status != "revoked":
+                raise ChangeConflict("Кабинет Директа уже подключён.")
+            account.status = "ok"
+            account.access_token_enc = "demo"
+            account.scopes = ["direct:api", "metrika:read"]
+            repository.save(account)
+            if business.status != "running":
+                return
+            self.worker.step_key = f"owner:{uuid4()}"
+            with self.worker.business_clock(business):
+                for campaign in self.worker.current_campaigns(business):
+                    last = repository.last_status_change(
+                        business.id, campaign.platform, "campaign", campaign.external_id
+                    )
+                    if campaign.platform != "direct" or last is None or last.reason_code != "ACCOUNT_REVOKE":
+                        continue
+                    await self.worker.apply(
+                        business,
+                        campaign,
+                        [
+                            Operation(
+                                "set_status", "campaign", campaign.external_id, "status", campaign.status, "active"
+                            )
+                        ],
+                        actor="owner",
+                        kind="resume",
+                        reason_code="OWNER_RESUME",
+                        reason_text="Вы снова подключили кабинет — реклама продолжилась.",
+                        suffix="reconnect",
+                    )

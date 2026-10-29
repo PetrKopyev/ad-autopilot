@@ -3,10 +3,10 @@ from string import Formatter
 
 import pytest
 
-from app.domain.explain import MONEY_FIELDS, TEMPLATES, explain, explain_decision, explain_experiment, rubles
+from app.domain.explain import MONEY_FIELDS, TEMPLATES, explain, explain_decision, explain_experiment, rubles, undone
 from app.domain.types import Action, Decision, ExperimentResult, Metrics, Verdict
 
-PERIOD = {"period_start": "2026-11-01", "period_end": "2026-11-14"}
+PERIOD = {"period_start": "2026-11-01", "period_end": "2026-11-14", "ad": "Маникюр рядом с домом"}
 
 
 @pytest.mark.parametrize(
@@ -43,15 +43,44 @@ def test_ruble_format_whole_rubles_and_kopecks_below_hundred(kopecks, expected):
         ("EXPERIMENT_TOO_LONG", {"days": 21}, "примерно 21 день."),
         ("BUDGET_OPPORTUNITY", {"extra_budget": 10_000, "extra_leads": Decimal("1.5")}, "1,5 обращения в день"),
         ("BUDGET_OPPORTUNITY", {"extra_budget": 10_000, "extra_leads": Decimal("2")}, "2 обращения в день"),
+        ("BUDGET_OPPORTUNITY", {"extra_budget": 10_000, "extra_leads": Decimal("62.96")}, "63 обращения в день"),
     ],
 )
 def test_numbers_agree_with_words(code, values, expected):
     assert expected in explain(code, values)
 
 
-def test_revert_of_change_with_own_period_has_single_period():
-    text = explain("REVERT", change="Остановили рекламу на всех площадках.")
-    assert text == "Вы отменили изменение: Остановили рекламу на всех площадках. Вернули предыдущие настройки."
+@pytest.mark.parametrize(
+    "kind,entity_type,params,expected",
+    [
+        (
+            "pause",
+            "ad",
+            {"ad": "Маникюр рядом"},
+            "Вы отменили остановку объявления «Маникюр рядом». Вернули прежние настройки.",
+        ),
+        ("pause", "ad", {}, "Вы отменили остановку объявления. Вернули прежние настройки."),
+        ("pause", "campaign", {}, "Вы отменили остановку рекламы. Вернули прежние настройки."),
+        (
+            "budget",
+            "group",
+            {"group": "Педикюр"},
+            "Вы отменили повышение дневного лимита группы «Педикюр». Вернули прежние настройки.",
+        ),
+        ("experiment_verdict", "ad", {}, "Вы отменили вывод сравнения вариантов. Вернули прежние настройки."),
+    ],
+)
+def test_revert_names_what_was_undone_and_does_not_read_as_a_new_stop(kind, entity_type, params, expected):
+    assert explain("REVERT", change=undone(kind, entity_type, params)) == expected
+
+
+def test_pause_and_scale_name_the_ad_and_the_group():
+    assert "на объявление «Маникюр рядом с домом» нажали 3 раза" in explain("PAUSE_NO_LEADS", PERIOD, clicks=3)
+    text = explain("SCALE_UP", group="Педикюр", campaign="Автопилот — Директ", old_limit=47_500, new_limit=50_300)
+    assert text == (
+        "Объявления группы «Педикюр» (кампания «Автопилот — Директ») приносят обращения по подходящей цене. "
+        "Повысили дневной лимит этой группы с 475 до 503 ₽."
+    )
 
 
 @pytest.mark.parametrize("code", TEMPLATES)
@@ -127,5 +156,7 @@ def test_hypothesis_names_and_extension_are_plain_russian():
 )
 def test_pause_reason_names_the_days_it_was_decided_on(start, end, expected):
     # На экране объявления расход считается за свой период: без дат «Потратили 211 ₽» спорит с «Расход 0 ₽».
-    text = explain("PAUSE_TOO_EXPENSIVE", spend=21_100, leads=3, ref_cpl=5_000, period_start=start, period_end=end)
-    assert text.startswith(f"{expected} потратили 211 ₽, получили 3 обращения.")
+    text = explain(
+        "PAUSE_TOO_EXPENSIVE", spend=21_100, leads=3, ref_cpl=5_000, period_start=start, period_end=end, ad="Маникюр"
+    )
+    assert text.startswith(f"{expected} на объявление «Маникюр» потратили 211 ₽, получили 3 обращения.")

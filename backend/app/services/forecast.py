@@ -46,7 +46,7 @@ LEADS_WORD = re.compile(r"обращени", re.IGNORECASE)
 LEADS_NEAR = 12
 PENDING = "Яндекс Директ готовит прогноз, обычно это занимает до минуты."
 VISITS_NOTE = (
-    "Доля считается на визит, а визитов на сайт бывает меньше, чем кликов: часть людей уходит до загрузки страницы. "
+    "Не каждый, кто нажал на объявление, доходит до сайта: часть людей уходит, пока страница загружается. "
     "Поэтому обращений может выйти меньше."
 )
 SYSTEM = (
@@ -67,9 +67,7 @@ class Conversion:
     note: str | None = None
 
 
-BENCHMARK = Conversion(
-    Decimal("0.01"), Decimal("0.03"), "benchmark", "ориентир по рынку услуг, не измерение", BENCHMARK_URL
-)
+BENCHMARK = Conversion(Decimal("0.01"), Decimal("0.03"), "benchmark", "средняя цифра для сайтов услуг", BENCHMARK_URL)
 
 
 @dataclass(frozen=True)
@@ -145,8 +143,8 @@ def measured(visits: int, reached: int) -> Conversion | None:
         return None
     low, high = wilson(reached, visits)
     label = (
-        f"измерено Метрикой на вашем сайте: {reached} из {visits} визитов с рекламы Яндекс Директа (поиск и сети) за "
-        "90 дней достигли выбранных целей"
+        f"так было на вашем сайте: за последние 3 месяца из {visits} посетителей с рекламы в Яндексе "
+        f"заявку оставили {reached}"
     )
     return Conversion(low, high, "metrica", label)
 
@@ -168,7 +166,9 @@ def numbers(text: str) -> set[Decimal]:
     return {Decimal(re.sub(r"\s", "", item).replace(",", ".")) for item in NUMBER.findall(text)}
 
 
-def template(clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_range: tuple[int, int]) -> str:
+def template(
+    clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_range: tuple[int, int], budget_note: str = ""
+) -> str:
     if not clicks.potential:
         return (
             "Яндекс Директ не видит спроса по фразам плана в вашем регионе за прошлый месяц: прогноз обращений "
@@ -183,25 +183,20 @@ def template(clicks: Clicks, budget_rub: Decimal, conversion: Conversion, leads_
         return (
             f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
             f"{rub(clicks.potential)} кликов. Но при бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} не "
-            "выйдет ни одного клика, а значит, и обращений из Директа. Это прогноз, он может ошибаться."
+            f"выйдет ни одного клика, а значит, и обращений из Директа.{budget_note} Это прогноз, он может ошибаться."
         )
-    if conversion.source == "metrica":
-        rate = (
-            f"На вашем сайте цели достигают от {percent(conversion.min)} до {percent(conversion.max)}% визитов "
-            f"с рекламы — {conversion.label}."
-        )
-    else:
-        rate = (
-            f"Обычно заявку оставляют от {percent(conversion.min)} до {percent(conversion.max)} из 100 посетителей "
-            f"сайта — это {conversion.label}, не по вашему сайту."
-        )
-        rate += f" {conversion.note}" if conversion.note else ""
+    rate = (
+        f"Заявку оставляют от {percent(conversion.min)} до {percent(conversion.max)} из 100 посетителей сайта — "
+        f"{conversion.label}."
+    )
+    rate += f" {conversion.note}" if conversion.note else ""
     return (
         f"Яндекс Директ оценивает спрос по фразам плана в вашем регионе: за прошлый месяц было бы до "
         f"{rub(clicks.potential)} кликов. При бюджете {rub(budget_rub)} ₽ в месяц и цене клика {price} выйдет "
-        f"примерно от {rub(clicks.min)} до {rub(clicks.max)} кликов. {rate} Итого примерно от {leads_range[0]} до "
-        f"{leads_range[1]} обращений в месяц. {VISITS_NOTE} Это прогноз, он может ошибаться: вся сумма не обязательно "
-        "потратится, а после первой недели покажем цифры по вашему сайту."
+        f"примерно от {rub(clicks.min)} до {rub(clicks.max)} кликов.{budget_note} {rate} "
+        f"Итого примерно от {leads_range[0]} до {leads_range[1]} обращений в месяц. {VISITS_NOTE} "
+        "Это прогноз, он может ошибаться: вся сумма не обязательно потратится, а после первой недели покажем цифры "
+        "по вашему сайту."
     )
 
 
@@ -308,6 +303,15 @@ class ForecastService:
             return unavailable("Для Яндекс Директа в плане нет ключевых фраз — прогнозировать нечего.", vk)
         shares = allocate(payload["month_budget_kop"], platform_shares(platforms, self.domain))
         budget_rub = Decimal(shares["direct"]) * (1 - self.domain.budget_reserve) / 100
+        # Прогноз считается не на весь бюджет из плана: владельцу нужно сказать, на какую сумму и почему.
+        reserve = f"{percent(self.domain.budget_reserve)}% оставляем запасом, чтобы расход не вышел за бюджет"
+        if shares["direct"] < payload["month_budget_kop"]:
+            budget_note = (
+                f" Из бюджета {rub(Decimal(payload['month_budget_kop']) / 100)} ₽ на Яндекс Директ приходится "
+                f"{rub(Decimal(shares['direct']) / 100)} ₽, остальное — на ВКонтакте; {reserve}."
+            )
+        else:
+            budget_note = f" Это не весь бюджет {rub(Decimal(payload['month_budget_kop']) / 100)} ₽: {reserve}."
         city = payload.get("city", business.city)
         goals = list(business.lead_goal_ids or [])[:MAX_GOALS]
         info = None if self.demo else self.registry.load(business.id, "direct")
@@ -326,7 +330,7 @@ class ForecastService:
                 entry = None
             if entry is not None and entry.status != "pending":
                 return entry.response | {"vk": vk}
-            entry = await self.refresh(business, info, entry, key, phrases, city, budget_rub, now, today)
+            entry = await self.refresh(business, info, entry, key, phrases, city, budget_rub, budget_note, now, today)
             FORECASTS[business.id] = entry
             return entry.response | {"vk": vk}
 
@@ -339,12 +343,13 @@ class ForecastService:
         phrases: list[str],
         city: str,
         budget_rub: Decimal,
+        budget_note: str,
         now: datetime,
         today: date,
     ) -> Entry:
         """Один шаг без ожидания: заказать отчёт или спросить его готовность; готовый прочитать и удалить."""
         if self.demo:
-            return await self.ready(business, key, demo_rows(phrases), budget_rub, now, today)
+            return await self.ready(business, key, demo_rows(phrases), budget_rub, budget_note, now, today)
         forecast_id = entry.forecast_id if entry else None
         try:
             client = self.client(info, business.id)
@@ -364,7 +369,7 @@ class ForecastService:
         await self.drop(business.id, info, forecast_id)
         if rows is None:
             return self.failed(key, "Яндекс Директ не смог посчитать прогноз. Попробуем ещё раз позже.", now)
-        return await self.ready(business, key, rows, budget_rub, now, today)
+        return await self.ready(business, key, rows, budget_rub, budget_note, now, today)
 
     def client(self, info: Any, business_id: int) -> DirectForecastClient:
         if info is None or info.status != "ok":
@@ -400,7 +405,7 @@ class ForecastService:
 
     async def conversion(self, business: Business) -> Conversion:
         if not business.metrica_counter_id or not business.lead_goal_ids:
-            return replace(BENCHMARK, note="Своей доли нет: в Метрике не выбраны цели обращений.")
+            return replace(BENCHMARK, note="Своих цифр по сайту нет: не выбрано, что на сайте считать обращением.")
         try:
             metrica = self.registry.metrica(business.id)
             visits, reached = await metrica.get_ad_conversions(
@@ -408,15 +413,20 @@ class ForecastService:
             )
         except (MetricaError, PlatformError) as error:
             logger.warning("Доля обращений бизнеса %s по Метрике не посчитана: %s", business.id, error)
-            return replace(BENCHMARK, note="Свою долю по Метрике посчитать не удалось: Метрика ответила ошибкой.")
+            return replace(BENCHMARK, note="Свои цифры по сайту получить не удалось: счётчик посещений не ответил.")
         return measured(visits, reached) or replace(
-            BENCHMARK,
-            note=f"Своей доли нет: в Метрике за 90 дней {visits} визитов с рекламы Яндекс Директа, а нужно не меньше "
-            f"{MIN_VISITS}.",
+            BENCHMARK, note="Своих цифр по сайту пока мало: с рекламы в Яндексе на него заходили слишком редко."
         )
 
     async def ready(
-        self, business: Business, key: str, rows: list[PhraseForecast], budget_rub: Decimal, now: datetime, today: date
+        self,
+        business: Business,
+        key: str,
+        rows: list[PhraseForecast],
+        budget_rub: Decimal,
+        budget_note: str,
+        now: datetime,
+        today: date,
     ) -> Entry:
         clicks = direct_clicks(rows, budget_rub)
         if clicks.potential and clicks.cpc_min is None and clicks.cpc_max is None:
@@ -425,7 +435,7 @@ class ForecastService:
             )
         conversion = await self.conversion(business)
         leads_range = leads(clicks, conversion)
-        text = template(clicks, budget_rub, conversion, leads_range)
+        text = template(clicks, budget_rub, conversion, leads_range, budget_note)
         explanation = await self.explain(business, text, leads_range, today) if clicks.max else None
         forecast = (
             "Демо: числа придуманы для показа, это не прогноз Яндекса"
@@ -436,12 +446,14 @@ class ForecastService:
             {"what": "Клики и цена клика", "source": forecast, "url": None if self.demo else FORECAST_DOC},
             {
                 "what": "Бюджет",
-                "source": f"Ваш план: {rub(budget_rub)} ₽ в месяц на Яндекс Директ, без запаса на перерасход",
+                "source": f"Ваш план: {rub(budget_rub)} ₽ в месяц на Яндекс Директ.{budget_note}",
                 "url": None,
             },
             {
-                "what": "Доля обращений",
-                "source": " ".join(filter(None, [f"{conversion.label}, на визит.", conversion.note])),
+                "what": "Сколько посетителей оставляют заявку",
+                "source": " ".join(
+                    filter(None, [f"{conversion.label[0].upper()}{conversion.label[1:]}.", conversion.note])
+                ),
                 "url": conversion.url,
             },
         ]

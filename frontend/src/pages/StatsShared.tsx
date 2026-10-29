@@ -3,7 +3,7 @@ import { copy } from '../copy';
 import type { PeriodChoice } from '../api/period';
 import { displayDate, displayDateTime } from '../format';
 import { mockEnabled } from '../api/screens';
-import type { Ad, AdStatus, Campaign, Source, Summary } from '../api/types';
+import type { Ad, AdStatus, Campaign, Experiment, Source, Summary } from '../api/types';
 import './Stats.css';
 
 export function DemoNotice() { return mockEnabled ? <p className="stats-demo">{copy.screens.demo}</p> : null; }
@@ -62,7 +62,12 @@ export function shownStatus(ad: Ad, campaigns: Campaign[]): AdStatus {
 }
 export const campaignStopped = (id: number, campaigns: Campaign[]) => stoppedCampaign.has(campaigns.find((item) => item.id === id)?.status ?? '');
 
-/** Меньше трёх работающих объявлений — сравнивать цену обращения не с чем: почему автопилот молчит (как min_reference_units). */
+/** Подпись к выводу сравнения: за какие дни его цифры. */
+export function experimentPeriod({ period, status }: Experiment): string | null {
+  return period && copy.ads.period(displayDate(period.from), displayDate(period.to), status === 'running');
+}
+
+/** Меньше трёх работающих объявлений: опорная цена — средняя по всей рекламе, решения ждут обращений (как ref_cpl на сервере). */
 export function fewAdsReason(ads: Ad[], campaigns: Campaign[], avgCheck: number | null): string | null {
   const live = ads.filter((ad) => shownStatus(ad, campaigns) === 'active').length;
   return live > 0 && live < 3 ? copy.screens.fewAds(live, avgCheck !== null) : null;

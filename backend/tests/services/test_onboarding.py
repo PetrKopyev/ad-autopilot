@@ -451,8 +451,8 @@ def test_business_budget_below_direct_minimum_names_the_minimum_and_why(world: W
     with pytest.raises(OnboardingError) as error:
         world.onboarding.create_business(2, "salon2.example", "Казань", 1_549_999, None)
     assert str(error.value) == (
-        "Минимальный бюджет — 15 500 ₽ в месяц. Яндекс Директ требует не меньше 366 ₽ с НДС на кампанию в неделю, а "
-        "мы считаем с запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
+        "Минимальный бюджет — 15 500 ₽ в месяц. С меньшей суммой Яндекс Директ рекламу не показывает, а мы ещё берём "
+        "небольшой запас, чтобы реклама не останавливалась в конце месяца."
     )
     assert world.repository.user_businesses(2) == []
     assert world.onboarding.create_business(2, "salon2.example", "Казань", 1_550_000, None)["month_budget_kop"]

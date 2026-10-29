@@ -113,3 +113,16 @@ def advance(
         raise HTTPException(409, ADVANCING)
     background.add_task(run_advance, open_service, business.id, progress)
     return demo_status(business, today)
+
+
+@router.post("/reconnect", dependencies=[Depends(require_csrf)])
+async def reconnect(business: CurrentBusiness, open_service: Service) -> dict:
+    """Демо: вернуть кабинет Директа после «Отключить» — настоящего входа в Яндекс в демо нет."""
+    if advance_jobs.running(business.id):
+        raise HTTPException(409, ADVANCING)
+    try:
+        with open_service(business.id) as service:
+            await service.reconnect(business.id)
+    except ChangeConflict as error:
+        raise HTTPException(409, str(error)) from error
+    return {"message": "Кабинет Директа снова подключён."}

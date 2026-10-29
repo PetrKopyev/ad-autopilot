@@ -12,9 +12,10 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); fetchMock.mockReset(); assign.mockReset(); });
 
-it('в демо подключение кабинета не уводит на сервер, а объясняет, почему нельзя', async () => {
+it('в демо Директ возвращается без входа в Яндекс, а ВКонтакте объясняет, почему нельзя', async () => {
   fetchMock.mockImplementation(async () => Response.json({ demo: true, vk_oauth: false }));
-  await expect(connectAccount('direct', 7)).rejects.toThrow(copy.errors.demoConnect);
+  await connectAccount('direct', 7);
+  expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith('/api/demo/reconnect') && init?.method === 'POST')).toBe(true);
   await expect(connectAccount('vk', 7)).rejects.toThrow(copy.errors.demoConnect);
   expect(assign).not.toHaveBeenCalled();
 });

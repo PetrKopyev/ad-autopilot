@@ -166,7 +166,7 @@ function AccountsBlock({ business, status }: { business: BusinessSettings; statu
         <div className="actions">
           {/* ВКонтакте подключают ключом или входом на отдельной странице — как в мастере. */}
           {platform.id === 'vk' && !demo ? <Link className="button button--secondary" to="/connect/vk" state={{ back: '/settings' }}>{connectLabel}</Link>
-            : <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); }); }}>{connectLabel}</Button>}
+            : (off || !demo) && <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); status.reload(); }); }}>{connectLabel}</Button>}
           {account && !off && <Button variant="secondary" disabled={section.busy}
             onClick={() => { setStopResult(undefined); section.clear(); setLeaving({ id: account.id, name: platform.name }); }}>{copy.settings.disconnect}</Button>}
         </div></li>;

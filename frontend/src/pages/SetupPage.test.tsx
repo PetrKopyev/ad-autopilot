@@ -456,10 +456,10 @@ it('подключённый Директ — одна строка «Подкл
 
 it('итог проверки не повторяет название площадки', async () => {
   accountsStep([{ id: 12345, name: 'Счётчик' }], { items: [
-    { platform: 'direct', ok: true, message: 'отвечает.' }, { platform: 'metrica', ok: true, message: 'отвечает, счётчиков: 1.' }] });
+    { platform: 'direct', ok: true, message: 'Работает.' }, { platform: 'metrica', ok: true, message: 'Работает. Счётчиков на аккаунте: 1.' }] });
   fireEvent.click(await screen.findByRole('button', { name: copy.launchFlow.refresh }));
-  await screen.findByText('отвечает, счётчиков: 1.', { exact: false });
-  expect([...document.querySelectorAll('.check-results li')].map((item) => item.textContent)).toEqual(['Директ: отвечает.', 'Метрика: отвечает, счётчиков: 1.']);
+  await screen.findByText('Работает. Счётчиков на аккаунте: 1.', { exact: false });
+  expect([...document.querySelectorAll('.check-results li')].map((item) => item.textContent)).toEqual(['Директ: Работает.', 'Метрика: Работает. Счётчиков на аккаунте: 1.']);
 });
 
 it('успешная проверка сайта показывает найденные услуги с ценами, а повтор — небольшой второстепенной кнопкой', async () => {

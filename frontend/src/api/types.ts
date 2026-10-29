@@ -85,6 +85,8 @@ export interface Experiment {
   /** Варианты А и Б; image — ссылка на картинку варианта. */
   arms: { title: string; text: string; image: string | null }[];
   remaining_impressions: number;
+  /** За какие дни цифры в выводе: у завершённой — на момент вывода; null — устоявшихся дней ещё нет. */
+  period: { from: string; to: string } | null;
   status: 'running' | 'concluded' | 'cancelled';
   conclusion: string | null;
 }

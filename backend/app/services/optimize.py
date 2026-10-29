@@ -181,6 +181,7 @@ async def optimize(worker: Worker, business: Business) -> None:
     local_groups = worker.repository.rows(AdGroup, business.id)
     testing = {item.ad_group_id for item in worker.repository.rows(Experiment, business.id, status="running")}
     ad_map = {ad.id: ad for ad in ads}
+    titles = {ad.external_id: ad.title for ad in worker.repository.rows(Ad, business.id)}
     for decision in decisions:
         if decision.action == Action.NOTIFY:
             worker.notice(business, decision.reason_code, explain_decision(decision), target_id=decision.target_id)
@@ -199,7 +200,7 @@ async def optimize(worker: Worker, business: Business) -> None:
                 campaign,
                 [Operation("set_status", "ad", decision.target_id, "status", state.status, "paused_auto")],
                 reason_code=decision.reason_code,
-                reason_params=decision.numbers,
+                reason_params={**decision.numbers, "ad": titles[decision.target_id]},
                 kind="pause",
                 suffix=decision.target_id,
             )
@@ -234,7 +235,7 @@ async def optimize(worker: Worker, business: Business) -> None:
                 ],
                 kind="budget",
                 reason_code=decision.reason_code,
-                reason_params=decision.numbers,
+                reason_params={**decision.numbers, "group": group.theme, "campaign": campaign.name},
                 suffix=group_id,
                 entity_type="group",
                 entity_id=group_id,

@@ -18,9 +18,12 @@ DIRECT_CODES = {
     "3000": "Яндекс закрыл этому аккаунту доступ к API Директа. Проверьте в кабинете Директа, не заблокирован ли "
     "аккаунт, или напишите в поддержку Директа.",
 }
-DIRECT_FAILED = "ответил ошибкой. Проверьте ещё раз позже."
-WORKING = "отвечает."
-NO_COUNTERS = "на этом аккаунте Яндекса нет счётчиков."
+DIRECT_FAILED = "Яндекс ответил ошибкой. Проверьте ещё раз через несколько минут."
+WORKING = "Работает."
+NO_COUNTERS = (
+    "На этом аккаунте Яндекса нет счётчиков посещений сайта. Подключите аккаунт, на котором установлен счётчик "
+    "Метрики вашего сайта."
+)
 
 
 def failure(error: Exception) -> str:
@@ -29,7 +32,9 @@ def failure(error: Exception) -> str:
     if isinstance(error, RateLimited):
         return "Площадка просит подождать. Проверьте ещё раз через минуту."
     if isinstance(error, MetricaAccessError):
-        return "нет доступа. Подключите Директ заново и разрешите доступ к Метрике."
+        return (
+            "Нет доступа к счётчикам сайта. Подключите Директ заново и на странице Яндекса разрешите доступ к Метрике."
+        )
     code = str(getattr(error, "direct_code", ""))
     if not code:
         return str(error)
@@ -66,11 +71,11 @@ async def check_connections(
 
     async def counters() -> tuple[bool, str]:
         found = await (await run_in_threadpool(metrica, business_id)).list_counters()
-        return (True, f"отвечает, счётчиков: {len(found)}.") if found else (False, NO_COUNTERS)
+        return (True, f"Работает. Счётчиков на аккаунте: {len(found)}.") if found else (False, NO_COUNTERS)
 
     results = []
     if statuses.get("direct", "revoked") == "revoked":
-        results.append({"platform": "direct", "ok": False, "message": "не подключён — нажмите «Подключить Директ»."})
+        results.append({"platform": "direct", "ok": False, "message": "Не подключён. Нажмите «Подключить Директ»."})
     for platform in ("direct", "vk"):
         if statuses.get(platform) == "ok":
             results.append(await check(platform, partial(whoami, platform)))

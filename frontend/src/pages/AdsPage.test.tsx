@@ -19,7 +19,7 @@ afterEach(() => { cleanup(); vi.mocked(getAds).mockReset(); vi.mocked(getExperim
 const text = 'Запись онлайн, мастер рядом с домом.';
 function experiment(hypothesis: Experiment['hypothesis'], arms: Experiment['arms']): Experiment {
   return { id: 1, title: 'Сравниваем', hypothesis, comparing: 'Меняем только картинку, текст объявления тот же. До конца проверки: 4 дня.',
-    arms, remaining_impressions: 1200, status: 'running', conclusion: null };
+    arms, remaining_impressions: 1200, period: null, status: 'running', conclusion: null };
 }
 async function show(hypothesis: Experiment['hypothesis'], arms: Experiment['arms'], ads: Ad[] = []) {
   vi.mocked(getAds).mockResolvedValue({ items: ads, campaigns: [] });
@@ -131,4 +131,12 @@ it('одинаковые объявления с разными картинка
   render(<MemoryRouter><AdsPage /></MemoryRouter>);
   expect(await screen.findByRole('heading', { name: copy.screens.adImageVariant(`Маникюр — «${text}»`, 1) })).toBeTruthy();
   expect(screen.getByRole('heading', { name: copy.screens.adImageVariant(`Маникюр — «${text}»`, 2) })).toBeTruthy();
+});
+
+it('у завершённого сравнения вывод подписан днями, по которым его сделали', async () => {
+  vi.mocked(getAds).mockResolvedValue({ items: [], campaigns: [] });
+  vi.mocked(getExperiments).mockResolvedValue({ items: [{ ...experiment('text', []), status: 'concluded', conclusion: 'Оставили Б.',
+    period: { from: '2026-10-01', to: '2026-10-11' } }] });
+  render(<MemoryRouter><AdsPage /></MemoryRouter>);
+  expect(await screen.findByText(copy.ads.period('01.10.2026', '11.10.2026', false))).toBeTruthy();
 });

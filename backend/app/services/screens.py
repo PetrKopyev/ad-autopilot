@@ -18,8 +18,9 @@ from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum, daily_minimum, 
 from app.domain.explain import PLURALS, explain_experiment, plural, rubles
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError
-from app.services.budget_guard import read_spend, stop_all
+from app.services.budget_guard import STOPPED, read_spend, stop_all
 from app.services.changes import ChangeConflict
+from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
 from app.services.optimize import rebalance_budget
 from app.services.stats import aggregate, aggregate_budget, aggregate_daily
@@ -57,6 +58,11 @@ class ScreensService:
         last_check = self.repository.last_check(business.id)
         budget = self.budget(business)
         status = business.status if business.status in {"running", "paused", "budget_stop"} else "draft"
+        accounts = self.repository.rows(PlatformAccount, business.id)
+        revoked = [row for row in accounts if row.status == "revoked"]
+        # Отключение кабинета останавливает его рекламу: без подключённых кабинетов реклама не работает.
+        if status == "running" and len(revoked) == len(accounts):
+            status = "paused"
         if status == "running" and not budget["remaining_kop"]:
             status = "budget_stop"
         titles = {
@@ -77,9 +83,28 @@ class ScreensService:
                 ),
             }
         ]
+        campaigns = self.worker.current_campaigns(business)
+        for account in revoked:
+            stopped = all(
+                campaign.status in STOPPED or not campaign.external_id
+                for campaign in campaigns
+                if campaign.platform_account_id == account.id
+            )
+            attention.append(
+                {
+                    "id": f"revoked_{account.platform}",
+                    "title": f"Кабинет {TITLES[account.platform]} отключён",
+                    "destination": "settings",
+                    "description": (
+                        "Реклама там остановлена. Чтобы она снова работала, подключите кабинет в настройках."
+                        if stopped
+                        else "Мы не смогли подтвердить, что реклама там остановлена, — проверьте в кабинете площадки. "
+                        "Чтобы реклама снова работала под присмотром автопилота, подключите кабинет в настройках."
+                    ),
+                }
+            )
         latest = self.repository.latest_run(business.id, "budget_guard")
-        accounts = self.repository.rows(PlatformAccount, business.id)
-        if (latest and latest.status == "failed") or any(row.status != "ok" for row in accounts):
+        if (latest and latest.status == "failed") or any(row.status == "needs_reauth" for row in accounts):
             attention.append(
                 {
                     "id": "platform",
@@ -124,6 +149,12 @@ class ScreensService:
                 raise ChangeConflict("Реклама уже работает")
             if business.status not in {"paused", "budget_stop"}:
                 raise ChangeConflict("Сначала запустите рекламу")
+            accounts = self.repository.rows(PlatformAccount, business.id)
+            revoked = {row.id for row in accounts if row.status == "revoked"}
+            if len(revoked) == len(accounts):
+                raise ChangeConflict(
+                    "Кабинеты площадок отключены. Подключите кабинет в настройках, и реклама снова сможет работать."
+                )
             await self.check_remaining(business)
             meta = self.worker.metadata(business)
             if meta.get("pending_stop"):
@@ -134,7 +165,12 @@ class ScreensService:
             active = False
             campaigns = self.worker.current_campaigns(business)
             for campaign in campaigns:
-                if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
+                if (
+                    campaign.owner_paused
+                    or not campaign.daily_limit_kop
+                    or campaign.id in held
+                    or campaign.platform_account_id in revoked
+                ):
                     continue
                 last = self.repository.last_status_change(
                     business.id, campaign.platform, "campaign", campaign.external_id
@@ -294,18 +330,21 @@ class ScreensService:
         items = []
         for experiment in experiments:
             started = experiment.started_at.astimezone(MOSCOW).date()
-            arms = []
-            for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):
-                arm = [
-                    row
-                    for row in rows
-                    if row.ad_id == ad_id
-                    and row.is_settled
-                    and started <= row.date <= today(self.worker.clock) - timedelta(days=2)
-                ]
-                arms.append(
-                    Metrics(impressions=sum(row.impressions for row in arm), clicks=sum(row.clicks for row in arm))
-                )
+            # Завершённая проверка показывает цифры, по которым её решили, а не накопленные после вывода.
+            change = self.repository.find(ChangeLog, id=experiment.change_id) if experiment.change_id else None
+            if experiment.status != "running" and change is not None:
+                end = change.created_at.astimezone(MOSCOW).date() - timedelta(days=2)
+            else:
+                end = today(self.worker.clock) - timedelta(days=2)
+            if change is not None and "control" in change.evidence:
+                arms = [Metrics(**change.evidence["control"]), Metrics(**change.evidence["variant"])]
+            else:
+                arms = []
+                for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):
+                    arm = [row for row in rows if row.ad_id == ad_id and started <= row.date <= end]
+                    arms.append(
+                        Metrics(impressions=sum(row.impressions for row in arm), clicks=sum(row.clicks for row in arm))
+                    )
             result = experiment.stats.get("result")
             conclusion = explain_experiment(ExperimentResult(**result), *arms) if result else None
             if experiment.status == "cancelled":
@@ -334,6 +373,7 @@ class ScreensService:
                     "comparing": comparing,
                     "arms": contents,
                     "remaining_impressions": remaining if experiment.status == "running" else 0,
+                    "period": {"from": started, "to": end} if end >= started else None,
                     "status": experiment.status,
                     "conclusion": conclusion
                     or (

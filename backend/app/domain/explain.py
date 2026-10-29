@@ -9,17 +9,18 @@ TEMPLATES = {
     # {period} — дни, по которым принято решение (period_start, period_end): расход на экране объявления считается
     # за другой период, и без дат цифры пояснения с ним не сходятся.
     "PAUSE_NO_LEADS": (
-        "{period} на объявление нажали {clicks}, но обращений не было. Остановили его, чтобы сберечь бюджет."
+        "{period} на объявление «{ad}» нажали {clicks}, но обращений не было. Остановили его, чтобы сберечь бюджет."
     ),
     "PAUSE_TOO_EXPENSIVE": (
-        "{period} потратили {spend} ₽, получили {leads}. Даже с учётом погрешности это слишком дорого "
-        "при ориентире {ref_cpl} ₽ за обращение. Остановили объявление."
+        "{period} на объявление «{ad}» потратили {spend} ₽, получили {leads}. Даже с учётом погрешности это "
+        "слишком дорого при ориентире {ref_cpl} ₽ за обращение. Остановили его."
     ),
     "PAUSE_LOW_CTR": (
-        "{period} объявление показали {impressions}, нажали {clicks}. На соседние нажимают чаще. Остановили его."
+        "{period} объявление «{ad}» показали {impressions}, нажали {clicks}. На соседние нажимают чаще. Остановили его."
     ),
     "SCALE_UP": (
-        "Объявления приносят обращения по подходящей цене. Повысили дневной лимит с {old_limit} до {new_limit} ₽."
+        "Объявления группы «{group}» (кампания «{campaign}») приносят обращения по подходящей цене. "
+        "Повысили дневной лимит этой группы с {old_limit} до {new_limit} ₽."
     ),
     "EXPERIMENT_START": (
         "Проверяем {hypothesis}: сравним по {n_per_arm} каждого объявления. Это займёт примерно {days}."
@@ -63,7 +64,7 @@ TEMPLATES = {
     "MARKING_SET": "Добавили обязательную маркировку рекламы: {marking}.",
     "LAUNCH": "Запустили рекламу. Месячный бюджет — {budget} ₽.",
     "OWNER_EDIT": "Вы изменили {object}. Дадим рекламе время поработать с новыми настройками.",
-    "REVERT": "Вы отменили изменение: {change}. Вернули предыдущие настройки.",
+    "REVERT": "Вы отменили {change}. Вернули прежние настройки.",
     "EXTERNAL_CHANGE": "Настройки {object} изменились в кабинете площадки. Учли это изменение.",
     "EXTERNAL_PAUSE": "Вы остановили кампанию в кабинете площадки — автопилот её не включает.",
     "EXTERNAL_RESUME": (
@@ -121,8 +122,11 @@ def rubles(kopecks: int) -> str:
 
 
 def plural(number: int | Decimal, forms: tuple[str, str, str]) -> str:
-    if isinstance(number, Decimal) and number != number.to_integral_value():
-        return f"{format(number, '.1f').replace('.', ',')} {forms[1]}"
+    if isinstance(number, Decimal):
+        # Округляем до десятых раньше, чем смотреть на дробь: 62,96 — «63 обращения», а не «63,0».
+        number = number.quantize(Decimal("0.1"))
+        if number != number.to_integral_value():
+            return f"{format(number, '.1f').replace('.', ',')} {forms[1]}"
     value = int(number)
     # Разряды отделяются пробелом, как в суммах и в интерфейсе: «11 040 раз».
     shown = f"{value:,}".replace(",", " ")
@@ -133,6 +137,29 @@ def plural(number: int | Decimal, forms: tuple[str, str, str]) -> str:
     else:
         word = forms[2]
     return f"{shown} {word}"
+
+
+UNDONE = {
+    "budget": "изменение дневного лимита",
+    "experiment_verdict": "вывод сравнения вариантов",
+    "resume": "включение рекламы",
+    "text": "замену текста объявления",
+    "image": "замену картинки объявления",
+    "launch": "запуск объявления",
+    "marking": "добавление маркировки",
+}
+
+
+def undone(kind: str, entity_type: str, params: Mapping[str, object]) -> str:
+    """Что отменил владелец — для записи об отмене: текст исходной записи («…Остановили объявление») читался бы
+    как новая остановка."""
+    if kind == "pause":
+        if entity_type != "ad":
+            return "остановку рекламы"
+        return f"остановку объявления «{params['ad']}»" if "ad" in params else "остановку объявления"
+    if kind == "budget" and "group" in params:
+        return f"повышение дневного лимита группы «{params['group']}»"
+    return UNDONE.get(kind, "изменение")
 
 
 def explain(
@@ -147,9 +174,6 @@ def explain(
         }.get(data["hypothesis"], data["hypothesis"])
     if "period_start" in data:
         data["period"] = period(date.fromisoformat(data["period_start"]), date.fromisoformat(data["period_end"]))
-    if "change" in data:
-        # Текст отменённого изменения сам заканчивается точкой, а шаблон ставит свою.
-        data["change"] = str(data["change"]).rstrip(" .")
     for key in MONEY_FIELDS & data.keys():
         data[key] = rubles(data[key])
     for key in PLURALS.keys() & data.keys():

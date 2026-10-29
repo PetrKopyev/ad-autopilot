@@ -18,7 +18,7 @@ from app.content.site_reader import SiteReadResult, extract_description, read_si
 from app.content.verify import DescriptionDraft, Fact, OwnerQuestion, Service
 from app.content.yandexgpt import CompletionResult, YandexGPTError
 from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
-from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum
+from app.domain.budget import budget_minimum
 from app.domain.explain import rubles
 from app.platforms.metrica import Metrica
 from app.platforms.regions import CITY_NAMES, normalize
@@ -437,9 +437,8 @@ def check_budget(amount: int) -> None:
     minimum = budget_minimum(("direct",), get_domain_settings())
     if amount < minimum:
         raise OnboardingError(
-            f"Минимальный бюджет — {rubles(minimum)} ₽ в месяц. Яндекс Директ требует не меньше "
-            f"{rubles(PLATFORM_MINIMUMS['direct']['weekly_limit_kop'])} ₽ с НДС на кампанию в неделю, а мы считаем с "
-            "запасом, чтобы реклама не вставала на паузу в конце недели и месяца."
+            f"Минимальный бюджет — {rubles(minimum)} ₽ в месяц. С меньшей суммой Яндекс Директ рекламу не "
+            "показывает, а мы ещё берём небольшой запас, чтобы реклама не останавливалась в конце месяца."
         )
 
 

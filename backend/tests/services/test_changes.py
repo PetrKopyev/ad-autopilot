@@ -104,7 +104,7 @@ async def apply_budget(repository, adapter, refs, **kwargs):
         platform="fake",
         kind="budget",
         reason_code="SCALE_UP",
-        reason_params={"old_limit": 10_000, "new_limit": 12_000},
+        reason_params={"old_limit": 10_000, "new_limit": 12_000, "group": "Маникюр", "campaign": "Автопилот"},
         **kwargs,
     )
 

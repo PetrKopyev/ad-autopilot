@@ -107,10 +107,10 @@ export function mockExperiments() {
   return { items: [
     { id: 2, title: copy.screens.mockImageExperiment, hypothesis: 'image' as const, comparing: copy.screens.mockImageComparing,
       arms: [1, 2].map((id) => ({ title: copy.screens.mockAdTitle, text, image: mockAsset(id).url })),
-      remaining_impressions: 3100, status: 'running' as const, conclusion: null },
+      remaining_impressions: 3100, period: null, status: 'running' as const, conclusion: null },
     { id: 1, title: copy.screens.mockExperiment, hypothesis: 'text' as const, comparing: copy.screens.mockComparing,
       arms: [{ title: copy.screens.mockAdTitle, text, image: null }, { title: copy.screens.mockSecondAdTitle, text, image: null }],
-      remaining_impressions: 4200, status: 'running' as const, conclusion: null },
+      remaining_impressions: 4200, period: null, status: 'running' as const, conclusion: null },
   ] };
 }
 

@@ -67,7 +67,12 @@ export async function disconnectAccount(id: number): Promise<StopResult> {
 export async function connectAccount(platform: 'login' | 'direct' | 'vk', businessId?: number) {
   if (mockEnabled) { (await import('./mocks')).mockSetupConnect(platform); return; }
   // Демо работает на условных площадках: вход в настоящий кабинет там некуда принять, и сервер отвечает голым текстом.
-  if (platform !== 'login' && (await getAuthConfig()).demo) throw new ApiError(copy.errors.demoConnect);
+  // Отключённый Директ демо возвращает само, без входа в Яндекс.
+  if (platform !== 'login' && (await getAuthConfig()).demo) {
+    if (platform === 'vk') throw new ApiError(copy.errors.demoConnect);
+    await api('/api/demo/reconnect', { method: 'POST' });
+    return;
+  }
   const params = new URLSearchParams();
   if (platform !== 'vk') params.set('purpose', platform);
   if (businessId) params.set('business_id', String(businessId));

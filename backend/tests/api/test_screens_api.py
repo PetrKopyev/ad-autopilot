@@ -5,11 +5,23 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from app.db.models import Ad, Business, Campaign, ChangeLog, Experiment, Session, StatsDaily, User, WorkerRun
+from app.db.models import (
+    Ad,
+    Business,
+    Campaign,
+    ChangeLog,
+    Experiment,
+    PlatformAccount,
+    Session,
+    StatsDaily,
+    User,
+    WorkerRun,
+)
 from app.platforms.base import Operation, PlatformError
 from app.services.changes import ChangeConflict
 from app.services.rollback import RollbackService
 from app.services.screens import ScreensService
+from app.worker.clock import MOSCOW
 from tests.integration.harness import make_world
 
 ROUTES = [
@@ -479,7 +491,7 @@ def test_budget_below_direct_minimum_is_rejected_with_the_minimum(setup):
     world.repository.save(PlatformAccount(business_id=world.business.id, platform="vk", status="ok"))
     response = client.put("/api/business/budget", json={"month_budget_kop": 1_549_999})
     assert response.status_code == 422
-    assert response.json()["detail"].startswith("Минимальный бюджет — 15 500 ₽ в месяц. Яндекс Директ требует")
+    assert response.json()["detail"].startswith("Минимальный бюджет — 15 500 ₽ в месяц. С меньшей суммой")
     assert world.business.month_budget_kop == 10_000_000
 
 
@@ -502,14 +514,15 @@ def test_autopilot_stop_reason_does_not_repeat_status_label(setup):
                 "spend": 21_500,
                 "leads": 0,
                 "ref_cpl": 10_000,
+                "ad": ad.title,
             },
         )
     )
     row = next(item for item in client.get("/api/ads").json()["items"] if item["id"] == ad.id)
     history = world.repository.rows(ChangeLog)[-1].reason_text
     assert row["status"] == "paused_auto"
-    assert history.endswith("слишком дорого при ориентире 100 ₽ за обращение. Остановили объявление.")
-    assert row["reason"] == history.removesuffix(" Остановили объявление.")
+    assert history.endswith("слишком дорого при ориентире 100 ₽ за обращение. Остановили его.")
+    assert row["reason"] == history.removesuffix(" Остановили его.")
 
 
 def test_business_returns_saved_setup_steps(setup):
@@ -546,3 +559,80 @@ def test_budget_below_vk_minimum_is_saved_with_warning_and_vk_resumes_after_rais
     assert world.adapter._states[world.refs.campaign_id].status == "active"
     assert world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
     assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+def test_revoked_account_is_named_and_stops_running_status(setup):
+    client, world = setup
+    world.business.status = "running"
+    account = world.repository.rows(PlatformAccount, 1)[0]
+    account.status = "revoked"
+    world.campaign.status = "paused_owner"
+    response = client.get("/api/autopilot/status").json()
+    assert response["status"] == "paused"
+    item = next(row for row in response["needs_attention"] if row["id"] == "revoked_direct")
+    assert item["title"] == "Кабинет Яндекс Директ отключён"
+    assert item["description"].startswith("Реклама там остановлена.")
+    assert not any(row["id"] == "platform" for row in response["needs_attention"])
+    world.campaign.status = "active"
+    item = next(
+        row for row in client.get("/api/autopilot/status").json()["needs_attention"] if row["id"] == "revoked_direct"
+    )
+    assert "не смогли подтвердить" in item["description"]
+    world.business.status = "paused"
+    response = client.post("/api/autopilot/resume")
+    assert response.status_code == 409
+    assert "Подключите кабинет" in response.json()["detail"]
+
+
+def test_concluded_experiment_shows_numbers_and_period_of_the_verdict(setup):
+    client, world = setup
+    control, variant = list(world.ads.values())[:2]
+    started = world.clock.now
+    world.clock.advance(days=12)
+    verdict = ChangeLog(
+        id=500,
+        business_id=1,
+        actor="autopilot",
+        kind="experiment_verdict",
+        platform="direct",
+        entity_type="ad",
+        entity_id=control.external_id,
+        operations=[],
+        reason_code="EXPERIMENT_VERDICT",
+        reason_params={},
+        reason_text="Вывод.",
+        evidence={
+            "control": {"spend": 0, "impressions": 3000, "clicks": 30, "leads": 0},
+            "variant": {"spend": 0, "impressions": 3100, "clicks": 62, "leads": 0},
+        },
+        status="applied",
+        created_at=world.clock.now,
+    )
+    world.repository.save(verdict)
+    for id_, status in ((1, "concluded"), (2, "running")):
+        world.repository.save(
+            Experiment(
+                id=id_,
+                business_id=1,
+                ad_group_id=control.ad_group_id,
+                hypothesis="text",
+                control_ad_id=control.id,
+                variant_ad_id=variant.id,
+                planned_n_per_arm=2000,
+                started_at=started,
+                deadline=started + timedelta(days=14),
+                status=status,
+                change_id=500 if status == "concluded" else None,
+                stats={"result": {"verdict": "variant", "reason_code": "EXPERIMENT_VERDICT", "p_value": 0.01}}
+                if status == "concluded"
+                else {},
+            )
+        )
+    world.clock.advance(days=5)
+    running, concluded = client.get("/api/experiments").json()["items"]
+    first = started.astimezone(MOSCOW).date()
+    assert concluded["period"] == {"from": first.isoformat(), "to": (first + timedelta(days=10)).isoformat()}
+    assert running["period"] == {"from": first.isoformat(), "to": (first + timedelta(days=15)).isoformat()}
+    assert concluded["conclusion"].startswith(
+        "Объявление Б показывали 3 100 раз, на него нажали 62 раза (2,0%) против 1,0% у А."
+    )

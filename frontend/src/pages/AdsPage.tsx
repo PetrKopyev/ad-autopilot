@@ -8,7 +8,7 @@ import { getBusinessToday, lastDays } from '../api/period';
 import { displayDate } from '../format';
 import { useResource } from '../api/useResource';
 import type { Ad, AdStatus, Experiment } from '../api/types';
-import { DemoNotice, NullableMoney, adLabels, campaignStopped, fewAdsReason, shownStatus } from './StatsShared';
+import { DemoNotice, NullableMoney, adLabels, campaignStopped, experimentPeriod, fewAdsReason, shownStatus } from './StatsShared';
 import { getBusiness } from '../api/settings';
 import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
 import './Ads.css';
@@ -84,6 +84,7 @@ function ExperimentCard({ experiment }: { experiment: Experiment }) {
     {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
     <p className={`ads-verdict${experiment.conclusion ? ' ads-verdict--done' : ''}`}><strong>{copy.ads.conclusion}: </strong>
       {experiment.conclusion ?? (experiment.status === 'running' ? copy.common.insufficient : copy.common.unknown)}</p>
+    {experimentPeriod(experiment) && <p className="muted">{experimentPeriod(experiment)}</p>}
   </article>;
 }
 

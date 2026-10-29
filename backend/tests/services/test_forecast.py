@@ -75,7 +75,7 @@ def test_measured_conversion_needs_enough_visits() -> None:
     conversion = measured(400, 12)
     assert conversion.source == "metrica"
     assert conversion.min < Decimal("0.03") < conversion.max
-    assert "12 из 400 визитов с рекламы Яндекс Директа (поиск и сети)" in conversion.label
+    assert "из 400 посетителей с рекламы в Яндексе заявку оставили 12" in conversion.label
     assert measured(150, 0).min == 0
 
 
@@ -212,14 +212,25 @@ async def test_ready_forecast_is_cached(http: httpx.AsyncClient, direct: Direct)
         "min": 0.01,
         "max": 0.03,
         "source": "benchmark",
-        "label": "ориентир по рынку услуг, не измерение",
+        "label": "средняя цифра для сайтов услуг",
     }
-    assert [source["what"] for source in result["sources"]] == ["Клики и цена клика", "Бюджет", "Доля обращений"]
+    assert [source["what"] for source in result["sources"]] == [
+        "Клики и цена клика",
+        "Бюджет",
+        "Сколько посетителей оставляют заявку",
+    ]
     assert result["sources"][2]["url"] == BENCHMARK.url
     assert result["sources"][2]["source"] == (
-        "ориентир по рынку услуг, не измерение, на визит. Своей доли нет: в Метрике не выбраны цели обращений."
+        "Средняя цифра для сайтов услуг. Своих цифр по сайту нет: не выбрано, что на сайте считать обращением."
     )
-    assert "визитов на сайт бывает меньше, чем кликов" in result["explanation"]
+    assert "Не каждый, кто нажал на объявление, доходит до сайта" in result["explanation"]
+    # Прогноз считается не на весь бюджет: текст говорит, на какую сумму и почему.
+    assert (
+        "Из бюджета 60\xa0000 ₽ на Яндекс Директ приходится 42\xa0000 ₽, остальное — на ВКонтакте; "
+        "8% оставляем запасом, чтобы расход не вышел за бюджет." in result["explanation"]
+    )
+    for word in ("Метрик", "визит", "90 дней", "доля"):
+        assert word not in result["explanation"] and word not in result["sources"][2]["source"]
     assert result["vk"] == {"status": "unavailable", "label": VK_NOTE}
     assert result["computed_at"] == NOW.isoformat() and result["demo"] is False
     assert "Это прогноз, он может ошибаться" in result["explanation"] and not result["explanation_by_ai"]
@@ -365,8 +376,8 @@ async def test_conversion_from_metrica(http: httpx.AsyncClient, direct: Direct) 
 
     conversion = result["conversion"]
     assert conversion["source"] == "metrica" and conversion["min"] < 0.05 < conversion["max"]
-    assert "20 из 400 визитов с рекламы Яндекс Директа" in conversion["label"]
-    assert result["sources"][2]["source"] == f"{conversion['label']}, на визит."
+    assert "из 400 посетителей с рекламы в Яндексе заявку оставили 20" in conversion["label"]
+    assert result["sources"][2]["source"] == f"{conversion['label'][0].upper()}{conversion['label'][1:]}."
     assert result["leads_min"] == int(result["clicks_min"] * conversion["min"])
 
 
@@ -385,7 +396,7 @@ async def test_metrica_failure_falls_back_to_benchmark(
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["conversion"]["source"] == "benchmark"
-    reason = "Свою долю по Метрике посчитать не удалось: Метрика ответила ошибкой."
+    reason = "Свои цифры по сайту получить не удалось: счётчик посещений не ответил."
     assert reason in result["sources"][2]["source"] and reason in result["explanation"]
     # Текст ошибки Метрики пользователю не показывается — только в журнале.
     assert "Нет доступа" not in result["explanation"] and "Нет доступа" not in result["sources"][2]["source"]
@@ -401,7 +412,7 @@ async def test_few_metrica_visits_say_why_benchmark(http: httpx.AsyncClient, dir
     result = await case.service.forecast(case.business, NOW, TODAY)
 
     assert result["conversion"]["source"] == "benchmark"
-    assert "за 90 дней 57 визитов с рекламы Яндекс Директа, а нужно не меньше 100" in result["sources"][2]["source"]
+    assert "с рекламы в Яндексе на него заходили слишком редко" in result["sources"][2]["source"]
 
 
 async def test_ai_explanation_is_used_only_without_new_numbers(http: httpx.AsyncClient, direct: Direct) -> None:
@@ -495,7 +506,7 @@ def test_wilson_when_every_visit_reached_goal() -> None:
     conversion = measured(100, 100)
 
     assert Decimal(0) < conversion.min < conversion.max <= Decimal(1)
-    assert "100 из 100 визитов" in conversion.label
+    assert "из 100 посетителей с рекламы в Яндексе заявку оставили 100" in conversion.label
 
 
 def test_measured_at_exactly_min_visits() -> None:
@@ -648,3 +659,15 @@ async def test_cached_forecast_is_not_shared_between_businesses(http: httpx.Asyn
     other = await second.service.forecast(second.business, NOW, TODAY)
 
     assert other["status"] == "pending" and direct.calls[-1]["method"] == "CreateNewForecast"
+
+
+async def test_direct_only_forecast_says_it_is_not_the_whole_budget(http: httpx.AsyncClient, direct: Direct) -> None:
+    done(direct)
+    case = world(http, platforms=("direct",))
+    await case.service.forecast(case.business, NOW, TODAY)
+    result = await case.service.forecast(case.business, NOW, TODAY)
+    assert result["budget_rub"] == 55200.0
+    assert (
+        "Это не весь бюджет 60\xa0000 ₽: 8% оставляем запасом, чтобы расход не вышел за бюджет."
+        in result["explanation"]
+    )

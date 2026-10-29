@@ -12,7 +12,7 @@ import { useBusinessNow } from '../api/useBusinessNow';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
 import type { Ad, AdStatus, AdsResponse, Daily, Experiment, Summary } from '../api/types';
 import { displayClock, displayDate, displayDateTime, justNow } from '../format';
-import { DemoNotice, NullableMoney, campaignStopped, fewAdsReason, platformName, shownStatus } from './StatsShared';
+import { DemoNotice, NullableMoney, campaignStopped, experimentPeriod, fewAdsReason, platformName, shownStatus } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { formatMoney } from '../components/Money';
 import { getBusiness, resumeAutopilot } from '../api/settings';
@@ -161,6 +161,7 @@ function Experiments({ items, quiet }: { items: Experiment[]; quiet: string | nu
     </li>)}</ol>
     {experiment.status === 'running' && <p className="muted">{copy.screens.remainingShows(experiment.remaining_impressions)}</p>}
     {experiment.conclusion && <p className="home-ab__verdict"><strong>{copy.ads.conclusion}: </strong>{experiment.conclusion}</p>}
+    {experiment.conclusion && experimentPeriod(experiment) && <p className="muted">{experimentPeriod(experiment)}</p>}
   </li>)}</ul>;
 }
 
@@ -275,7 +276,7 @@ export function HomePage() {
   const statusText = noShows ? copy.home.noShows : status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
       : status?.status === 'draft' ? copy.screens.draft : copy.home.pausedLine;
-  const platformTrouble = !!status?.needs_attention.some((item) => item.id === 'platform');
+  const platformTrouble = !!status?.needs_attention.some((item) => item.id === 'platform' || item.id.startsWith('revoked_'));
   const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at) && !noShows && !platformTrouble;
   const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' && !noShows ? 'success' : 'warning';
   const question = questions.data?.items.find((item) => !item.answered_at);

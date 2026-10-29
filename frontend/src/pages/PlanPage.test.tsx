@@ -263,7 +263,7 @@ it('у запущенного плана с несколькими площад�
 
 function forecast(fields: Partial<Forecast>): Forecast {
   return { status: 'ready', leads_min: 9, leads_max: 26, clicks_min: 450, clicks_max: 870, cpc_rub: 32, cpc_rub_max: 61, budget_rub: 26000,
-    conversion: { min: 0.02, max: 0.03, source: 'benchmark', label: 'ориентир по рынку услуг, не измерение' },
+    conversion: { min: 0.02, max: 0.03, source: 'benchmark', label: 'средняя цифра для сайтов услуг' },
     explanation: 'За месяц 450–870 кликов.', explanation_by_ai: false,
     sources: [{ what: 'Клики и цена клика', source: 'Яндекс Директ, прогноз бюджета', url: 'https://yandex.ru/dev/direct/' }],
     computed_at: '2026-10-29T10:00:00Z', demo: false, vk: null, ...fields };

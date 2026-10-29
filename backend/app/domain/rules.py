@@ -76,7 +76,12 @@ def ref_cpl(
         return int(avg_check * client_conversion(known, settings) * settings.check_ad_share)
     totals = [total_metrics(settled_days(ad.days, today, settings)) for ad in ads]
     prices = [Decimal(item.spend) / item.leads for item in totals if item.leads]
-    return int(median(prices)) if len(prices) >= settings.min_reference_units else None
+    if len(prices) >= settings.min_reference_units:
+        return int(median(prices))
+    # Одна-две услуги без среднего чека: медиану брать не из чего, опорой служит средняя цена обращения всей рекламы,
+    # как только обращений столько же, сколько нужно объявлений для медианы.
+    leads = sum(item.leads for item in totals)
+    return sum(item.spend for item in totals) // leads if leads >= settings.min_reference_units else None
 
 
 def has_anomaly(days: Sequence[DaySpend], today: date, settings: DomainSettings = DEFAULT_SETTINGS) -> bool:
