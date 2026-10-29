@@ -19,7 +19,7 @@
 .stats-chart { display: block; width: 100%; height: auto; overflow: visible; }
 .stats-chart text { font-size: 13px; fill: var(--color-muted); }
 .stats-chart-key { display: flex; flex-wrap: wrap; gap: 24px; }
-.stats-chart-key span::before { content: ''; display: inline-block; width: 20px; height: 3px; vertical-align: middle; margin-right: 8px; background: var(--color-primary); }
+.stats-chart-key span::before { content: ''; display: inline-block; width: 20px; height: 3px; vertical-align: middle; margin-right: 8px; background: #245e4c; }
 .stats-chart-key span:last-child::before { background: #326bc0; }
 .stats-chart-details summary { cursor: pointer; min-height: 44px; padding: 8px 0; }
 @media (max-width: 1000px) { .stats-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
