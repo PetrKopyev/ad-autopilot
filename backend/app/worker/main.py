@@ -69,6 +69,14 @@ def build_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
     return scheduler
 
 
+def log_mode() -> None:
+    # warning, а не info: под uvicorn журнал приложения показывает только предупреждения.
+    if settings.dry_run:
+        logger.warning("Пробный режим: автопилот только предлагает")
+    else:
+        logger.warning("Рабочий режим: автопилот применяет решения")
+
+
 async def start_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
     if demo_enabled():
         logger.warning("Демо-вход включён: стенд только для локальной проверки, без настоящих площадок.")
@@ -81,6 +89,7 @@ async def start_scheduler(registry: AdapterRegistry) -> AsyncIOScheduler:
 
 
 async def serve() -> None:
+    log_mode()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):

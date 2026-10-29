@@ -116,7 +116,8 @@ class AdapterRegistry:
             client=self.http,
             counter_ids=(info.counter_id,) if info.counter_id else (),
             goal_ids=info.goal_ids,
-            # Ключевые цели стратегии требуют ценности конверсии: берём средний чек, если владелец его указал.
+            # Ценность ключевых целей — средний чек, если владелец его указал. В кампанию они уходят только при
+            # стратегии по конверсиям (DirectAdapter._campaign_settings).
             priority_goals=dict.fromkeys(info.goal_ids, info.goal_value_kop) if info.goal_value_kop else None,
             href=info.href,
             marking_confirmed=info.marking_confirmed,

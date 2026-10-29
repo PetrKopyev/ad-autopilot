@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import ExitStack
 from math import ceil
 from time import monotonic
@@ -15,6 +16,8 @@ from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
+
+logger = logging.getLogger(__name__)
 
 
 async def read_spend(
@@ -252,8 +255,12 @@ async def balance_notice(worker: Worker, business: Business) -> None:
         daily = sum(item.daily_limit_kop for item in campaigns if item.platform == platform)
         try:
             balance = await worker.resolve_adapter(business.id, platform).get_balance_hint()
-        except CLOSED_ACCOUNT:
+        except CLOSED_ACCOUNT as error:
             # Остаток — подсказка: площадка не ответила — прежнее состояние сохраняется до следующего опроса.
+            # В журнал — только тип и текст ошибки, без запроса и токена.
+            logger.warning(
+                "Остаток счёта %s бизнеса %s не получен: %s: %s", platform, business.id, type(error).__name__, error
+            )
             if platform in low:
                 current[platform] = low[platform]
             continue

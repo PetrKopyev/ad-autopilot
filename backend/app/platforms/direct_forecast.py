@@ -61,14 +61,21 @@ def _count(value: Any) -> int:
     return value
 
 
-def _price(value: Any) -> Decimal:
+def _decimal(value: Any) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise _invalid()
     try:
-        price = Decimal(str(value))
+        number = Decimal(str(value))
     except InvalidOperation:
         raise _invalid() from None
-    if not price.is_finite() or price < 0:
+    if not number.is_finite():
+        raise _invalid()
+    return number
+
+
+def _price(value: Any) -> Decimal:
+    price = _decimal(value)
+    if price < 0:
         raise _invalid()
     return price
 
@@ -157,7 +164,8 @@ class DirectForecastClient:
         if not accounts:
             return None
         try:
-            return sum((_price(item["Amount"]) for item in accounts), Decimal(0))
+            # Счёт в минусе — остаток 0: предупреждение о балансе приходит, а не падает разбор ответа.
+            return max(sum((_decimal(item["Amount"]) for item in accounts), Decimal(0)), Decimal(0))
         except (KeyError, TypeError):
             raise _invalid() from None
 

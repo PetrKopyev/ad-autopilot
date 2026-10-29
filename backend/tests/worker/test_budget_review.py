@@ -649,14 +649,16 @@ async def test_low_balance_is_notified_once_until_the_account_is_topped_up():
     assert len(notices()) == 2
 
 
-async def test_unknown_balance_or_platform_error_does_not_notify(monkeypatch):
+async def test_unknown_balance_or_platform_error_does_not_notify(monkeypatch, caplog):
     from app.services.budget_guard import budget_guard
 
     world = await make_world()
     await budget_guard(world.worker(), world.business)
     monkeypatch.setattr(world.adapter, "get_balance_hint", AsyncMock(side_effect=PlatformError("Нет ответа.")))
     world.clock.advance(hours=0.5)
-    await budget_guard(world.worker(), world.business)
+    with caplog.at_level("WARNING", logger="app.services.budget_guard"):
+        await budget_guard(world.worker(), world.business)
+    assert "Остаток счёта direct" in caplog.text and "PlatformError: Нет ответа." in caplog.text
     assert not [
         row
         for row in world.repository.rows(WorkerRun, world.business.id, kind="notification")

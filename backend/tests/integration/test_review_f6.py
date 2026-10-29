@@ -277,6 +277,27 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
 
 
+async def test_rejected_ad_is_not_rewritten_in_dry_run(monkeypatch):
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    ad = next(iter(world.ads.values()))
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", ad.external_id, "text", ad.text, "Исправлено")])
+    await sync_moderation(world.worker(dry_run=True, rewrite_rejected=rewrite), world.business)
+    rewrite.assert_not_awaited()
+    assert world.business.settings["_worker"].get("rewritten", []) == []
+    assert not world.changes(reason_code="REJECTED_REWRITE")
+    assert [
+        run.log[0]["reason_code"] for run in world.repository.rows(WorkerRun, world.business.id, kind="notification")
+    ] == ["MODERATION_REJECTED"]
+
+
 async def test_paid_rewrite_is_not_repeated_when_platform_did_not_confirm_the_text(monkeypatch):
     from app.platforms.base import ModerationInfo
 

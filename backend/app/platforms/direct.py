@@ -426,7 +426,9 @@ class DirectAdapter:
         }
         if self._text_campaign:
             settings["BiddingStrategy"]["Network"]["NetworkDefault"] = {}
-        if self._goals:
+        # Ключевые цели нужны только стратегии по конверсиям; при оплате за клики они меняли бы оптимизацию,
+        # а для отчёта по обращениям хватает goal_ids.
+        if self._strategy == "WB_MAXIMUM_CONVERSION_RATE":
             settings["PriorityGoals"] = {
                 "Items": [{"GoalId": goal, "Value": value * MICROS_PER_KOP} for goal, value in self._goals.items()]
             }
@@ -1133,12 +1135,15 @@ class DirectAdapter:
         return sum(row.cost_kop for row in await self.get_stats(today, today, "campaign"))
 
     async def get_balance_hint(self) -> int | None:
-        """Остаток общего счёта в копейках с НДС (API v4 Live); общего счёта нет — None."""
+        """Остаток общего счёта в копейках (API v4 Live); общего счёта нет — None.
+
+        Amount берём как есть, без пересчёта на НДС: не подтверждено, с НДС он или без. Если без, остаток
+        занижен и предупреждение о балансе придёт раньше — это безопаснее, чем опоздать."""
         async with DirectForecastClient(
             self._token, config=self._config, client=self._client, timeout=self._timeout
         ) as live:
             amount = await live.balance()
-        return None if amount is None else self._from_api(int(amount * 1_000_000))
+        return None if amount is None else int(amount * 100)
 
     async def limits(self) -> PlatformLimits:
         return self._limits

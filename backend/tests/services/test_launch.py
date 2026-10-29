@@ -411,6 +411,8 @@ async def test_registry_passes_business_goals_to_direct(http) -> None:
     adapter = registry.build("direct", info(goal_ids=(34, 56)))
     assert adapter._report_goals == (34, 56) and not adapter._goals
     adapter = registry.build("direct", info(goal_ids=(34,), goal_value_kop=150000))
+    assert "PriorityGoals" not in adapter._campaign_settings(1000)
+    adapter._strategy = "WB_MAXIMUM_CONVERSION_RATE"
     assert adapter._campaign_settings(1000)["PriorityGoals"] == {"Items": [{"GoalId": 34, "Value": 1500000000}]}
 
 

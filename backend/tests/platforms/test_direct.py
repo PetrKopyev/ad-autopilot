@@ -279,7 +279,8 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     settings = campaign["UnifiedCampaign"]
     assert "TextCampaign" not in campaign
     assert settings["CounterIds"] == {"Items": [12]}
-    assert settings["PriorityGoals"] == {"Items": [{"GoalId": 34, "Value": 125000000}]}
+    # Оплата за клики: ключевые цели не отправляются, хотя ценность цели известна.
+    assert "PriorityGoals" not in settings
     assert settings["BiddingStrategy"]["Search"] == {
         "BiddingStrategyType": "WB_MAXIMUM_CLICKS",
         "WbMaximumClicks": {"WeeklySpendLimit": 5000000000},
@@ -343,6 +344,9 @@ async def test_conversion_strategy(adapter, api, plan):
     assert strategy == {
         "BiddingStrategyType": "WB_MAXIMUM_CONVERSION_RATE",
         "WbMaximumConversionRate": {"WeeklySpendLimit": 5000000000, "GoalId": 34},
+    }
+    assert server.rows["campaigns"][0]["UnifiedCampaign"]["PriorityGoals"] == {
+        "Items": [{"GoalId": 34, "Value": 125000000}]
     }
     adapter._goals[35] = 100
     assert adapter._campaign_settings(100)["BiddingStrategy"]["Search"]["WbMaximumConversionRate"]["GoalId"] == 13
@@ -719,8 +723,10 @@ async def test_spend_today_and_minimums(adapter, api):
     "include_vat,accounts,expected",
     [
         (True, [{"AccountID": 1, "Amount": "1234.56", "Currency": "RUB"}], 123_456),
-        # Остаток без НДС переводится в те же единицы, что бюджет и расход.
-        (False, [{"AccountID": 1, "Amount": "1000", "Currency": "RUB"}], 122_000),
+        # Остаток не пересчитывается на НДС: не подтверждено, с НДС ли Amount; заниженный остаток безопаснее.
+        (False, [{"AccountID": 1, "Amount": "1000", "Currency": "RUB"}], 100_000),
+        # Счёт в минусе — остаток 0, предупреждение о балансе приходит.
+        (False, [{"AccountID": 1, "Amount": "-150.5", "Currency": "RUB"}], 0),
         (True, [], None),
     ],
 )

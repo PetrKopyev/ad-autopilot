@@ -24,7 +24,7 @@ from app.api.vk import router as vk_router
 from app.config import settings
 from app.db.session import SessionLocal, engine
 from app.services.registry import AdapterRegistry, db_loader
-from app.worker.main import DemoRegistry, start_scheduler
+from app.worker.main import DemoRegistry, log_mode, start_scheduler
 
 
 class WithoutQuery(logging.Filter):
@@ -42,6 +42,7 @@ logging.getLogger("uvicorn.access").addFilter(WithoutQuery())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    log_mode()
     async with httpx.AsyncClient(timeout=30) as http:
         app.state.http = http
         registry_type = DemoRegistry if settings.platform_mode == "fake" else AdapterRegistry

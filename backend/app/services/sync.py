@@ -149,9 +149,11 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                         target_id=key,
                     )
                     # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
+                    # В пробном режиме ИИ не зовём и ключ не отмечаем: владельцу остаётся уведомление об отказе.
                     reason = (info.reason or "").casefold()
                     if (
                         worker.rewrite_rejected
+                        and not worker.proposed(business)
                         and key not in rewritten
                         and (info.entity_id in shared or info.entity_id not in rewritten)
                         and any(word in reason for word in ("текст", "заголов", "опечат"))
