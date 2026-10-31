@@ -44,6 +44,8 @@ MAX_GOALS = 10
 AUTH_URL = "https://oauth.yandex.ru/authorize"
 TOKEN_URL = "https://oauth.yandex.ru/token"
 STRATEGIES = {"WB_MAXIMUM_CLICKS": "WbMaximumClicks", "WB_MAXIMUM_CONVERSION_RATE": "WbMaximumConversionRate"}
+# Служебная фраза-автотаргетинга единых кампаний: Директ создаёт её сам, API не даёт ни остановить, ни удалить.
+AUTOTARGETING_KEYWORD = "---autotargeting"
 MARKING_UNSUPPORTED_CODES = {54, 55, 8000}
 MARKING_FIELDS = {
     "FieldNames": ["ClientId", "Phone"],
@@ -628,6 +630,11 @@ class DirectAdapter:
                     "FieldNames": ["Id", "Keyword", "State"],
                 },
             )
+            # Служебная фраза-автотаргетинга единых кампаний: её API не даёт ни остановить, ни удалить,
+            # а тратить бюджет она начнёт только когда кампания показывает объявления — недельный лимит
+            # всё равно ограничивает расход. Не привязываем к плану и не считаем чужой (иначе падал
+            # suspend ниже), в эвристике совпадения по числу не участвует.
+            keywords = [item for item in keywords if item.get("Keyword") != AUTOTARGETING_KEYWORD]
             complete_targets = len(keywords) == len(group.targets)
             for target in group.targets:
                 match = next((item for item in keywords if item.get("Keyword") == target.value), None)
@@ -840,10 +847,15 @@ class DirectAdapter:
                     "Keywords",
                     {
                         "SelectionCriteria": {"AdGroupIds": [id_]},
-                        "FieldNames": ["Id"],
+                        # Keyword нужен, чтобы отличить служебный автотаргетинг единых кампаний:
+                        # API не даёт ни остановить, ни запустить его, поэтому в смену статуса
+                        # группы он не включается.
+                        "FieldNames": ["Id", "Keyword"],
                     },
                 )
                 for item in keywords:
+                    if item.get("Keyword") == AUTOTARGETING_KEYWORD:
+                        continue
                     await self.apply(Operation("set_status", "target", str(item["Id"]), "status", op.before, op.after))
                 return
             method = {

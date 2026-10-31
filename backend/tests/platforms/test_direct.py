@@ -115,6 +115,8 @@ class DirectServer:
         self.campaign_state = "ON"
         # По живому API у черновика кампании State="OFF" и Status="DRAFT".
         self.campaign_status = "ACCEPTED"
+        # Единые кампании сами создают в новой группе служебную фразу-автотаргетинг.
+        self.autotargeting = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         service = request.url.path.rsplit("/", 1)[-1]
@@ -160,6 +162,18 @@ class DirectServer:
                     row["CampaignId"] for row in self.rows["adgroups"] if row["Id"] == item["AdGroupId"]
                 )
             self.rows[service].append(item)
+            if service == "adgroups" and self.autotargeting:
+                self.next_id += 1
+                self.rows["keywords"].append(
+                    {
+                        "Id": self.next_id,
+                        "CampaignId": item["CampaignId"],
+                        "AdGroupId": item["Id"],
+                        "Keyword": "---autotargeting",
+                        "State": "ON",
+                        "Status": "ACCEPTED",
+                    }
+                )
             return httpx.Response(200, json={"result": {"AddResults": [{"Id": item["Id"]}]}})
         if method == "update":
             for update in params[key]:
@@ -167,6 +181,21 @@ class DirectServer:
             return httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 1}]}})
         for item in self.rows[service]:
             if item["Id"] in params.get("SelectionCriteria", {}).get("Ids", []):
+                if service == "keywords" and item.get("Keyword") == "---autotargeting" and method == "suspend":
+                    # Как живой API: автотаргетинг нельзя остановить.
+                    return httpx.Response(
+                        200,
+                        json={
+                            "result": {
+                                "SuspendResults": [
+                                    {
+                                        "Id": item["Id"],
+                                        "Errors": [{"Code": 5000, "Message": "Автотаргетинг не может быть остановлен"}],
+                                    }
+                                ]
+                            }
+                        },
+                    )
                 item["State"] = {
                     "suspend": "SUSPENDED",
                     "resume": "ON",
@@ -391,6 +420,48 @@ async def test_create_tree_suspends_new_campaign_when_not_draft(adapter, api, pl
     assert refs.campaign_id == "101"
     assert ("campaigns", "suspend", {"SelectionCriteria": {"Ids": [101]}}) in server.writes
     assert server.rows["campaigns"][0]["State"] == "SUSPENDED"
+
+
+async def test_create_tree_ignores_service_autotargeting_phrase(adapter, api, plan):
+    """Единые кампании сами создают в группе служебную фразу-автотаргетинг: её API не даёт ни остановить,
+    ни удалить, поэтому она не привязывается к плану и не считается чужой фразой, suspend для неё
+    не вызывается, и в эвристике совпадения по числу она не участвует."""
+    server = DirectServer()
+    server.autotargeting = True
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    rows = [row for row in server.rows["keywords"] if row["AdGroupId"] == int(refs.groups["nails"])]
+    automatic = next(row for row in rows if row["Keyword"] == "---autotargeting")
+    planned = next(row for row in rows if row["Keyword"] == "маникюр")
+    assert refs.targets == {"phrase": str(planned["Id"])}
+    # Одна служебная фраза против одной плановой — не расхождение содержимого, ошибок нет.
+    assert adapter.content_mismatches == []
+    # Служебная фраза активна и не остановлена как чужая.
+    assert automatic["State"] == "ON"
+    assert ("keywords", "suspend") not in [(service, method) for service, method, _ in server.writes]
+    # Повторный сбор дерева видит обе фразы: плановую привязываем, автотаргетинг снова не трогаем.
+    adapter._trees.clear()
+    assert await adapter.create_campaign_tree(plan) == refs
+    assert automatic["State"] == "ON"
+    assert ("keywords", "suspend") not in [(service, method) for service, method, _ in server.writes]
+
+
+async def test_create_tree_autotargeting_does_not_trigger_complete_targets_mismatch(adapter, api, plan):
+    """Владелец удалил плановую фразу из кабинета, служебный автотаргетинг остался: совпадение
+    по числу (одна фраза против одной плановой) не считается расхождением содержимого — фраза
+    просто создаётся заново, без записи в журнал."""
+    server = DirectServer()
+    server.autotargeting = True
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    original = await adapter.create_campaign_tree(plan)
+    server.rows["keywords"] = [row for row in server.rows["keywords"] if row["Keyword"] != "маникюр"]
+    adapter._trees.clear()
+    refs = await adapter.create_campaign_tree(plan)
+    planned = next(row for row in server.rows["keywords"] if row["Keyword"] == "маникюр")
+    assert refs.targets == {"phrase": str(planned["Id"])}
+    assert refs.targets != original.targets
+    assert adapter.content_mismatches == []
+    assert adapter.foreign_stops == []
 
 
 async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan):
@@ -1106,6 +1177,26 @@ async def test_group_pause_and_resume_are_idempotent(adapter, api, plan):
     await adapter.apply(operation.inverse())
     assert len(server.writes) == writes
     assert (await adapter.get_state(refs))[refs.groups["nails"]].status == "active"
+
+
+async def test_group_pause_and_resume_skip_service_autotargeting(adapter, api, plan):
+    """Пауза группы не распространяется на служебный автотаргетинг: API отклоняет suspend такой фразы,
+    а плановые фразы останавливаются и запускаются как раньше."""
+    server = DirectServer()
+    server.autotargeting = True
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    adapter._marking_confirmed = True
+    automatic = next(row for row in server.rows["keywords"] if row["Keyword"] == "---autotargeting")
+    planned = next(row for row in server.rows["keywords"] if row["Keyword"] == "маникюр")
+    await adapter.apply(
+        Operation("set_status", "group", refs.groups["nails"], "status", "active", "paused_auto")
+    )
+    assert automatic["State"] == "ON" and planned["State"] == "SUSPENDED"
+    await adapter.apply(
+        Operation("set_status", "group", refs.groups["nails"], "status", "paused_auto", "active")
+    )
+    assert automatic["State"] == "ON" and planned["State"] == "ON"
 
 
 async def test_archive_inverse_unarchives_then_resumes(adapter, api):
