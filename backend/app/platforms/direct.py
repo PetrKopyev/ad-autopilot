@@ -82,6 +82,16 @@ def _named(name: str, key: str) -> str:
 
 
 def _status(item: dict) -> str:
+    # Живой Direct у сущности на проверке шлёт Status=MODERATION/DRAFT при State=OFF: маппим по Status
+    # первым, иначе ожидание модерации неотличимо от паузы (changes.py держит изменение pending по этим
+    # статусам). Status не запрашивается у keywords — там прежняя логика по State.
+    status = item.get("Status")
+    if status == "DRAFT":
+        return "draft"
+    if status == "MODERATION":
+        return "moderation"
+    if status == "REJECTED":
+        return "rejected"
     state = item.get("State")
     if state == "ARCHIVED":
         return "archived"
@@ -615,7 +625,9 @@ class DirectAdapter:
                 # бюджет вне статистики и контроля автопилота им нельзя — убираем в архив. Операция уходит в
                 # журнал запуска: откат вернёт объявлению прежний статус.
                 before = _status(item)
-                if before == "archived":
+                if before not in {"active", "paused_owner", "paused_auto"}:
+                    # Черновики, объявления на модерации и отклонённые бюджет не тратят; архивировать их
+                    # Директ не даст, а откат умеет восстанавливать только рабочие статусы.
                     continue
                 await self._api("ads", "archive", {"SelectionCriteria": {"Ids": [item["Id"]]}})
                 self._foreign_stops.append(
@@ -896,12 +908,18 @@ class DirectAdapter:
             try:
                 await self._api(services[op.entity_type], method, {"SelectionCriteria": {"Ids": [id_]}})
             except PlatformError as error:
-                # Включение черновика, который ещё на проверке после moderate, отклоняется с «ожидает модерации»:
-                # это не провал изменения — запись остаётся pending, воркер доведёт сверкой.
-                if not (
+                # Включение сущности, которая ещё на проверке (объявление после moderate ждёт модерации,
+                # кампания-черновик v501 — принятия её объявлений), отклоняется площадкой: это не провал
+                # изменения — запись остаётся pending, воркер доведёт сверкой.
+                waiting = (
                     op.entity_type == "ad"
-                    and op.after == "active"
                     and "модерац" in str(error).lower()
+                    or op.entity_type == "campaign"
+                    and "черновик" in str(error).lower()
+                )
+                if not (
+                    op.after == "active"
+                    and waiting
                     and not isinstance(error, (AuthExpired, RateLimited))
                 ):
                     raise
@@ -1039,7 +1057,8 @@ class DirectAdapter:
             "Campaigns",
             {
                 "SelectionCriteria": {"Ids": [int(refs.campaign_id)]},
-                "FieldNames": ["Id", "Name", "State"],
+                # Status нужен: у кампании-черновика и кампании на модерации State="OFF", отличие — в Status.
+                "FieldNames": ["Id", "Name", "State", "Status"],
                 f"{kind}FieldNames": ["BiddingStrategy"],
             },
         )

@@ -307,11 +307,12 @@ async def test_reconcile_fails_moderation_wait_after_limit(repository, tree, mon
     assert repository.pending() == []
 
 
-def test_awaiting_moderation_is_only_for_ad_activation():
+def test_awaiting_moderation_is_only_for_activation():
     states = {
         "1": EntityState("1", "ad", None, "Объявление", "moderation"),
         "2": EntityState("2", "ad", None, "Объявление", "paused_owner"),
-        "3": EntityState("3", "campaign", None, "Кампания", "pending"),
+        "3": EntityState("3", "campaign", None, "Кампания", "draft"),
+        "4": EntityState("4", "campaign", None, "Кампания", "paused_owner"),
     }
     activation = [Operation("set_status", "ad", "1", "status", "paused_auto", "active")]
     assert awaiting_moderation(activation, states)
@@ -323,9 +324,13 @@ def test_awaiting_moderation_is_only_for_ad_activation():
     assert not awaiting_moderation(
         [Operation("set_status", "ad", "2", "status", "paused_owner", "active")], states
     )
-    # Проверяемое состояние у кампании не считается.
+    # Кампания-черновик при включении — ожидание: воркер повторит resume после модерации объявлений.
+    campaign_activation = [Operation("set_status", "campaign", "3", "status", "paused_owner", "active")]
+    assert awaiting_moderation(campaign_activation, states)
+    assert differences(campaign_activation, states) == []
+    # Включение просто остановленной кампании — обычное расхождение, не ожидание.
     assert not awaiting_moderation(
-        [Operation("set_status", "campaign", "3", "status", "paused_owner", "active")], states
+        [Operation("set_status", "campaign", "4", "status", "paused_owner", "active")], states
     )
     # Проверка на расхождения тоже терпима к ожиданию модерации: не провал и не «применено».
     assert differences(activation, states) == []

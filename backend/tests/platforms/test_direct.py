@@ -30,7 +30,7 @@ from app.platforms.base import (
     TargetSpec,
     lead_count,
 )
-from app.platforms.direct import DirectAdapter
+from app.platforms.direct import DirectAdapter, _status
 
 V5 = "https://api.direct.yandex.com/json/v5"
 V501 = "https://api.direct.yandex.com/json/v501"
@@ -1270,6 +1270,124 @@ async def test_draft_activation_other_resume_error_is_a_real_failure(adapter, ap
     )
     with pytest.raises(PlatformError, match="Недостаточно прав"):
         await adapter.apply(Operation("set_status", "ad", "1", "status", "pending", "active"))
+
+
+@pytest.mark.parametrize(
+    "item,expected",
+    [
+        # Живой API шлёт у проверяемой сущности Status=MODERATION/DRAFT при State=OFF: маппим по Status
+        # первым, иначе ожидание модерации неотличимо от паузы.
+        ({"State": "OFF", "Status": "DRAFT"}, "draft"),
+        ({"State": "OFF", "Status": "MODERATION"}, "moderation"),
+        ({"State": "OFF", "Status": "REJECTED"}, "rejected"),
+        ({"State": "ON", "Status": "MODERATION"}, "moderation"),
+        ({"State": "OFF", "Status": "ACCEPTED"}, "paused_owner"),
+        ({"State": "SUSPENDED", "Status": "ACCEPTED"}, "paused_owner"),
+        ({"State": "ON", "Status": "ACCEPTED"}, "active"),
+        ({"State": "ARCHIVED", "Status": "ACCEPTED"}, "archived"),
+        # keywords.get запрашивается без Status — там прежняя логика по State.
+        ({"State": "OFF"}, "paused_owner"),
+        ({"State": "ON"}, "active"),
+    ],
+)
+def test_status_prefers_moderation_status_over_state(item, expected):
+    assert _status(item) == expected
+
+
+async def test_draft_campaign_activation_waits_for_ad_moderation(adapter, api):
+    """resume кампании-черновика v501 отклоняется, пока её объявления не пройдут модерацию: это ожидание
+    проверки, а не сбой — изменение останется pending, воркер повторит сверкой."""
+    adapter._marking_confirmed = True
+    route = api.post(f"{V501}/campaigns").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {"Campaigns": [{"Id": 1, "State": "OFF", "Status": "DRAFT"}]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "ResumeResults": [
+                            {
+                                "Id": 1,
+                                "Errors": [
+                                    {
+                                        "Code": 6000,
+                                        "Message": "Неверный статус: кампания является черновиком",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+            ),
+        ]
+    )
+    with pytest.raises(AwaitingModeration):
+        await adapter.apply(Operation("set_status", "campaign", "1", "status", "paused_owner", "active"))
+    assert [json.loads(call.request.content)["method"] for call in route.calls] == ["get", "resume"]
+
+
+async def test_draft_campaign_other_resume_error_is_a_real_failure(adapter, api):
+    """Другая ошибка resume кампании (не про черновик) — обычный сбой площадки: изменение провалится,
+    как раньше."""
+    adapter._marking_confirmed = True
+    api.post(f"{V501}/campaigns").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {"Campaigns": [{"Id": 1, "State": "OFF", "Status": "DRAFT"}]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "ResumeResults": [{"Id": 1, "Errors": [{"Code": 5000, "Message": "Недостаточно прав"}]}]
+                    }
+                },
+            ),
+        ]
+    )
+    with pytest.raises(PlatformError, match="Недостаточно прав"):
+        await adapter.apply(Operation("set_status", "campaign", "1", "status", "paused_owner", "active"))
+
+
+async def test_create_tree_keeps_foreign_ad_awaiting_moderation(adapter, api, plan):
+    """Чужое объявление на модерации бюджет не тратит; архивировать его Директ не даст — пропускаем,
+    чтобы создание дерева не падало (живое ограничение API)."""
+    server = DirectServer()
+    server.next_id = 200
+    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
+    server.rows["ads"].append(
+        {
+            "Id": 103,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "State": "ON",
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Маникюр"}],
+                "Texts": [{"Text": "Запишитесь"}],
+                "Href": "https://salon.example",
+                "AdImages": {"Items": [{"ImageHash": "image-hash", "Status": "ACCEPTED"}]},
+            },
+        }
+    )
+    server.rows["ads"].append(
+        {
+            "Id": 105,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "State": "OFF",
+            "Status": "MODERATION",
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Лишнее объявление"}],
+                "Texts": [{"Text": "Не из плана"}],
+                "Href": "https://salon.example",
+            },
+        }
+    )
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs.ads == {"ad": "103"}
+    # Проверяемое чужое объявление осталось на месте: не архивировали и операции не записывали.
+    assert server.rows["ads"][1]["State"] == "OFF"
+    assert adapter.foreign_stops == []
 
 
 async def test_confirmed_campaign_can_start(adapter, api, plan):

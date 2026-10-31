@@ -104,13 +104,13 @@ def differences(
             if (
                 state is not None
                 and state.entity_type == op.entity_type
-                and op.entity_type == "ad"
+                and op.entity_type in {"ad", "campaign"}
                 and op.field == "status"
                 and op.after == "active"
                 and state.status in {"pending", "moderation", "draft"}
             ):
-                # Объявление ещё на проверке у площадки: не расхождение, а ожидание. В сверке изменение
-                # остаётся pending (awaiting_moderation), иначе провалилось бы до конца проверки.
+                # Объявление или кампания ещё на проверке у площадки: не расхождение, а ожидание. В сверке
+                # изменение остаётся pending (awaiting_moderation), иначе провалилось бы до конца проверки.
                 continue
             result.append(
                 {
@@ -126,14 +126,15 @@ def differences(
 
 
 def awaiting_moderation(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> bool:
-    """Включение объявления, которое площадка ещё проверяет (после moderate): не расхождение, а ожидание —
-    изменение остаётся pending, сверка повторится, когда площадка закончит проверку."""
+    """Включение объявления или кампании, которое площадка ещё проверяет (после moderate; кампания-черновик
+    v501 — до принятия её объявлений): не расхождение, а ожидание — изменение остаётся pending, сверка
+    повторится, когда площадка закончит проверку."""
     for op in final_operations(operations):
         state = states.get(op.entity_id)
         if (
             state is not None
             and state.entity_type == op.entity_type
-            and op.entity_type == "ad"
+            and op.entity_type in {"ad", "campaign"}
             and op.field == "status"
             and op.after == "active"
             and state.status in {"pending", "moderation", "draft"}
