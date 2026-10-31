@@ -156,7 +156,12 @@ class DirectServer:
             return httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 1}]}})
         for item in self.rows[service]:
             if item["Id"] in params.get("SelectionCriteria", {}).get("Ids", []):
-                item["State"] = {"suspend": "SUSPENDED", "resume": "ON", "archive": "ARCHIVED"}[method]
+                item["State"] = {
+                    "suspend": "SUSPENDED",
+                    "resume": "ON",
+                    "archive": "ARCHIVED",
+                    "unarchive": "OFF",
+                }[method]
         return httpx.Response(200, json={"result": {method.capitalize() + "Results": [{"Id": 1}]}})
 
 
@@ -330,8 +335,9 @@ async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan)
 
 async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api, plan):
     """Число объявлений совпало с планом, но содержимое — нет (владелец правил текст или фразы в кабинете):
-    чужое не привязываем, плановое создаётся заново, а несовпадение отдаётся в журнал запуска. Повтор идемпотентен
-    — созданное по плану находится по содержимому, без новых записей."""
+    чужое не привязываем, плановое создаётся заново, чужое останавливается (архив/пауза — иначе оно тратило
+    бы бюджет мимо статистики и контроля автопилота), а несовпадение и операции остановок отдаются в журнал
+    запуска. Повтор идемпотентен — созданное по плану находится по содержимому, без новых записей."""
     server = DirectServer()
     server.next_id = 200
     server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
@@ -341,6 +347,7 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
             "Id": 103,
             "AdGroupId": 102,
             "CampaignId": 101,
+            "State": "ON",
             "ResponsiveAd": {
                 "Titles": [{"Title": "Маникюр со скидкой"}],
                 "Texts": [{"Text": "Другой текст"}],
@@ -348,7 +355,9 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
             },
         }
     )
-    server.rows["keywords"].append({"Id": 104, "AdGroupId": 102, "CampaignId": 101, "Keyword": "педикюр"})
+    server.rows["keywords"].append(
+        {"Id": 104, "AdGroupId": 102, "CampaignId": 101, "State": "ON", "Keyword": "педикюр"}
+    )
     api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     assert refs.campaign_id == "101" and refs.groups == {"nails": "102"}
@@ -357,10 +366,63 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
         "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново.",
         "В кабинете фраза «маникюр» группы «Маникюр» отличается от плана — создали заново.",
     ]
+    # Чужое объявление ушло в архив, чужая фраза остановлена; операции — для откатываемой записи запуска.
+    assert server.rows["ads"][0]["State"] == "ARCHIVED"
+    assert server.rows["keywords"][0]["State"] == "SUSPENDED"
+    assert adapter.foreign_stops == [
+        Operation("set_status", "ad", "103", "status", "active", "archived"),
+        Operation("set_status", "target", "104", "status", "active", "paused_owner"),
+    ]
     again = await adapter.create_campaign_tree(plan)
     assert again.ads == refs.ads and again.targets == refs.targets
-    assert adapter.content_mismatches == []
+    assert adapter.content_mismatches == [] and adapter.foreign_stops == []
     assert len(server.rows["ads"]) == 2 and len(server.rows["keywords"]) == 2
+
+
+async def test_create_tree_archives_extra_foreign_ad_beyond_plan(adapter, api, plan):
+    """В группе объявления больше, чем в плане (владелец добавил своё): плановое привязывается к своему,
+    лишнее архивируется с записью операции — активным и вне refs его оставлять нельзя."""
+    server = DirectServer()
+    server.next_id = 200
+    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
+    server.rows["ads"].append(
+        {
+            "Id": 103,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "State": "ON",
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Маникюр"}],
+                "Texts": [{"Text": "Запишитесь"}],
+                "Href": "https://salon.example",
+                "AdImages": {"Items": [{"ImageHash": "image-hash", "Status": "ACCEPTED"}]},
+            },
+        }
+    )
+    server.rows["ads"].append(
+        {
+            "Id": 105,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "State": "ON",
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Лишнее объявление"}],
+                "Texts": [{"Text": "Не из плана"}],
+                "Href": "https://salon.example",
+            },
+        }
+    )
+    server.rows["keywords"].append(
+        {"Id": 104, "AdGroupId": 102, "CampaignId": 101, "State": "ON", "Keyword": "маникюр"}
+    )
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    # Плановое объявление нашлось по содержимому; лишнее архивно. Текста о пересоздании нет — ничего не создавали.
+    assert refs.ads == {"ad": "103"} and refs.targets == {"phrase": "104"}
+    assert adapter.content_mismatches == []
+    assert [item["State"] for item in server.rows["ads"]] == ["ON", "ARCHIVED"]
+    assert adapter.foreign_stops == [Operation("set_status", "ad", "105", "status", "active", "archived")]
 
 
 @pytest.mark.parametrize(
@@ -1058,6 +1120,12 @@ async def test_restarting_with_edited_plan_recreates_ads_and_reports(adapter, ap
     assert refs.campaign_id == original.campaign_id and refs.groups == original.groups
     assert refs.ads != original.ads
     assert len(server.rows["ads"]) == 2
+    # Объявление под прежним содержимым остановлено: не привязано к плану — нечему тратить бюджет мимо учёта.
+    old_id = int(original.ads["ad"])
+    assert next(item for item in server.rows["ads"] if item["Id"] == old_id)["State"] == "ARCHIVED"
+    assert adapter.foreign_stops == [
+        Operation("set_status", "ad", original.ads["ad"], "status", "active", "archived")
+    ]
     assert adapter.content_mismatches == [
         "В кабинете объявление «Другой заголовок» группы «Маникюр» отличается от плана — создали заново."
     ]

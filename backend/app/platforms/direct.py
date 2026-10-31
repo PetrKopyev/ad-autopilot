@@ -172,11 +172,18 @@ class DirectAdapter:
         self._tz = ZoneInfo(getattr(config, "tz_default", "Europe/Moscow"))
         # Содержимое кабинета, отличное от плана и пересозданное при запуске: тексты для журнала запуска.
         self._content_mismatches: list[str] = []
+        # Остановки содержимого кабинета, которого нет в плане: операции для записи запуска (откат вернёт).
+        self._foreign_stops: list[Operation] = []
 
     @property
     def content_mismatches(self) -> list[str]:
         """Что в кабинете отличалось от плана (объявления и фразы пересозданы): читает запуск для журнала."""
         return list(self._content_mismatches)
+
+    @property
+    def foreign_stops(self) -> list[Operation]:
+        """Остановки объявлений и фраз, не привязанных к плану: читает запуск для откатываемой записи журнала."""
+        return list(self._foreign_stops)
 
     @staticmethod
     def _sandbox_url(url: str) -> str:
@@ -476,6 +483,7 @@ class DirectAdapter:
         async with self._create_lock:
             # Несовпадения отчитываются за один проход создания: повторный вызов читает только свежие.
             self._content_mismatches = []
+            self._foreign_stops = []
             return await self._create_tree(plan_part)
 
     async def _create_tree(self, plan: CampaignTreeSpec) -> ExternalRefs:
@@ -585,6 +593,17 @@ class DirectAdapter:
                     if ad.status != "active" or group.status != "active":
                         await self._api("ads", "suspend", {"SelectionCriteria": {"Ids": [int(ad_id)]}})
                 refs.ads[ad.id] = ad_id
+            for item in ads:
+                # Остатки не из плана (владелец правил или добавил объявление): в refs не попадают, и тратить
+                # бюджет вне статистики и контроля автопилота им нельзя — убираем в архив. Операция уходит в
+                # журнал запуска: откат вернёт объявлению прежний статус.
+                before = _status(item)
+                if before == "archived":
+                    continue
+                await self._api("ads", "archive", {"SelectionCriteria": {"Ids": [item["Id"]]}})
+                self._foreign_stops.append(
+                    Operation("set_status", "ad", str(item["Id"]), "status", before, "archived")
+                )
             keywords = await self._get(
                 "keywords",
                 "Keywords",
@@ -613,6 +632,16 @@ class DirectAdapter:
                     if target.status != "active" or group.status != "active":
                         await self._api("keywords", "suspend", {"SelectionCriteria": {"Ids": [int(target_id)]}})
                 refs.targets[target.id] = target_id
+            for item in keywords:
+                # Чужие фразы (правил или добавлял владелец) убираем из активных остановкой: архивирования
+                # у ключевых фраз Директа нет. Неактивные не трогаем: неактивная фраза бюджет не тратит.
+                before = _status(item)
+                if before != "active":
+                    continue
+                await self._api("keywords", "suspend", {"SelectionCriteria": {"Ids": [item["Id"]]}})
+                self._foreign_stops.append(
+                    Operation("set_status", "target", str(item["Id"]), "status", before, "paused_owner")
+                )
         if not found and plan.status == "active" and self._marking_confirmed:
             for group in plan.groups:
                 for ad in group.ads:

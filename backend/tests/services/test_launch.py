@@ -17,7 +17,7 @@ from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services import launch as launch_module
 from app.services import plan as plan_module
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, load_operations
 from app.services.launch import LaunchBlocked, LaunchFailed
 from app.services.onboarding import Blocked, NotFound, ai_budget
 from app.services.plan import budget_limits, launch_unsettled
@@ -54,6 +54,10 @@ class MismatchingCreate(FakeAdapter):
         refs = await super().create_campaign_tree(plan_part)
         self.content_mismatches = [
             "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново."
+        ]
+        self.foreign_stops = [
+            Operation("set_status", "ad", "991", "status", "active", "archived"),
+            Operation("set_status", "target", "992", "status", "active", "paused_owner"),
         ]
         return refs
 
@@ -113,6 +117,23 @@ async def test_launch_logs_recreated_cabinet_content(tmp_path: Path) -> None:
         "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново."
     )
     assert not world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_CONTENT_RECREATED", platform="vk")
+
+
+async def test_launch_stops_foreign_cabinet_content_with_revertible_record(tmp_path: Path) -> None:
+    """Содержимого кабинета, которого нет в плане, запуск лишает активных статусов (иначе оно тратит бюджет
+    мимо статистики и недоступно для «остановить всё»), а операции остановок сохраняет единой откатываемой
+    записью со ссылками на остановленные сущности."""
+    world, plan = await ready(tmp_path, adapters={"direct": MismatchingCreate(), "vk": FakeAdapter()})
+    assert (await launch(world, plan))["status"] == "launched"
+    (record,) = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_FOREIGN_STOPPED")
+    assert record.platform == "direct" and record.status == "applied" and record.actor == "system"
+    assert [load_operations(record)[index].after for index in (0, 1)] == ["archived", "paused_owner"]
+    refs = record.evidence["_service"]["refs"]
+    assert refs["ads"]["foreign-ad:991"] == "991" and refs["targets"]["foreign-target:992"] == "992"
+    assert "незаметно для статистики" in record.reason_text
+    # Информационные записи о пересоздании по-прежнему без операций: их откатывать нечего.
+    (info,) = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_CONTENT_RECREATED")
+    assert info.operations == []
 
 
 async def test_full_path_creates_limited_campaigns_within_budget(tmp_path: Path) -> None:

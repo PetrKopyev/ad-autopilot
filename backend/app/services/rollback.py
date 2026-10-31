@@ -62,6 +62,17 @@ def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) 
 
 SUPERSEDED = "Статус этой рекламы с тех пор уже меняли: возобновить или остановить её можно на главной."
 
+NOTHING_TO_REVERT = "Эта запись информационная: она ничего не меняла, откатывать нечего."
+
+
+def reverts_by_experiment(change: ChangeLog) -> bool:
+    """Записи проверок объявлений откатываются по связанному эксперименту, а не по собственным операциям:
+    аудиторный запуск создавал группу отдельным вызовом (операций в записи нет), вердикт «разницы нет» тоже
+    ничего не менял. Без ссылок на площадку такой откат не построить — это информационная запись чужого вида."""
+    return (change.evidence or {}).get("_service", {}).get("refs") is not None and (
+        change.kind == "experiment_verdict" or change.reason_code == "EXPERIMENT_START"
+    )
+
 
 def experiment_verdict_revert_text(
     operations: Sequence[Operation], ads: Mapping[int, Ad], skipped: Collection[str]
@@ -116,6 +127,9 @@ def can_revert(
         and change.kind != "revert"
         # Записи о маркировке информационные: операций нет, откатывать нечего.
         and change.kind != "marking"
+        # Информационные записи без операций (например, о пересозданном содержимом кабинета) не откатываются:
+        # обратных операций не существует, и откат упал бы с ошибкой. Исключение — записи проверок объявлений.
+        and (bool(change.operations) or reverts_by_experiment(change))
         and change.id not in overridden
         and not (change.evidence or {}).get("_service", {}).get("dry_run")
         and not budget_protection(change, business)
@@ -243,6 +257,8 @@ class RollbackService:
             if not can_revert(
                 original, business, actor=actor, reverts=reverts, replaced=replaced, overridden=overridden
             ):
+                if not original.operations and not reverts_by_experiment(original):
+                    raise ChangeConflict(NOTHING_TO_REVERT)
                 if budget_protection(original, business):
                     raise ChangeConflict("Это защита бюджета, отменить нельзя.")
                 if turns_on_replaced(original, replaced):

@@ -36,6 +36,16 @@ CLOSED_ACCOUNT = (PlatformError, LookupError, InvalidToken)
 # Тексты конфликтов доходят до владельца (409): без слов «сверка» и «применение».
 PENDING = "Площадка ещё не подтвердила предыдущее изменение. Попробуйте через несколько минут."
 
+# Сколько изменение может ждать проверки объявления площадкой. Неизвестный статус площадки (например,
+# терминальный статус VK вне известного набора) читается как «на проверке»: без границы такое изменение
+# держало бы очередь платформы вечно. За границей — failed с честным текстом.
+MODERATION_AWAITING_LIMIT = timedelta(hours=24)
+_MODERATION_AWAITING_HOURS = int(MODERATION_AWAITING_LIMIT.total_seconds() // 3600)
+MODERATION_TIMEOUT = (
+    f"Площадка больше {_MODERATION_AWAITING_HOURS} часов не подтверждает объявление. Проверьте его в кабинете "
+    "площадки — возможно, оно ещё на проверке или отклонено. Изменение не применено, чтобы не блокировать остальные."
+)
+
 
 class ChangeConflict(ValueError):
     pass
@@ -612,10 +622,22 @@ class ChangesService:
             self._metadata(change, error="Состояние площадки не совпало с ожидаемым.", differences=mismatches)
         elif awaiting_moderation(operations, states):
             # Включение объявления, которое площадка ещё проверяет после moderate: не провал. Ждём активного
-            # статуса от площадки — тогда изменение применится само на следующей сверке.
-            self._metadata(change, error="Площадка ещё проверяет объявление. Включим его, как только одобрит.")
-            self.repository.save(change)
-            return
+            # статуса от площадки — тогда изменение применится само на следующей сверке. Ожидание ограничено:
+            # статус вне известного набора (терминальный статус VK, сбой площадки) выглядит как «на проверке»
+            # бесконечно, и за границей честнее провалить запись, чем держать очередь платформы закрытой.
+            now = now or datetime.now(UTC)
+            since = (change.evidence or {}).get("_service", {}).get("awaiting_since")
+            if since is not None and datetime.fromisoformat(since) + MODERATION_AWAITING_LIMIT < now:
+                change.status = "failed"
+                self._metadata(change, error=MODERATION_TIMEOUT)
+            else:
+                self._metadata(
+                    change,
+                    error="Площадка ещё проверяет объявление. Включим его, как только одобрит.",
+                    awaiting_since=since or now.isoformat(),
+                )
+                self.repository.save(change)
+                return
         else:
             change.status = "applied"
             self._metadata(change, error=None, differences=[])

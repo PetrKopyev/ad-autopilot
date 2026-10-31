@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from textwrap import shorten
@@ -373,6 +374,38 @@ class LaunchService:
                         reason_params={},
                         reason_text=text,
                         evidence={},
+                        status="applied",
+                    )
+                )
+            stops = getattr(adapter, "foreign_stops", [])
+            if stops:
+                # Содержимого кабинета, которого нет в плане, у адаптера больше нет в активных: не привязанное
+                # к плану тратило бы бюджет мимо статистики и недоступным для остановки автопилотом. Операции
+                # остановок сохраняем единой откатываемой записью: откат вернёт объявлениям и фразам статусы.
+                stop_refs = replace(
+                    refs,
+                    ads=refs.ads
+                    | {f"foreign-ad:{op.entity_id}": op.entity_id for op in stops if op.entity_type == "ad"},
+                    targets=refs.targets
+                    | {f"foreign-target:{op.entity_id}": op.entity_id for op in stops if op.entity_type == "target"},
+                )
+                self.repository.save(
+                    ChangeLog(
+                        business_id=business.id,
+                        actor="system",
+                        kind="launch",
+                        platform=platform,
+                        entity_type="campaign",
+                        entity_id=refs.campaign_id,
+                        operations=[asdict(op) for op in stops],
+                        reason_code="LAUNCH_FOREIGN_STOPPED",
+                        reason_params={},
+                        reason_text=(
+                            "В кабинете нашли объявления и фразы, которых нет в плане: они тратили бы бюджет "
+                            "незаметно для статистики. Чужие объявления остановили и убрали в архив, чужие "
+                            "фразы остановили."
+                        ),
+                        evidence={"_service": {"refs": asdict(stop_refs), "dry_run": False}},
                         status="applied",
                     )
                 )

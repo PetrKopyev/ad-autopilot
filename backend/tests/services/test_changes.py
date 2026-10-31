@@ -22,6 +22,7 @@ from app.platforms.base import (
 )
 from app.platforms.fake import FakeAdapter
 from app.services.changes import (
+    MODERATION_AWAITING_LIMIT,
     ChangeConflict,
     ChangesRepository,
     ChangesService,
@@ -268,6 +269,42 @@ async def test_reconcile_waits_for_moderation_and_then_applies(repository, tree,
     recovered = await service.recover_pending(lambda *_: adapter)
     assert [item.status for item in recovered] == ["applied"]
     assert change.status == "applied"
+
+
+async def test_reconcile_fails_moderation_wait_after_limit(repository, tree, monkeypatch):
+    """Ожидание проверки площадкой ограничено: неизвестный статус (терминальный статус VK вне известного
+    набора, зависшая проверка) читается как «на проверке» бесконечно и держал бы очередь платформы закрытой.
+    По границе ожидания запись проваливается с честным текстом, и очередь разблокируется."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+
+    async def awaiting(operation):
+        raise AwaitingModeration(operation.entity_id)
+
+    monkeypatch.setattr(adapter, "apply", awaiting)
+    change = await activation_change(service, adapter, refs)
+    assert change.status == "pending"
+    get_state = adapter.get_state
+
+    async def reviewing(tree_refs):
+        return {
+            key: replace(state, status="moderation") if state.entity_type == "ad" else state
+            for key, state in (await get_state(tree_refs)).items()
+        }
+
+    monkeypatch.setattr(adapter, "get_state", reviewing)
+    now = datetime.now(UTC)
+    await service._reconcile(change, adapter, now=now)
+    assert change.status == "pending"
+    assert change.evidence["_service"]["awaiting_since"] == now.isoformat()
+    # В пределах границы изменение по-прежнему ждёт проверку.
+    await service._reconcile(change, adapter, now=now + MODERATION_AWAITING_LIMIT - timedelta(minutes=1))
+    assert change.status == "pending"
+    # За границей — честный провал: запись не провисает в очереди платформы вечно.
+    await service._reconcile(change, adapter, now=now + MODERATION_AWAITING_LIMIT + timedelta(minutes=1))
+    assert change.status == "failed"
+    assert "не подтверждает объявление" in change.evidence["_service"]["error"]
+    assert repository.pending() == []
 
 
 def test_awaiting_moderation_is_only_for_ad_activation():

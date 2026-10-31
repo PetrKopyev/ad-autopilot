@@ -1,9 +1,11 @@
 import os
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,15 +15,20 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, PlatformAccount, User
 from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
+from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
 from app.services.rollback import (
+    NOTHING_TO_REVERT,
     ConfirmationRequired,
     RollbackService,
+    can_revert,
     inverse_operations,
+    reverts_by_experiment,
     superseded,
     turns_on_replaced,
 )
+from tests.platforms.test_direct import DirectServer, configuration
 
 
 @pytest.fixture
@@ -687,6 +694,59 @@ async def test_history_hides_dry_run_and_pending_reverts(client, repository, tre
     assert http.get("/api/history").json()["items"][0]["can_revert"] is False
 
 
+async def test_launch_info_record_without_operations_is_not_revertable(client, repository):
+    """Служебная запись запуска о пересозданном содержимом кабинета ничего не меняла на площадке: кнопки
+    отмены у неё нет, а прямой вызов отката отвечает честным 409, а не общей ошибкой подготовки."""
+    http, resolver, _ = client
+    record = ChangeLog(
+        id=5,
+        business_id=1,
+        actor="system",
+        kind="launch",
+        platform="fake",
+        entity_type="campaign",
+        entity_id="c-1",
+        operations=[],
+        reason_code="LAUNCH_CONTENT_RECREATED",
+        reason_text="В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново.",
+        evidence={},
+        status="applied",
+    )
+    repository.history.return_value = ([record], 1)
+    repository.save(record)
+    repository.get_owned.return_value = record
+    assert http.get("/api/history").json()["items"][0]["can_revert"] is False
+    response = http.post("/api/history/5/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 409 and response.json()["detail"] == NOTHING_TO_REVERT
+
+
+@pytest.mark.parametrize(
+    "kind,reason_code,evidence,expected",
+    [
+        # Записи проверок откатываются по связанному эксперименту, хотя собственных операций у них нет.
+        ("experiment_verdict", "EXPERIMENT_NO_DIFF", {"_service": {"refs": {"campaign_id": "c-1"}}}, True),
+        ("launch", "EXPERIMENT_START", {"_service": {"refs": {"campaign_id": "c-1"}}}, True),
+        # Записана без ссылок на площадку — откат по эксперименту не построить: это информационная запись.
+        ("experiment_verdict", "EXPERIMENT_NO_DIFF", {}, False),
+        ("launch", "EXPERIMENT_START", {}, False),
+        ("launch", "LAUNCH_CONTENT_RECREATED", {}, False),
+    ],
+)
+def test_empty_operations_records_revert_only_by_experiment(kind, reason_code, evidence, expected):
+    change = ChangeLog(
+        id=1,
+        business_id=1,
+        kind=kind,
+        platform="fake",
+        reason_code=reason_code,
+        operations=[],
+        evidence=evidence,
+        status="applied",
+    )
+    assert reverts_by_experiment(change) is expected
+    assert can_revert(change) is expected
+
+
 async def test_history_does_not_offer_to_turn_on_campaign_of_replaced_plan(client, repository, tree):
     """Остановку кампании прежнего плана не вернуть: откат включил бы рекламу, за которой никто не следит. Остановку
     действующей кампании вернуть можно."""
@@ -793,3 +853,100 @@ def test_turns_on_replaced_tolerates_old_operations_without_keys():
     new = ChangeLog(id=2, kind="pause", platform="fake", operations=[{"entity_id": "c1"}, stop])
     assert not turns_on_replaced(old, {("fake", "c1")})
     assert turns_on_replaced(new, {("fake", "c1")})
+
+
+async def test_launch_foreign_stops_record_reverts_to_previous_statuses(repository):
+    """Запись запуска об остановке чужого содержимого кабинета откатывается: объявление возвращается из
+    архива, фраза снова активна. Плановые сущности откат не трогает."""
+    from app.platforms.base import TargetSpec
+
+    server = DirectServer()
+    server.next_id = 200
+    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["adgroups"].append(
+        {
+            "Id": 102,
+            "Name": "Маникюр ap-nails",
+            "CampaignId": 101,
+            "RegionIds": [51],
+            "NegativeKeywords": {"Items": []},
+            "Status": "ACCEPTED",
+        }
+    )
+    server.rows["ads"].append(
+        {
+            "Id": 103,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "State": "ON",
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Маникюр со скидкой"}],
+                "Texts": [{"Text": "Другой текст"}],
+                "Href": "https://salon.example",
+            },
+        }
+    )
+    server.rows["keywords"].append(
+        {"Id": 104, "AdGroupId": 102, "CampaignId": 101, "State": "ON", "Keyword": "педикюр"}
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(server))
+    adapter = DirectAdapter(
+        "test-only",
+        config=configuration(),
+        client=client,
+        client_login="advertiser",
+        counter_ids=(12,),
+        href="https://salon.example",
+        marking_confirmed=True,
+    )
+    adapter._today = lambda: date(2026, 10, 26)
+    plan = CampaignTreeSpec(
+        "salon",
+        "Салон",
+        100000,
+        500000,
+        (
+            AdGroupSpec(
+                "nails",
+                "Маникюр",
+                (AdSpec("ad", "Маникюр", "Запишитесь", "image-hash"),),
+                (TargetSpec("phrase", "phrase", "маникюр"),),
+                {"region_ids": [51]},
+            ),
+        ),
+    )
+    refs = await adapter.create_campaign_tree(plan)
+    stops = adapter.foreign_stops
+    assert [(op.entity_type, op.entity_id, op.before, op.after) for op in stops] == [
+        ("ad", "103", "active", "archived"),
+        ("target", "104", "active", "paused_owner"),
+    ]
+    # Запись такая, как её пишет запуск: операции остановок и ссылки, включающие остановленные сущности.
+    stop_refs = replace(
+        refs,
+        ads=refs.ads | {f"foreign-ad:{op.entity_id}": op.entity_id for op in stops if op.entity_type == "ad"},
+        targets=refs.targets
+        | {f"foreign-target:{op.entity_id}": op.entity_id for op in stops if op.entity_type == "target"},
+    )
+    record = ChangeLog(
+        business_id=1,
+        actor="system",
+        kind="launch",
+        platform="direct",
+        entity_type="campaign",
+        entity_id=refs.campaign_id,
+        operations=[asdict(op) for op in stops],
+        reason_code="LAUNCH_FOREIGN_STOPPED",
+        reason_params={},
+        reason_text="В кабинете нашли объявления и фразы, которых нет в плане.",
+        evidence={"_service": {"refs": asdict(stop_refs), "dry_run": False}},
+        status="applied",
+    )
+    repository.save(record)
+    revert = await RollbackService(repository, dry_run=False).revert(
+        record.id, business_id=1, adapter=adapter
+    )
+    assert revert.status == "applied" and record.status == "reverted"
+    states = await adapter.get_state(stop_refs)
+    assert states["103"].status == "active" and states["104"].status == "active"
+    await client.aclose()
