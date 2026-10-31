@@ -48,6 +48,8 @@ export function ClientsPage() {
   const questions = useResource(useCallback((signal: AbortSignal) => getClientQuestions(signal), []));
   // Плитка «Цена клиента» — из того же окна клиентов, что на «Статистике»: один порог ответов на обоих экранах.
   const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod('month', signal), signal), []));
+  // Ответ меняет и сводную: окно клиентов на сервере пересчитывается, поэтому плитку запрашиваем заново вместе с вопросами.
+  const refresh = () => { questions.reload(); summary.reload(); };
   const items = questions.data?.items ?? [];
   const open = items.filter((item) => !item.answered_at);
   const answered = items.filter((item) => item.answered_at);
@@ -67,7 +69,7 @@ export function ClientsPage() {
         <MetricTile label={labels.openCount} value={open.length.toLocaleString('ru-RU')} hint={labels.openCountHint} />
       </div>
       <PanelCard title={labels.open} titleId="clients-open" flush>
-        {open.length ? <ul className="clients-list">{open.map((item) => <QuestionRow key={item.id} question={item} onAnswered={questions.reload} />)}</ul>
+        {open.length ? <ul className="clients-list">{open.map((item) => <QuestionRow key={item.id} question={item} onAnswered={refresh} />)}</ul>
           : <p className="clients-empty"><Icon name="check" />{labels.nothingOpen}</p>}
       </PanelCard>
       <PanelCard title={labels.answered} titleId="clients-answered" flush>

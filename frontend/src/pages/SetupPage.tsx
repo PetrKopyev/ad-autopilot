@@ -60,6 +60,7 @@ export function SetupPage() {
   const [budget, setBudget] = useState(draft.business ? rublesValue(draft.business.month_budget_kop) : '');
   const [average, setAverage] = useState(draft.business?.avg_check_kop ? rublesValue(draft.business.avg_check_kop) : '');
   const [noSite, setNoSite] = useState(false);
+  const [demo, setDemo] = useState(false);
   const [budgetHint, setBudgetHint] = useState<BudgetHint>();
   const [cities, setCities] = useState<string[]>();
   const session = useSession();
@@ -94,10 +95,7 @@ export function SetupPage() {
   useEffect(() => {
     const controller = new AbortController();
     void getAuthConfig(controller.signal).then((config) => {
-      if (!config.demo || controller.signal.aborted) return;
-      setWebsite((value) => value || 'https://salon.example/');
-      setCity((value) => value || 'Москва');
-      setBudget((value) => value || '50000');
+      if (!controller.signal.aborted) setDemo(config.demo === true);
     }).catch(() => {});
     void getCities(controller.signal).then((value) => { if (!controller.signal.aborted) setCities(value.cities); }).catch(() => {});
     return () => controller.abort();
@@ -141,6 +139,14 @@ export function SetupPage() {
     });
     return () => controller.abort();
   }, [userId, attempt]);
+  // Демо предзаполняет пустые поля первого шага. Ждём восстановления черновика: оно обнуляет поля свежего входа,
+  // и предзаполнение до него было бы стёрто; «только пустые» не затирает ни введённое владельцем, ни сохранённое.
+  useEffect(() => {
+    if (!demo || restoring) return;
+    setWebsite((value) => value || 'https://salon.example/');
+    setCity((value) => value || 'Москва');
+    setBudget((value) => value || '50000');
+  }, [demo, restoring]);
   // Расчёт к бюджету — с сервера, по тем же правилам, что план и запуск; пока сумму вводят, запрос ждёт паузы.
   const typedBudget = current === 1 ? rublesToKopecks(budget) : null;
   const hintAmount = tooMuchMoney(typedBudget) ? null : typedBudget;

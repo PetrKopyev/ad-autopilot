@@ -573,3 +573,20 @@ it('пустое поле бюджета просит бюджет, а не «с
   expect(screen.queryByText(copy.launchFlow.moneyZero)).toBeNull();
   expect(calls()).not.toContain('POST /api/business');
 });
+
+it('в демо шаг 1 предзаполняет сайт, город и бюджет: поле сайта не пустое, как в сценарии приёмки', async () => {
+  // Как на живом стенде: конфигурация демо приходит от сервера, бизнеса ещё нет.
+  fetchMock.mockImplementation(async (url) => {
+    const answers: Record<string, unknown> = {
+      '/api/auth/config': { demo: true, vk_oauth: false },
+      '/api/me': { id: 1, login: 'demo', email: null, has_business: false, accounts: [] },
+      '/api/cities': { cities: ['Москва'] },
+    };
+    return new Response(JSON.stringify(answers[new URL(String(url)).pathname]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+  renderStep(1);
+  const website = await screen.findByLabelText(copy.setup.business.website) as HTMLInputElement;
+  expect(website.value).toBe('https://salon.example/');
+  expect((screen.getByLabelText(copy.setup.business.city, { exact: true }) as HTMLInputElement).value).toBe('Москва');
+  expect((screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement).value).toBe('50 000');
+});

@@ -17,13 +17,16 @@ vi.mock('../api/period', async (original) => ({ ...await original<typeof import(
 afterEach(cleanup);
 
 /** Окно клиентов, как его отдаёт сводная статистика: одно на «Клиентов» и «Статистику». */
-function summaryWindow(fields: Partial<ClientsWindow>) {
-  vi.mocked(getSummary).mockResolvedValue({
+function summaryResponse(fields: Partial<ClientsWindow>) {
+  return {
     business_id: 1, from: '2026-10-01', to: '2026-10-31', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
     ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
     clients_window: { from: '2026-09-28', to: '2026-10-25', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4, ...fields },
     budget: { month: '2026-10-01', budget_kop: 3000000, spent_kop: 0, reported_kop: 0, remaining_kop: 3000000, days_remaining: 5, platforms: [] },
-  });
+  };
+}
+function summaryWindow(fields: Partial<ClientsWindow>) {
+  vi.mocked(getSummary).mockResolvedValue(summaryResponse(fields));
 }
 
 it('большие числа пишет с разделителем тысяч', async () => {
@@ -74,6 +77,27 @@ it('до запуска с готовым планом не ждёт вопро�
   expect(screen.getByText(copy.prelaunch.clients)).toBeTruthy();
   expect(screen.getByRole('link', { name: copy.prelaunch.openPlan }).getAttribute('href')).toBe('/plan');
   expect(screen.queryByText(copy.clientsScreen.nothingOpen)).toBeNull();
+});
+
+it('после ответа плитка «Цена клиента» пересчитывается без перезагрузки: сводная и вопросы запрашиваются заново', async () => {
+  // До ответа окно без цены; сервер пересчитывает окно после ответа — плитка должна сойтись со свежей сводной сразу.
+  vi.mocked(getSummary).mockResolvedValueOnce(summaryResponse({}))
+    .mockResolvedValueOnce(summaryResponse({ clients: 5631, cost_kop: 1_891_000, cost_per_client_kop: 336, answered_weeks: 1, unknown_weeks: 3 }));
+  const question = { week_start: '2026-10-19', week_end: '2026-10-25', asked_at: '2026-10-26T09:00:00+03:00' };
+  vi.mocked(getClientQuestions).mockResolvedValueOnce({ cost_per_client_kop: null, items: [
+    { id: 'open', leads_count: 100, clients_count: null, answered_at: null, ...question }] })
+    .mockResolvedValueOnce({ cost_per_client_kop: null, items: [
+      { id: 'open', leads_count: 100, clients_count: 12, answered_at: '2026-10-28T10:00:00+03:00', ...question }] });
+  render(<ClientsPage />);
+  const field = await screen.findByRole('textbox', { name: copy.clientsScreen.countLabel });
+  expect(screen.getByText(copy.clientsScreen.costPerClientEmpty)).toBeTruthy();
+  fireEvent.change(field, { target: { value: '12' } });
+  fireEvent.click(screen.getByRole('button', { name: copy.clientsScreen.send }));
+  expect(await screen.findByText('3,36 ₽')).toBeTruthy();
+  expect(screen.getByText(copy.home.clientsHint(1, 4))).toBeTruthy();
+  expect(screen.getByText(copy.clientsScreen.answerLine(12, 100))).toBeTruthy();
+  expect(vi.mocked(getSummary).mock.calls.length).toBe(2);
+  expect(vi.mocked(getClientQuestions).mock.calls.length).toBe(2);
 });
 
 it('неверное число объясняется у поля: дробь, минус, больше обращений', async () => {
