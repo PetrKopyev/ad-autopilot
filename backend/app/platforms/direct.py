@@ -308,7 +308,9 @@ class DirectAdapter:
         offset = 0
         while True:
             data = await self._api(service, "get", {**params, "Page": {"Limit": 1000, "Offset": offset}})
-            batch = data.get(key)
+            # Живой API опускает пустую коллекцию в ответе: нет ключа — пустой список,
+            # а вот ключ с несписком под ним — битый ответ.
+            batch = data.get(key, [])
             if not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch):
                 raise _invalid()
             if any(type(item.get("Id")) is not int or item["Id"] <= 0 for item in batch):
@@ -523,13 +525,18 @@ class DirectAdapter:
                 },
             )
             # Единые кампании (API 501) создаются черновиком, а suspend для черновика Direct отклоняет;
+            # по живому API у черновика State="OFF", Status="DRAFT", поэтому проверяем оба поля;
             # черновик сам не показывает объявления — для «создать остановленной» пауза не нужна.
             created = await self._get(
                 "campaigns",
                 "Campaigns",
-                {"SelectionCriteria": {"Ids": [int(campaign_id)]}, "FieldNames": ["Id", "State"]},
+                {"SelectionCriteria": {"Ids": [int(campaign_id)]}, "FieldNames": ["Id", "State", "Status"]},
             )
-            if created and created[0].get("State") != "DRAFT":
+            if (
+                created
+                and created[0].get("State") != "DRAFT"
+                and created[0].get("Status") != "DRAFT"
+            ):
                 await self._api("campaigns", "suspend", {"SelectionCriteria": {"Ids": [int(campaign_id)]}})
         refs = ExternalRefs(
             campaign_id,

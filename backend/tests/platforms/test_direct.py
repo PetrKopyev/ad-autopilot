@@ -113,6 +113,8 @@ class DirectServer:
         self.fail_keywords_once = False
         # В API 501 единые кампании создаются черновиком; текстовые (v5) — сразу включёнными.
         self.campaign_state = "ON"
+        # По живому API у черновика кампании State="OFF" и Status="DRAFT".
+        self.campaign_status = "ACCEPTED"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         service = request.url.path.rsplit("/", 1)[-1]
@@ -139,7 +141,8 @@ class DirectServer:
         if method == "add":
             self.next_id += 1
             state = self.campaign_state if service == "campaigns" else "ON"
-            item = {**params[key][0], "Id": self.next_id, "State": state, "Status": "ACCEPTED"}
+            status = self.campaign_status if service == "campaigns" else "ACCEPTED"
+            item = {**params[key][0], "Id": self.next_id, "State": state, "Status": status}
             if service == "ads" and "ResponsiveAd" in item:
                 content = item["ResponsiveAd"]
                 item["ResponsiveAd"] = {
@@ -356,10 +359,24 @@ async def test_create_tree_leaves_draft_campaign_without_suspend(adapter, api, p
         "method": "get",
         "params": {
             "SelectionCriteria": {"Ids": [101]},
-            "FieldNames": ["Id", "State"],
+            "FieldNames": ["Id", "State", "Status"],
             "Page": {"Limit": 1000, "Offset": 0},
         },
     } in campaign_requests
+
+
+async def test_create_tree_leaves_draft_campaign_with_off_state_without_suspend(adapter, api, plan):
+    """Живой API отдаёт у черновика кампании State="OFF" и Status="DRAFT": пауза не нужна,
+    даже когда State не равен DRAFT."""
+    server = DirectServer()
+    server.campaign_state = "OFF"
+    server.campaign_status = "DRAFT"
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs.campaign_id == "101"
+    assert server.rows["campaigns"][0]["State"] == "OFF"
+    assert server.rows["campaigns"][0]["Status"] == "DRAFT"
+    assert ("campaigns", "suspend") not in [(service, method) for service, method, _ in server.writes]
 
 
 @pytest.mark.parametrize("text_campaign", [False, True])
@@ -534,6 +551,21 @@ async def test_campaign_pagination(adapter, api, plan):
     assert (await adapter.create_campaign_tree(empty)).campaign_id == "10"
     assert request_body(route)["params"]["Page"]["Offset"] == 1
     assert request_body(route)["params"]["SelectionCriteria"] == {}
+
+
+async def test_get_treats_missing_collection_key_as_empty(adapter, api):
+    """Живой API опускает пустую коллекцию в ответе: ads.get для группы без объявлений
+    вернул {"result": {}} — это пустой список, а не ошибка."""
+    api.post(f"{V501}/ads").respond(json={"result": {}})
+    assert await adapter._ads({"AdGroupIds": [102]}) == []
+
+
+@pytest.mark.parametrize("payload", [{"Ads": {}}, {"Ads": {"Id": 1}}, {"Ads": ["ad"]}, {"Ads": [{"Id": "1"}]}])
+async def test_get_rejects_collection_that_is_not_a_list(adapter, api, payload):
+    """Коллекция под ключом есть, но это не список либо элементы битые — некорректный ответ API."""
+    api.post(f"{V501}/ads").respond(json={"result": payload})
+    with pytest.raises(PlatformError, match="некорректные данные"):
+        await adapter._ads({})
 
 
 async def test_upload_image(adapter, api, tmp_path: Path):
