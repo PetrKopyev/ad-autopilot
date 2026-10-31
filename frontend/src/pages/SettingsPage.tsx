@@ -89,8 +89,15 @@ function BudgetBlock({ business }: { business: BusinessSettings }) {
     if (budgetKop === null || budgetError || averageError) return;
     // Неизменённый бюджет не отправляем: каждое сохранение бюджета — запись в истории и пересчёт лимитов.
     void section.run(async () => {
-      if (budgetKop !== savedBudget) { setWarning(await saveBudget(budgetKop)); setSavedBudget(budgetKop); }
-      await saveBusinessSettings(autoContinue, averageKop);
+      // Отклонённое сохранение не применено: поле возвращаем к сумме, которая действует сейчас.
+      let applied = savedBudget;
+      try {
+        if (budgetKop !== savedBudget) { setWarning(await saveBudget(budgetKop)); applied = budgetKop; setSavedBudget(budgetKop); }
+        await saveBusinessSettings(autoContinue, averageKop);
+      } catch (reason) {
+        setBudget(rublesValue(applied));
+        throw reason;
+      }
     }, labels.saved);
   }
   // До сохранения подпись говорит, что будет после него: сумма ещё не действует.
@@ -188,6 +195,8 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   const showInnError = (innTouched || !!marking.inn) && !innOk;
   const innError = copy.launchFlow.innError(marking.subject_type);
   const confirmed = stored ? (['direct', 'vk'] as const).filter((platform) => stored.confirmed_in_platform[platform]) : [];
+  // Передача данных — по площадкам: кабинет принял данные сам или ждёт заполнения владельцем.
+  const transmission = stored?.transmission;
   function edit() {
     section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setEditing(true);
   }
@@ -197,7 +206,11 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
     if (!marking.name.trim() || marking.phone.replace(/\D/g, '').length < 10) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
-    void section.run(async () => { await saveMarking(marking); setStored(maskMarking(marking)); setEditing(false); }, labels.markingSaved);
+    void section.run(async () => {
+      const result = await saveMarking(marking);
+      setStored(maskMarking(marking, result));
+      setEditing(false);
+    }, labels.markingSaved);
   }
   return <Block id="marking" title={copy.settings.marking} hint={labels.markingHint}>
     {editing ? <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
@@ -225,6 +238,13 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
         <p>{labels.markingStored(stored.inn_masked, stored.phone_masked)}</p>
       </div>
       <StatusBadge tone={confirmed.length ? 'success' : 'warning'}>{confirmed.length ? labels.markingConfirmed(confirmed.map((platform) => copy.setup.accounts[platform]).join(', ')) : labels.markingNotConfirmed}</StatusBadge>
+      {(['direct', 'vk'] as const).filter((platform) => transmission?.[platform]).map((platform) => transmission![platform] === 'marking_transmitted'
+        ? <p key={platform} className="marking-transmitted">{copy.marking.transmitted(copy.setup.accounts[platform])}</p>
+        : <div key={platform} className="marking-manual">
+          <p>{copy.marking.manualRequired(copy.setup.accounts[platform])}</p>
+          <ol>{copy.marking.manualSteps[platform].map((step) => <li key={step}>{step}</li>)}</ol>
+          <p className="field__hint">{copy.marking.confirmAfterSteps}</p>
+        </div>)}
       <Status section={section} />
       <div className="actions"><Button variant="secondary" onClick={edit}>{labels.markingEdit}</Button></div>
     </>}

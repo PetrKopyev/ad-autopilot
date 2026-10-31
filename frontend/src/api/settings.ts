@@ -2,21 +2,25 @@ import { api } from './client';
 import { mockEnabled } from './screens';
 import { setupGet, setupMutation } from './setup';
 import type { Business, Description, Marking, SiteCheck, StopResult } from './setup';
+import type { MarkingTransmission } from './types';
 
 // Описание сервер хранит вместе со служебными данными проверки сайта; форме нужны только поля.
 export interface StoredDescription { fields: Description }
 // ИНН и телефон сервер целиком не возвращает: inn и phone пустые, а последние цифры — в inn_masked и phone_masked.
 export interface StoredMarking extends Omit<Marking, 'confirmed_in_platform'> {
   confirmed_in_platform: Partial<Marking['confirmed_in_platform']>; saved: true; inn_masked: string; phone_masked: string | null;
+  /** Статус передачи данных рекламодателя по площадкам; null — передачи не было или кабинет не подключён. */
+  transmission: MarkingTransmission;
 }
 export interface BusinessSettings extends Business {
   description: StoredDescription | null; auto_continue: boolean; marking: StoredMarking | null;
   metrica_counter_id: number | null; lead_goal_ids: number[]; description_approved: boolean; medical_level: SiteCheck['medical_level'];
 }
 /** Сохранённые реквизиты так, как их показывает сервер: от ИНН и телефона — только последние цифры. */
-export function maskMarking(marking: Marking): StoredMarking {
+export function maskMarking(marking: Marking, transmission?: MarkingTransmission): StoredMarking {
   const phone = marking.phone.replace(/\D/g, '');
-  return { ...marking, inn: '', phone: '', saved: true, inn_masked: `•••${marking.inn.slice(-4)}`, phone_masked: phone ? `+7•••${phone.slice(-4)}` : null };
+  return { ...marking, inn: '', phone: '', saved: true, inn_masked: `•••${marking.inn.slice(-4)}`, phone_masked: phone ? `+7•••${phone.slice(-4)}` : null,
+    transmission: transmission ?? { direct: null, vk: null } };
 }
 export async function getBusiness(signal?: AbortSignal): Promise<BusinessSettings> {
   if (mockEnabled) return (await import('./mocks')).mockBusinessSettings();

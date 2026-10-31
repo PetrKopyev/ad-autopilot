@@ -3,10 +3,13 @@ import { Button, ErrorBanner, Field, Icon, MetricTile, PageHeader, PanelCard, de
 import { copy } from '../copy';
 import { answerClientQuestion, getClientQuestions, parseClients } from '../api/clients';
 import type { ClientQuestion } from '../api/clients';
+import { getPeriod } from '../api/period';
+import { getSummary } from '../api/screens';
 import { displayDate } from '../format';
 import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
 import { PrelaunchEmpty, usePrelaunch } from './Prelaunch';
+import { clientWindowPrice } from './StatsShared';
 import './Clients.css';
 
 const labels = copy.clientsScreen;
@@ -43,10 +46,13 @@ function QuestionRow({ question, onAnswered }: { question: ClientQuestion; onAns
 
 export function ClientsPage() {
   const questions = useResource(useCallback((signal: AbortSignal) => getClientQuestions(signal), []));
+  // Плитка «Цена клиента» — из того же окна клиентов, что на «Статистике»: один порог ответов на обоих экранах.
+  const summary = useResource(useCallback(async (signal: AbortSignal) => getSummary(await getPeriod('month', signal), signal), []));
   const items = questions.data?.items ?? [];
   const open = items.filter((item) => !item.answered_at);
   const answered = items.filter((item) => item.answered_at);
-  const cost = questions.data?.cost_per_client_kop ?? null;
+  const window = summary.data?.clients_window;
+  const cost = clientWindowPrice(window);
   const prelaunch = usePrelaunch();
   return <div className="page-stack">
     <PageHeader title={copy.clients.title} description={labels.intro} />
@@ -56,7 +62,8 @@ export function ClientsPage() {
       <PrelaunchEmpty hasPlan={prelaunch.hasPlan} description={copy.prelaunch.clients} /></div>}
     {questions.data && !(items.length === 0 && prelaunch) && <>
       <div className="metric-tiles clients-tiles">
-        <MetricTile label={labels.costPerClient} value={cost === null ? '—' : formatMoney(cost)} hint={cost === null ? labels.costPerClientEmpty : undefined} />
+        <MetricTile label={labels.costPerClient} value={cost === null ? '—' : formatMoney(cost)}
+          hint={cost === null ? labels.costPerClientEmpty : copy.home.clientsHint(window!.answered_weeks, window!.answered_weeks + window!.unknown_weeks)} />
         <MetricTile label={labels.openCount} value={open.length.toLocaleString('ru-RU')} hint={labels.openCountHint} />
       </div>
       <PanelCard title={labels.open} titleId="clients-open" flush>

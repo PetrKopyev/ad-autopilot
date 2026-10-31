@@ -24,7 +24,7 @@ afterEach(() => { cleanup(); mockAccounts = []; vi.mocked(getBusiness).mockReset
 
 const business: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
   auto_continue: true, description: null, marking: { subject_type: 'ip', inn: '', name: 'Иванов Иван', phone: '', confirmed_in_platform: { direct: true },
-    saved: true, inn_masked: '•••2259', phone_masked: '+7•••1122' },
+    saved: true, inn_masked: '•••2259', phone_masked: '+7•••1122', transmission: { direct: 'marking_transmitted', vk: null } },
   metrica_counter_id: 12345, lead_goal_ids: [1], description_approved: true, medical_level: 'none' };
 
 async function marking(settings = business) {
@@ -56,7 +56,7 @@ it('«Изменить» открывает форму: ИНН и телефон
 });
 
 it('после сохранения отправляет все поля и показывает новые последние цифры', async () => {
-  vi.mocked(saveMarking).mockResolvedValue();
+  vi.mocked(saveMarking).mockResolvedValue({ direct: 'marking_transmitted', vk: null });
   const block = await marking();
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
   fireEvent.change(block.getByRole('textbox', { name: copy.setup.advertiser.taxId }), { target: { value: '500100732259' } });
@@ -72,6 +72,47 @@ it('без сохранённой маркировки сразу показыв
   const block = await marking({ ...business, marking: null });
   expect((block.getByRole('textbox', { name: copy.setup.advertiser.taxId }) as HTMLInputElement).value).toBe('');
   expect(block.queryByRole('button', { name: copy.settingsScreen.markingCancel })).toBeNull();
+});
+
+it('переданные данные маркировки показаны словами; отказ площадки — с инструкцией по кабинету', async () => {
+  const block = await marking({ ...business, marking: { ...business.marking!,
+    confirmed_in_platform: { direct: false }, transmission: { direct: 'marking_manual_required', vk: null } } });
+  expect(block.getByText(copy.marking.manualRequired(copy.setup.accounts.direct))).toBeTruthy();
+  for (const step of copy.marking.manualSteps.direct) expect(block.getByText(step)).toBeTruthy();
+  expect(block.getByText(copy.marking.confirmAfterSteps)).toBeTruthy();
+  expect(block.queryByText(copy.marking.transmitted(copy.setup.accounts.direct))).toBeNull();
+});
+
+it('площадка, принявшая данные маркировки, названа в статусе передачи', async () => {
+  const block = await marking();
+  expect(block.getByText(copy.marking.transmitted(copy.setup.accounts.direct))).toBeTruthy();
+  expect(block.queryByText(copy.marking.manualRequired(copy.setup.accounts.direct))).toBeNull();
+});
+
+it('после сохранения маркировки статус передачи из ответа сервера виден сразу', async () => {
+  vi.mocked(saveMarking).mockResolvedValue({ direct: 'marking_manual_required', vk: null });
+  const block = await marking();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+  fireEvent.click(block.getByRole('checkbox', { name: copy.launchFlow.confirmDirect }));
+  fireEvent.change(block.getByRole('textbox', { name: copy.setup.advertiser.taxId }), { target: { value: '500100732259' } });
+  fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.phone }), { target: { value: '+7 900 000-33-44' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText(copy.marking.manualRequired(copy.setup.accounts.direct))).toBeTruthy();
+});
+
+it('бюджет: отклонённое сохранение возвращает поле к действующей сумме', async () => {
+  vi.mocked(saveBudget).mockReset().mockRejectedValue(new Error('Минимальный бюджет — 15 500 ₽ в месяц.'));
+  vi.mocked(saveBusinessSettings).mockResolvedValue();
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const block = within((await screen.findByRole('heading', { name: copy.settingsScreen.budgetTitle })).closest('section') as HTMLElement);
+  const field = block.getByLabelText(copy.settingsScreen.budgetLabel) as HTMLInputElement;
+  fireEvent.change(field, { target: { value: '10000' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText('Минимальный бюджет — 15 500 ₽ в месяц.')).toBeTruthy();
+  // Отказ сервера: в поле осталась реально сохранённая сумма, а не введённая, и подсказка о будущем бюджете исчезла.
+  expect(field.value).toBe('30\u00a0000');
+  expect(block.queryByText(/После сохранения бюджет станет/)).toBeNull();
 });
 
 it('бюджет ниже порога ВКонтакте сохраняется, а предупреждение сервера видно под формой', async () => {

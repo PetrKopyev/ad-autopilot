@@ -556,8 +556,20 @@ it('цена визита «-100» не становится молча 100 ₽:
   fireEvent.change(average, { target: { value: '0,0' } });
   fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
   expect(await screen.findByText(copy.launchFlow.moneyZero)).toBeTruthy();
-  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '0' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.budget), { target: { value: '0,0' } });
   fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
   await waitFor(() => expect(screen.getAllByText(copy.launchFlow.moneyZero)).toHaveLength(1));
+  expect(calls()).not.toContain('POST /api/business');
+});
+
+it('пустое поле бюджета просит бюджет, а не «сумму больше нуля»', async () => {
+  renderStep(1);
+  fireEvent.change(await screen.findByLabelText(copy.setup.business.website), { target: { value: 'https://salon.example/' } });
+  fireEvent.change(screen.getByLabelText(copy.setup.business.city), { target: { value: 'Москва' } });
+  const budget = screen.getByLabelText(copy.setup.business.budget) as HTMLInputElement;
+  expect(budget.value).toBe('');
+  fireEvent.click(screen.getByRole('button', { name: copy.common.next }));
+  expect(await screen.findByText(copy.setup.business.budgetMissing)).toBeTruthy();
+  expect(screen.queryByText(copy.launchFlow.moneyZero)).toBeNull();
   expect(calls()).not.toContain('POST /api/business');
 });

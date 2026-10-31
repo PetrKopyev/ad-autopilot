@@ -3,15 +3,28 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
 import { getClientQuestions } from '../api/clients';
+import { getAutopilotStatus, getSummary } from '../api/screens';
+import type { ClientsWindow } from '../api/types';
 import { ClientsPage } from './ClientsPage';
 import { MemoryRouter } from 'react-router';
-import { getAutopilotStatus } from '../api/screens';
 
 vi.mock('../api/screens', () => ({ mockEnabled: false,
-  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })) }));
+  getAutopilotStatus: vi.fn(async () => ({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true })),
+  getSummary: vi.fn() }));
 vi.mock('../api/clients', async (original) => ({ ...await original<typeof import('../api/clients')>(), getClientQuestions: vi.fn(), answerClientQuestion: vi.fn() }));
+vi.mock('../api/period', async (original) => ({ ...await original<typeof import('../api/period')>(), getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-31' }) }));
 
 afterEach(cleanup);
+
+/** Окно клиентов, как его отдаёт сводная статистика: одно на «Клиентов» и «Статистику». */
+function summaryWindow(fields: Partial<ClientsWindow>) {
+  vi.mocked(getSummary).mockResolvedValue({
+    business_id: 1, from: '2026-10-01', to: '2026-10-31', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
+    ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
+    clients_window: { from: '2026-09-28', to: '2026-10-25', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4, ...fields },
+    budget: { month: '2026-10-01', budget_kop: 3000000, spent_kop: 0, reported_kop: 0, remaining_kop: 3000000, days_remaining: 5, platforms: [] },
+  });
+}
 
 it('большие числа пишет с разделителем тысяч', async () => {
   const question = { week_start: '2026-10-19', week_end: '2026-10-25', asked_at: '2026-10-26T09:00:00+03:00' };
@@ -26,12 +39,31 @@ it('большие числа пишет с разделителем тысяч'
 });
 
 it('без открытых вопросов и ответов показывает пустые состояния и прочерк вместо цены клиента', async () => {
+  summaryWindow({});
   vi.mocked(getClientQuestions).mockResolvedValue({ cost_per_client_kop: null, items: [] });
   render(<ClientsPage />);
   expect(await screen.findByText(copy.clientsScreen.nothingOpen)).toBeTruthy();
   expect(screen.getByText(copy.clientsScreen.nothingAnswered)).toBeTruthy();
   expect(screen.getByText(copy.clientsScreen.costPerClientEmpty)).toBeTruthy();
   expect(screen.getByText('—')).toBeTruthy();
+});
+
+it('цена клиента — из того же окна, что на «Статистике»: отвеченные недели считаются, «не знаю» не мешает', async () => {
+  // Сервер вопросов держит цену на «появится после ваших ответов» (там порог строже), а статистика по тем же
+  // ответам уже считает: плитка должна сойтись со «Статистикой», а не с вопросами.
+  summaryWindow({ clients: 5631, cost_kop: 1_891_000, cost_per_client_kop: 336, answered_weeks: 2, unknown_weeks: 2 });
+  const week = { asked_at: '2026-10-26T09:00:00+03:00', answered_at: '2026-10-28T10:00:00+03:00' };
+  vi.mocked(getClientQuestions).mockResolvedValue({ cost_per_client_kop: null, items: [
+    { id: 'w4', week_start: '2026-10-19', week_end: '2026-10-25', leads_count: 4938, clients_count: 2469, ...week },
+    { id: 'w3', week_start: '2026-10-12', week_end: '2026-10-18', leads_count: 4986, clients_count: null, ...week },
+    { id: 'w2', week_start: '2026-10-05', week_end: '2026-10-11', leads_count: 5100, clients_count: 3162, ...week },
+    { id: 'w1', week_start: '2026-09-28', week_end: '2026-10-04', leads_count: 4800, clients_count: null, ...week },
+  ] });
+  render(<ClientsPage />);
+  // Строковая игла не нормализуется матчером, а текст элемента — да: сравниваем с обычным пробелом.
+  expect(await screen.findByText('3,36 ₽')).toBeTruthy();
+  expect(screen.getByText(copy.home.clientsHint(2, 4))).toBeTruthy();
+  expect(screen.queryByText(copy.clientsScreen.costPerClientEmpty)).toBeNull();
 });
 
 it('до запуска с готовым планом не ждёт вопросов, а ведёт в план', async () => {

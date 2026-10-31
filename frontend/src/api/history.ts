@@ -9,6 +9,8 @@ export interface HistoryEntry {
   kind: ChangeKind; platform: string | null; entity_type: string; entity_id: string;
   /** Название кампании, если запись о кампании: запуск и остановка пишутся по записи на каждую. */
   campaign?: string | null;
+  /** Код причины с сервера: имя отличает защиту бюджета от обычных записей. */
+  reason_code: string | null;
   reason_text: string; evidence: Record<string, unknown>; status: 'proposed' | 'pending' | 'applied' | 'failed' | 'reverted';
   reverts_id: number | null; can_revert: boolean; revert_warning: string | null;
 }
@@ -31,6 +33,15 @@ export async function revertChange(id: number): Promise<HistoryEntry> {
 }
 
 const labels = copy.historyScreen;
+// Коды системных записей про бюджет: откат любой из них дал бы выйти за бюджет месяца.
+const budgetProtectionCodes = new Set(['BUDGET_REBALANCE', 'BUDGET_STOP', 'SPEND_MISMATCH', 'MONTH_STOP', 'BUDGET_UPDATE_FAILED', 'LAUNCH_INTERRUPTED']);
+/** Почему запись нельзя отменить: короткое пояснение вместо просто отсутствия кнопки; null — пояснения нет. */
+export function noRevertHint(entry: HistoryEntry): string | null {
+  if (entry.can_revert) return null;
+  if (entry.kind === 'revert') return labels.noRevertRevert;
+  if (entry.reason_code && budgetProtectionCodes.has(entry.reason_code)) return labels.noRevertBudget;
+  return null;
+}
 // Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».
 function kindTitle(entry: HistoryEntry): string {
   if (entry.kind === 'launch' && 'experiment_key' in entry.evidence) return labels.experimentStart;

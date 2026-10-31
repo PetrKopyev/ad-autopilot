@@ -252,7 +252,7 @@ function GroupDetail({ group, index, total, site, adIndex, onPreview, disabled, 
     {ad && <div className="plan-section plan-texts">
       <fieldset className="plan-ads" aria-describedby={group.ads.length > 1 ? `plan-texts-hint-${group.id}` : undefined}>
         <legend className="plan-label">{copy.plan.texts}</legend>
-        {group.ads.length > 1 && <p className="muted plan-hint" id={`plan-texts-hint-${group.id}`}>{copy.plan.textsHint}</p>}
+        {group.ads.length > 1 && <p className="muted plan-hint" id={`plan-texts-hint-${group.id}`}>{copy.plan.textsHint(group.ads.indexOf(ad) + 1, group.ads.length)}</p>}
         {group.ads.map((item, position) => <label key={position} className="plan-ad">
           <input type="radio" name={`plan-ad-${group.id}`} checked={item === ad} onChange={() => onPreview(position)} />
           <span><strong>{item.title}</strong><span>{item.text}</span></span>

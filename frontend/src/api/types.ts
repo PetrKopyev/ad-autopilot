@@ -47,6 +47,11 @@ export interface Daily extends StatsPeriod {
   is_incomplete: boolean;
   items: (Metrics & { date: string })[];
 }
+/** Статус последней передачи данных рекламодателя в площадку; null — передачи ещё не было или кабинет не подключён. */
+export type MarkingTransmissionStatus = 'marking_transmitted' | 'marking_manual_required';
+export interface MarkingTransmission { direct: MarkingTransmissionStatus | null; vk: MarkingTransmissionStatus | null }
+/** Маркировка: что владелец подтвердил галочкой и что площадки приняли сами. */
+export interface MarkingStatus { confirmed: { direct: boolean; vk: boolean }; transmission: MarkingTransmission }
 // Proposed contracts for endpoints that are not available yet.
 export interface AutopilotStatus {
   /** no_business — мастер ещё не пройден, бизнеса нет. */
@@ -58,6 +63,8 @@ export interface AutopilotStatus {
   has_plan: boolean;
   /** Когда автопилот примет первые решения по цене — пока срок не прошёл; только у работающей рекламы. */
   first_decisions?: string | null;
+  /** Маркировка рекламодателя; null — данные ещё не сохраняли. */
+  marking?: MarkingStatus | null;
 }
 export type AdStatus = 'draft' | 'moderation' | 'active' | 'paused_auto' | 'paused_owner' | 'rejected' | 'archived';
 export interface Ad {

@@ -4,15 +4,15 @@ import { AdStatusBadge, BudgetRing, Button, ConfirmDialog, EmptyState, ErrorBann
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { getAds, getAutopilotStatus, getDaily, getExperiments, getSummary, stopAllAds } from '../api/screens';
-import { entryTitle, getHistoryPage, revertChange, type HistoryEntry } from '../api/history';
+import { entryTitle, getHistoryPage, noRevertHint, revertChange, type HistoryEntry } from '../api/history';
 import { answerClientQuestion, getClientQuestions, parseClients, type ClientQuestion } from '../api/clients';
 import { getPeriod, perDay, type PeriodChoice } from '../api/period';
 import { useResource } from '../api/useResource';
 import { useBusinessNow } from '../api/useBusinessNow';
 import { useDemo } from '../api/useDemo';
 import { getNotifications, readNotification, type AppNotification } from '../api/notifications';
-import type { Ad, AdStatus, AdsResponse, Daily, Experiment, Summary } from '../api/types';
-import { displayClock, displayDate, displayDateTime, justNow } from '../format';
+import type { Ad, AdStatus, AdsResponse, Daily, Experiment, MarkingStatus, Summary } from '../api/types';
+import { displayClock, displayDate, displayDateTime, justNow, wholeLeads } from '../format';
 import { DemoNotice, NullableMoney, campaignStopped, experimentPeriod, fewAdsReason, platformName, shownStatus } from './StatsShared';
 import { DemoPanel } from '../components/DemoPanel';
 import { formatMoney } from '../components/Money';
@@ -44,7 +44,7 @@ function Notifications({ items, changed }: { items: AppNotification[]; changed: 
     <h2 id="notifications-title" className="visually-hidden">{copy.home.notifications}</h2>
     {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
     {items.map((item) => <article key={item.id} className={`home-notice home-notice--${item.level}`}>
-      <p className="home-notice__text"><strong>{item.title}.</strong> {item.text}{' '}
+      <p className="home-notice__text"><strong>{item.title}.</strong> {wholeLeads(item.text)}{' '}
         <time className="home-notice__time" dateTime={item.created_at}>{displayDateTime(item.created_at)}</time></p>
       <Button variant="secondary" size="small" disabled={busy !== undefined} onClick={() => void read(item.id)}>{copy.home.understood}</Button>
     </article>)}
@@ -88,6 +88,25 @@ function AfterLaunch({ summary }: { summary: Summary }) {
     <h2 id="home-after-title">{copy.prelaunch.afterTitle}</h2>
     <p className="home-after__budget">{copy.prelaunch.afterBudget(formatMoney(summary.budget.budget_kop))}</p>
     <p className="muted">{copy.prelaunch.afterHint}</p>
+  </section>;
+}
+
+/** Маркировка не подтверждена или площадка не приняла данные: до запуска честно говорим, что сделать. */
+function MarkingNotice({ marking }: { marking: MarkingStatus }) {
+  // Директ обязателен для запуска; VK напоминаем, только если данные для него сохраняли (передача была).
+  const platforms = (['direct', 'vk'] as const).filter((platform) => platform === 'direct' || marking.transmission[platform] !== null);
+  const manual = platforms.filter((platform) => marking.transmission[platform] === 'marking_manual_required');
+  const unconfirmed = platforms.filter((platform) => !marking.confirmed[platform]);
+  if (!manual.length && !unconfirmed.length) return null;
+  return <section className="home-marking notice" aria-labelledby="home-marking-title">
+    <h2 id="home-marking-title">{copy.marking.todoTitle}</h2>
+    {manual.map((platform) => <div key={platform}>
+      <p>{copy.marking.manualRequired(copy.setup.accounts[platform])}</p>
+      <ol>{copy.marking.manualSteps[platform].map((step) => <li key={step}>{step}</li>)}</ol>
+    </div>)}
+    {manual.length > 0 && <p className="field__hint">{copy.marking.confirmAfterSteps}</p>}
+    {unconfirmed.length > 0 && <p>{copy.marking.unconfirmed(unconfirmed.map((platform) => copy.setup.accounts[platform]).join(', '))}</p>}
+    <div className="actions"><Link className="button button--secondary" to="/settings#marking">{copy.marking.openSettings}</Link></div>
   </section>;
 }
 
@@ -200,6 +219,7 @@ function Journal({ items, now, changed }: { items: HistoryEntry[]; now: number |
         <div className="home-log__body">
           <h3>{entryTitle(entry, items)}</h3>
           <p>{entry.reason_text}</p>
+          {noRevertHint(entry) && <p className="muted">{noRevertHint(entry)}</p>}
           {numbers.length > 0 && <p className="home-log__numbers mono">{numbers.join(' · ')}</p>}
           <p className="home-log__meta">{labels.authors[entry.actor]}{entry.platform ? ` · ${platformName(entry.platform)}` : ''}</p>
           {entry.status in labels.statuses && <StatusBadge>{labels.statuses[entry.status as keyof typeof labels.statuses]}</StatusBadge>}
@@ -332,7 +352,10 @@ export function HomePage() {
       <span className="skeleton home-skeleton" /></div>)}</div>}
     {board.loading && <p className="loading visually-hidden" role="status">{copy.screens.loading}</p>}
     {board.error && <ErrorBanner message={board.error} onRetry={board.reload} />}
-    {summary && prelaunch && <AfterLaunch summary={summary} />}
+    {summary && prelaunch && <>
+      {status?.marking && <MarkingNotice marking={status.marking} />}
+      <AfterLaunch summary={summary} />
+    </>}
     {summary && !prelaunch && <>
       <Tiles summary={summary} daily={board.data?.daily ?? null} />
       {summary.budget.spent_kop > summary.budget.reported_kop && <p className="muted home-fresher">{copy.budget.fresher(formatMoney(summary.budget.reported_kop))}</p>}

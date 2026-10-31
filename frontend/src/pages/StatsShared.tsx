@@ -4,8 +4,14 @@ import type { PeriodChoice } from '../api/period';
 import { displayDate, displayDateTime } from '../format';
 import { mockEnabled } from '../api/screens';
 import { useDemo } from '../api/useDemo';
-import type { Ad, AdStatus, Campaign, Experiment, Source, Summary } from '../api/types';
+import type { Ad, AdStatus, Campaign, ClientsWindow, Experiment, Source, Summary } from '../api/types';
 import './Stats.css';
+
+/** Порог ответов один на «Клиентов» и «Статистику»: цена клиента появляется, как только в окне есть хотя бы одна
+ * отвеченная неделя; недели с ответом «не знаю» окно не блокируют. Считает сервер — в окне клиентов сводной статистики. */
+export function clientWindowPrice(window: ClientsWindow | null | undefined): number | null {
+  return window?.cost_per_client_kop ?? null;
+}
 
 export function DemoNotice() { return mockEnabled ? <p className="stats-demo">{copy.screens.demo}</p> : null; }
 export function PeriodPicker({ value, onChange }: { value: PeriodChoice; onChange: (value: PeriodChoice) => void }) {

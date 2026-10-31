@@ -235,7 +235,7 @@ export function SetupPage() {
       if (!['http:', 'https:'].includes(url.protocol)) throw new FieldError('website', copy.setup.business.websiteError);
       const chosen = cities ? cities.find((item) => cityKey(item) === cityKey(city)) : city.trim();
       if (!chosen) throw new FieldError('city', copy.setup.business.cityError);
-      if (!month_budget_kop) throw new FieldError('budget', moneyError(budget));
+      if (!month_budget_kop) throw new FieldError('budget', budget.trim() ? moneyError(budget) : copy.setup.business.budgetMissing);
       if (tooMuchMoney(month_budget_kop)) throw new FieldError('budget', copy.launchFlow.moneyTooBig);
       // Минимум проверяем здесь, даже если расчёт под полем ещё не пришёл: иначе тот же текст пришёл бы с сервера
       // баннером, а через миг — и под полем. Расчёт не получили — минимум проверит сервер.

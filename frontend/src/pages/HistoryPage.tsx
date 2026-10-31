@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { Button, EmptyState, ErrorBanner, PageHeader, PanelCard, PlatformBadge, StatusBadge } from '../components';
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
-import { entryTitle, getHistoryPage, revertChange } from '../api/history';
+import { entryTitle, getHistoryPage, noRevertHint, revertChange } from '../api/history';
 import type { ChangeKind, HistoryEntry, HistoryFilter } from '../api/history';
 import { formatMoney } from '../components/Money';
 import { useResource } from '../api/useResource';
@@ -102,6 +102,7 @@ export function HistoryPage() {
                 {labels.statuses[entry.status as keyof typeof labels.statuses]}</StatusBadge>}</div>
             <p className="journal__meta">{author(entry)}{entry.platform && <> · <PlatformBadge platform={entry.platform} /></>}</p>
             <p className="journal__reason">{(entry.actor === 'autopilot' || entry.actor === 'system') && <span className="journal__label">{labels.why}</span>}{entry.reason_text}</p>
+            {noRevertHint(entry) && <p className="journal__no-revert muted">{noRevertHint(entry)}</p>}
             {numbers.length > 0 && <dl className="journal__numbers" aria-label={labels.numbers}>
               {numbers.map(([name, value]) => <div key={name}><dt>{name}</dt><dd className="mono">{value}</dd></div>)}</dl>}
             {entry.can_revert && confirming !== entry.id && <div className="journal__actions">

@@ -2,6 +2,7 @@ import { api, ApiError } from './client';
 import { mockEnabled } from './screens';
 import { copy } from '../copy';
 import { demoDateKey } from './demo';
+import type { MarkingTransmission } from './types';
 
 export interface Account {
   id: number; business_id: number; platform: 'direct' | 'vk'; external_login: string;
@@ -122,9 +123,12 @@ export async function saveMetrica(counter_id: number, lead_goal_ids: number[]) {
   if (mockEnabled) { (await import('./mocks')).mockSetupMetrica(counter_id, lead_goal_ids); return; }
   await api('/api/business/metrica', { method: 'PUT', body: { counter_id, lead_goal_ids } });
 }
-export async function saveMarking(body: Marking) {
-  if (mockEnabled) { (await import('./mocks')).mockSetupMarking(body); return; }
-  await api('/api/business/marking', { method: 'PUT', body });
+/** Результат сохранения: подтверждения и статус передачи данных в каждый подключённый кабинет. */
+export async function saveMarking(body: Marking): Promise<MarkingTransmission> {
+  if (mockEnabled) return (await import('./mocks')).mockSetupMarking(body);
+  const result = await api<{ transmission: MarkingTransmission }>('/api/business/marking', { method: 'PUT', body });
+  if (!result) throw new ApiError(copy.errors.invalidResponse);
+  return result.transmission;
 }
 export function validInn(value: string): boolean {
   if (!/^(?:\d{10}|\d{12})$/.test(value) || /^0+$/.test(value)) return false;

@@ -11,6 +11,14 @@ export function plural(count: number, one: string, few: string, many: string): s
  * Берём нижнюю: прогноз не обещает больше. */
 export function forecastBounds(min: number, max: number): number[] { return (max - min) * 100 <= max ? [min] : [min, max]; }
 
+/** Сервер пишет дробные обращения словами («ещё примерно 90,6 обращения в день»): показываем целое с «≈». */
+export function wholeLeads(text: string): string {
+  return text.replace(/примерно (\d+),(\d) (обращение|обращения|обращений)/g, (_: string, whole: string, fraction: string) => {
+    const rounded = Math.round(Number(`${whole}.${fraction}`));
+    return `≈${rounded.toLocaleString('ru-RU')} ${plural(rounded, 'обращение', 'обращения', 'обращений')}`;
+  });
+}
+
 function parse(value: string): Date { return new Date(value.length === 10 ? `${value}T12:00:00` : value); }
 
 export function displayDate(value: string): string { return parse(value).toLocaleDateString('ru-RU'); }

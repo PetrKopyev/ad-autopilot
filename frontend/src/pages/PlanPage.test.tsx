@@ -192,9 +192,9 @@ it('пока своё фото группы ждёт или загружаетс
   vi.mocked(uploadPhoto).mockReturnValueOnce(uploaded.promise);
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   await screen.findByRole('button', { name: /Педикюр/ });
-  expect(card('Педикюр').getByText('Можно попросить ещё 2 варианта картинок.')).toBeTruthy();
+  expect(card('Педикюр').getByText('Можно попросить ещё 2 раза.')).toBeTruthy();
   fireEvent.click(card('Маникюр').getByRole('button', { name: 'Попросить ещё варианты' }));
-  expect(card('Педикюр').getByText('Можно попросить ещё 1 вариант картинок.')).toBeTruthy();
+  expect(card('Педикюр').getByText('Можно попросить ещё 1 раз.')).toBeTruthy();
   const input = card('Педикюр').getByLabelText('Загрузить своё фото') as HTMLInputElement;
   fireEvent.change(input, { target: { files: [new File(['photo'], 'photo.jpg', { type: 'image/jpeg' })] } });
   expect(input.disabled).toBe(true);
@@ -278,7 +278,7 @@ it('готовый прогноз: диапазон обращений с сер
   await screen.findByRole('heading', { name: 'Прогноз на месяц' });
   expect(forecastPanel().getByText('≈ 9–26')).toBeTruthy();
   expect(forecastPanel().getByText('За месяц 450–870 кликов.')).toBeTruthy();
-  expect(forecastPanel().getByText('Прогноз, может ошибаться.')).toBeTruthy();
+  expect(forecastPanel().getByText('Прогноз может ошибаться.')).toBeTruthy();
   expect(forecastPanel().getByText('Для ВКонтакте прогноз появится после первых дней работы.')).toBeTruthy();
   expect(forecastPanel().getByRole('link', { name: 'Яндекс Директ, прогноз бюджета' }).getAttribute('href')).toBe('https://yandex.ru/dev/direct/');
   expect(within(screen.getByRole('region', { name: 'Итог плана' })).getByText('≈ 9–26')).toBeTruthy();
@@ -302,7 +302,7 @@ it('пояснение от ИИ уже с пометкой — вторую н�
   vi.mocked(getForecast).mockResolvedValue(forecast({ explanation: 'Пересказ. Пояснение написал ИИ — это прогноз, он может ошибаться.', explanation_by_ai: true, demo: true }));
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   await screen.findByRole('heading', { name: 'Прогноз на месяц' });
-  expect(screen.queryByText('Прогноз, может ошибаться.')).toBeNull();
+  expect(screen.queryByText('Прогноз может ошибаться.')).toBeNull();
   expect(forecastPanel().getByText('демо')).toBeTruthy();
 });
 
@@ -387,9 +387,12 @@ it('предпросмотр показывает выбранный текст 
   const preview = within((await screen.findByText('Примерный вид: площадка может показать немного иначе.')).closest('figure') as HTMLElement);
   expect(preview.getByText('Маникюр у дома')).toBeTruthy();
   await waitFor(() => expect(preview.getByText('Реклама · studio.ru')).toBeTruthy());
+  // Переключатель текстов подписан как предпросмотр: в рекламе работают все тексты, радиокнопка ничего не выбирает «настоящего».
+  expect(screen.getByText(copy.plan.textsHint(1, 2))).toBeTruthy();
   fireEvent.click(screen.getByRole('radio', { name: /Гель-лак за час/ }));
   expect(preview.getByText('Гель-лак за час')).toBeTruthy();
   expect(preview.getByText('Второй текст')).toBeTruthy();
+  expect(screen.getByText(copy.plan.textsHint(2, 2))).toBeTruthy();
 });
 
 it('если услуг в описании больше пяти, план говорит, что в Директ вошли первые пять', async () => {

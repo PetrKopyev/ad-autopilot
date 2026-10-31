@@ -21,7 +21,7 @@ vi.mock('../api/screens', () => ({
 vi.mock('../api/history', async (original) => ({ ...await original<typeof import('../api/history')>(), getHistoryPage: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 5 })), revertChange: vi.fn() }));
 vi.mock('../api/clients', async (original) => ({ ...await original<typeof import('../api/clients')>(), getClientQuestions: vi.fn(async () => ({ items: [], cost_per_client_kop: null })), answerClientQuestion: vi.fn() }));
 vi.mock('../api/period', async (original) => ({ ...await original<typeof import('../api/period')>(), getPeriod: async () => ({ from: '2026-10-01', to: '2026-10-27' }) }));
-vi.mock('../api/notifications', () => ({ getNotifications: async () => [], readNotification: vi.fn() }));
+vi.mock('../api/notifications', () => ({ getNotifications: vi.fn(async () => []), readNotification: vi.fn() }));
 vi.mock('../api/useBusinessNow', () => ({ useBusinessNow: () => Date.parse('2026-10-27T10:05:00Z') }));
 vi.mock('../api/settings', () => ({ resumeAutopilot: vi.fn(), getBusiness: vi.fn(async () => ({ avg_check_kop: null })) }));
 vi.mock('../components/DemoPanel', () => ({ DemoPanel: () => null }));
@@ -193,7 +193,7 @@ it('кампания без ряда по дням показывается бе
 
 it('отменяет изменение из журнала только после подтверждения', async () => {
   const entry: HistoryEntry = { id: 7, business_id: 1, created_at: '2026-10-27T09:00:00Z', actor: 'autopilot', kind: 'budget', platform: 'direct',
-    entity_type: 'campaign', entity_id: '1', reason_text: 'Обращение здесь дешевле всего.', evidence: { budget_kop: 105_000 }, status: 'applied',
+    entity_type: 'campaign', entity_id: '1', reason_code: null, reason_text: 'Обращение здесь дешевле всего.', evidence: { budget_kop: 105_000 }, status: 'applied',
     reverts_id: null, can_revert: true, revert_warning: 'Дневной бюджет вернётся к 820 ₽.' };
   vi.mocked(getHistoryPage).mockResolvedValue({ items: [entry], total: 1, page: 1, page_size: 5 });
   vi.mocked(revertChange).mockResolvedValue({ ...entry, id: 8, kind: 'revert', reverts_id: 7 });
@@ -266,4 +266,45 @@ it('после запуска остановка на месте', async () => {
   await show(0, 0);
   expect(await screen.findByRole('button', { name: copy.home.stopAll })).toBeTruthy();
   expect(screen.queryByRole('link', { name: copy.prelaunch.openPlan })).toBeNull();
+});
+
+it('до запуска неподтверждённая маркировка — блок «что сделать» с инструкцией и ссылкой в настройки', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true,
+    marking: { confirmed: { direct: false, vk: false }, transmission: { direct: 'marking_manual_required', vk: null } } });
+  vi.mocked(getSummary).mockResolvedValue({
+    business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
+    ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
+  } satisfies Summary);
+  render(<MemoryRouter><HomePage /></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: copy.marking.todoTitle })).toBeTruthy();
+  expect(screen.getByText(copy.marking.manualRequired(copy.setup.accounts.direct))).toBeTruthy();
+  for (const step of copy.marking.manualSteps.direct) expect(screen.getByText(step)).toBeTruthy();
+  expect(screen.getByText(copy.marking.unconfirmed(copy.setup.accounts.direct))).toBeTruthy();
+  expect(screen.getByRole('link', { name: copy.marking.openSettings }).getAttribute('href')).toBe('/settings#marking');
+});
+
+it('подтверждённая и переданная маркировка не отнимает место на главной', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'draft', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true,
+    marking: { confirmed: { direct: true, vk: false }, transmission: { direct: 'marking_transmitted', vk: null } } });
+  vi.mocked(getSummary).mockResolvedValue({
+    business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
+    ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
+  } satisfies Summary);
+  render(<MemoryRouter><HomePage /></MemoryRouter>);
+  await screen.findByText(copy.prelaunch.afterTitle);
+  expect(screen.queryByText(copy.marking.todoTitle)).toBeNull();
+});
+
+it('дробные обращения в уведомлении показывает округлёнными', async () => {
+  const { getNotifications } = await import('../api/notifications');
+  vi.mocked(getNotifications).mockResolvedValue([{ id: 1, kind: 'BUDGET_OPPORTUNITY', created_at: '2026-10-27T09:00:00Z', level: 'info',
+    title: 'Можно получить больше обращений',
+    text: 'При увеличении дневного бюджета на 136,75 ₽ можно получить ещё примерно 90,6 обращения в день. Это оценка по текущей цене.' }]);
+  await show(0, 0);
+  expect(await screen.findByText(/можно получить ещё ≈91 обращение в день/)).toBeTruthy();
+  expect(screen.queryByText(/90,6 обращения/)).toBeNull();
 });

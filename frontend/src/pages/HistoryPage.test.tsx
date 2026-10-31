@@ -17,7 +17,7 @@ const labels = copy.historyScreen;
 function entry(id: number, kind: HistoryEntry['kind']): HistoryEntry {
   return {
     id, business_id: 1, created_at: '2026-10-20T10:00:00+03:00', actor: 'owner', kind, platform: 'direct',
-    entity_type: 'campaign', entity_id: '1', reason_text: `Запись ${id}`, evidence: {}, status: 'applied',
+    entity_type: 'campaign', entity_id: '1', reason_code: null, reason_text: `Запись ${id}`, evidence: {}, status: 'applied',
     reverts_id: null, can_revert: true, revert_warning: null,
   };
 }
@@ -78,6 +78,33 @@ it('кнопки отката нет, если сервер не разреша�
   await screen.findByText('Запись 1');
   expect(screen.queryByRole('button', { name: labels.resume })).toBeNull();
   expect(screen.getAllByRole('button', { name: copy.history.undo })).toHaveLength(1);
+});
+
+it('защищённая запись защиты бюджета объясняет, почему её нельзя отменить', async () => {
+  serve([{ ...entry(1, 'pause'), actor: 'system', can_revert: false, reason_code: 'BUDGET_REBALANCE' },
+    { ...entry(2, 'pause'), actor: 'system', can_revert: false, reason_code: 'NO_ACTIVE_ADS' }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getByText(labels.noRevertBudget)).toBeTruthy();
+  // Не любая системная остановка — защита бюджета: без кода защиты пояснения нет.
+  expect(screen.queryByText(labels.noRevertRevert)).toBeNull();
+  expect(screen.getAllByText(labels.noRevertBudget)).toHaveLength(1);
+});
+
+it('запись об отмене изменения объясняет, что откатить её нельзя', async () => {
+  serve([{ ...entry(1, 'revert'), reverts_id: 9, can_revert: false }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getByText(labels.noRevertRevert)).toBeTruthy();
+  expect(screen.queryByText(labels.noRevertBudget)).toBeNull();
+});
+
+it('пояснение не мешает отмене: кнопка у откатываемой записи, пояснение — только у защищённой', async () => {
+  serve([entry(1, 'budget'), { ...entry(2, 'pause'), actor: 'system', can_revert: false, reason_code: 'BUDGET_STOP' }]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getByRole('button', { name: copy.history.undo })).toBeTruthy();
+  expect(screen.getAllByText(labels.noRevertBudget)).toHaveLength(1);
 });
 
 it('цифры причины видны сразу, отменённая запись помечена «Отменено» и без кнопки', async () => {

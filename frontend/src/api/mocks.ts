@@ -1,7 +1,7 @@
 import { copy } from '../copy';
 import { ApiError } from './client';
 import { isoDate, periodFor } from './period';
-import type { Ad, AdsResponse, AutopilotStatus, Breakdown, Daily, Metrics, Period, StatsLevel, Summary } from './types';
+import type { Ad, AdsResponse, AutopilotStatus, Breakdown, Daily, MarkingTransmission, Metrics, Period, StatsLevel, Summary } from './types';
 
 const timestamp = new Date().toISOString();
 const base = (cost: number, leads: number, impressions = 1200, clicks = 48): Metrics => ({
@@ -76,11 +76,18 @@ export function mockBreakdown(period: Period, level: StatsLevel): Breakdown {
 export function mockStatus(): AutopilotStatus {
   // Как на сервере: до запуска плана — черновик, мастер и план без меню.
   if (!live()) return { status: 'draft', last_check_at: null, auto_continue: true, has_plan: !!setupMock.plan,
-    needs_attention: [{ id: 'budget', title: copy.screens.draft, description: '', destination: 'settings' }] };
+    needs_attention: [{ id: 'budget', title: copy.screens.draft, description: '', destination: 'settings' }],
+    marking: setupMock.marking
+      ? { confirmed: { direct: !!setupMock.marking.direct, vk: !!setupMock.marking.vk }, transmission: businessSettings.marking?.transmission ?? { direct: null, vk: null } }
+      : null };
   return { status: paused ? 'paused' : 'running', last_check_at: timestamp, auto_continue: true,
     needs_attention: questions.some((item) => !item.answered_at)
       ? [{ id: 'clients', title: copy.screens.mockAttention, description: copy.screens.mockAttentionHint, destination: 'clients' }] : [],
-    has_plan: true };
+    has_plan: true,
+    marking: businessSettings.marking
+      ? { confirmed: { direct: !!businessSettings.marking.confirmed_in_platform.direct, vk: !!businessSettings.marking.confirmed_in_platform.vk },
+        transmission: businessSettings.marking.transmission }
+      : null };
 }
 export function mockAds(): AdsResponse {
   const today = new Date(); today.setHours(12, 0, 0, 0);
@@ -185,10 +192,14 @@ export function mockSetupCheck(): { items: AccountCheck[] } {
 export function mockSetupCounters() { return { items: [{ id: 12345, name: copy.launchFlow.mockCounter }] }; }
 export function mockSetupGoals(counter: number) { return { items: counter === 12345 ? [{ id: 1, name: copy.launchFlow.mockGoal }] : [] }; }
 export function mockSetupMetrica(counter: number, goals: number[]) { setupMock.counter = counter; setupMock.goals = goals; persistSetupMock(); }
-export function mockSetupMarking(body: Marking) {
+export function mockSetupMarking(body: Marking): MarkingTransmission {
   // Never keep the INN, phone or manual account key in browser storage.
   setupMock.marking = body.confirmed_in_platform; setupMock.plan = undefined; persistSetupMock();
-  businessSettings.marking = maskMarking(body);
+  // Демо-площадки принимают данные без запросов: передача состоялась во все подключённые кабинеты.
+  const connected = (platform: 'direct' | 'vk') => setupMock.me.accounts.some((item) => item.platform === platform && item.status === 'ok');
+  const transmission: MarkingTransmission = { direct: connected('direct') ? 'marking_transmitted' : null, vk: connected('vk') ? 'marking_transmitted' : null };
+  businessSettings.marking = maskMarking(body, transmission);
+  return transmission;
 }
 function mockAsset(id: number, selected = false): PlanAsset {
   const color = id % 2 ? '#e7c2bb' : '#b8cfc3';
@@ -277,12 +288,12 @@ export function mockPlanLaunch(acknowledged: boolean) {
 const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
 const historyEntries: HistoryEntry[] = [
   { id: 3, business_id: 1, created_at: hoursAgo(2), actor: 'autopilot', kind: 'pause', platform: 'direct', entity_type: 'ad', entity_id: '1',
-    reason_text: 'Объявление потратило втрое больше обычного и не принесло ни одного обращения.',
+    reason_code: 'PAUSE_TOO_EXPENSIVE', reason_text: 'Объявление потратило втрое больше обычного и не принесло ни одного обращения.',
     evidence: { cost_kop: 450000, leads: 0, clicks: 120 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
   { id: 2, business_id: 1, created_at: hoursAgo(30), actor: 'owner', kind: 'budget', platform: null, entity_type: 'business', entity_id: '1',
-    reason_text: 'Вы увеличили бюджет на месяц.', evidence: { budget_kop: 3000000 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
+    reason_code: null, reason_text: 'Вы увеличили бюджет на месяц.', evidence: { budget_kop: 3000000 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
   { id: 1, business_id: 1, created_at: hoursAgo(55), actor: 'external', kind: 'text', platform: 'vk', entity_type: 'ad', entity_id: '2',
-    reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null },
+    reason_code: null, reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null },
 ];
 export function mockHistoryPage(filter: HistoryFilter, pageSize: number): HistoryPage {
   const items = !live() ? [] : historyEntries.filter((item) => (!filter.platform || item.platform === filter.platform)
@@ -291,7 +302,7 @@ export function mockHistoryPage(filter: HistoryFilter, pageSize: number): Histor
 }
 function record(kind: 'pause' | 'resume', entity_type: string, entity_id: string, reason_text: string) {
   historyEntries.unshift({ id: historyEntries[0].id + 1, business_id: 1, created_at: new Date().toISOString(), actor: 'owner', kind,
-    platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_text, evidence: {}, status: 'applied', reverts_id: null,
+    platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_code: null, reason_text, evidence: {}, status: 'applied', reverts_id: null,
     can_revert: kind === 'pause' && entity_type === 'business', revert_warning: null });
 }
 export function mockRevert(id: number): HistoryEntry {
@@ -300,7 +311,7 @@ export function mockRevert(id: number): HistoryEntry {
   if (original.kind === 'pause' && original.entity_type === 'business') resumeAll();
   original.status = 'reverted'; original.can_revert = false;
   const entry: HistoryEntry = { ...original, id: historyEntries[0].id + 1, created_at: new Date().toISOString(), actor: 'owner', kind: 'revert',
-    reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false };
+    reason_code: null, reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false };
   historyEntries.unshift(entry); return structuredClone(entry);
 }
 const weekStart = (weeksAgo: number) => { const day = new Date(); day.setDate(day.getDate() - ((day.getDay() + 6) % 7) - 7 * weeksAgo); return isoDate(day); };
