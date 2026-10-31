@@ -33,7 +33,7 @@ from app.platforms.base import (
 from app.platforms.direct import DirectAdapter
 
 V5 = "https://api.direct.yandex.com/json/v5"
-V501 = "https://api.direct.yandex.com/v501"
+V501 = "https://api.direct.yandex.com/json/v501"
 TODAY = date(2026, 10, 26)
 
 
@@ -262,12 +262,12 @@ async def test_sandbox_urls_and_optional_login(api):
         api.post("https://api-sandbox.direct.yandex.com/json/v5/adimages").respond(
             json={"result": {"AddResults": [{"AdImageHash": "hash"}]}}
         )
-        assert instance._v501_url == "https://api-sandbox.direct.yandex.com/v501"
+        assert instance._v501_url == "https://api-sandbox.direct.yandex.com/json/v501"
 
 
 async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     first = await adapter.create_campaign_tree(plan)
     assert first == ExternalRefs(
         "101",
@@ -325,7 +325,7 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
 async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan):
     server = DirectServer()
     server.fail_keywords_once = True
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     with pytest.raises(PlatformError):
         await adapter.create_campaign_tree(plan)
     first, second = await asyncio.gather(adapter.create_campaign_tree(plan), adapter.create_campaign_tree(plan))
@@ -358,7 +358,7 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
     server.rows["keywords"].append(
         {"Id": 104, "AdGroupId": 102, "CampaignId": 101, "State": "ON", "Keyword": "педикюр"}
     )
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     assert refs.campaign_id == "101" and refs.groups == {"nails": "102"}
     assert refs.ads == {"ad": "201"} and refs.targets == {"phrase": "202"}
@@ -416,7 +416,7 @@ async def test_create_tree_archives_extra_foreign_ad_beyond_plan(adapter, api, p
     server.rows["keywords"].append(
         {"Id": 104, "AdGroupId": 102, "CampaignId": 101, "State": "ON", "Keyword": "маникюр"}
     )
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     # Плановое объявление нашлось по содержимому; лишнее архивно. Текста о пересоздании нет — ничего не создавали.
     assert refs.ads == {"ad": "103"} and refs.targets == {"phrase": "104"}
@@ -436,7 +436,7 @@ async def test_weekly_limit_respects_month_and_period(adapter, today, expected):
 async def test_conversion_strategy(adapter, api, plan):
     adapter._strategy = "WB_MAXIMUM_CONVERSION_RATE"
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     await adapter.create_campaign_tree(plan)
     strategy = server.rows["campaigns"][0]["UnifiedCampaign"]["BiddingStrategy"]["Search"]
     assert strategy == {
@@ -614,7 +614,7 @@ async def test_end_date_extension_is_separate_from_budget_update(adapter, api, e
 
 async def test_state_and_moderation(adapter, api, plan):
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     state = await adapter.get_state(refs)
     assert set(state) == set(refs.entity_ids())
@@ -1004,7 +1004,7 @@ with warnings.catch_warnings():
 
 async def test_group_pause_and_resume_are_idempotent(adapter, api, plan):
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     adapter._marking_confirmed = True
     operation = Operation("set_status", "group", refs.groups["nails"], "status", "active", "paused_auto")
@@ -1097,7 +1097,7 @@ async def test_draft_activation_other_resume_error_is_a_real_failure(adapter, ap
 async def test_confirmed_campaign_can_start(adapter, api, plan):
     adapter._marking_confirmed = True
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     assert server.rows["campaigns"][0]["State"] == "ON"
     assert server.rows["campaigns"][0]["EndDate"] == "2026-10-31"
@@ -1108,7 +1108,7 @@ async def test_restarting_with_edited_plan_recreates_ads_and_reports(adapter, ap
     """План пересобрал тексты под тем же ключом (или владелец правил объявление в кабинете): сервис не привязывает
     план к чужому содержимому — создаёт объявление по плану заново и честно пишет об этом в журнал запуска."""
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     original = await adapter.create_campaign_tree(plan)
     adapter._trees.clear()
     changed = replace(
@@ -1136,7 +1136,7 @@ async def test_sandbox_reports_are_requested_per_campaign(api):
         "test-only", config=configuration(direct_sandbox=True), priority_goals={34: 1}
     ) as instance:
         instance._today = lambda: TODAY
-        api.post("https://api-sandbox.direct.yandex.com/v501/campaigns").respond(
+        api.post("https://api-sandbox.direct.yandex.com/json/v501/campaigns").respond(
             json={"result": {"Campaigns": [{"Id": 1}, {"Id": 4}]}}
         )
         route = api.post("https://api-sandbox.direct.yandex.com/json/v5/reports").mock(
@@ -1193,7 +1193,7 @@ async def test_service_confirms_direct_auto_pause_and_preserves_local_author(ada
     from tests.services.test_changes import MemoryRepository
 
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     refs = await adapter.create_campaign_tree(plan)
     adapter._marking_confirmed = True
     await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "paused_owner", "active"))
@@ -1231,7 +1231,7 @@ async def test_service_budget_update_after_restart_converts_lifetime_cap_and_ext
     repository.current_business.settings = {"_worker": {"started_on": "2026-10-26"}}
     campaign = Campaign(id=1, external_id="1", daily_limit_kop=100_000, period_cap_kop=1_000_000)
     repository.entities = {("campaign", "1"): campaign}
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     config = configuration(direct_amounts_include_vat=include_vat)
     async with DirectAdapter("test-only", config=config) as restarted:
         restarted._today = lambda: day
@@ -1406,7 +1406,7 @@ async def test_group_without_regions_is_rejected_instead_of_targeting_whole_worl
 
 async def test_add_group_into_running_campaign_is_idempotent(adapter, api, plan):
     server = DirectServer()
-    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
     adapter._marking_confirmed = True
     refs = await adapter.create_campaign_tree(plan)
     group = AdGroupSpec(

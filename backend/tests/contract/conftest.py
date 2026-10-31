@@ -39,7 +39,7 @@ async def platform_errors(request: pytest.FixtureRequest):
         return
     config = SimpleNamespace(
         direct_api_url="https://api.direct.yandex.com/json/v5",
-        direct_api_v501_url="https://api.direct.yandex.com/v501",
+        direct_api_v501_url="https://api.direct.yandex.com/json/v501",
         direct_sandbox=False,
         direct_amounts_include_vat=False,
         vat_percent=22,

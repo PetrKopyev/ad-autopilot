@@ -439,7 +439,7 @@ async def test_registry_rebuilds_adapter_only_when_account_data_changes(http) ->
 async def test_registry_builds_direct_for_any_city_region_is_resolved_at_launch(http) -> None:
     config = SimpleNamespace(
         direct_api_url="https://api.direct.yandex.com/json/v5",
-        direct_api_v501_url="https://api.direct.yandex.com/v501",
+        direct_api_v501_url="https://api.direct.yandex.com/json/v501",
         direct_sandbox=True,
         direct_amounts_include_vat=False,
         vat_percent=22,
@@ -451,7 +451,7 @@ async def test_registry_builds_direct_for_any_city_region_is_resolved_at_launch(
 async def test_registry_passes_business_goals_to_direct(http) -> None:
     config = SimpleNamespace(
         direct_api_url="https://api.direct.yandex.com/json/v5",
-        direct_api_v501_url="https://api.direct.yandex.com/v501",
+        direct_api_v501_url="https://api.direct.yandex.com/json/v501",
         direct_sandbox=False,
         direct_amounts_include_vat=True,
         vat_percent=22,

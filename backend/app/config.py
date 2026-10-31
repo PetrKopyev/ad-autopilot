@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     yandex_client_id: str = ""
     yandex_client_secret: SecretStr = SecretStr("")
     direct_api_url: str = "https://api.direct.yandex.com/json/v5"
-    direct_api_v501_url: str = "https://api.direct.yandex.com/v501"
+    direct_api_v501_url: str = "https://api.direct.yandex.com/json/v501"
     direct_sandbox: bool = False
     # Суммы стратегии в API Директа: по умолчанию считаем их без НДС и делим бюджет на (1 + НДС), чтобы трата
     # с НДС не превысила бюджет. true — суммы API уже с НДС и передаются как есть.
