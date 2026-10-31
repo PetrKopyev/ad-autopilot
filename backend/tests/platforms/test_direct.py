@@ -111,6 +111,8 @@ class DirectServer:
         self.requests = []
         self.next_id = 100
         self.fail_keywords_once = False
+        # В API 501 единые кампании создаются черновиком; текстовые (v5) — сразу включёнными.
+        self.campaign_state = "ON"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         service = request.url.path.rsplit("/", 1)[-1]
@@ -124,6 +126,11 @@ class DirectServer:
             for field, row_field in (("Ids", "Id"), ("CampaignIds", "CampaignId"), ("AdGroupIds", "AdGroupId")):
                 if field in selection:
                     items = [item for item in items if item.get(row_field) in selection[field]]
+            if service == "keywords" and params.get("FieldNames"):
+                # Как живой API: keywords.get отдаёт только запрошенные поля. Без State в FieldNames
+                # сверка статусов фраз на сервисе невозможна — так пропускался suspend чужих фраз.
+                fields = set(params["FieldNames"])
+                items = [{name: value for name, value in item.items() if name in fields} for item in items]
             return httpx.Response(200, json={"result": {key: items}})
         self.writes.append((service, method, params))
         if service == "keywords" and self.fail_keywords_once:
@@ -131,7 +138,8 @@ class DirectServer:
             return httpx.Response(503, text="unavailable")
         if method == "add":
             self.next_id += 1
-            item = {**params[key][0], "Id": self.next_id, "State": "ON", "Status": "ACCEPTED"}
+            state = self.campaign_state if service == "campaigns" else "ON"
+            item = {**params[key][0], "Id": self.next_id, "State": state, "Status": "ACCEPTED"}
             if service == "ads" and "ResponsiveAd" in item:
                 content = item["ResponsiveAd"]
                 item["ResponsiveAd"] = {
@@ -322,6 +330,52 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     assert len(server.writes) == writes
 
 
+async def test_create_tree_leaves_draft_campaign_without_suspend(adapter, api, plan):
+    """Единые кампании (API 501) создаются черновиком: suspend для черновика Direct отклоняет, а показов
+    у черновика нет — дерево собирается без остановки кампании."""
+    server = DirectServer()
+    server.campaign_state = "DRAFT"
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs == ExternalRefs(
+        "101",
+        {"nails": "102"},
+        {"ad": "103"},
+        {"phrase": "104"},
+        {
+            "daily_limit_kop": plan.daily_limit_kop,
+            "period_cap_kop": plan.period_cap_kop,
+            "weekly_limit_kop": 500_000,
+        },
+    )
+    assert server.rows["campaigns"][0]["State"] == "DRAFT"
+    assert ("campaigns", "suspend") not in [(service, method) for service, method, _ in server.writes]
+    # Состояние новой кампании читается по Id перед решением об остановке.
+    campaign_requests = [body for service, body in server.requests if service == "campaigns"]
+    assert {
+        "method": "get",
+        "params": {
+            "SelectionCriteria": {"Ids": [101]},
+            "FieldNames": ["Id", "State"],
+            "Page": {"Limit": 1000, "Offset": 0},
+        },
+    } in campaign_requests
+
+
+@pytest.mark.parametrize("text_campaign", [False, True])
+async def test_create_tree_suspends_new_campaign_when_not_draft(adapter, api, plan, text_campaign):
+    """Свежая кампания не в статусе черновика (текстовые кампании v5 создаются сразу включёнными)
+    останавливается после создания, как раньше."""
+    adapter._text_campaign = text_campaign
+    server = DirectServer()
+    base = "v5" if text_campaign else "v501"
+    api.post(url__regex=rf"https://api\.direct\.yandex\.com/json/{base}/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs.campaign_id == "101"
+    assert ("campaigns", "suspend", {"SelectionCriteria": {"Ids": [101]}}) in server.writes
+    assert server.rows["campaigns"][0]["State"] == "SUSPENDED"
+
+
 async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan):
     server = DirectServer()
     server.fail_keywords_once = True
@@ -369,6 +423,7 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
     # Чужое объявление ушло в архив, чужая фраза остановлена; операции — для откатываемой записи запуска.
     assert server.rows["ads"][0]["State"] == "ARCHIVED"
     assert server.rows["keywords"][0]["State"] == "SUSPENDED"
+    assert ("keywords", "suspend", {"SelectionCriteria": {"Ids": [104]}}) in server.writes
     assert adapter.foreign_stops == [
         Operation("set_status", "ad", "103", "status", "active", "archived"),
         Operation("set_status", "target", "104", "status", "active", "paused_owner"),

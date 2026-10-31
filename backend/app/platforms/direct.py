@@ -522,7 +522,15 @@ class DirectAdapter:
                     campaign_kind: self._campaign_settings(weekly),
                 },
             )
-            await self._api("campaigns", "suspend", {"SelectionCriteria": {"Ids": [int(campaign_id)]}})
+            # Единые кампании (API 501) создаются черновиком, а suspend для черновика Direct отклоняет;
+            # черновик сам не показывает объявления — для «создать остановленной» пауза не нужна.
+            created = await self._get(
+                "campaigns",
+                "Campaigns",
+                {"SelectionCriteria": {"Ids": [int(campaign_id)]}, "FieldNames": ["Id", "State"]},
+            )
+            if created and created[0].get("State") != "DRAFT":
+                await self._api("campaigns", "suspend", {"SelectionCriteria": {"Ids": [int(campaign_id)]}})
         refs = ExternalRefs(
             campaign_id,
             {},
@@ -609,7 +617,8 @@ class DirectAdapter:
                 "Keywords",
                 {
                     "SelectionCriteria": {"AdGroupIds": [int(group_id)]},
-                    "FieldNames": ["Id", "Keyword"],
+                    # State нужен: по нему отличаем активные чужие фразы, которые останавливаем ниже.
+                    "FieldNames": ["Id", "Keyword", "State"],
                 },
             )
             complete_targets = len(keywords) == len(group.targets)
