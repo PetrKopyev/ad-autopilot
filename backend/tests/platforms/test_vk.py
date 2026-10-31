@@ -206,7 +206,11 @@ async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api)
     assert refs.campaign_id == "10" and refs.ads == {"a1": "30"}
     assert not create.called
     params = parse_qs(api.calls[0].request.url.query.decode())
-    assert params["_name__contains"] == ["ap-c1"]
+    # Живой API отвергает фильтр по имени у ad_plans: список читаем целиком, отбор по суффиксу — на нашей стороне.
+    assert "_name__contains" not in params
+    banner_params = parse_qs(api.calls[2].request.url.query.decode())
+    # Живой API: фильтр плана у banners — "_ad_group__ad_plan_id", "_ad_plan_id" невалиден.
+    assert banner_params["_ad_group__ad_plan_id"] == ["10"]
 
 
 async def test_create_tree_rejects_unsupported_input_before_requests(adapter: VkAdapter, api) -> None:

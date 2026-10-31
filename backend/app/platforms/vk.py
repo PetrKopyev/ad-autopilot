@@ -183,9 +183,11 @@ class VkAdapter(VkClient):
                     )
             if any(target.kind != "interest" for target in group.targets):
                 raise PlatformError("VK принимает только интересы; фразы и аудитории задаются в targeting группы.")
+        # Живой API не поддерживает фильтра по имени у ad_plans (unknown_filter "_name__contains"):
+        # читаем список целиком и отбираем суффикс ключа, как в адаптере Директа.
         found = [
             item
-            for item in await self._items("ad_plans", {"_name__contains": key, "fields": "id,name"})
+            for item in await self._items("ad_plans", {"fields": "id,name"})
             if str(item.get("name", "")).endswith(f" {key}")
         ]
         if len(found) > 1:
@@ -193,7 +195,10 @@ class VkAdapter(VkClient):
         if found:
             plan = {"id": found[0]["id"]}
             plan["ad_groups"] = await self._items("ad_groups", {"_ad_plan_id": plan["id"], "fields": "id,name"})
-            banners = await self._items("banners", {"_ad_plan_id": plan["id"], "fields": "id,name,ad_group_id"})
+            # Живой API: у banners фильтр плана — "_ad_group__ad_plan_id"; "_ad_plan_id" отвергается.
+            banners = await self._items(
+                "banners", {"_ad_group__ad_plan_id": plan["id"], "fields": "id,name,ad_group_id"}
+            )
             for group in plan["ad_groups"]:
                 group["banners"] = [item for item in banners if item.get("ad_group_id") == group["id"]]
         else:
