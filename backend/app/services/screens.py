@@ -42,6 +42,13 @@ SAME_EXCEPT = {
 REPEATS_LABEL = re.compile(r" Остановили (?:объявление|его)\.$")
 
 
+def transmission_view(marking: MarkingProfile) -> dict[str, str | None]:
+    """Статус последней передачи данных рекламодателя по площадкам: marking_transmitted / marking_manual_required /
+    None (передачи ещё не было или кабинет не подключён)."""
+    stored = marking.transmission or {}
+    return {platform: (stored.get(platform) or {}).get("status") for platform in ("direct", "vk")}
+
+
 class ScreensService:
     def __init__(self, worker: Worker) -> None:
         self.worker = worker
@@ -126,6 +133,15 @@ class ScreensService:
             # План собран (plan_ready) или уже запущен: до запуска экраны ведут в план, а не в мастер.
             "has_plan": business.status != "draft",
             "first_decisions": self.first_decisions(business) if status == "running" else None,
+            # Маркировка: что подтверждено галочкой и что площадки приняли сами (инструкция — в настройках).
+            "marking": None
+            if (marking := next(iter(self.repository.rows(MarkingProfile, business.id)), None)) is None
+            else {
+                "confirmed": {
+                    platform: marking.confirmed_in_platform.get(platform) is True for platform in ("direct", "vk")
+                },
+                "transmission": transmission_view(marking),
+            },
         }
 
     def first_decisions(self, business: Business) -> str | None:
@@ -186,10 +202,22 @@ class ScreensService:
     async def check_remaining(self, business: Business) -> None:
         from app.config import get_domain_settings
 
-        margin = stop_margin(
-            sum(campaign.daily_limit_kop for campaign in self.worker.current_campaigns(business)),
-            get_domain_settings(),
+        # Запас считаем по кампаниям, которые заработают после возобновления: остановленные владельцем,
+        # архивные и удерживаемые не тратят. Пауза автопилота (budget_stop, NO_ACTIVE_ADS) не исключается —
+        # возобновление их снимает, и запас должен покрывать их трату, иначе кнопка «Продолжить» превращается
+        # в мгновенный повторный останов стражем.
+        held = set(self.worker.metadata(business).get("below_minimum", []))
+        revoked = {row.id for row in self.repository.rows(PlatformAccount, business.id) if row.status == "revoked"}
+        daily = sum(
+            campaign.daily_limit_kop
+            for campaign in self.worker.current_campaigns(business)
+            if campaign.daily_limit_kop
+            and campaign.status != "archived"
+            and not campaign.owner_paused
+            and campaign.id not in held
+            and campaign.platform_account_id not in revoked
         )
+        margin = stop_margin(daily, get_domain_settings())
         if await self.month_spent(business) >= max(0, business.month_budget_kop - margin):
             raise ChangeConflict(
                 "Остатка бюджета не хватает с учётом защитного запаса. "
@@ -477,6 +505,7 @@ class ScreensService:
                 "name": marking.name,
                 "phone": "",
                 "confirmed_in_platform": marking.confirmed_in_platform,
+                "transmission": transmission_view(marking),
                 "saved": True,
                 "inn_masked": f"•••{marking.inn_enc[-4:]}",
                 "phone_masked": f"+7•••{marking.phone_enc[-4:]}" if marking.phone_enc else None,

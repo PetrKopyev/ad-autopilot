@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from app.content.ad_text import phrase_titles
 from app.content.art import ArtBudget, ArtResult, YandexArt, validate_request
 from app.content.llm import LLMClient
 from app.content.yandexgpt import TokenTariff, YandexGPTClient
@@ -100,6 +101,16 @@ class AdapterRegistry:
         except PlatformError:
             return default
 
+    def fresh(self, business_id: int, platform: str) -> AdPlatform:
+        """Новый экземпляр адаптера вне кэша: пробный вызов (передача маркировки) меняет внутреннее состояние
+        адаптера, а кэшированный экземпляр применяет изменения рекламы — состояния смешивать нельзя."""
+        if self.mode == "fake":
+            return self.resolve(business_id, platform)
+        info = self.load(business_id, platform)
+        if info is None or info.status != "ok":
+            raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+        return self.build(platform, info)
+
     def build(self, platform: str, info: AccountInfo) -> AdPlatform:
         if platform == "vk":
             return VkAdapter(
@@ -171,9 +182,14 @@ class DemoLLM:
         if "Напиши объявление" in system:
             data = json.loads(user)
             facts = data.get("facts", [])
-            # Два объявления группы — разные заходы: через цену с названием услуги и через услугу с поводом.
+            # Два объявления группы — разные заходы и разные заголовки-фразы: услуга с поводом одной фразой,
+            # как в шаге «Заголовки объявлений», а не голое имя услуги; первому — форма, отличная от title_example.
             if data.get("angle", "цена") == "цена":
-                title = next(iter(facts), "Услуги и запись")
+                example = data.get("title_example") or ""
+                titles = phrase_titles(
+                    facts[0] if facts else None, data.get("segment", ""), data.get("platform", "direct")
+                )
+                title = next((item for item in titles if item != example), example or "Услуги и запись")
                 text = next((fact for fact in facts if "₽" in fact), "Подробности и запись.")
             else:
                 title = data.get("title_example") or "Услуги и запись"

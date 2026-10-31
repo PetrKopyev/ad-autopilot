@@ -13,6 +13,9 @@ from app.services.changes import ChangeConflict
 from app.worker.jobs import Worker, WorkerRepository
 
 DEMO_UID_PREFIX = "demo-"
+# Адрес салона-примера: мастер демо предзаполняет им сайт, а пустое поле в демо создаёт бизнес с ним же
+# (чтение демо-сайта работает для любого адреса).
+DEMO_SITE_URL = "https://salon.example/"
 
 DEMO_DESCRIPTION = {
     "services": [

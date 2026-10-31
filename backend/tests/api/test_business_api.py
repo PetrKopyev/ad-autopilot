@@ -20,6 +20,15 @@ def test_budget_must_be_whole_positive_kopecks(api, budget) -> None:
     assert context.world.business.month_budget_kop != budget
 
 
+def test_empty_site_is_rejected_outside_demo(api) -> None:
+    """В демо пустое поле сайта получает адрес салона-примера; вне демо пустой сайт по-прежнему отклоняется."""
+    client, context = api
+    response = new_business(client, site_url="  ")
+    assert response.status_code == 422
+    assert "Укажите ссылку на сайт" in response.json()["detail"]
+    assert context.world.business.site_url == "https://salon.example/"
+
+
 def test_budget_below_direct_minimum_is_rejected_with_the_minimum(api) -> None:
     client, context = api
     response = new_business(client, month_budget_kop=1_549_999)
@@ -238,6 +247,14 @@ def test_after_launch_wizard_explains_metrica_and_settings_keep_saving_descripti
     description = {"description": {"services": {"value": "Педикюр"}}, "approved": True}
     assert client.put("/api/business/description", json=description).status_code == 200
     marking = {"subject_type": "ooo", "inn": "7707083893", "name": "ООО Ромашка", "phone": "89001234567"}
-    assert client.put("/api/business/marking", json=marking).status_code == 200
+    response = client.put("/api/business/marking", json=marking)
+    assert response.status_code == 200
+    # Данные рекламодателя уходят в подключённые кабинеты; симулятор демо-режима принимает их без запросов.
+    assert response.json()["transmission"] == {"direct": "marking_transmitted", "vk": "marking_transmitted"}
     assert business.description["fields"]["services"]["value"] == "Педикюр"
-    assert context.world.repository.marking(business.id).name == "ООО Ромашка"
+    stored = context.world.repository.marking(business.id)
+    assert stored.name == "ООО Ромашка"
+    assert stored.transmission["direct"]["status"] == "marking_transmitted"
+    assert context.world.adapters["direct"]._marking["inn"] == "7707083893"
+    # Состояние передачи хранится в профиле: экраны настроек и главной читают его оттуда (шаг B1).
+    assert context.world.repository.marking(business.id).transmission["vk"]["status"] == "marking_transmitted"

@@ -574,6 +574,42 @@ async def test_demo_ideas_without_used() -> None:
     assert len(answer["ideas"]) == 1
 
 
+async def test_demo_llm_first_angle_title_is_phrase_not_bare_service_name() -> None:
+    """Первое объявление группы в демо — тоже заголовок-фраза «услуга + повод» (шаг «Заголовки объявлений»),
+    а не голое имя услуги; заходы группы получают разные заголовки."""
+    from app.services.registry import DemoLLM
+
+    llm = DemoLLM()
+    user = json.dumps(
+        {
+            "facts": ["Маникюр", "Маникюр — 1 500 ₽"],
+            "platform": "direct",
+            "angle": "цена",
+            "segment": "к празднику",
+            "title_example": "Маникюр к празднику",
+            "location": [],
+        },
+        ensure_ascii=False,
+    )
+    answer = json.loads(await llm.complete_json("Напиши объявление", user))
+    assert answer["title"] == "Маникюр: праздничный образ"
+    assert "1 500" in answer["text"]
+
+
+async def test_demo_plan_ad_titles_are_phrases_and_differ(world: World) -> None:
+    """В плане демо у групп Директа оба текста имеют разные заголовки-фразы — без голого имени услуги.
+    У VK заголовок 25 знаков: длинное название услуги с поводом не влезает — там имя услуги допустимо."""
+    from app.services.registry import DemoLLM
+
+    world.plans.llm = DemoLLM()
+    plan = await build(world)
+    for group in plan["groups"]:
+        titles = [ad["title"] for ad in group["ads"]]
+        if group["platform"] == "direct":
+            assert len(titles) == len(set(titles)), titles
+            assert all(" " in title.strip() for title in titles), titles
+
+
 async def test_regenerate_stops_at_limit_without_charging(tmp_path: Path) -> None:
     world = make_world(tmp_path, limits=AiLimits(onboarding_kop=8 * ART_COST_KOP + 100, weekly_kop=2500))
     plan = await build(world)

@@ -25,7 +25,7 @@ from app.db.models import (
 )
 from app.demo_flags import ADVANCING, advance_jobs
 from app.domain.explain import TEMPLATES, explain
-from app.platforms.base import AdPlatform, EntityState, ExternalRefs, Operation, PlatformError
+from app.platforms.base import AdPlatform, AwaitingModeration, EntityState, ExternalRefs, Operation, PlatformError
 
 type AdapterResolver = Callable[[int, str], AdPlatform]
 
@@ -81,6 +81,27 @@ def differences(
             # API площадок возвращает одну паузу без автора; автора хранит наш журнал.
             continue
         if state is None or state.entity_type != op.entity_type or getattr(state, op.field) != op.after:
+            current = getattr(state, op.field) if state is not None and state.entity_type == op.entity_type else None
+            if (
+                op.field in {"daily_limit_kop", "period_cap_kop"}
+                and isinstance(current, int)
+                and isinstance(op.after, int)
+                and abs(current - op.after) <= 1
+            ):
+                # Пересчёт НДС лимита VK (VK_AMOUNTS_INCLUDE_VAT=true) теряет копейку на округлении рублёвой
+                # строки API до двух знаков: копейка не расхождение, на решения и бюджет не влияет.
+                continue
+            if (
+                state is not None
+                and state.entity_type == op.entity_type
+                and op.entity_type == "ad"
+                and op.field == "status"
+                and op.after == "active"
+                and state.status in {"pending", "moderation", "draft"}
+            ):
+                # Объявление ещё на проверке у площадки: не расхождение, а ожидание. В сверке изменение
+                # остаётся pending (awaiting_moderation), иначе провалилось бы до конца проверки.
+                continue
             result.append(
                 {
                     "entity_type": op.entity_type,
@@ -92,6 +113,23 @@ def differences(
                 }
             )
     return result
+
+
+def awaiting_moderation(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> bool:
+    """Включение объявления, которое площадка ещё проверяет (после moderate): не расхождение, а ожидание —
+    изменение остаётся pending, сверка повторится, когда площадка закончит проверку."""
+    for op in final_operations(operations):
+        state = states.get(op.entity_id)
+        if (
+            state is not None
+            and state.entity_type == op.entity_type
+            and op.entity_type == "ad"
+            and op.field == "status"
+            and op.after == "active"
+            and state.status in {"pending", "moderation", "draft"}
+        ):
+            return True
+    return False
 
 
 def with_current_before(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> list[Operation]:
@@ -466,11 +504,13 @@ class ChangesService:
         idempotency_key: str | None = None,
         now: datetime | None = None,
         force: bool = False,
+        record_only: bool = False,
     ) -> ChangeLog:
         """Пробный режим (DRY_RUN) касается только решений автопилота: действия владельца, отката и служебные
         (лимиты бюджета, продление кампании, страж бюджета) применяются всегда. force — защитное действие автопилота,
-        которое выполняется и в пробном режиме."""
-        if not operations:
+        которое выполняется и в пробном режиме. record_only — на площадке нечего менять (откат вывода сравнения,
+        чьё объявление владелец уже удалил): запись журнала и разбор эксперимента идут без операций."""
+        if not operations and not record_only:
             raise ValueError("Нужна хотя бы одна операция.")
         business = self.repository.business(business_id)
         dry_run = self.dry_run
@@ -530,6 +570,11 @@ class ChangesService:
             if actor != "external":
                 for operation in operations:
                     await adapter.apply(operation)
+        except AwaitingModeration:
+            # Площадка ещё проверяет объявление: не провал. Изменение остаётся pending, воркер доведёт сверкой.
+            self._metadata(change, error="Площадка ещё проверяет объявление. Включим его, как только одобрит.")
+            self.repository.save(change)
+            return change
         except PlatformError:
             self._metadata(change, error="Площадка ответила ошибкой.")
         await self._reconcile(change, adapter, now=now)
@@ -551,9 +596,10 @@ class ChangesService:
             from app.platforms.direct import DirectAdapter
             from app.platforms.vk import VkAdapter
 
+            states = await adapter.get_state(refs)
             mismatches = differences(
                 operations,
-                await adapter.get_state(refs),
+                states,
                 platform_pauses=isinstance(adapter, (DirectAdapter, VkAdapter)),
             )
         except PlatformError:
@@ -564,6 +610,12 @@ class ChangesService:
         if mismatches:
             change.status = "failed"
             self._metadata(change, error="Состояние площадки не совпало с ожидаемым.", differences=mismatches)
+        elif awaiting_moderation(operations, states):
+            # Включение объявления, которое площадка ещё проверяет после moderate: не провал. Ждём активного
+            # статуса от площадки — тогда изменение применится само на следующей сверке.
+            self._metadata(change, error="Площадка ещё проверяет объявление. Включим его, как только одобрит.")
+            self.repository.save(change)
+            return
         else:
             change.status = "applied"
             self._metadata(change, error=None, differences=[])

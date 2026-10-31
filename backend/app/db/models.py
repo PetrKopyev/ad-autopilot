@@ -137,6 +137,9 @@ class MarkingProfile(Base):
     name: Mapped[str] = mapped_column(Text)
     phone_enc: Mapped[str | None] = mapped_column(EncryptedText)
     confirmed_in_platform: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    # Статус последней передачи данных рекламодателя через API площадки: {площадка: {status, attempted_at}}.
+    # status — marking_transmitted / marking_manual_required (данные не приняты: владелец заполняет в кабинете).
+    transmission: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
 
 
 class PlatformAccount(Base):

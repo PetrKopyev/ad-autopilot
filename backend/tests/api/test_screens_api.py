@@ -11,6 +11,7 @@ from app.db.models import (
     Campaign,
     ChangeLog,
     Experiment,
+    MarkingProfile,
     PlatformAccount,
     Session,
     StatsDaily,
@@ -227,8 +228,14 @@ def test_status_contract_heartbeat_and_platform_error(setup):
         "needs_attention",
         "has_plan",
         "first_decisions",
+        "marking",
     }
     assert response["last_check_at"] is not None
+    # В макете профиль рекламодателя уже сохранён: главная показывает подтверждения и статус передачи по площадкам.
+    assert response["marking"] == {
+        "confirmed": {"direct": True, "vk": False},
+        "transmission": {"direct": None, "vk": None},
+    }
     world.repository.save(
         WorkerRun(
             kind="budget_guard",
@@ -250,6 +257,19 @@ def test_status_tells_whether_plan_is_ready_before_launch(setup):
         assert (response["status"], response["has_plan"]) == ("draft", has_plan)
     world.business.status = "running"
     assert client.get("/api/autopilot/status").json()["has_plan"] is True
+
+
+def test_status_shows_marking_confirmation_and_transmission(setup):
+    """Главная честно показывает маркировку: галочки подтверждений и что площадки приняли данные сами."""
+    client, world = setup
+    profile = world.repository.rows(MarkingProfile, business_id=world.business.id)[0]
+    profile.transmission = {
+        "direct": {"status": "marking_manual_required", "attempted_at": world.clock.now.isoformat()}
+    }
+    assert client.get("/api/autopilot/status").json()["marking"] == {
+        "confirmed": {"direct": True, "vk": False},
+        "transmission": {"direct": "marking_manual_required", "vk": None},
+    }
 
 
 def test_status_tells_when_first_decisions_come(setup):
@@ -476,6 +496,7 @@ def test_experiment_arms_carry_own_text_and_missing_ad_is_empty(setup):
         "name": "ИП Иванов",
         "phone": "",
         "confirmed_in_platform": {"direct": True},
+        "transmission": {"direct": None, "vk": None},
         "saved": True,
         "inn_masked": "•••4689",
         "phone_masked": "+7•••1122",

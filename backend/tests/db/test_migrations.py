@@ -53,6 +53,7 @@ LATER_COLUMNS = {
     "llm_calls": ("created_at",),
     "worker_runs": ("slot_key",),
     "change_log": ("idempotency_key",),
+    "marking_profiles": ("transmission",),
 }
 INITIAL_INDEXES = {"ix_stats_daily_business_id_date", "ix_change_log_business_id_created_at"}
 

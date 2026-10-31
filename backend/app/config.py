@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # с НДС не превысила бюджет. true — суммы API уже с НДС и передаются как есть.
     direct_amounts_include_vat: bool = False
     vat_percent: int = Field(default=22, ge=0, le=100)
+    # Суммы лимитов в API VK Рекламы: по умолчанию уходят как есть. true — ставка НДС сверх лимита VK
+    # (зеркально Директу при DIRECT_AMOUNTS_INCLUDE_VAT=false): лимит делим на (1 + НДС).
+    vk_amounts_include_vat: bool = False
     vk_package_id: int | None = Field(default=None, gt=0)
     vk_client_id: str = ""
     vk_client_secret: SecretStr = SecretStr("")

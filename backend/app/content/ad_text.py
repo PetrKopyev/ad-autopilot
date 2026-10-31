@@ -414,6 +414,15 @@ def _title_example(service: Service | None, segment: str, platform: Platform) ->
     return next((title for title in _titles(service, segment) if len(title) <= LIMITS[platform][0]), "")
 
 
+def phrase_titles(service_name: str | None, segment: str, platform: Platform) -> list[str]:
+    """Заголовки-фразы «услуга + повод», влезающие в лимит площадки, от предпочтительного к запасным. Голое имя
+    услуги — только когда у повода нет своей формы (TITLE_FORMS): «Маникюр: время для себя» читалось бы как услуга.
+    Демо-генератор берёт из них заголовок, отличный от title_example: оба объявления группы — фразы."""
+    service = Service(service_name, None, "", "") if service_name else None
+    limit = LIMITS[platform][0]
+    return [title for title in _titles(service, segment) if title != GENERIC_TITLE and len(title) <= limit]
+
+
 def _bare_segment(title: str, services: list[Service]) -> bool:
     """Заголовок — одно название повода любой ниши: «К празднику», «Рядом с домом!». Повод, который и есть название
     услуги из описания («Консультация»), годится."""

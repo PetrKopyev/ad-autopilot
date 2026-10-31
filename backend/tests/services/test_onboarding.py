@@ -34,6 +34,7 @@ from app.db.models import (
     Target,
     WorkerRun,
 )
+from app.platforms.base import PlatformError
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
 from app.services.changes import ChangeConflict
@@ -366,7 +367,14 @@ def make_world(
     metrica = FakeMetrica(
         [MetricaCounter(COUNTER, "Счётчик", "salon.example")], {COUNTER: [MetricaGoal(1, "Заявка", "action")]}
     )
-    onboarding = OnboardingService(repository, llm, lambda business_id: metrica, limits, reader=reader)
+    onboarding = OnboardingService(
+        repository,
+        llm,
+        lambda business_id: metrica,
+        limits,
+        reader=reader,
+        fresh=lambda business_id, platform: adapters[platform],
+    )
     business = Business(user_id=1, site_url=SITE, city="Самара", month_budget_kop=BUDGET_KOP)
     repository.add(business)
     for platform in platforms:
@@ -1302,6 +1310,132 @@ async def test_marking_is_saved_with_strict_confirmations(world: World) -> None:
     profile = world.repository.marking(world.business.id)
     assert profile.inn_enc == "7707083893" and profile.phone_enc == "+79001234567"
     assert profile.confirmed_in_platform == {"direct": True, "vk": False}
+
+
+class MarkingApiStub:
+    """Площадка для проверки передачи маркировки: успех, отказ API или «поля не поддерживаются» (с инструкцией)."""
+
+    def __init__(self, *, refuse: Exception | None = None, instruction: str | None = None) -> None:
+        self.refuse = refuse
+        self.instruction = instruction
+        self.received: dict | None = None
+
+    async def set_marking(self, profile) -> None:
+        self.received = dict(profile)
+        if self.refuse is not None:
+            raise self.refuse
+
+    def marking_instruction(self) -> str | None:
+        return self.instruction
+
+
+async def test_transmit_marking_demo_fake_accepts_without_requests(world: World) -> None:
+    """Демо-режим: симулятор принимает данные без запросов — no-op успех, журнал без записей."""
+    world.onboarding.save_marking(
+        world.business.id, "person", "001234567887", "Тестов Тест Тестович", "+7 999 000-00-00", {"direct": True}
+    )
+    result = await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert result == {"direct": "marking_transmitted", "vk": "marking_transmitted"}
+    profile = world.repository.marking(world.business.id)
+    assert profile.transmission["direct"] == {"status": "marking_transmitted", "attempted_at": NOW.isoformat()}
+    assert not world.repository.rows(ChangeLog, kind="marking")
+
+
+@pytest.mark.parametrize(
+    ("subject", "inn", "api_type"),
+    [
+        ("ip", "526317984689", "ip"),
+        ("ooo", "7707083893", "ooo"),
+        ("selfemployed", "001234567887", "self_employed"),
+        ("person", "001234567887", "individual"),
+    ],
+)
+async def test_transmit_marking_maps_subject_type_for_platform_api(
+    world: World, subject: str, inn: str, api_type: str
+) -> None:
+    stub = MarkingApiStub()
+    world.onboarding.fresh = lambda business_id, platform: stub
+    world.onboarding.save_marking(world.business.id, subject, inn, "Тестов Тест", "+79990000000", {})
+    await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert stub.received == {
+        "type": api_type,
+        "inn": inn,
+        "name": "Тестов Тест",
+        "phone": "+79990000000",
+    }
+
+
+async def test_transmit_marking_api_refusal_keeps_save_and_asks_to_fill_in_cabinet(world: World) -> None:
+    """Отказ API (нет прав, регистрация не завершена) не роняет сохранение: статус manual_required и запись
+    в журнале с понятным текстом; соседняя площадка принимает данные независимо."""
+    direct = MarkingApiStub(refuse=PlatformError("Недостаточно прав на изменение данных клиента."))
+    vk = MarkingApiStub()
+    world.onboarding.fresh = lambda business_id, platform: {"direct": direct, "vk": vk}[platform]
+    world.onboarding.save_marking(
+        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+    )
+    result = await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert result == {"direct": "marking_manual_required", "vk": "marking_transmitted"}
+    profile = world.repository.marking(world.business.id)
+    assert profile.inn_enc == "526317984689" and profile.subject_type == "ip"
+    records = world.repository.rows(ChangeLog, kind="marking")
+    assert len(records) == 1
+    record = records[0]
+    assert record.actor == "system" and record.platform == "direct" and record.status == "applied"
+    assert record.reason_code == "MARKING_NOT_TRANSMITTED"
+    assert "Данные рекламодателя не получилось передать в Яндекс Директ автоматически." in record.reason_text
+    assert "Заполните данные рекламодателя в кабинете площадки" in record.reason_text
+
+
+async def test_transmit_marking_unsupported_fields_give_platform_instruction(world: World) -> None:
+    """Площадка ответила без ошибки, но поля не приняла (инструкция от адаптера): тот же ручной путь,
+    и в тексте журнала — инструкция этой площадки."""
+    instruction = "В Директ Про откройте «Данные рекламодателя», заполните их и подтвердите в приложении."
+    direct = MarkingApiStub(instruction=instruction)
+    world.onboarding.fresh = lambda business_id, platform: direct
+    world.onboarding.save_marking(
+        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+    )
+    result = await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert result == {"direct": "marking_manual_required", "vk": "marking_manual_required"}
+    record = world.repository.rows(ChangeLog, kind="marking", platform="direct")[0]
+    assert instruction in record.reason_text
+
+
+async def test_transmit_marking_closed_account_is_manual_required(world: World) -> None:
+    """Кабинет в базе «ok», но не открылся (вход истёк между чтением и запросом): без падения, статус в профиле."""
+
+    def closed(business_id: int, platform: str):
+        raise PlatformError("Кабинет площадки не подключён или требует входа заново.")
+
+    world.onboarding.fresh = closed
+    world.onboarding.save_marking(
+        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+    )
+    result = await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert result == {"direct": "marking_manual_required", "vk": "marking_manual_required"}
+    assert len(world.repository.rows(ChangeLog, kind="marking")) == 2
+
+
+async def test_transmit_marking_without_accounts_is_noop(tmp_path: Path) -> None:
+    world = make_world(tmp_path, platforms=())
+    world.onboarding.save_marking(
+        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+    )
+    assert await world.onboarding.transmit_marking(world.business.id, NOW) == {}
+    assert world.repository.marking(world.business.id).transmission == {}
+    assert not world.repository.rows(ChangeLog, kind="marking")
+
+
+async def test_transmit_marking_skips_accounts_not_connected(world: World) -> None:
+    vk = world.repository.rows(PlatformAccount, business_id=world.business.id, platform="vk")[0]
+    vk.status = "revoked"
+    world.onboarding.save_marking(
+        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+    )
+    result = await world.onboarding.transmit_marking(world.business.id, NOW)
+    assert result == {"direct": "marking_transmitted"}
+    assert "vk" not in world.repository.marking(world.business.id).transmission
 
 
 async def test_ai_spend_limit_stops_paid_calls(tmp_path: Path) -> None:

@@ -121,6 +121,22 @@ class VkAdapter(VkClient):
         self._tz = ZoneInfo(getattr(self._config, "tz_default", "Europe/Moscow"))
         self._trees: dict[str, ExternalRefs] = {}
         self._add_ad_lock = asyncio.Lock()
+        # Суммы лимитов в API VK: по умолчанию уходят как есть. VK_AMOUNTS_INCLUDE_VAT=true — ставка НДС
+        # сверх лимита VK (как у Директа при DIRECT_AMOUNTS_INCLUDE_VAT=false): лимит делим на (1 + НДС),
+        # чтобы трата с НДС не превысила бюджет, и умножаем обратно при чтении.
+        self._vat_percent = (
+            getattr(self._config, "vat_percent", 22)
+            if getattr(self._config, "vk_amounts_include_vat", False)
+            else 0
+        )
+
+    def _to_api(self, kop: int) -> int:
+        """Сумма с НДС (как бюджет и расход) в копейки лимита API; без НДС — вниз, чтобы не превысить бюджет."""
+        return kop * 100 // (100 + self._vat_percent)
+
+    def _from_api(self, kop: int) -> int:
+        """Сумма лимита API в копейки с НДС: в тех же единицах, что бюджет и расход."""
+        return (kop * (100 + self._vat_percent) + 50) // 100
 
     def _today(self) -> date:
         return datetime.now(self._tz).date()
@@ -224,8 +240,8 @@ class VkAdapter(VkClient):
             "status": self._state(plan.status),
             "objective": API_FORMAT["objective"],
             "autobidding_mode": API_FORMAT["autobidding_mode"],
-            "budget_limit_day": _rub(plan.daily_limit_kop),
-            "budget_limit": _rub(plan.period_cap_kop),
+            "budget_limit_day": _rub(self._to_api(plan.daily_limit_kop)),
+            "budget_limit": _rub(self._to_api(plan.period_cap_kop)),
             "ad_groups": [self._group_body(group, url) for group in plan.groups],
         }
 
@@ -367,7 +383,7 @@ class VkAdapter(VkClient):
             if op.after == 0:
                 raise PlatformError("Нулевой бюджет недопустим; остановите кампанию операцией set_status.")
             name = {"daily_limit_kop": "budget_limit_day", "period_cap_kop": "budget_limit"}[op.field]
-            await self._update("ad_plans", id_, {name: _rub(op.after)})
+            await self._update("ad_plans", id_, {name: _rub(self._to_api(op.after))})
         elif op.kind == "update_ad_text":
             key = API_FORMAT["title_key" if op.field == "title" else "text_key"]
             limit = API_FORMAT["title_limit" if op.field == "title" else "text_limit"]
@@ -407,8 +423,8 @@ class VkAdapter(VkClient):
                     None,
                     item["name"],
                     _status(item),
-                    daily_limit_kop=_kop(item["budget_limit_day"]),
-                    period_cap_kop=_kop(item["budget_limit"]),
+                    daily_limit_kop=self._from_api(_kop(item["budget_limit_day"])),
+                    period_cap_kop=self._from_api(_kop(item["budget_limit"])),
                 )
             if refs.groups:
                 for item in await self._items(

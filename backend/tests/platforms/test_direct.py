@@ -20,6 +20,7 @@ from app.platforms.base import (
     AdSpec,
     AuthExpired,
     AuthSession,
+    AwaitingModeration,
     CampaignTreeSpec,
     ExternalRefs,
     ModerationRejected,
@@ -325,6 +326,41 @@ async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan)
     first, second = await asyncio.gather(adapter.create_campaign_tree(plan), adapter.create_campaign_tree(plan))
     assert first == second
     assert all(len(items) == 1 for items in server.rows.values())
+
+
+async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api, plan):
+    """Число объявлений совпало с планом, но содержимое — нет (владелец правил текст или фразы в кабинете):
+    чужое не привязываем, плановое создаётся заново, а несовпадение отдаётся в журнал запуска. Повтор идемпотентен
+    — созданное по плану находится по содержимому, без новых записей."""
+    server = DirectServer()
+    server.next_id = 200
+    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
+    server.rows["ads"].append(
+        {
+            "Id": 103,
+            "AdGroupId": 102,
+            "CampaignId": 101,
+            "ResponsiveAd": {
+                "Titles": [{"Title": "Маникюр со скидкой"}],
+                "Texts": [{"Text": "Другой текст"}],
+                "Href": "https://salon.example",
+            },
+        }
+    )
+    server.rows["keywords"].append({"Id": 104, "AdGroupId": 102, "CampaignId": 101, "Keyword": "педикюр"})
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs.campaign_id == "101" and refs.groups == {"nails": "102"}
+    assert refs.ads == {"ad": "201"} and refs.targets == {"phrase": "202"}
+    assert adapter.content_mismatches == [
+        "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново.",
+        "В кабинете фраза «маникюр» группы «Маникюр» отличается от плана — создали заново.",
+    ]
+    again = await adapter.create_campaign_tree(plan)
+    assert again.ads == refs.ads and again.targets == refs.targets
+    assert adapter.content_mismatches == []
+    assert len(server.rows["ads"]) == 2 and len(server.rows["keywords"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -634,6 +670,22 @@ async def test_report_levels(adapter, api, level, id_):
 
 
 @pytest.mark.parametrize(
+    ("day", "settled"),
+    [
+        ("2026-10-24", True),  # сегодня минус 2: день устоявшийся, как обещано в RULES.md
+        ("2026-10-25", False),  # вчера: последние два дня площадка ещё уточняет
+        ("2026-10-26", False),  # сегодня
+    ],
+)
+async def test_report_settled_boundary_matches_docs(adapter, api, day, settled):
+    """Граница устоявшихся дней: «не позже сегодня минус 2» — позавчера и раньше уточняются площадкой не должны."""
+    api.post(f"{V5}/reports").respond(text=tsv(day=day))
+    (row,) = await adapter.get_stats(date(2026, 10, 23), TODAY)
+    assert row.date == date.fromisoformat(day)
+    assert row.is_settled is settled
+
+
+@pytest.mark.parametrize(
     "micros,kop",
     [("0", 0), ("4999", 0), ("5000", 1), ("10000", 1), ("1000000", 100), ("999999999999999999", 100000000000000)],
 )
@@ -936,6 +988,50 @@ async def test_draft_activation_sends_to_moderation(adapter, api):
     assert [json.loads(call.request.content)["method"] for call in route.calls] == ["get", "moderate", "resume"]
 
 
+async def test_draft_activation_awaiting_moderation_waits_instead_of_failing(adapter, api):
+    """resume после moderate отклонён с «ожидает модерации»: это ожидание проверки, а не сбой — применение
+    изменения останется pending, воркер доведёт сверкой."""
+    adapter._marking_confirmed = True
+    route = api.post(f"{V501}/ads").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {"Ads": [{"Id": 1, "State": "ON", "Status": "DRAFT"}]}}),
+            httpx.Response(200, json={"result": {"ModerateResults": [{"Id": 1}]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "ResumeResults": [
+                            {"Id": 1, "Errors": [{"Code": 6000, "Message": "Объявление ожидает модерации"}]}
+                        ]
+                    }
+                },
+            ),
+        ]
+    )
+    with pytest.raises(AwaitingModeration):
+        await adapter.apply(Operation("set_status", "ad", "1", "status", "pending", "active"))
+    assert [json.loads(call.request.content)["method"] for call in route.calls] == ["get", "moderate", "resume"]
+
+
+async def test_draft_activation_other_resume_error_is_a_real_failure(adapter, api):
+    """Другая ошибка resume (не про модерацию) — обычный сбой площадки: изменение провалится, как раньше."""
+    adapter._marking_confirmed = True
+    api.post(f"{V501}/ads").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {"Ads": [{"Id": 1, "State": "ON", "Status": "DRAFT"}]}}),
+            httpx.Response(200, json={"result": {"ModerateResults": [{"Id": 1}]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {"ResumeResults": [{"Id": 1, "Errors": [{"Code": 5000, "Message": "Недостаточно прав"}]}]}
+                },
+            ),
+        ]
+    )
+    with pytest.raises(PlatformError, match="Недостаточно прав"):
+        await adapter.apply(Operation("set_status", "ad", "1", "status", "pending", "active"))
+
+
 async def test_confirmed_campaign_can_start(adapter, api, plan):
     adapter._marking_confirmed = True
     server = DirectServer()
@@ -946,7 +1042,9 @@ async def test_confirmed_campaign_can_start(adapter, api, plan):
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
 
 
-async def test_restarting_does_not_duplicate_edited_ads(adapter, api, plan):
+async def test_restarting_with_edited_plan_recreates_ads_and_reports(adapter, api, plan):
+    """План пересобрал тексты под тем же ключом (или владелец правил объявление в кабинете): сервис не привязывает
+    план к чужому содержимому — создаёт объявление по плану заново и честно пишет об этом в журнал запуска."""
     server = DirectServer()
     api.post(url__regex=r"https://api\.direct\.yandex\.com/v501/.*").mock(side_effect=server)
     original = await adapter.create_campaign_tree(plan)
@@ -956,9 +1054,13 @@ async def test_restarting_does_not_duplicate_edited_ads(adapter, api, plan):
         name="Другое имя",
         groups=(replace(plan.groups[0], ads=(replace(plan.groups[0].ads[0], title="Другой заголовок"),)),),
     )
-    writes = len(server.writes)
-    assert await adapter.create_campaign_tree(changed) == original
-    assert len(server.writes) == writes
+    refs = await adapter.create_campaign_tree(changed)
+    assert refs.campaign_id == original.campaign_id and refs.groups == original.groups
+    assert refs.ads != original.ads
+    assert len(server.rows["ads"]) == 2
+    assert adapter.content_mismatches == [
+        "В кабинете объявление «Другой заголовок» группы «Маникюр» отличается от плана — создали заново."
+    ]
 
 
 async def test_sandbox_reports_are_requested_per_campaign(api):

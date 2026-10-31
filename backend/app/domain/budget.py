@@ -1,7 +1,8 @@
 from calendar import monthrange
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, Decimal
+from typing import Any
 
 from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.types import BudgetPlan, GroupLimit, GuardResult, PlatformLimit, nonnegative_int
@@ -235,6 +236,12 @@ def stop_margin(total_daily_limit: int, settings: DomainSettings = DEFAULT_SETTI
         / (24 * 60)
     )
     return int(amount.to_integral_value(rounding=ROUND_CEILING))
+
+
+def active_daily_limit(campaigns: Iterable[Any]) -> int:
+    """Сумма дневных лимитов работающих кампаний. Остановленные кампании не тратят: с ними запас стража
+    завышен, и реклама останавливается раньше порога бюджета."""
+    return sum(campaign.daily_limit_kop for campaign in campaigns if campaign.status == "active")
 
 
 def split_group_limits(limit: PlatformLimit, weights: Mapping[str, Decimal]) -> tuple[GroupLimit, ...]:

@@ -21,6 +21,7 @@ from app.platforms.base import (
     AdGroupSpec,
     AuthExpired,
     AuthSession,
+    AwaitingModeration,
     CampaignTreeSpec,
     EntityState,
     ExternalRefs,
@@ -169,6 +170,13 @@ class DirectAdapter:
         self._minimums: dict[str, int] | None = None
         self._trees: dict[str, ExternalRefs] = {}
         self._tz = ZoneInfo(getattr(config, "tz_default", "Europe/Moscow"))
+        # Содержимое кабинета, отличное от плана и пересозданное при запуске: тексты для журнала запуска.
+        self._content_mismatches: list[str] = []
+
+    @property
+    def content_mismatches(self) -> list[str]:
+        """Что в кабинете отличалось от плана (объявления и фразы пересозданы): читает запуск для журнала."""
+        return list(self._content_mismatches)
 
     @staticmethod
     def _sandbox_url(url: str) -> str:
@@ -466,6 +474,8 @@ class DirectAdapter:
 
     async def create_campaign_tree(self, plan_part: CampaignTreeSpec) -> ExternalRefs:
         async with self._create_lock:
+            # Несовпадения отчитываются за один проход создания: повторный вызов читает только свежие.
+            self._content_mismatches = []
             return await self._create_tree(plan_part)
 
     async def _create_tree(self, plan: CampaignTreeSpec) -> ExternalRefs:
@@ -560,7 +570,13 @@ class DirectAdapter:
                         content["AdImageHashes"] = [image]
                 match = next((item for item in ads if self._same_ad(item.get(ad_kind, {}), content)), None)
                 if match is None and complete_ads and ads:
-                    match = min(ads, key=lambda item: item["Id"])
+                    # Число объявлений совпало с планом, но содержимое — нет: в кабинете объявление правили
+                    # или план пересобрал тексты под тем же ключом. Чужое не привязываем — создаём плановое
+                    # заново, а запуск честно пишет об этом в журнал (content_mismatches).
+                    self._content_mismatches.append(
+                        f"В кабинете объявление «{ad.title}» группы «{group.name}» отличается от плана — "
+                        "создали заново."
+                    )
                 if match:
                     ads.remove(match)
                     ad_id = str(match["Id"])
@@ -581,7 +597,12 @@ class DirectAdapter:
             for target in group.targets:
                 match = next((item for item in keywords if item.get("Keyword") == target.value), None)
                 if match is None and complete_targets and keywords:
-                    match = min(keywords, key=lambda item: item["Id"])
+                    # Число фраз совпало с планом, но содержимое — нет: чужую фразу не привязываем, создаём
+                    # плановую заново и честно пишем об этом в журнал запуска.
+                    self._content_mismatches.append(
+                        f"В кабинете фраза «{target.value}» группы «{group.name}» отличается от плана — "
+                        "создали заново."
+                    )
                 if match:
                     keywords.remove(match)
                     target_id = str(match["Id"])
@@ -815,7 +836,19 @@ class DirectAdapter:
                     return
             if op.entity_type == "ad" and op.after == "active" and item.get("Status") == "DRAFT":
                 await self._api("ads", "moderate", {"SelectionCriteria": {"Ids": [id_]}})
-            await self._api(services[op.entity_type], method, {"SelectionCriteria": {"Ids": [id_]}})
+            try:
+                await self._api(services[op.entity_type], method, {"SelectionCriteria": {"Ids": [id_]}})
+            except PlatformError as error:
+                # Включение черновика, который ещё на проверке после moderate, отклоняется с «ожидает модерации»:
+                # это не провал изменения — запись остаётся pending, воркер доведёт сверкой.
+                if not (
+                    op.entity_type == "ad"
+                    and op.after == "active"
+                    and "модерац" in str(error).lower()
+                    and not isinstance(error, (AuthExpired, RateLimited))
+                ):
+                    raise
+                raise AwaitingModeration(op.entity_id) from error
         elif op.kind == "set_budget":
             await self._set_budget(id_, op.field, op.after, op.budget_context)
         elif op.kind in {"update_ad_text", "swap_ad_image"}:
@@ -1172,7 +1205,9 @@ class DirectAdapter:
                         _kop(item["Cost"]),
                         conversions,
                         fetched_at,
-                        day <= self._today() - timedelta(days=3),
+                        # Подпись в интерфейсе и RULES.md: «последние 2 дня уточняются» — устоявшиеся дни
+                        # заканчиваются позавчера, сегодня и вчера площадка ещё пересчитывает.
+                        day <= self._today() - timedelta(days=2),
                     )
                 )
         except (ValueError, InvalidOperation, TypeError, KeyError):

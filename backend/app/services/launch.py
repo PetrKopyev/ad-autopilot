@@ -357,6 +357,25 @@ class LaunchService:
                 configure_adapter(adapter, spec, configured[platform])
                 configured[platform] += len(spec.groups)
             refs = await adapter.create_campaign_tree(spec)
+            for text in getattr(adapter, "content_mismatches", []):
+                # Содержимое кабинета отличалось от плана: адаптер пересоздал объявления и фразы, запуск честно
+                # пишет об этом в журнал — иначе «лишние» объявления в кабинете были бы непонятны владельцу.
+                self.repository.save(
+                    ChangeLog(
+                        business_id=business.id,
+                        actor="system",
+                        kind="launch",
+                        platform=platform,
+                        entity_type="campaign",
+                        entity_id=refs.campaign_id,
+                        operations=[],
+                        reason_code="LAUNCH_CONTENT_RECREATED",
+                        reason_params={},
+                        reason_text=text,
+                        evidence={},
+                        status="applied",
+                    )
+                )
             self.bind(campaign, refs)
             created[key] = (campaign, refs)
             self.repository.commit()

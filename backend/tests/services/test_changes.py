@@ -1,7 +1,7 @@
 import os
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -11,12 +11,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Plan, User
-from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
+from app.platforms.base import (
+    AdGroupSpec,
+    AdSpec,
+    AwaitingModeration,
+    CampaignTreeSpec,
+    EntityState,
+    Operation,
+    PlatformError,
+)
 from app.platforms.fake import FakeAdapter
 from app.services.changes import (
     ChangeConflict,
     ChangesRepository,
     ChangesService,
+    awaiting_moderation,
     differences,
     load_operations,
     replaced_campaigns,
@@ -202,6 +211,100 @@ async def test_read_outage_keeps_pending_until_recovery(repository, tree, monkey
     monkeypatch.setattr(adapter, "get_state", get_state)
     await ChangesService(repository).recover_pending(lambda *_: adapter)
     assert change.status == "applied"
+
+
+async def activation_change(service, adapter, refs):
+    return await service.apply_change(
+        business_id=1,
+        adapter=adapter,
+        refs=refs,
+        operations=[Operation("set_status", "ad", refs.ads["ad"], "status", "paused_owner", "active")],
+        actor="owner",
+        kind="resume",
+        platform="fake",
+        reason_code="OWNER_AD_STATUS",
+        reason_text="Вы включили объявление.",
+    )
+
+
+async def test_awaiting_moderation_keeps_change_pending_with_honest_note(repository, tree, monkeypatch):
+    """Директ отклонил resume с «ожидает модерации»: изменение не проваливается, а ждёт следующей сверки воркера."""
+    adapter, refs = tree
+
+    async def awaiting(operation):
+        raise AwaitingModeration(operation.entity_id)
+
+    monkeypatch.setattr(adapter, "apply", awaiting)
+    change = await activation_change(ChangesService(repository, dry_run=False), adapter, refs)
+    assert change.status == "pending"
+    assert change.evidence["_service"]["error"] == "Площадка ещё проверяет объявление. Включим его, как только одобрит."
+
+
+async def test_reconcile_waits_for_moderation_and_then_applies(repository, tree, monkeypatch):
+    """Пока объявление на проверке, сверка держит изменение pending (не failed и не applied); как только площадка
+    включила объявление, сверка применяет изменение без повторной записи на площадку."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+
+    async def awaiting(operation):
+        raise AwaitingModeration(operation.entity_id)
+
+    monkeypatch.setattr(adapter, "apply", awaiting)
+    change = await activation_change(service, adapter, refs)
+    assert change.status == "pending"
+    get_state = adapter.get_state
+
+    async def reviewing(tree_refs):
+        return {
+            key: replace(state, status="moderation") if state.entity_type == "ad" else state
+            for key, state in (await get_state(tree_refs)).items()
+        }
+
+    monkeypatch.setattr(adapter, "get_state", reviewing)
+    recovered = await service.recover_pending(lambda *_: adapter)
+    assert [item.status for item in recovered] == ["pending"]
+    assert change.status == "pending"
+    monkeypatch.setattr(adapter, "get_state", get_state)
+    recovered = await service.recover_pending(lambda *_: adapter)
+    assert [item.status for item in recovered] == ["applied"]
+    assert change.status == "applied"
+
+
+def test_awaiting_moderation_is_only_for_ad_activation():
+    states = {
+        "1": EntityState("1", "ad", None, "Объявление", "moderation"),
+        "2": EntityState("2", "ad", None, "Объявление", "paused_owner"),
+        "3": EntityState("3", "campaign", None, "Кампания", "pending"),
+    }
+    activation = [Operation("set_status", "ad", "1", "status", "paused_auto", "active")]
+    assert awaiting_moderation(activation, states)
+    # Пауза на проверяемом объявлении — не ожидание: сверяется как обычно.
+    assert not awaiting_moderation(
+        [Operation("set_status", "ad", "1", "status", "active", "paused_auto")], states
+    )
+    # Включение остановленного объявления — обычное расхождение, не ожидание модерации.
+    assert not awaiting_moderation(
+        [Operation("set_status", "ad", "2", "status", "paused_owner", "active")], states
+    )
+    # Проверяемое состояние у кампании не считается.
+    assert not awaiting_moderation(
+        [Operation("set_status", "campaign", "3", "status", "paused_owner", "active")], states
+    )
+    # Проверка на расхождения тоже терпима к ожиданию модерации: не провал и не «применено».
+    assert differences(activation, states) == []
+    pause = [Operation("set_status", "ad", "1", "status", "active", "paused_auto")]
+    assert differences(pause, states)[0]["current"] == "moderation"
+
+
+def test_differences_tolerates_vat_rounding_kopeck_on_limits():
+    """Пересчёт НДС лимита VK теряет копейку на округлении рублёвой строки API: копейка не расхождение,
+    больше копейки — уже расхождение."""
+    campaign = EntityState("10", "campaign", None, "Кампания", "active", daily_limit_kop=449_999)
+    operation = [Operation("set_budget", "campaign", "10", "daily_limit_kop", 400_000, 450_000)]
+    assert differences(operation, {"10": campaign}) == []
+    off_by_two = replace(campaign, daily_limit_kop=449_997)
+    mismatch = differences(operation, {"10": off_by_two})
+    assert mismatch[0]["expected"] == 450_000 and mismatch[0]["current"] == 449_997
 
 
 async def test_partial_batch_fails_without_claiming_all_applied(repository, tree, monkeypatch):

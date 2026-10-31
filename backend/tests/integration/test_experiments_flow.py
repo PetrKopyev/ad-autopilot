@@ -67,7 +67,10 @@ async def test_existing_experiment_variant_wins_explains_and_rolls_back_with_gro
     assert reverted.status == "applied" and change.status == "reverted"
     restored = await world.adapter.get_state(world.refs)
     assert restored[control.external_id].status == "active"
-    assert restored[variant.external_id].status == "paused_owner"
+    assert restored[variant.external_id].status == "active"
+    assert reverted.reason_text == (
+        f"Вы отменили вывод сравнения вариантов: объявление «{control.title}» снова работает."
+    )
     assert restored[world.campaign.external_id] == before[world.campaign.external_id]
     assert experiment.status == "cancelled"
     assert control.frozen_until == variant.frozen_until == world.clock.now + timedelta(days=14)
@@ -117,7 +120,10 @@ async def test_live_variant_is_added_wins_from_fake_stats_and_rolls_back(tmp_pat
     assert reverted.status == "applied" and change.status == "reverted"
     restored = await world.adapter.get_state(worker.refs(world.campaign))
     assert restored[control.external_id].status == "active"
-    assert restored[variant.external_id].status == "paused_owner"
+    assert restored[variant.external_id].status == "active"
+    assert reverted.reason_text == (
+        f"Вы отменили вывод сравнения вариантов: объявление «{control.title}» снова работает."
+    )
     assert all(
         restored[id_] == state for id_, state in pre_verdict.items()
         if id_ not in {control.external_id, variant.external_id}

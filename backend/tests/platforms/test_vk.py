@@ -127,6 +127,60 @@ async def test_create_tree_posts_whole_plan_with_exact_budgets(adapter: VkAdapte
     assert route.call_count == 1
 
 
+def vat_configuration() -> SimpleNamespace:
+    config = configuration()
+    config.vat_percent = 22
+    config.vk_amounts_include_vat = True
+    return config
+
+
+@pytest.mark.parametrize(
+    ("include_vat", "day", "cap"),
+    [(False, "150.50", "4500.00"), (True, "123.36", "3688.52")],
+    ids=["as-is", "vat-net"],
+)
+async def test_plan_limits_follow_vat_config(api, include_vat: bool, day: str, cap: str) -> None:
+    """VK_AMOUNTS_INCLUDE_VAT=true: лимиты VK уходят без НДС (лимит ÷ (1 + VAT_PERCENT)), иначе — как есть."""
+    config = configuration()
+    config.vat_percent = 22
+    config.vk_amounts_include_vat = include_vat
+    route = mock_creation(api)
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    body = sent(route)
+    assert (body["budget_limit_day"], body["budget_limit"]) == (day, cap)
+
+
+async def test_set_budget_divides_limits_when_vat_configured(api) -> None:
+    route = api.post(f"{API}/ad_plans/10.json").respond(json={})
+    async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.apply(Operation("set_budget", "campaign", "10", "daily_limit_kop", 15050, 12_200))
+        await vk.apply(Operation("set_budget", "campaign", "10", "period_cap_kop", 450_000, 61_000))
+    assert sent(route, 0) == {"budget_limit_day": "100.00"}
+    assert sent(route, 1) == {"budget_limit": "500.00"}
+
+
+async def test_get_state_restores_gross_limits_when_vat_configured(api) -> None:
+    """Чтение лимитов умножает обратно на (1 + НДС): копейки округлений сходятся в пределах копейки."""
+    api.get(f"{API}/ad_plans.json").respond(
+        json={
+            "count": 1,
+            "items": [
+                {
+                    "id": 10,
+                    "name": "П",
+                    "status": "active",
+                    "budget_limit_day": "100.00",
+                    "budget_limit": "3688.52",
+                }
+            ],
+        }
+    )
+    async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
+        state = (await vk.get_state(ExternalRefs("10", {}, {}, {})))["10"]
+    assert (state.daily_limit_kop, state.period_cap_kop) == (12_200, 449_999)
+
+
 async def test_create_tree_stays_blocked_until_marking_confirmed(api) -> None:
     route = mock_creation(api)
     async with VkAdapter("tok", config=configuration(), href="https://shop.example/") as vk:

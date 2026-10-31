@@ -7,10 +7,10 @@ import pytest
 from integration.harness import BUDGET_KOP, make_world
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, WorkerRun
-from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget
+from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget, stop_margin
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
-from app.services.budget_guard import read_spend, stop_all
+from app.services.budget_guard import budget_guard, read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
@@ -62,6 +62,61 @@ async def test_startup_stops_real_spend_above_authorized_budget(monkeypatch):
     assert world.business.status == "budget_stop"
     assert (await world.adapter.get_state(world.refs))[world.refs.campaign_id].status == "paused_auto"
     assert world.changes(reason_code="SPEND_MISMATCH", status="applied")
+
+
+async def test_guard_margin_counts_only_active_campaigns(monkeypatch):
+    """Остановленная кампания не тратит: запас стража считается по работающим кампаниям, поэтому порог остановки
+    выше, чем если складывать лимиты всех кампаний, — реклама не останавливается раньше времени."""
+    from app.config import get_domain_settings
+
+    world = await make_world()
+    worker = world.worker()
+    margin_all = stop_margin(world.campaign.daily_limit_kop, get_domain_settings())
+    assert margin_all > 0
+    # Владелец остановил рекламу: кампания на паузе, а её дневной лимит в базе сохранился.
+    await world.adapter.apply(
+        Operation("set_status", "campaign", world.refs.campaign_id, "status", "active", "paused_owner")
+    )
+    world.campaign.status = "paused_owner"
+    world.repository.save(world.campaign)
+    # Расход выше старого порога (бюджет − запас с паузой), но ниже бюджета: новый запас по активным — ноль.
+    spent = world.business.month_budget_kop - margin_all // 2
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": spent}, {})))
+    await budget_guard(worker, world.business)
+    assert world.business.status == "running"
+    assert not world.changes(reason_code="BUDGET_STOP")
+    # Превысили бюджет: страж останавливает рекламу.
+    monkeypatch.setattr(
+        "app.services.budget_guard.read_spend",
+        AsyncMock(return_value=({"direct": world.business.month_budget_kop + 1}, {})),
+    )
+    await budget_guard(worker, world.business)
+    assert world.business.status == "budget_stop"
+
+
+async def test_resume_margin_skips_owner_paused_but_keeps_system_paused() -> None:
+    """Запас для возобновления: кампании, остановленные владельцем, не тратят и в запас не идут; пауза автопилота
+    (budget_stop) — идёт: возобновление её снимет, и запас обязан покрывать трату, иначе «Продолжить» превращалось
+    бы в мгновенный повторный останов."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=3)
+    spent = world.platform_spend()
+    daily = world.campaign.daily_limit_kop
+    margin = stop_margin(daily)
+    assert margin > 0
+    service = ScreensService(world.worker())
+    world.business.month_budget_kop = spent + margin // 2
+    # Пауза владельцем: запас по ней не считается, возобновить объявление можно, пока остаток положительный.
+    world.campaign.owner_paused = True
+    world.repository.save(world.campaign)
+    await service.check_remaining(world.business)
+    # Пауза автопилота: возобновление снимет её — запас обязан её учесть, иначе страж остановит снова сразу.
+    world.campaign.owner_paused = False
+    world.campaign.status = "paused_auto"
+    world.repository.save(world.campaign)
+    with pytest.raises(ChangeConflict, match="защитного запаса"):
+        await service.check_remaining(world.business)
 
 
 async def test_rebalance_with_no_daily_budget_pauses_instead_of_setting_zero(monkeypatch):

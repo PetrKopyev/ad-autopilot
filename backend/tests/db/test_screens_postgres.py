@@ -41,6 +41,7 @@ def test_settings_show_saved_marking_masked(db_session) -> None:
         "name": "ИП Иванов",
         "phone": "",
         "confirmed_in_platform": {"direct": True},
+        "transmission": {"direct": None, "vk": None},
         "saved": True,
         "inn_masked": "•••4689",
         "phone_masked": "+7•••1122",

@@ -306,6 +306,95 @@ async def test_experiment_rollback_restores_control_and_freezes_group_ads(reposi
     assert all(ad.frozen_until == now + timedelta(days=14) for ad in ads.values())
 
 
+async def verdict_change(repository, adapter, refs, *, loser: str) -> ChangeLog:
+    return await ChangesService(repository, dry_run=False).apply_change(
+        business_id=1,
+        adapter=adapter,
+        refs=refs,
+        operations=[Operation("set_status", "ad", loser, "status", "active", "paused_auto")],
+        actor="autopilot",
+        kind="experiment_verdict",
+        platform="fake",
+        reason_code="EXPERIMENT_VERDICT",
+        reason_text="Оставили прежнее объявление А, Б остановили.",
+    )
+
+
+@pytest.mark.parametrize("hypothesis", ["text", "image", "audience"])
+async def test_verdict_rollback_restores_loser_and_leaves_winner(repository, tree, hypothesis):
+    """Откат вывода сравнения возвращает проигравшему статус до вывода — объявление снова работает,
+    победитель остаётся как есть; текст записи отката — по факту."""
+    adapter, refs = tree
+    ads = {
+        ("ad", refs.ads[name]): Ad(
+            id=index, ad_group_id=3, external_id=refs.ads[name], title=name, frozen_until=None
+        )
+        for index, name in enumerate(("control", "variant"), 1)
+    }
+    repository.local_entities.return_value = ads
+    original = await verdict_change(repository, adapter, refs, loser=refs.ads["variant"])
+    experiment = Experiment(
+        id=1, control_ad_id=1, variant_ad_id=2, ad_group_id=3, stats={}, status="concluded", hypothesis=hypothesis
+    )
+    repository.experiments.return_value = [experiment]
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    states = await adapter.get_state(refs)
+    assert states[refs.ads["variant"]].status == "active"
+    assert states[refs.ads["control"]].status == "active"
+    assert revert.reason_code == "EXPERIMENT_VERDICT_REVERT"
+    assert revert.reason_text == "Вы отменили вывод сравнения вариантов: объявление «variant» снова работает."
+    assert experiment.status == "cancelled"
+
+
+async def test_verdict_rollback_when_variant_wins_does_not_pause_it(repository, tree):
+    """Зеркальный случай: проиграл контроль. Откат снова включает контроль и не записывает победивший
+    вариант остановленным владельцем."""
+    adapter, refs = tree
+    ads = {
+        ("ad", refs.ads[name]): Ad(
+            id=index, ad_group_id=3, external_id=refs.ads[name], title=name, frozen_until=None
+        )
+        for index, name in enumerate(("control", "variant"), 1)
+    }
+    repository.local_entities.return_value = ads
+    original = await verdict_change(repository, adapter, refs, loser=refs.ads["control"])
+    experiment = Experiment(id=1, control_ad_id=1, variant_ad_id=2, ad_group_id=3, stats={}, status="concluded")
+    repository.experiments.return_value = [experiment]
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    states = await adapter.get_state(refs)
+    assert states[refs.ads["control"]].status == "active"
+    assert states[refs.ads["variant"]].status == "active"
+    assert revert.reason_text == "Вы отменили вывод сравнения вариантов: объявление «control» снова работает."
+
+
+async def test_verdict_rollback_when_loser_deleted_by_owner(repository, tree):
+    """Проигравшее объявление владелец уже удалил в кабинете: откат не падает, не воскрешает его и честно
+    пишет, что восстанавливать нечего."""
+    adapter, refs = tree
+    ads = {
+        ("ad", refs.ads[name]): Ad(
+            id=index, ad_group_id=3, external_id=refs.ads[name], title=name, frozen_until=None
+        )
+        for index, name in enumerate(("control", "variant"), 1)
+    }
+    repository.local_entities.return_value = ads
+    original = await verdict_change(repository, adapter, refs, loser=refs.ads["variant"])
+    await adapter.apply(Operation("set_status", "ad", refs.ads["variant"], "status", "paused_auto", "archived"))
+    experiment = Experiment(id=1, control_ad_id=1, variant_ad_id=2, ad_group_id=3, stats={}, status="concluded")
+    repository.experiments.return_value = [experiment]
+    revert = await RollbackService(repository, dry_run=False).revert(
+        original.id, business_id=1, adapter=adapter, confirm=True
+    )
+    states = await adapter.get_state(refs)
+    assert states[refs.ads["variant"]].status == "archived"
+    assert revert.status == "applied" and revert.operations == []
+    assert revert.reason_text == (
+        "Вы отменили вывод сравнения вариантов: объявление «variant» уже удалено "
+        "в кабинете площадки — восстанавливать не стали."
+    )
+    assert experiment.status == "cancelled"
+
+
 async def test_unknown_irreversible_entity_is_not_guessed(tree):
     adapter, refs = tree
     with pytest.raises(ValueError):
@@ -535,8 +624,11 @@ async def test_postgresql_rollback_updates_original_ad_and_experiment(tree, monk
                     db.expire_all()
                     assert db.get(ChangeLog, original.id).status == "reverted"
                     assert db.get(ChangeLog, revert.id).reverts_id == original.id
+                    # Откат вывода сравнения возвращает статусы из записи изменения: контроль снова работает,
+                    # вариант в операциях записи не участвовал — не трогаем (раньше здесь был принудительный
+                    # paused_owner, из-за которого откат выглядел как остановка владельцем).
                     assert db.get(Ad, ads[0].id).status == "active"
-                    assert db.get(Ad, ads[1].id).status == "paused_owner"
+                    assert db.get(Ad, ads[1].id).status == "active"
                     assert all(db.get(Ad, ad.id).frozen_until == now + timedelta(days=14) for ad in ads)
                     assert db.get(Experiment, experiment.id).stats["manual_verdict"] == "variant_lost"
             finally:
@@ -556,6 +648,8 @@ async def test_postgresql_rollback_updates_original_ad_and_experiment(tree, monk
         ("CUSTOM", "system", "pause", "budget_stop", False, False),
         ("CUSTOM", "system", "pause", "paused", True, False),
         ("REVERT", "owner", "revert", "running", False, False),
+        # Запись о маркировке информационная: операций нет, откатывать нечего.
+        ("MARKING_NOT_TRANSMITTED", "system", "marking", "running", False, False),
         ("CUSTOM", "autopilot", "pause", "running", False, True),
         ("CUSTOM", "external", "pause", "running", False, True),
     ],

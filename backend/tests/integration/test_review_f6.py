@@ -222,7 +222,9 @@ async def test_reverted_hypothesis_stays_completed_after_freeze_expires():
     assert "text" in completed_hypotheses(worker, world.business, experiment.ad_group_id)
     proposal = await create_experiment(world.worker(dry_run=True), world.business, control_snapshot(world), design())
     assert proposal.reason_params["hypothesis"] == "image"
-    assert world.ads["borderline-2"].status == "paused_owner"
+    # Откат вывода не трогает второе плечо: раньше оно записывалось «остановленным владельцем», теперь
+    # остаётся в своём статусе (это объявление ещё на модерации).
+    assert world.ads["borderline-2"].status == "moderation"
 
 
 async def test_fake_restart_skips_jobs_and_notifies_once():

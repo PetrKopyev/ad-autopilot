@@ -17,9 +17,10 @@ from app.content.medical import MedicalLevel, classify
 from app.content.site_reader import SiteReadResult, extract_description, read_site, safe_url
 from app.content.verify import DescriptionDraft, Fact, OwnerQuestion, Service
 from app.content.yandexgpt import CompletionResult, YandexGPTError
-from app.db.models import ArtCall, Business, LLMCall, MarkingProfile, Plan, PlatformAccount
+from app.db.models import ArtCall, Business, ChangeLog, LLMCall, MarkingProfile, Plan, PlatformAccount
 from app.domain.budget import budget_minimum
-from app.domain.explain import rubles
+from app.domain.explain import explain, rubles
+from app.platforms.base import AdPlatform
 from app.platforms.metrica import Metrica
 from app.platforms.regions import CITY_NAMES, normalize
 from app.services.changes import LOCK_WAIT_SECONDS, ChangeConflict, ChangesRepository, wait_for_lock, waiting
@@ -27,6 +28,10 @@ from app.worker.clock import MOSCOW
 
 DESCRIPTION_KEYS = ("services", "prices", "address", "difference")
 SUBJECT_TYPES = ("ip", "ooo", "selfemployed", "person")
+# Типы рекламодателя у API площадок: у нас «selfemployed»/«person», у адаптеров — «self_employed»/«individual».
+MARKING_API_TYPES = {"ip": "ip", "ooo": "ooo", "selfemployed": "self_employed", "person": "individual"}
+MARKING_TRANSMITTED = "marking_transmitted"
+MARKING_MANUAL_REQUIRED = "marking_manual_required"
 INN_ERRORS = {
     "ip": "Проверьте ИНН: у ИП в нём 12 цифр, без ошибок.",
     "ooo": "Проверьте ИНН: у ООО в нём 10 цифр, без ошибок.",
@@ -452,6 +457,7 @@ class OnboardingService:
         *,
         reader: Callable[[str], Awaitable[SiteReadResult]] = read_site,
         ai_mode: str = "",
+        fresh: Callable[[int, str], AdPlatform] | None = None,
     ) -> None:
         self.repository = repository
         self.llm = llm
@@ -459,6 +465,8 @@ class OnboardingService:
         self.limits = limits
         self.reader = reader
         self.ai_mode = ai_mode
+        # Отдельный экземпляр адаптера вне кэша реестра: передача маркировки меняет его внутреннее состояние.
+        self.fresh = fresh
 
     def create_business(
         self, user_id: int, site_url: str, city: str, month_budget_kop: int, avg_check_kop: int | None
@@ -745,3 +753,74 @@ class OnboardingService:
             profile.confirmed_in_platform = {platform: confirmed.get(platform) is True for platform in ("direct", "vk")}
             self.repository.add(profile)
         return {"confirmed_in_platform": profile.confirmed_in_platform}
+
+    async def transmit_marking(self, business_id: int, now: datetime) -> dict[str, str]:
+        """Передача данных рекламодателя в каждый подключённый кабинет (маркировка рекламы).
+
+        Любая ошибка площадки (нет прав, регистрация в ЕРИР не завершена, отказ принять поля, сеть) не роняет
+        сохранение: статус площадки становится marking_manual_required и в журнал пишется запись с инструкцией,
+        которую владелец видит в настройках. Симулятор демо-режима принимает данные без запросов.
+        """
+        if self.fresh is None:
+            return {}
+        profile = self.repository.marking(business_id)
+        if profile is None:
+            return {}
+        accounts = [item for item in self.repository.accounts(business_id) if item.status == "ok"]
+        if not accounts:
+            return {}
+        payload = {
+            "type": MARKING_API_TYPES[profile.subject_type],
+            "inn": profile.inn_enc,
+            "name": profile.name,
+            "phone": profile.phone_enc or "",
+        }
+        transmission: dict[str, dict[str, Any]] = {}
+        for account in accounts:
+            platform = account.platform
+            adapter: AdPlatform | None = None
+            instruction = None
+            try:
+                adapter = self.fresh(business_id, platform)
+                await adapter.set_marking(payload)
+                # Адаптер без подтверждения (Директ не принял поля ЕРИР, VK — не физлицо) возвращает инструкцию:
+                # данные целиком не приняты, владелец заполняет «Данные рекламодателя» в кабинете самостоятельно.
+                instruction = adapter.marking_instruction()
+                status = MARKING_MANUAL_REQUIRED if instruction else MARKING_TRANSMITTED
+            except Exception:  # noqa: BLE001 — любая ошибка API: сохранение уже состоялось, реклама не ломается
+                status = MARKING_MANUAL_REQUIRED
+                instruction = adapter.marking_instruction() if adapter is not None else None
+            transmission[platform] = {"status": status, "attempted_at": now.isoformat()}
+            if status == MARKING_MANUAL_REQUIRED:
+                self._marking_failure(business_id, platform, instruction, now)
+        profile.transmission = transmission
+        self.repository.add(profile)
+        return {platform: item["status"] for platform, item in transmission.items()}
+
+    def _marking_failure(
+        self, business_id: int, platform: str, instruction: str | None, now: datetime
+    ) -> None:
+        from app.services.launch import TITLES
+
+        self.repository.save(
+            ChangeLog(
+                business_id=business_id,
+                actor="system",
+                kind="marking",
+                platform=platform,
+                entity_type="marking",
+                entity_id=platform,
+                operations=[],
+                reason_code="MARKING_NOT_TRANSMITTED",
+                reason_params={"platform": platform},
+                reason_text=explain(
+                    "MARKING_NOT_TRANSMITTED",
+                    platform=TITLES.get(platform, "площадку"),
+                    instruction=instruction
+                    or "Заполните данные рекламодателя в кабинете площадки и подтвердите заполнение в приложении.",
+                ),
+                evidence={},
+                status="applied",
+                created_at=now,
+            )
+        )

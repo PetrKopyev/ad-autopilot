@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import given, settings
@@ -9,6 +10,7 @@ from hypothesis import strategies as st
 from app.domain.budget import (
     MINIMUM_MARGIN,
     WORST_DAY,
+    active_daily_limit,
     allocate,
     authorized_budget,
     budget_guard,
@@ -122,6 +124,20 @@ def test_guard_threshold_is_inclusive_and_margin_rounds_up():
     result = budget_guard(100_000, 99_000, 16_000)
     assert result.stop and result.reason_code == "BUDGET_STOP"
     assert budget_guard(0, 0, 0).stop
+
+
+def test_active_daily_limit_skips_paused_campaigns():
+    campaigns = [
+        SimpleNamespace(status=status, daily_limit_kop=limit)
+        for status, limit in (
+            ("active", 10_000),
+            ("paused_auto", 20_000),
+            ("paused_owner", 30_000),
+            ("archived", 40_000),
+        )
+    ]
+    assert active_daily_limit(campaigns) == 10_000
+    assert active_daily_limit([]) == 0
 
 
 def test_reconciliation_stops_on_one_extra_kopeck_and_uses_highest_spend():

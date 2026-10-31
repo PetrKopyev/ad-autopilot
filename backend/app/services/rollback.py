@@ -63,6 +63,30 @@ def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) 
 SUPERSEDED = "Статус этой рекламы с тех пор уже меняли: возобновить или остановить её можно на главной."
 
 
+def experiment_verdict_revert_text(
+    operations: Sequence[Operation], ads: Mapping[int, Ad], skipped: Collection[str]
+) -> str:
+    """Текст отката вывода сравнения по факту: кого вернули к прежнему статусу и кого восстановить уже не вышло."""
+    titles = {ad.external_id: ad.title for ad in ads.values() if ad.external_id}
+    facts = []
+    for op in operations:
+        if op.entity_type != "ad" or op.field != "status":
+            continue
+        title = titles.get(op.entity_id, "объявление")
+        if op.after == "active":
+            facts.append(f"объявление «{title}» снова работает")
+        elif op.after == "archived":
+            facts.append(f"объявление «{title}» остановлено и убрано в архив")
+        else:
+            facts.append(f"объявлению «{title}» вернули прежний статус")
+    for external_id in skipped:
+        title = titles.get(external_id, "объявление")
+        facts.append(f"объявление «{title}» уже удалено в кабинете площадки — восстанавливать не стали")
+    if not facts:
+        facts.append("настройки рекламы не меняли")
+    return "Вы отменили вывод сравнения вариантов: " + "; ".join(facts) + "."
+
+
 def superseded(changes: Sequence[ChangeLog]) -> set[int]:
     """Остановки и возобновления, после которых статус тех же объектов менялся ещё раз; changes — по порядку
     (ChangesRepository.status_changes). После «Продолжить» на главной старая остановка в журнале уже не отменяется."""
@@ -90,6 +114,8 @@ def can_revert(
     return (
         change.status == "applied"
         and change.kind != "revert"
+        # Записи о маркировке информационные: операций нет, откатывать нечего.
+        and change.kind != "marking"
         and change.id not in overridden
         and not (change.evidence or {}).get("_service", {}).get("dry_run")
         and not budget_protection(change, business)
@@ -261,20 +287,50 @@ class RollbackService:
                     preserved.append(replace(op, before=value, after=value))
                 inverse = preserved
             ads = {entity.id: entity for entity in entities.values() if isinstance(entity, Ad)}
-            for experiment in related_experiments(self.repository, original):
-                for ad_id, status in ((experiment.control_ad_id, "active"), (experiment.variant_ad_id, "paused_owner")):
-                    ad = ads.get(ad_id)
-                    if ad is None or ad.external_id not in states:
-                        raise ValueError("Для отката эксперимента нужны оба объявления на площадке.")
-                    if ad_id == experiment.variant_ad_id and any(
-                        op.entity_id == ad.external_id and op.field == "status" and op.after == "archived"
+            skipped: list[str] = []
+            verdict = original.kind == "experiment_verdict"
+            if verdict:
+                # Откат вывода сравнения возвращает объявлениям статусы, записанные в самом изменении (какие были
+                # до вывода); победитель не трогается. Объявление, которое владелец уже удалил на площадке, не
+                # воскрешаем: запись об откате говорит о нём отдельно.
+                restore_targets = {op.entity_id for op in inverse if op.entity_type == "ad" and op.field == "status"}
+                for experiment in related_experiments(self.repository, original):
+                    for ad_id in (experiment.control_ad_id, experiment.variant_ad_id):
+                        ad = ads.get(ad_id)
+                        if ad is None or ad.external_id not in restore_targets:
+                            continue
+                        state = states.get(ad.external_id)
+                        if state is None or state.status == "archived":
+                            skipped.append(ad.external_id)
+                if skipped:
+                    inverse = [
+                        op
                         for op in inverse
+                        if not (op.entity_type == "ad" and op.field == "status" and op.entity_id in skipped)
+                    ]
+            else:
+                # Откат самого запуска проверки останавливает её новое плечо: для аудиторной проверки запись
+                # запуска без операций — группу на площадке создавал отдельный вызов, и без этих операций
+                # откату нечего было бы применить.
+                for experiment in related_experiments(self.repository, original):
+                    for ad_id, status in (
+                        (experiment.control_ad_id, "active"),
+                        (experiment.variant_ad_id, "paused_owner"),
                     ):
-                        continue
-                    inverse = [op for op in inverse if (op.entity_id, op.field) != (ad.external_id, "status")]
-                    inverse.append(
-                        Operation("set_status", "ad", ad.external_id, "status", states[ad.external_id].status, status)
-                    )
+                        ad = ads.get(ad_id)
+                        if ad is None or ad.external_id not in states:
+                            raise ValueError("Для отката эксперимента нужны оба объявления на площадке.")
+                        if ad_id == experiment.variant_ad_id and any(
+                            op.entity_id == ad.external_id and op.field == "status" and op.after == "archived"
+                            for op in inverse
+                        ):
+                            continue
+                        inverse = [op for op in inverse if (op.entity_id, op.field) != (ad.external_id, "status")]
+                        inverse.append(
+                            Operation(
+                                "set_status", "ad", ad.external_id, "status", states[ad.external_id].status, status
+                            )
+                        )
             return await self.changes._apply_change(
                 business_id=business_id,
                 adapter=adapter,
@@ -285,8 +341,12 @@ class RollbackService:
                 platform=original.platform,
                 entity_type=original.entity_type,
                 entity_id=original.entity_id,
-                reason_code="REVERT",
+                reason_code="EXPERIMENT_VERDICT_REVERT" if verdict else "REVERT",
                 reason_params={"change": undone(original.kind, original.entity_type, original.reason_params)},
+                # _apply_change берёт готовый текст, только если кода нет в шаблонах: REVERT там есть, свой код —
+                # нет, текст составляем по факту отката.
+                reason_text=experiment_verdict_revert_text(inverse, ads, skipped) if verdict else None,
+                record_only=verdict and not inverse,
                 evidence={
                     "confirmed": confirm,
                     "conflicts": mismatches,

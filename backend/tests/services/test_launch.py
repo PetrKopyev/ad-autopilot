@@ -47,6 +47,17 @@ class FailingCreate(FakeAdapter):
         return await super().create_campaign_tree(plan_part)
 
 
+class MismatchingCreate(FakeAdapter):
+    """Как Директ после правки владельца в кабинете: дерево создаётся, но содержимое отличалось от плана."""
+
+    async def create_campaign_tree(self, plan_part):
+        refs = await super().create_campaign_tree(plan_part)
+        self.content_mismatches = [
+            "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново."
+        ]
+        return refs
+
+
 class FailingActivation(FakeAdapter):
     fail = True
 
@@ -87,6 +98,21 @@ def refs_of(world: World, campaign: Campaign) -> ExternalRefs:
 
 async def states(world: World, campaign: Campaign):
     return await world.adapters[campaign.platform].get_state(refs_of(world, campaign))
+
+
+async def test_launch_logs_recreated_cabinet_content(tmp_path: Path) -> None:
+    """Содержимое кабинета отличалось от плана (владелец правил текст): запуск пересоздаёт по плану и пишет
+    об этом честную запись в журнал — иначе «лишнее» объявление в кабинете было бы владельцу непонятно."""
+    world, plan = await ready(tmp_path, adapters={"direct": MismatchingCreate(), "vk": FakeAdapter()})
+    assert (await launch(world, plan))["status"] == "launched"
+    records = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_CONTENT_RECREATED")
+    assert len(records) == 1
+    record = records[0]
+    assert record.platform == "direct" and record.status == "applied" and record.actor == "system"
+    assert record.reason_text == (
+        "В кабинете объявление «Маникюр» группы «Маникюр» отличается от плана — создали заново."
+    )
+    assert not world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_CONTENT_RECREATED", platform="vk")
 
 
 async def test_full_path_creates_limited_campaigns_within_budget(tmp_path: Path) -> None:

@@ -265,6 +265,15 @@ class ModerationRejected(PlatformError):
         self.reason = reason
 
 
+class AwaitingModeration(PlatformError):
+    """Площадка ещё проверяет объявление (включение отклонено с «ожидает модерации»): не провал изменения,
+    а ожидание — запись остаётся pending, воркер доведёт сверкой."""
+
+    def __init__(self, entity_id: str) -> None:
+        super().__init__("Площадка ещё проверяет объявление.", status_code=425)
+        self.entity_id = entity_id
+
+
 @runtime_checkable
 class AdPlatform(Protocol):
     def auth_url(self, state: str) -> str: ...

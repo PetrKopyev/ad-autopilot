@@ -179,6 +179,21 @@ def launch(client):
     assert response.status_code == 200, response.text
 
 
+def test_demo_business_uses_demo_site_url_when_field_left_empty(demo):
+    """Предзаполнение мастера демо: сайт остался пустым (сброс черновика, новая вкладка) — бизнес всё равно
+    создаётся с адресом салона-примером, и шаг «Проверяем сайт» его читает."""
+    client, world, _ = demo
+    response = client.post(
+        "/api/business",
+        json={"site_url": "  ", "city": "Москва", "month_budget_kop": 3_000_000},
+    )
+    assert response.status_code == 200, response.text
+    business = world.repository.business(world.business.id)
+    assert business.site_url == "https://salon.example/" and business.city == "Москва"
+    site = client.get("/api/business/site-check").json()
+    assert site["status"] == "ready" and site["services_found"] > 0
+
+
 @pytest.mark.parametrize("mode,enabled", [("live", False), ("live", True), ("fake", False)])
 def test_hidden_outside_demo(demo, monkeypatch, mode, enabled):
     client, _, _ = demo

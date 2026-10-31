@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
+from starlette.concurrency import run_in_threadpool
 
 from app.api.autopilot import Screens
 from app.api.demo import router as demo_router
@@ -19,7 +20,7 @@ from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
 from app.platforms.regions import CITY_REGIONS
 from app.services.changes import ChangeConflict, ServerBusy
-from app.services.demo import prepare_business, read_demo_site
+from app.services.demo import DEMO_SITE_URL, prepare_business, read_demo_site
 from app.services.onboarding import (
     MAX_BUDGET_KOP,
     AiLimits,
@@ -85,13 +86,16 @@ async def get_onboarding_service(request: Request) -> AsyncIterator[OnboardingSe
     from app.config import settings
 
     with request_session() as db:
+        registry = request.app.state.platform_adapters
         yield OnboardingService(
             OnboardingRepository(db),
             build_llm(settings, request.app.state.http),
-            request.app.state.platform_adapters.metrica,
+            registry.metrica,
             AiLimits.from_settings(settings),
             reader=read_demo_site if settings.platform_mode == "fake" else read_site,
             ai_mode=llm_mode(settings),
+            # У частичных заглушек реестра в тестах fresh может отсутствовать: передача тогда пропускается.
+            fresh=getattr(registry, "fresh", None),
         )
 
 
@@ -102,7 +106,10 @@ CurrentUser = Annotated[User, Depends(current_user)]
 @router.post("/business", dependencies=[Depends(require_csrf)])
 def create_business(body: BusinessIn, user: CurrentUser, service: Service) -> dict:
     with human_errors():
-        result = service.create_business(user.id, body.site_url, body.city, body.month_budget_kop, body.avg_check_kop)
+        # Мастер демо предзаполняет сайт салоном-примером; если поле осталось пустым (сброс черновика, новая
+        # вкладка), демо-бизнес всё равно создаём с этим адресом — иначе шаг 1 встаёт на пустом поле.
+        site_url = body.site_url.strip() or (DEMO_SITE_URL if demo_enabled() else body.site_url)
+        result = service.create_business(user.id, site_url, body.city, body.month_budget_kop, body.avg_check_kop)
         if demo_enabled():
             prepare_business(service.repository, service.repository.business(result["id"]))
         return result
@@ -171,11 +178,21 @@ async def save_metrica(body: MetricaIn, business: CurrentBusiness, service: Serv
 
 
 @router.put("/business/marking", dependencies=[Depends(require_csrf)])
-def save_marking(body: MarkingIn, business: CurrentBusiness, service: Service) -> dict:
+async def save_marking(request: Request, body: MarkingIn, business: CurrentBusiness, service: Service) -> dict:
     with human_errors():
-        return service.save_marking(
-            business.id, body.subject_type, body.inn, body.name, body.phone, body.confirmed_in_platform
+        # Сохранение ждёт блокировку бизнеса в пуле потоков, а передача на площадки идёт сразу после него:
+        # результат передачи владелец видит в ответе и в настройках.
+        result = await run_in_threadpool(
+            service.save_marking,
+            business.id,
+            body.subject_type,
+            body.inn,
+            body.name,
+            body.phone,
+            body.confirmed_in_platform,
         )
+        transmission = await service.transmit_marking(business.id, datetime.now(UTC))
+        return result | {"transmission": transmission}
 
 
 class BudgetIn(BaseModel):
