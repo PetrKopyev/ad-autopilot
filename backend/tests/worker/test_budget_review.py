@@ -633,6 +633,21 @@ async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch)
     assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
 
 
+async def test_vk_rebalance_sends_only_daily_limit_and_keeps_internal_period_cap():
+    """VK не хранит лимит периода: на площадку уходит операция только с дневным лимитом, а внутренний учёт
+    остатка месяца (campaign.period_cap_kop) продолжается — он нужен для минимума площадки и распределения."""
+    world = await make_world()
+    world.campaign.platform = "vk"
+    world.clock.advance(days=2)
+    world.business.month_budget_kop -= 100_000
+    before_cap = world.campaign.period_cap_kop
+    await rebalance_budget(world.worker(), world.business)
+    (change,) = world.changes(reason_code="BUDGET_REBALANCE", kind="budget")
+    assert {op["field"] for op in change.operations} == {"daily_limit_kop"}
+    assert change.operations[0]["after"] == world.adapter._states[world.refs.campaign_id].daily_limit_kop
+    assert world.campaign.period_cap_kop != before_cap and world.campaign.period_cap_kop > 0
+
+
 def report_pauses_as_owner(adapter: FakeAdapter) -> None:
     """VK и Директ отдают остановленную кампанию как paused_owner: «blocked» и «OFF» не различают, кто остановил."""
     original = adapter.get_state

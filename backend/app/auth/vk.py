@@ -153,6 +153,17 @@ class VkClient:
         except (ValueError, AttributeError):
             return None
 
+    @staticmethod
+    def _error_detail(data: Any) -> str | None:
+        """Причина отказа из тела ответа VK: у живых ошибок есть code/message/description, без них отладка вслепую."""
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            parts = [str(error[key]) for key in ("code", "message", "description") if error.get(key)]
+            return "; ".join(parts).rstrip(".") or None
+        if isinstance(error, str) and error:
+            return error.rstrip(".")
+        return None
+
     async def _request(
         self, method: str, path: str, *, authenticated: bool = True, headers: dict | None = None, **kwargs
     ) -> dict:
@@ -181,8 +192,15 @@ class VkClient:
                 )
             if not authenticated and self._error_code(response) in TOKEN_ERRORS:
                 raise AuthExpired()
+            try:
+                detail = self._error_detail(response.json())
+            except ValueError:
+                detail = None
+            message = f"Ошибка VK Рекламы (HTTP {response.status_code})"
+            if detail:
+                message = f"{message}: {detail}"
             raise PlatformError(
-                f"Ошибка VK Рекламы (HTTP {response.status_code}). Повторите попытку позже.",
+                f"{message}. Повторите попытку позже.",
                 status_code=response.status_code,
             )
         if response.status_code == 204:
@@ -200,7 +218,10 @@ class VkClient:
                 raise AuthExpired()
             if code in {"rate_limit_exceeded", "request_limit_exceeded"}:
                 raise RateLimited(retry)
-            raise PlatformError("VK Реклама отклонила запрос.")
+            detail = self._error_detail(data)
+            raise PlatformError(
+                f"VK Реклама отклонила запрос: {detail}." if detail else "VK Реклама отклонила запрос."
+            )
         return data
 
     def auth_url(self, state: str) -> str:

@@ -8,12 +8,13 @@ from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.types import BudgetPlan, GroupLimit, GuardResult, PlatformLimit, nonnegative_int
 
 CAP_MULTIPLIER = Decimal("1.25")
-# Минимумы площадок для расчёта без сети: Директ — недельный бюджет стратегии, VK — дневной и общий лимит кампании.
+# Минимумы площадок для расчёта без сети: Директ — недельный бюджет стратегии, VK — дневной лимит плана.
 # Запуск сверяет лимиты с минимумами, которые площадка отдаёт живьём (min_budgets адаптера). Суммы — с НДС, как бюджет:
-# у Директа 300 ₽ без НДС (DIRECT_AMOUNTS_INCLUDE_VAT=false) это 366 ₽ с НДС 22%.
+# у Директа 300 ₽ без НДС (DIRECT_AMOUNTS_INCLUDE_VAT=false) это 366 ₽ с НДС 22%. Лимита периода у VK нет:
+# план держит только дневной лимит, месяц закрывает страж бюджета — периодного минимума не требуем.
 PLATFORM_MINIMUMS = {
     "direct": {"weekly_limit_kop": 36_600},
-    "vk": {"daily_limit_kop": 30_000, "period_cap_kop": 30_000},
+    "vk": {"daily_limit_kop": 30_000},
 }
 MINIMUM_MARGIN = Decimal("1.15")
 WORST_DAY = date(2026, 3, 31)
@@ -149,7 +150,8 @@ def launch_limits(
 
 def meets_minimum(limit: PlatformLimit, minimum: Mapping[str, int], margin: Decimal = Decimal(1)) -> bool:
     """Лимиты кампании на полную неделю не ниже минимумов площадки: Директ — недельный, VK — дневной (с запасом
-    margin) и на кампанию, симулятор — day/period. Неполную неделю запуска проверяет launch.below_minimum."""
+    margin), периодного минимума у VK нет, симулятор — day/period. Неполную неделю запуска проверяет
+    launch.below_minimum."""
     period = minimum.get("period_cap_kop", minimum.get("period", 0))
     return limit.daily_limit >= daily_floor(minimum, margin) and limit.remaining_cap >= period
 

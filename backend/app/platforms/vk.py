@@ -38,9 +38,20 @@ API_FORMAT = {
     "text_limit": 90,
     "statuses": {"active": "active", "paused_owner": "blocked", "paused_auto": "blocked", "archived": "deleted"},
     "min_daily_limit_kop": 30000,
-    "min_period_cap_kop": 30000,
     "page": 250,
 }
+# Пакет VK обязателен в ad_groups (живой кабинет, 31.10). Подходит не каждый пакет из packages.json:
+# - флаг no_create_campaigns закрывает создание кампаний через API (живой ответ: Invalid package);
+# - карусель, посты сообщества и MAX — иной формат баннеров; этим пакетам нужна цель priced_goal
+#   (Top@Mail/мобильные приложения), а цель Метрики через API не привязывается — нам такие пакеты не подходят.
+PACKAGE_REJECT_FLAGS = {"no_create_campaigns"}
+PACKAGE_REJECT_HINTS = ("carousel", "карусель", "пост", "post", "max")
+PACKAGE_UNAVAILABLE = (
+    "В кабинете VK Рекламы нет пакета, на котором API может создать кампанию: универсальные пакеты «Сайт» "
+    "закрыты для создания (no_create_campaigns), а остальные — карусель, посты сообщества и MAX, которым нужна "
+    "цель Top@Mail или приложения (priced_goal), а её у бизнеса нет. Запросите у VK пакет для API-создания "
+    "(ads_api@vk.team) или задайте подходящий id в VK_PACKAGE_ID."
+)
 # Регионы VK со своими id (не Яндекса): GET /api/v2/regions.json, см. https://ads.vk.com/doc/api/object/Region
 RUSSIA = 188
 RUSSIAN = {"Accept-Language": "ru-RU"}
@@ -88,6 +99,16 @@ def _status(item: dict) -> str:
     return {"active": "active", "blocked": "paused_owner", "deleted": "archived"}.get(item.get("status"), "pending")
 
 
+def _package_fits(item: dict) -> bool:
+    """Можно ли создавать на пакете кампанию нашего формата; перечень пакетов — packages.json."""
+    if not isinstance(item.get("id"), int) or item.get("status", "active") != "active":
+        return False
+    if any(flag in PACKAGE_REJECT_FLAGS for flag in item.get("flags") or []):
+        return False
+    text = f"{item.get('name', '')} {item.get('description', '')}".lower()
+    return not any(hint in text for hint in PACKAGE_REJECT_HINTS)
+
+
 def _targetings(targeting: dict) -> dict:
     result: dict[str, Any] = {}
     if targeting.get("regions"):
@@ -117,6 +138,7 @@ class VkAdapter(VkClient):
         super().__init__(token, **kwargs)
         self._href = href
         self._package_id = package_id
+        self._package_choice: dict[str, Any] | None = None
         self._marking_confirmed = marking_confirmed
         self._tz = ZoneInfo(getattr(self._config, "tz_default", "Europe/Moscow"))
         self._trees: dict[str, ExternalRefs] = {}
@@ -137,6 +159,10 @@ class VkAdapter(VkClient):
     def _from_api(self, kop: int) -> int:
         """Сумма лимита API в копейки с НДС: в тех же единицах, что бюджет и расход."""
         return (kop * (100 + self._vat_percent) + 50) // 100
+
+    def _limit_kop(self, value: Any) -> int | None:
+        """Строка лимита API в копейки с НДС; отсутствующее поле — None (VK не хранит лимит периода)."""
+        return None if value is None else self._from_api(_kop(value))
 
     def _today(self) -> date:
         return datetime.now(self._tz).date()
@@ -166,14 +192,42 @@ class VkAdapter(VkClient):
     async def _update(self, path: str, id_: int, body: dict) -> None:
         await self._request("POST", f"{path}/{id_}.json", json=body)
 
+    async def _resolve_package(self) -> tuple[int, dict[str, Any]]:
+        """Пакет для ad_groups: id из конфига, иначе первый подходящий из packages.json (выбор кэшируется
+        на экземпляр, чтобы новые группы работающей кампании жили на том же пакете, что и план)."""
+        if self._package_id is not None:
+            return self._package_id, {}
+        if self._package_choice is None:
+            # Фильтр fields у packages.json не документирован: читаем элементы целиком (список — сотни позиций).
+            items = await self._items("packages", {})
+            suitable = sorted((item for item in items if _package_fits(item)), key=lambda item: item["id"])
+            if not suitable:
+                raise PlatformError(PACKAGE_UNAVAILABLE)
+            self._package_choice = suitable[0]
+        return self._package_choice["id"], self._package_choice
+
+    def _package_objective(self, package: dict[str, Any]) -> tuple[str, str]:
+        """Цель и стратегия плана: из полей выбранного пакета, если VK их отдаёт, иначе дефолты API_FORMAT."""
+        objective = package.get("objective")
+        if isinstance(objective, list) and objective and isinstance(objective[0], str) and objective[0]:
+            objective = objective[0]
+        else:
+            objective = None
+        autobidding = package.get("autobidding_mode")
+        if not isinstance(autobidding, str) or not autobidding:
+            autobidding = None
+        return objective or API_FORMAT["objective"], autobidding or API_FORMAT["autobidding_mode"]
+
     async def create_campaign_tree(self, plan_part: CampaignTreeSpec) -> ExternalRefs:
         key = plan_part.idempotency_key
         if key in self._trees:
             return self._trees[key]
         if not self._href:
             raise PlatformError("Для объявлений нужна ссылка href.")
-        if not plan_part.daily_limit_kop or not plan_part.period_cap_kop:
-            raise PlatformError("Бюджеты VK должны быть положительными; нулевой бюджет задаётся остановкой кампании.")
+        if not plan_part.daily_limit_kop:
+            raise PlatformError(
+                "Дневной бюджет VK должен быть положительным; нулевой бюджет задаётся остановкой кампании."
+            )
         for group in plan_part.groups:
             _targetings(group.targeting)
             for ad in group.ads:
@@ -210,7 +264,7 @@ class VkAdapter(VkClient):
     def _state(self, value: str) -> str:
         return "active" if self._marking_confirmed and API_FORMAT["statuses"].get(value) == "active" else "blocked"
 
-    def _group_body(self, group: AdGroupSpec, url: int) -> dict:
+    def _group_body(self, group: AdGroupSpec, url: int, package_id: int) -> dict:
         banners = []
         for ad in group.ads:
             banner = {
@@ -230,24 +284,26 @@ class VkAdapter(VkClient):
             "status": self._state(group.status),
             "targetings": _targetings(group.targeting),
             "banners": banners,
+            "package_id": package_id,
         }
         interests = [_integer(target.value) for target in group.targets if target.status == "active"]
         if interests:
             body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
-        if self._package_id is not None:
-            body["package_id"] = self._package_id
         return body
 
     async def _plan_body(self, plan: CampaignTreeSpec) -> dict:
         url = (await self._add("urls", {"url": self._href}))["id"]
+        package_id, package = await self._resolve_package()
+        objective, autobidding = self._package_objective(package)
+        # Живой API принимает ровно один лимит плана: «Can't set both budget_limit and budget_limit_day».
+        # Держим дневной лимит (рычаг пейсинга), месяц закрывает страж бюджета — механика пауз платформонезависима.
         return {
             "name": _named(plan.name, plan.idempotency_key),
             "status": self._state(plan.status),
-            "objective": API_FORMAT["objective"],
-            "autobidding_mode": API_FORMAT["autobidding_mode"],
+            "objective": objective,
+            "autobidding_mode": autobidding,
             "budget_limit_day": _rub(self._to_api(plan.daily_limit_kop)),
-            "budget_limit": _rub(self._to_api(plan.period_cap_kop)),
-            "ad_groups": [self._group_body(group, url) for group in plan.groups],
+            "ad_groups": [self._group_body(group, url, package_id) for group in plan.groups],
         }
 
     async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
@@ -267,10 +323,10 @@ class VkAdapter(VkClient):
         if found:
             group_id = found[0]["id"]
         else:
+            package_id, _ = await self._resolve_package()
             url = (await self._add("urls", {"url": self._href}))["id"]
-            group_id = (await self._add("ad_groups", self._group_body(group, url) | {"ad_plan_id": int(campaign_id)}))[
-                "id"
-            ]
+            group_body = self._group_body(group, url, package_id) | {"ad_plan_id": int(campaign_id)}
+            group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {
             str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
             for item in await self._items("banners", {"_ad_group_id": group_id, "fields": "id,name"})
@@ -387,8 +443,9 @@ class VkAdapter(VkClient):
         elif op.kind == "set_budget":
             if op.after == 0:
                 raise PlatformError("Нулевой бюджет недопустим; остановите кампанию операцией set_status.")
-            name = {"daily_limit_kop": "budget_limit_day", "period_cap_kop": "budget_limit"}[op.field]
-            await self._update("ad_plans", id_, {name: _rub(self._to_api(op.after))})
+            if op.field == "period_cap_kop":
+                raise PlatformError("VK не хранит лимит периода: месяц закрывает страж бюджета.")
+            await self._update("ad_plans", id_, {"budget_limit_day": _rub(self._to_api(op.after))})
         elif op.kind == "update_ad_text":
             key = API_FORMAT["title_key" if op.field == "title" else "text_key"]
             limit = API_FORMAT["title_limit" if op.field == "title" else "text_limit"]
@@ -422,6 +479,7 @@ class VkAdapter(VkClient):
             for item in await self._items(
                 "ad_plans", {"_id__in": refs.campaign_id, "fields": "id,name,status,budget_limit_day,budget_limit"}
             ):
+                # План держит только дневной лимит: отсутствующий budget_limit — не ошибка, периода у VK нет.
                 states[str(item["id"])] = EntityState(
                     str(item["id"]),
                     "campaign",
@@ -429,7 +487,7 @@ class VkAdapter(VkClient):
                     item["name"],
                     _status(item),
                     daily_limit_kop=self._from_api(_kop(item["budget_limit_day"])),
-                    period_cap_kop=self._from_api(_kop(item["budget_limit"])),
+                    period_cap_kop=self._limit_kop(item.get("budget_limit")),
                 )
             if refs.groups:
                 for item in await self._items(
@@ -602,10 +660,8 @@ class VkAdapter(VkClient):
             raise invalid_response() from None
 
     async def min_budgets(self) -> dict[str, int]:
-        return {
-            "daily_limit_kop": API_FORMAT["min_daily_limit_kop"],
-            "period_cap_kop": API_FORMAT["min_period_cap_kop"],
-        }
+        # На плане VK живёт только дневной лимит: периодного минимума у площадки нет, месяц закрывает страж бюджета.
+        return {"daily_limit_kop": API_FORMAT["min_daily_limit_kop"]}
 
     async def set_marking(self, profile: Mapping[str, str]) -> None:
         required = {"type", "inn", "name", "phone"}

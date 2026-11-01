@@ -212,7 +212,8 @@ def test_odd_kopecks_split_without_loss_in_months_of_any_length(month_start):
 
 MONDAY = date(2026, 4, 6)  # апрель — 30 дней
 DIRECT_MINIMUM = {"weekly_limit_kop": 30_000}
-VK_MINIMUM = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
+# VK держит на плане только дневной лимит: периодного минимума нет, месяц закрывает страж бюджета.
+VK_MINIMUM = {"daily_limit_kop": 30_000}
 
 
 @pytest.mark.parametrize(
@@ -274,6 +275,14 @@ def test_one_step_below_direct_minimum_misses_it_on_the_worst_day():
         (PlatformLimit("vk", 30_000, 30_000, 30_000), VK_MINIMUM, Decimal(1), True),
         (PlatformLimit("vk", 34_500, 34_499, 34_500), VK_MINIMUM, MINIMUM_MARGIN, False),
         (PlatformLimit("vk", 34_500, 34_500, 34_500), VK_MINIMUM, MINIMUM_MARGIN, True),
+        # Периодного минимума у VK нет: остатка недели 300 ₽ достаточно, хотя минимум с периодом его отклонил бы.
+        (PlatformLimit("vk", 30_000, 30_000, 30_000), VK_MINIMUM, Decimal(1), True),
+        (
+            PlatformLimit("vk", 30_000, 30_000, 30_000),
+            {"daily_limit_kop": 30_000, "period_cap_kop": 60_000},
+            Decimal(1),
+            False,
+        ),
         (PlatformLimit("direct", 4_285, 4_285, 4_285), DIRECT_MINIMUM, Decimal(1), False),
         (PlatformLimit("direct", 4_286, 4_286, 4_286), DIRECT_MINIMUM, MINIMUM_MARGIN, True),
         (PlatformLimit("direct", 0, 0, 0), {"day": 0, "period": 0}, Decimal(1), True),

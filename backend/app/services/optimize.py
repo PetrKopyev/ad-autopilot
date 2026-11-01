@@ -273,16 +273,17 @@ async def optimize(worker: Worker, business: Business) -> None:
             ]
             spent = lifetime.get(campaign.external_id, 0)
             daily = state.daily_limit_kop * share_after // share_before
-            cap = spent + max(state.period_cap_kop - spent, 0) * share_after // share_before
+            # VK не хранит лимит периода: на площадку уходит только дневной лимит (месяц закрывает страж бюджета).
+            budget_fields = [("daily_limit_kop", state.daily_limit_kop, daily)]
+            if campaign.platform != "vk":
+                cap = spent + max(state.period_cap_kop - spent, 0) * share_after // share_before
+                budget_fields.insert(0, ("period_cap_kop", state.period_cap_kop, cap))
             await worker.apply(
                 business,
                 campaign,
                 [
                     Operation("set_budget", "campaign", campaign.external_id, field, value, after)
-                    for field, value, after in (
-                        ("period_cap_kop", state.period_cap_kop, cap),
-                        ("daily_limit_kop", state.daily_limit_kop, daily),
-                    )
+                    for field, value, after in budget_fields
                     if value != after
                 ],
                 kind="budget",
@@ -436,12 +437,14 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             )
             states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
             state = states[campaign.external_id]
+            # VK не хранит лимит периода: операцию не создаём (None из get_state дал бы операцию с пустым before),
+            # внутренний total_cap продолжает считаться для минимума площадки и учёта.
+            budget_fields = [("daily_limit_kop", state.daily_limit_kop, desired_daily)]
+            if campaign.platform != "vk":
+                budget_fields.insert(0, ("period_cap_kop", state.period_cap_kop, total_cap))
             operations = [
                 Operation("set_budget", "campaign", campaign.external_id, field, before, after)
-                for field, before, after in (
-                    ("period_cap_kop", state.period_cap_kop, total_cap),
-                    ("daily_limit_kop", state.daily_limit_kop, desired_daily),
-                )
+                for field, before, after in budget_fields
                 if before != after
             ]
             minimum = (

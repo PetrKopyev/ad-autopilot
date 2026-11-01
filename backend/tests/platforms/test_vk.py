@@ -76,9 +76,19 @@ def created_plan() -> dict:
     }
 
 
-def mock_creation(api: respx.MockRouter) -> respx.Route:
+# Пакет, который адаптер выберет из подставленного списка packages.json: активный, без запрещающих флагов.
+DEFAULT_PACKAGE = {"id": 3106, "name": "site_universal_banners", "status": "active", "flags": []}
+
+
+def packages_stub(api: respx.MockRouter, items: list[dict] | None = None) -> respx.Route:
+    items = [DEFAULT_PACKAGE] if items is None else items
+    return api.get(f"{API}/packages.json").respond(json={"count": len(items), "items": items})
+
+
+def mock_creation(api: respx.MockRouter, packages: list[dict] | None = None) -> respx.Route:
     api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
     api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api, packages)
     return api.post(f"{API}/ad_plans.json").respond(json=created_plan())
 
 
@@ -109,8 +119,10 @@ async def test_create_tree_posts_whole_plan_with_exact_budgets(adapter: VkAdapte
     refs = await adapter.create_campaign_tree(tree())
     assert refs == ExternalRefs("10", {"g1": "20"}, {"a1": "30"}, {"t1": "20"})
     body = sent(route)
-    assert body["name"] == "Маникюр ap-c1" and (body["budget_limit_day"], body["budget_limit"]) == ("150.50", "4500.00")
-    assert body["status"] == "active" and "package_id" not in body["ad_groups"][0]
+    # Живой API принимает ровно один лимит: уходит только дневной, период закрывает страж бюджета.
+    assert body["name"] == "Маникюр ap-c1" and body["budget_limit_day"] == "150.50" and "budget_limit" not in body
+    assert body["objective"] == "site_conversions" and body["autobidding_mode"] == "max_goals"
+    assert body["status"] == "active" and body["ad_groups"][0]["package_id"] == DEFAULT_PACKAGE["id"]
     group = body["ad_groups"][0]
     assert group["name"] == "Ищут маникюр ap-g1"
     assert group["targetings"] == {
@@ -135,12 +147,12 @@ def vat_configuration() -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    ("include_vat", "day", "cap"),
-    [(False, "150.50", "4500.00"), (True, "123.36", "3688.52")],
+    ("include_vat", "day"),
+    [(False, "150.50"), (True, "123.36")],
     ids=["as-is", "vat-net"],
 )
-async def test_plan_limits_follow_vat_config(api, include_vat: bool, day: str, cap: str) -> None:
-    """VK_AMOUNTS_INCLUDE_VAT=true: лимиты VK уходят без НДС (лимит ÷ (1 + VAT_PERCENT)), иначе — как есть."""
+async def test_plan_limits_follow_vat_config(api, include_vat: bool, day: str) -> None:
+    """VK_AMOUNTS_INCLUDE_VAT=true: лимит VK уходит без НДС (лимит ÷ (1 + VAT_PERCENT)), иначе — как есть."""
     config = configuration()
     config.vat_percent = 22
     config.vk_amounts_include_vat = include_vat
@@ -148,16 +160,83 @@ async def test_plan_limits_follow_vat_config(api, include_vat: bool, day: str, c
     async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
         await vk.create_campaign_tree(tree())
     body = sent(route)
-    assert (body["budget_limit_day"], body["budget_limit"]) == (day, cap)
+    assert body["budget_limit_day"] == day and "budget_limit" not in body
+
+
+async def test_plan_without_period_cap_still_creates(api) -> None:
+    """Периодный лимит VK не хранит: план с нулевым period_cap_kop создаётся, уходит только дневной лимит."""
+    route = mock_creation(api)
+    async with VkAdapter("tok", config=configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree(period_cap_kop=0))
+    assert sent(route)["budget_limit_day"] == "150.50"
+
+
+async def test_package_is_auto_selected_from_listing(adapter: VkAdapter, api) -> None:
+    """package_id из конфига не задан: адаптер берёт минимальный id подходящего пакета packages.json (один раз)."""
+    route = packages_stub(
+        api,
+        [
+            {"id": 2900, "name": "old", "status": "blocked", "flags": []},
+            {"id": 3105, "name": "Сайт // Site conversions // oCPM", "status": "active",
+             "flags": ["no_create_campaigns"]},
+            {"id": 3229, "name": "Карусель сайт", "status": "active", "flags": []},
+            {"id": 4822, "name": "max_clickout", "status": "active", "flags": []},
+            {"id": 4389, "name": "Посты сообщества", "status": "active", "flags": []},
+            {"id": 3001, "name": "site_universal_banners", "status": "active", "flags": []},
+            {"id": 3208, "name": "site_banners_extra", "status": "active", "flags": ["external"]},
+        ],
+    )
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_plans.json").respond(json=created_plan())
+    await adapter.create_campaign_tree(tree())
+    await adapter.create_campaign_tree(tree())
+    assert sent(create)["ad_groups"][0]["package_id"] == 3001
+    assert route.call_count == 1
+
+
+async def test_package_from_config_skips_listing(api) -> None:
+    """VK_PACKAGE_ID задан: адаптер использует его и не читает список пакетов."""
+    listing = api.get(f"{API}/packages.json").respond(503)
+    route = mock_creation(api)
+    async with VkAdapter(
+        "tok", config=configuration(), href="https://shop.example/", marking_confirmed=True, package_id=321
+    ) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(route)["ad_groups"][0]["package_id"] == 321
+    assert not listing.called
+
+
+async def test_package_without_candidates_is_honest_error(adapter: VkAdapter, api) -> None:
+    """Подходящего пакета нет (живой кабинет 31.10): честная инструкция вместо отказа API вслепую."""
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api, [{"id": 3105, "name": "Сайт // Site conversions // oCPM", "flags": ["no_create_campaigns"]}])
+    with pytest.raises(PlatformError, match="VK_PACKAGE_ID"):
+        await adapter.create_campaign_tree(tree())
+
+
+async def test_package_fields_override_plan_objective(adapter: VkAdapter, api) -> None:
+    """У выбранного пакета есть свои objective/autobidding_mode: план уходит с ними, иначе — дефолты API_FORMAT."""
+    route = mock_creation(
+        api,
+        [{"id": 3858, "name": "no_conversions", "status": "active", "flags": [],
+          "objective": ["engagement"], "autobidding_mode": "max_shows"}],
+    )
+    await adapter.create_campaign_tree(tree())
+    body = sent(route)
+    assert (body["objective"], body["autobidding_mode"]) == ("engagement", "max_shows")
+    assert body["ad_groups"][0]["package_id"] == 3858
 
 
 async def test_set_budget_divides_limits_when_vat_configured(api) -> None:
     route = api.post(f"{API}/ad_plans/10.json").respond(json={})
     async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
         await vk.apply(Operation("set_budget", "campaign", "10", "daily_limit_kop", 15050, 12_200))
-        await vk.apply(Operation("set_budget", "campaign", "10", "period_cap_kop", 450_000, 61_000))
+        with pytest.raises(PlatformError, match="страж бюджета"):
+            await vk.apply(Operation("set_budget", "campaign", "10", "period_cap_kop", 450_000, 61_000))
+    assert route.call_count == 1
     assert sent(route, 0) == {"budget_limit_day": "100.00"}
-    assert sent(route, 1) == {"budget_limit": "500.00"}
 
 
 async def test_get_state_restores_gross_limits_when_vat_configured(api) -> None:
@@ -179,6 +258,30 @@ async def test_get_state_restores_gross_limits_when_vat_configured(api) -> None:
     async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
         state = (await vk.get_state(ExternalRefs("10", {}, {}, {})))["10"]
     assert (state.daily_limit_kop, state.period_cap_kop) == (12_200, 449_999)
+
+
+async def test_get_state_without_period_limit_maps_to_none(adapter: VkAdapter, api) -> None:
+    """VK не хранит лимит периода: отсутствующий budget_limit читается как period_cap_kop=None, а не сбоем."""
+    api.get(f"{API}/ad_plans.json").respond(
+        json={"count": 1, "items": [{"id": 10, "name": "П", "status": "active", "budget_limit_day": "150.50"}]}
+    )
+    state = (await adapter.get_state(ExternalRefs("10", {}, {}, {})))["10"]
+    assert (state.daily_limit_kop, state.period_cap_kop) == (15050, None)
+
+
+async def test_vk_error_reason_is_in_platform_error(api) -> None:
+    """Живой API кладёт причину отказа в тело: она должна доходить до владельца, а не глотаться общим текстом."""
+    api.get(f"{API}/user.json").respond(
+        400, json={"error": {"code": "invalid_package", "message": "Invalid package", "description": "закрыт"}}
+    )
+    async with VkAdapter("tok", config=configuration()) as vk:
+        with pytest.raises(PlatformError, match="Invalid package") as failure:
+            await vk.whoami()
+    assert failure.value.status_code == 400
+    api.get(f"{API}/user.json").respond(200, json={"error": {"code": "bad_request", "message": "Причина отказа"}})
+    async with VkAdapter("tok", config=configuration()) as vk:
+        with pytest.raises(PlatformError, match="Причина отказа"):
+            await vk.whoami()
 
 
 async def test_create_tree_stays_blocked_until_marking_confirmed(api) -> None:
@@ -222,7 +325,7 @@ async def test_create_tree_rejects_unsupported_input_before_requests(adapter: Vk
         await adapter.create_campaign_tree(
             tree(groups=(AdGroupSpec("g1", "Группа", (AdSpec("a", "т", "т"),), phrase),))
         )
-    with pytest.raises(PlatformError, match="положительными"):
+    with pytest.raises(PlatformError, match="положительным"):
         await adapter.create_campaign_tree(tree(daily_limit_kop=0))
     assert not api.calls
 
@@ -257,15 +360,13 @@ async def test_apply_updates_status_budget_text_image_targeting(adapter: VkAdapt
     api.get(f"{API}/banners/30.json").respond(json={"moderation_status": "allowed"})
     await adapter.apply(Operation("set_status", "campaign", "10", "status", "active", "paused_owner"))
     await adapter.apply(Operation("set_budget", "campaign", "10", "daily_limit_kop", 15050, 20001))
-    await adapter.apply(Operation("set_budget", "campaign", "10", "period_cap_kop", 450_000, 600_005))
     await adapter.apply(Operation("set_status", "ad", "30", "status", "paused_owner", "active"))
     await adapter.apply(Operation("update_ad_text", "ad", "30", "title", "Старый", "Новый"))
     await adapter.apply(Operation("swap_ad_image", "ad", "30", "image_ref", "501", "502"))
     await adapter.apply(Operation("set_targeting", "group", "20", "targeting", {}, {"regions": [3], "age_from": 18}))
-    assert [sent(plan, i) for i in range(3)] == [
+    assert [sent(plan, i) for i in range(2)] == [
         {"status": "blocked"},
         {"budget_limit_day": "200.01"},
-        {"budget_limit": "6000.05"},
     ]
     assert [sent(banner, i) for i in range(3)] == [
         {"status": "active"},
@@ -274,7 +375,7 @@ async def test_apply_updates_status_budget_text_image_targeting(adapter: VkAdapt
     ]
     assert sent(group)["targetings"]["age"]["age_list"] == list(range(18, 76))
     await adapter.apply(Operation("set_status", "campaign", "10", "status", "active", "paused_owner"))
-    assert plan.call_count == 4
+    assert plan.call_count == 3
 
 
 async def test_apply_refuses_unsafe_changes(adapter: VkAdapter, api) -> None:
@@ -504,7 +605,7 @@ async def test_balance_hint_and_min_budgets(adapter: VkAdapter, api) -> None:
     assert await adapter.get_balance_hint() == 25075
     api.get(f"{API}/user.json").respond(json={"id": 5})
     assert await adapter.get_balance_hint() is None
-    assert (await adapter.min_budgets())["daily_limit_kop"] > 0
+    assert await adapter.min_budgets() == {"daily_limit_kop": 30000}
 
 
 VK_TREE = [
@@ -590,6 +691,7 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
         httpx.Response(200, json={"count": 1, "items": [{"id": 20, "name": "Чужая ap-g10"}]}),
         httpx.Response(200, json={"count": 1, "items": [{"id": 21, "name": "Ищут маникюр ap-g1"}]}),
     ]
+    packages = packages_stub(api)
     api.post(f"{API}/urls.json").respond(json={"id": 7})
     create = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
     api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
@@ -597,6 +699,8 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
     assert (refs.campaign_id, refs.groups, refs.ads, refs.targets) == ("10", {"g1": "21"}, {"a1": "31"}, {"t1": "21"})
     body = sent(create)
     assert body["ad_plan_id"] == 10 and body["name"] == "Ищут маникюр ap-g1"
+    assert body["package_id"] == DEFAULT_PACKAGE["id"]
     assert body["targetings"]["age"]["age_list"][0] == 25 and body["banners"][0]["name"] == "Маникюр рядом ap-a1"
     assert (await adapter.add_group("10", group)).ads == {"a1": "31"}
     assert create.call_count == 1
+    assert packages.call_count == 1
