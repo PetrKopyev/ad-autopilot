@@ -517,6 +517,9 @@ def test_budget_history_and_next_day(setup):
     change = next(row for row in world.repository.rows(ChangeLog) if row.reason_code == "OWNER_BUDGET")
     assert change.actor == "owner"
     assert "02.01.2026" in change.reason_text
+    # М-А: запись показывает «было → стало», а не только новую сумму.
+    assert "с 100 000 ₽ на 200 000 ₽" in change.reason_text
+    assert change.reason_params["before"] == 10_000_000 and change.reason_params["after"] == 20_000_000
 
 
 def test_platform_failure_is_human_error(setup, monkeypatch):

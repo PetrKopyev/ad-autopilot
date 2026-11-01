@@ -568,7 +568,8 @@ class ScreensService:
                     reason_code="OWNER_BUDGET",
                     reason_params={"before": old, "after": amount, "effective_on": effective.isoformat()},
                     reason_text=(
-                        f"Вы изменили бюджет на {rubles(amount)} ₽ в месяц. Он действует с {effective:%d.%m.%Y}."
+                        f"Вы изменили бюджет с {rubles(old)} ₽ на {rubles(amount)} ₽ в месяц. "
+                        f"Он действует с {effective:%d.%m.%Y}."
                     ),
                     evidence={},
                     status="applied",

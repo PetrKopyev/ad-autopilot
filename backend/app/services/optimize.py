@@ -487,12 +487,16 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 and last.kind == "pause"
                 and (last.actor == "system" or last.reason_code == "OWNER_STOP" and not meta.get("kill_switch"))
             )
+            # Возобновление касается кампаний из held (пауза по минимуму площадки) и остановленных с нулевым дневным
+            # лимитом: те в held не входят и прежним условием не возобновлялись никогда — новый месяц с деньгами их
+            # не спасал бы. Паузу «показывать нечего» не трогаем: объявления включает владелец.
+            zero_pause = not campaign.daily_limit_kop and last is not None and last.reason_text != NO_ACTIVE_ADS
             resume = (
-                campaign.id in held
-                and campaign.status == "paused_auto"
+                campaign.status == "paused_auto"
                 and not campaign.owner_paused
                 and state.status in {"paused_auto", "paused_owner"}
                 and stopped_by_service
+                and (campaign.id in held or zero_pause)
             )
             if (
                 resume
@@ -505,7 +509,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             ):
                 continue
             if resume:
-                # Кампанию останавливал только недостаток до минимума площадки: лимиты снова его набирают.
+                # Кампанию останавливал только недостаток бюджета: лимиты снова его набирают.
                 operations.append(
                     Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")
                 )
@@ -516,7 +520,11 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 reason_code="BUDGET_REBALANCE",
                 kind="resume" if resume else "budget",
                 actor="system",
-                reason_text="Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
+                reason_text=(
+                    "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
+                    if campaign.id in held
+                    else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+                )
                 if resume
                 else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
             )

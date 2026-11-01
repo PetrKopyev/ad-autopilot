@@ -72,6 +72,7 @@ async def stop_all(
     worker: Worker,
     reason_code: str = "OWNER_STOP",
     reason_params: dict | None = None,
+    reason_text: str | None = None,
     budget_stop: bool = False,
     actor: str = "system",
 ) -> None:
@@ -113,7 +114,7 @@ async def stop_all(
                     kind="pause",
                     reason_code=reason_code,
                     reason_params=reason_params,
-                    reason_text="Остановили рекламу на всех площадках.",
+                    reason_text=reason_text or "Остановили рекламу на всех площадках.",
                     suffix="stop_all",
                 )
             except (*CLOSED_ACCOUNT, ChangeConflict):

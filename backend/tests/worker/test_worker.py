@@ -350,6 +350,17 @@ async def test_month_rollover_without_auto_continue_stays_stopped() -> None:
     assert world.platform_spend() == stopped_at
 
 
+async def test_month_stop_record_names_the_reason() -> None:
+    """В-1п: запись месячной остановки называет причину — выключенное «Продолжать в следующем месяце»."""
+    world = await make_world(auto_continue=False)
+    worker = world.worker()
+    await world.advance(worker, days=34)
+    (stop,) = world.changes(reason_code="MONTH_STOP")
+    assert stop.reason_text == (
+        "Остановили рекламу на всех площадках. Продолжение в следующем месяце выключено в настройках."
+    )
+
+
 async def test_kill_switch_stops_all_and_blocks_autopilot() -> None:
     world = await make_world()
     worker = world.worker()

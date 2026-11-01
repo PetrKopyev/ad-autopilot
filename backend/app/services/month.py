@@ -38,7 +38,13 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         worker.remember(business, month=month.isoformat())
         return
     if not business.auto_continue or meta.get("kill_switch") or business.status == "paused":
-        await stop_all(business, worker=worker, reason_code="MONTH_STOP")
+        # Запись называет причину остановки: владелец иначе не поймёт, почему реклама выключилась 1-го числа.
+        reason_text = (
+            "Остановили рекламу на всех площадках. Продолжение в следующем месяце выключено в настройках."
+            if not business.auto_continue
+            else "Остановили рекламу на всех площадках. Реклама на паузе: вы остановили её вручную."
+        )
+        await stop_all(business, worker=worker, reason_code="MONTH_STOP", reason_text=reason_text)
         worker.remember(business, month=month.isoformat())
         return
     was_stopped = business.status == "budget_stop"

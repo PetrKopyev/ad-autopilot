@@ -408,6 +408,161 @@ async def test_rebalance_says_campaign_stopped_because_all_its_ads_are_stopped()
     assert pause.reason_text == NO_ACTIVE_ADS and "бюджета нет" not in pause.reason_text
 
 
+async def test_zero_limit_pause_resumes_when_daily_budget_is_back():
+    """Н-1: пауза «Доступного дневного бюджета нет» обнуляет лимит и в held не входит, но с положительным лимитом
+    пересчёт возобновляет кампанию честной записью — и повторный пересчёт идемпотентен."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    world.business.month_budget_kop = 0
+    await rebalance_budget(worker, world.business)
+    (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
+    assert "Доступного дневного бюджета нет" in pause.reason_text
+    assert world.campaign.status == "paused_auto" and world.campaign.daily_limit_kop == 0
+    # Денег по-прежнему нет: пауза держится, записей о возобновлении не появляется.
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:still-no-money"
+    await rebalance_budget(worker, world.business)
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    # Бюджет снова позволяет: кампания снова работает с положительным лимитом.
+    world.business.month_budget_kop = BUDGET_KOP
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:money-is-back"
+    await rebalance_budget(worker, world.business)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert resume.reason_text == "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+    assert [op["after"] for op in resume.operations if op["field"] == "status"] == ["active"]
+    assert world.campaign.status == "active" and world.campaign.daily_limit_kop > 0
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    assert world.business.settings["_worker"]["below_minimum"] == []
+    # Лимиты уже применены: повторный пересчёт без изменений новых записей не пишет.
+    count = len(world.changes())
+    worker.step_key = "rebalance_budget:again"
+    await rebalance_budget(worker, world.business)
+    assert len(world.changes()) == count
+
+
+async def test_zero_limit_pause_resumes_in_new_month():
+    """Н-1, перевод месяца: нулевая пауза не переживает смену месяца — её снимает пересчёт лимитов, а цикл
+    возобновления дублирующей записи не пишет."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    world.business.month_budget_kop = 0
+    await rebalance_budget(worker, world.business)
+    assert world.campaign.daily_limit_kop == 0 and world.campaign.status == "paused_auto"
+    world.business.month_budget_kop = BUDGET_KOP
+    world.clock.advance(days=32)
+    await worker.run("month_rollover", 1)
+    assert world.campaign.status == "active" and world.campaign.daily_limit_kop > 0
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert "Дневного бюджета снова хватает" in resume.reason_text
+    assert not world.changes(reason_code="BUDGET_RESUME")
+
+
+async def test_zero_limit_pause_resumes_after_budget_stop_month_rollover():
+    """Н-1 при was_stopped: месяц страж остановил бизнес, а кампания уже стояла с нулевым лимитом — после перевода
+    месяца оба ограничения сняты и кампания снова работает."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    world.business.month_budget_kop = 0
+    await rebalance_budget(worker, world.business)
+    assert world.campaign.daily_limit_kop == 0
+    await stop_all(world.business, worker=worker, budget_stop=True, reason_code="BUDGET_STOP")
+    assert world.business.status == "budget_stop"
+    world.business.month_budget_kop = BUDGET_KOP
+    world.clock.advance(days=32)
+    await worker.run("month_rollover", 1)
+    assert world.business.status == "running"
+    assert world.campaign.status == "active" and world.campaign.daily_limit_kop > 0
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+
+
+async def test_zero_limit_pause_does_not_resume_owner_paused_campaign():
+    """Н-1: кампания владельца с нулевым лимитом не возобновляется — ни пересчётом, ни переводом месяца."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    world.business.month_budget_kop = 0
+    await rebalance_budget(worker, world.business)
+    assert world.campaign.daily_limit_kop == 0
+    world.campaign.owner_paused = True
+    world.repository.save(world.campaign)
+    world.business.month_budget_kop = BUDGET_KOP
+    world.clock.advance(days=32)
+    await worker.run("month_rollover", 1)
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert not world.changes(reason_code="BUDGET_RESUME")
+    # Статус владельца не трогаем: ни возобновления, ни пересчёта лимитов (её группы не участвуют в доле бюджета).
+    assert world.campaign.status == "paused_auto" and world.campaign.daily_limit_kop == 0
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+
+
+async def test_no_active_ads_pause_is_not_resumed_by_budget_rebalance():
+    """Граница Н-1: пауза «показывать нечего» нулевым лимитом не снимается пересчётом, даже когда бюджет есть,
+    а объявление снова включили: включение такой рекламы решает владелец."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    ads = world.repository.rows(Ad)
+    for ad in ads:
+        await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto"))
+    await rebalance_budget(worker, world.business)
+    (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
+    assert pause.reason_text == NO_ACTIVE_ADS and world.campaign.daily_limit_kop == 0
+    # Одно объявление снова включили: показывать есть что и бюджет есть, но кампанию автоматически не включаем.
+    ad = ads[0]
+    await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "paused_auto", "active"))
+    ad.status = "active"
+    world.repository.save(ad)
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:ad-is-back"
+    await rebalance_budget(worker, world.business)
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.campaign.status == "paused_auto"
+
+
+async def test_zero_limit_resume_entry_is_protected_from_rollback():
+    """Запись о возобновлении нулевой паузы — системная защита бюджета: откат отклоняется честно, кампания продолжает
+    работать."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    world.business.month_budget_kop = 0
+    await rebalance_budget(worker, world.business)
+    world.business.month_budget_kop = BUDGET_KOP
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:resume"
+    await rebalance_budget(worker, world.business)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    with pytest.raises(ChangeConflict, match="защита бюджета, отменить нельзя"):
+        await RollbackService(world.repository, dry_run=False).revert(
+            resume.id, business_id=1, adapter=world.adapter, now=world.clock.now
+        )
+    assert resume.status == "applied"
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+
+
+async def test_owner_budget_change_is_followed_by_rebalance_journal_entry():
+    """М-Б: пересчёт дневных лимитов после смены бюджета владельцем виден в журнале — запись BUDGET_REBALANCE
+    с операциями «было → стало» по кампании появляется сразу после OWNER_BUDGET."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=8)
+    old_daily = world.campaign.daily_limit_kop
+    await ScreensService(world.worker()).save_budget(world.business, BUDGET_KOP // 2)
+    (owner,) = world.changes(reason_code="OWNER_BUDGET")
+    rebalance = [row for row in world.changes(reason_code="BUDGET_REBALANCE") if row.kind == "budget"]
+    assert rebalance
+    entry = rebalance[-1]
+    assert entry.created_at >= owner.created_at
+    assert {op["field"] for op in entry.operations} == {"daily_limit_kop", "period_cap_kop"}
+    assert all(op["before"] != op["after"] for op in entry.operations)
+    assert world.campaign.daily_limit_kop < old_daily
+
+
 async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
     from datetime import UTC, datetime
     from types import SimpleNamespace
