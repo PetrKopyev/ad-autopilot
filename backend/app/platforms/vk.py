@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -541,7 +541,9 @@ class VkAdapter(VkClient):
                             _kop(base["spent"]),
                             {LEAD: _integer(base.get("goals", 0))},
                             fetched_at,
-                            day < self._today(),
+                            # Как в Директе и в подписи интерфейса «последние 2 дня уточняются»:
+                            # устоявшиеся дни заканчиваются позавчера, сегодня и вчера площадка ещё пересчитывает.
+                            day <= self._today() - timedelta(days=2),
                         )
                     )
         except (KeyError, TypeError, ValueError, InvalidOperation):

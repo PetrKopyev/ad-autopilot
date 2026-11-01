@@ -396,6 +396,29 @@ async def test_get_stats_converts_rubles_to_kopecks_and_maps_campaign(adapter: V
     assert query["date_from"] == ["2026-10-20"] and query["metrics"] == ["base"]
 
 
+async def test_get_stats_days_settled_by_direct_boundary(adapter: VkAdapter, api) -> None:
+    """Граница устоявшихся дней совпадает с Директом и RULES.md: settled — не позже «сегодня минус 2»."""
+    today = datetime.now(adapter._tz).date()
+    api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {
+                    "id": 10,
+                    "rows": [
+                        {
+                            "date": (today - timedelta(days=day)).isoformat(),
+                            "base": {"shows": 1, "clicks": 0, "spent": "0"},
+                        }
+                        for day in (3, 2, 1, 0)
+                    ],
+                }
+            ]
+        }
+    )
+    rows = await adapter.get_stats(today - timedelta(days=3), today, "campaign")
+    assert [row.is_settled for row in rows] == [True, True, False, False]
+
+
 async def test_get_spend_today_sums_campaigns(adapter: VkAdapter, api) -> None:
     today = datetime.now(adapter._tz).date().isoformat()
     api.get(f"{API}/statistics/ad_plans/day.json").respond(

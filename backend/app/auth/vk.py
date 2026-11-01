@@ -19,6 +19,9 @@ AUTHORIZE_URL = "https://ads.vk.com/hq/settings/access"
 SCOPES = ("read_ads", "create_ads", "read_payments")
 TOKEN_TTL = 86400
 REFRESH_MARGIN = timedelta(minutes=1)
+# Запас до истечения, за который фоновый шаг воркера продлевает токен кабинета заранее:
+# тик каждые 30 минут успевает продлить токен раньше, чем доступ упадёт в needs_reauth.
+RENEW_MARGIN = timedelta(minutes=45)
 
 # Ambiguities in the supplied research are isolated here and in platforms.vk.API_FORMAT:
 # reset headers are Unix timestamps (Retry-After is seconds); missing expires_in = 24h.
@@ -269,16 +272,17 @@ class VkClient:
         self._session = replace(session, account_id=profile["id"])
         return self._session
 
-    async def refresh(self, account: AuthSession) -> AuthSession:
+    async def refresh(self, account: AuthSession, *, force: bool = False) -> AuthSession:
         async with self._refresh_lock:
             now = datetime.now(UTC) + REFRESH_MARGIN
-            if self._session and self._session.account_id == account.account_id and self._session.expires_at > now:
-                self._token = self._session.access_token
-                return self._session
-            if account.expires_at is not None and account.expires_at > now and account.access_token:
-                self._token = account.access_token
-                self._session = account
-                return account
+            if not force:
+                if self._session and self._session.account_id == account.account_id and self._session.expires_at > now:
+                    self._token = self._session.access_token
+                    return self._session
+                if account.expires_at is not None and account.expires_at > now and account.access_token:
+                    self._token = account.access_token
+                    self._session = account
+                    return account
             if account.refresh_token:
                 updated = await self._grant("refresh_token", refresh_token=account.refresh_token)
             elif self._manual_key:
@@ -367,7 +371,14 @@ def account_credentials(account: PlatformAccount) -> tuple[AuthSession, dict[str
     return AuthSession(account.external_login or "", account.access_token_enc, refresh, account.expires_at), credentials
 
 
-async def renew_account(db, business_id: int, *, config: Any = None, client: httpx.AsyncClient | None = None):
+async def renew_account(
+    db,
+    business_id: int,
+    *,
+    config: Any = None,
+    client: httpx.AsyncClient | None = None,
+    force: bool = False,
+):
     # The row lock makes parallel workers share one refresh instead of spending another of the 5 tokens.
     repository = VkAccountRepository(db)
     account = repository.lock_account(business_id)
@@ -377,7 +388,7 @@ async def renew_account(db, business_id: int, *, config: Any = None, client: htt
     session, credentials = account_credentials(account)
     async with VkClient(session.access_token, config=config, client=client, **credentials) as vk:
         try:
-            updated = await vk.refresh(session)
+            updated = await vk.refresh(session, force=force)
         except AuthExpired:
             account.status = "needs_reauth"
             repository.release()

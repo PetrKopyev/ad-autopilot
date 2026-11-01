@@ -10,6 +10,7 @@ from sqlalchemy import DateTime, and_, cast, delete, func, literal_column, or_, 
 from sqlalchemy.dialects.postgresql import JSONB, distinct_on, insert
 from sqlalchemy.orm import aliased
 
+from app.auth.vk import RENEW_MARGIN
 from app.db.models import (
     Ad,
     AdGroup,
@@ -20,6 +21,7 @@ from app.db.models import (
     LeadsSurvey,
     OAuthState,
     Plan,
+    PlatformAccount,
     Session,
     StatsDaily,
     Target,
@@ -109,6 +111,19 @@ class WorkerRepository(NoticesRepository, ChangesRepository):
 
     def find(self, model, **keys):
         return next(iter(self.rows(model, keys.pop("business_id", None), **keys)), None)
+
+    def expiring_vk_accounts(self, now: datetime) -> list[PlatformAccount]:
+        """VK-кабинеты с истекающим токеном: фоновый шаг воркера продлевает их до needs_reauth."""
+        return list(
+            self.db.scalars(
+                select(PlatformAccount).where(
+                    PlatformAccount.platform == "vk",
+                    PlatformAccount.status == "ok",
+                    PlatformAccount.expires_at.is_not(None),
+                    PlatformAccount.expires_at < now + RENEW_MARGIN,
+                )
+            )
+        )
 
     def save(self, *items) -> None:
         self.db.add_all(items)
@@ -294,6 +309,9 @@ class MemoryWorkerRepository(WorkerRepository):
     def __init__(self) -> None:
         self.tables: dict[type, list] = {}
         self._locked: set[int] = set()
+        # Соединения с базой у памятного хранилища нет: шаги, которым оно нужно (например продление
+        # токенов VK), в тестах подменяют.
+        self.db = None
 
     def rows(self, model, business_id: int | None = None, **filters) -> list:
         items = [item for item in self.tables.get(model, ()) if matches(item, filters)]
@@ -308,6 +326,16 @@ class MemoryWorkerRepository(WorkerRepository):
         else:
             scope = {"business_id": business_id}
         return [item for item in items if matches(item, scope)]
+
+    def expiring_vk_accounts(self, now: datetime) -> list[PlatformAccount]:
+        return [
+            row
+            for row in self.tables.get(PlatformAccount, [])
+            if row.platform == "vk"
+            and row.status == "ok"
+            and row.expires_at is not None
+            and row.expires_at < now + RENEW_MARGIN
+        ]
 
     def save(self, *items) -> None:
         for item in items:
@@ -830,9 +858,28 @@ class Worker:
         self.repository.prune_runs(self.clock.now)
         self.repository.prune_auth(self.clock.now)
 
+    async def renew_vk_tokens(self) -> None:
+        """Продление VK-токенов на истечении. Токен VK живёт ~24 часа; без этого шага кабинет регулярно
+        падал бы в needs_reauth, а секрет для повторного подключения VK показывает один раз. Кабинеты
+        Директа шаг не трогает, отказ одного кабинета не останавливает остальные."""
+        from app.auth.vk import renew_account
+
+        for account in self.repository.expiring_vk_accounts(self.clock.now):
+            try:
+                await renew_account(self.repository.db, account.business_id, force=True)
+            except Exception as error:
+                # Доступ, который VK отозвала, до нового подключения и так уйдёт в needs_reauth обычным путём.
+                logger.warning(
+                    "Token renewal failed: platform=%s business=%s code=%s",
+                    account.platform,
+                    account.business_id,
+                    getattr(error, "status_code", None) or type(error).__name__,
+                )
+
     async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
         await self.run("heartbeat")
+        await self.renew_vk_tokens()
         for business in self.repository.rows(Business):
             if not (skip and skip(business)):
                 await self.run_business_due(business.id)

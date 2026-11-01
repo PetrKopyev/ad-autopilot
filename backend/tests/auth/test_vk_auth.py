@@ -371,6 +371,15 @@ async def test_renew_account_marks_account_for_reauth(repository, vk_api) -> Non
     assert repository.accounts[1].status == "needs_reauth"
 
 
+async def test_renew_account_force_renews_still_valid_token(repository, vk_api) -> None:
+    # Фоновый шаг продляет токен заранее: форсированное продление запрашивает грант, а не переиспользует токен.
+    repository.businesses[1] = Business(id=1, user_id=1)
+    _accounts(repository).save(1, None, session_of(timedelta(hours=5)), auth_mode="oauth")
+    renewed = await vk.renew_account(FakeDB(repository, 1), 1, force=True)
+    assert (renewed.access_token_enc, renewed.refresh_token_enc) == ("vk-access", "vk-refresh")
+    assert len(vk_api.calls) == 1
+
+
 def test_manual_key_is_bound_only_to_current_users_business(client, repository, vk_api) -> None:
     repository.businesses[2] = Business(id=2, user_id=2)
     sign_in(client, repository)
