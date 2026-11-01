@@ -154,12 +154,41 @@ class VkClient:
             return None
 
     @staticmethod
+    def _field_errors(value: Any, path: str = "", depth: int = 0) -> list[str]:
+        """Пути полей с ошибками из вложенного 'fields' живого ответа: 'campaigns[0].priced_goal: required ...'.
+        Глубина ограничена; обёртка списка (items) не добавляет сегмента в путь."""
+        if depth > 4:
+            return []
+        if isinstance(value, list):
+            return [
+                item
+                for index, element in enumerate(value)
+                for item in VkClient._field_errors(element, f"{path}[{index}]", depth + 1)
+            ]
+        if not isinstance(value, dict):
+            return []
+        reason = " ".join(str(value[key]) for key in ("code", "message") if value.get(key))
+        if reason and path:
+            return [f"{path}: {reason}"]
+        if set(value) == {"items"}:
+            return VkClient._field_errors(value["items"], path, depth + 1)
+        return [
+            item
+            for key, element in value.items()
+            for item in VkClient._field_errors(element, f"{path}.{key}" if path else str(key), depth + 1)
+        ]
+
+    @staticmethod
     def _error_detail(data: Any) -> str | None:
-        """Причина отказа из тела ответа VK: у живых ошибок есть code/message/description, без них отладка вслепую."""
+        """Причина отказа из тела ответа VK: code/message/description плюс вложенные fields с полем-виновником."""
         error = data.get("error") if isinstance(data, dict) else None
         if isinstance(error, dict):
             parts = [str(error[key]) for key in ("code", "message", "description") if error.get(key)]
-            return "; ".join(parts).rstrip(".") or None
+            fields = VkClient._field_errors(error.get("fields"))
+            if fields:
+                parts.append("; ".join(fields[:5]))
+            detail = "; ".join(parts)
+            return detail[:300].rstrip(".; ") or None
         if isinstance(error, str) and error:
             return error.rstrip(".")
         return None

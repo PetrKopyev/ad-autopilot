@@ -121,8 +121,16 @@ async def test_create_tree_posts_whole_plan_with_exact_budgets(adapter: VkAdapte
     body = sent(route)
     # Живой API принимает ровно один лимит: уходит только дневной, период закрывает страж бюджета.
     assert body["name"] == "Маникюр ap-c1" and body["budget_limit_day"] == "150.50" and "budget_limit" not in body
-    assert body["objective"] == "site_conversions" and body["autobidding_mode"] == "max_goals"
-    assert body["status"] == "active" and body["ad_groups"][0]["package_id"] == DEFAULT_PACKAGE["id"]
+    # Campaign-поля живут на уровне campaigns (схема подтверждена живым валидатором 01.11), не на плане.
+    assert "objective" not in body and "autobidding_mode" not in body
+    (campaign,) = body["campaigns"]
+    assert campaign == {
+        "name": "Маникюр",
+        "package_id": DEFAULT_PACKAGE["id"],
+        "objective": "site_conversions",
+        "autobidding_mode": "max_goals",
+    }
+    assert body["status"] == "active" and "package_id" not in body["ad_groups"][0]
     group = body["ad_groups"][0]
     assert group["name"] == "Ищут маникюр ap-g1"
     assert group["targetings"] == {
@@ -191,7 +199,7 @@ async def test_package_is_auto_selected_from_listing(adapter: VkAdapter, api) ->
     create = api.post(f"{API}/ad_plans.json").respond(json=created_plan())
     await adapter.create_campaign_tree(tree())
     await adapter.create_campaign_tree(tree())
-    assert sent(create)["ad_groups"][0]["package_id"] == 3001
+    assert sent(create)["campaigns"][0]["package_id"] == 3001
     assert route.call_count == 1
 
 
@@ -203,7 +211,7 @@ async def test_package_from_config_skips_listing(api) -> None:
         "tok", config=configuration(), href="https://shop.example/", marking_confirmed=True, package_id=321
     ) as vk:
         await vk.create_campaign_tree(tree())
-    assert sent(route)["ad_groups"][0]["package_id"] == 321
+    assert sent(route)["campaigns"][0]["package_id"] == 321
     assert not listing.called
 
 
@@ -217,7 +225,7 @@ async def test_package_without_candidates_is_honest_error(adapter: VkAdapter, ap
 
 
 async def test_package_fields_override_plan_objective(adapter: VkAdapter, api) -> None:
-    """У выбранного пакета есть свои objective/autobidding_mode: план уходит с ними, иначе — дефолты API_FORMAT."""
+    """У выбранного пакета есть свои objective/autobidding_mode: campaign уходит с ними, иначе — дефолты API_FORMAT."""
     route = mock_creation(
         api,
         [{"id": 3858, "name": "no_conversions", "status": "active", "flags": [],
@@ -225,8 +233,34 @@ async def test_package_fields_override_plan_objective(adapter: VkAdapter, api) -
     )
     await adapter.create_campaign_tree(tree())
     body = sent(route)
-    assert (body["objective"], body["autobidding_mode"]) == ("engagement", "max_shows")
-    assert body["ad_groups"][0]["package_id"] == 3858
+    campaign = body["campaigns"][0]
+    assert (campaign["objective"], campaign["autobidding_mode"]) == ("engagement", "max_shows")
+    assert campaign["package_id"] == 3858
+
+
+async def test_priced_goal_from_config_goes_to_campaign(api) -> None:
+    """VK_PRICED_GOAL_SOURCE_ID задан: priced_goal уходит в campaign; имя — VK_PRICED_GOAL_NAME (дефолт «Заявка»)."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    route = mock_creation(api)
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(route)["campaigns"][0]["priced_goal"] == {"name": "Заявка", "source_id": 777}
+    config.vk_priced_goal_name = "Оплата заказа"
+    route = mock_creation(api)
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(route, route.call_count - 1)["campaigns"][0]["priced_goal"] == {
+        "name": "Оплата заказа",
+        "source_id": 777,
+    }
+
+
+async def test_priced_goal_absent_without_config(adapter: VkAdapter, api) -> None:
+    """source_id не задан: priced_goal в campaign не уходит — отказ VK (если пакет его потребует) будет виден."""
+    route = mock_creation(api)
+    await adapter.create_campaign_tree(tree())
+    assert "priced_goal" not in sent(route)["campaigns"][0]
 
 
 async def test_set_budget_divides_limits_when_vat_configured(api) -> None:
@@ -282,6 +316,34 @@ async def test_vk_error_reason_is_in_platform_error(api) -> None:
     async with VkAdapter("tok", config=configuration()) as vk:
         with pytest.raises(PlatformError, match="Причина отказа"):
             await vk.whoami()
+
+
+async def test_vk_validation_fields_point_to_the_culprit(api) -> None:
+    """Вложенные fields живой валидации дают точное поле-виновник: пути доходят до текста ошибки."""
+    api.get(f"{API}/user.json").respond(
+        400,
+        json={
+            "error": {
+                "code": "validation_failed",
+                "fields": {
+                    "campaigns": {
+                        "items": [
+                            {
+                                "priced_goal": {"code": "required", "message": "Empty value"},
+                                "source_id": {"code": "bad_value", "message": "Bad value"},
+                            }
+                        ]
+                    }
+                },
+            }
+        },
+    )
+    async with VkAdapter("tok", config=configuration()) as vk:
+        with pytest.raises(PlatformError) as failure:
+            await vk.whoami()
+    message = str(failure.value)
+    assert "campaigns[0].priced_goal: required Empty value" in message
+    assert "campaigns[0].source_id: bad_value Bad value" in message
 
 
 async def test_create_tree_stays_blocked_until_marking_confirmed(api) -> None:
@@ -691,7 +753,6 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
         httpx.Response(200, json={"count": 1, "items": [{"id": 20, "name": "Чужая ap-g10"}]}),
         httpx.Response(200, json={"count": 1, "items": [{"id": 21, "name": "Ищут маникюр ap-g1"}]}),
     ]
-    packages = packages_stub(api)
     api.post(f"{API}/urls.json").respond(json={"id": 7})
     create = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
     api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
@@ -699,8 +760,8 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
     assert (refs.campaign_id, refs.groups, refs.ads, refs.targets) == ("10", {"g1": "21"}, {"a1": "31"}, {"t1": "21"})
     body = sent(create)
     assert body["ad_plan_id"] == 10 and body["name"] == "Ищут маникюр ap-g1"
-    assert body["package_id"] == DEFAULT_PACKAGE["id"]
+    # Пакет живёт на campaign плана: ad_group его не несёт, группа наследует пакет кампании.
+    assert "package_id" not in body
     assert body["targetings"]["age"]["age_list"][0] == 25 and body["banners"][0]["name"] == "Маникюр рядом ap-a1"
     assert (await adapter.add_group("10", group)).ads == {"a1": "31"}
     assert create.call_count == 1
-    assert packages.call_count == 1

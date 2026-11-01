@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # (зеркально Директу при DIRECT_AMOUNTS_INCLUDE_VAT=false): лимит делим на (1 + НДС).
     vk_amounts_include_vat: bool = False
     vk_package_id: int | None = Field(default=None, gt=0)
+    # Цель оптимизации campaign VK (Top@Mail/приложения). Без неё часть пакетов не создаётся, а цель Метрики
+    # VK через API не привязывает: source_id счётчика Метрики живьём отвергнут («Bad value», 01.11).
+    vk_priced_goal_source_id: int | None = Field(default=None, gt=0)
+    vk_priced_goal_name: str = Field(default="Заявка", min_length=1)
     vk_client_id: str = ""
     vk_client_secret: SecretStr = SecretStr("")
     vk_oauth_enabled: bool = False

@@ -151,6 +151,10 @@ class VkAdapter(VkClient):
             if getattr(self._config, "vk_amounts_include_vat", False)
             else 0
         )
+        # Цель оптимизации campaign (Top@Mail/приложения): VK_PRICED_GOAL_SOURCE_ID, имя — VK_PRICED_GOAL_NAME.
+        # Не задана — в campaign не уходит: без неё часть пакетов не создастся, но отказ VK теперь виден в ошибке.
+        self._priced_goal_source_id = getattr(self._config, "vk_priced_goal_source_id", None)
+        self._priced_goal_name = getattr(self._config, "vk_priced_goal_name", None) or "Заявка"
 
     def _to_api(self, kop: int) -> int:
         """Сумма с НДС (как бюджет и расход) в копейки лимита API; без НДС — вниз, чтобы не превысить бюджет."""
@@ -193,7 +197,7 @@ class VkAdapter(VkClient):
         await self._request("POST", f"{path}/{id_}.json", json=body)
 
     async def _resolve_package(self) -> tuple[int, dict[str, Any]]:
-        """Пакет для ad_groups: id из конфига, иначе первый подходящий из packages.json (выбор кэшируется
+        """Пакет для campaign плана: id из конфига, иначе первый подходящий из packages.json (выбор кэшируется
         на экземпляр, чтобы новые группы работающей кампании жили на том же пакете, что и план)."""
         if self._package_id is not None:
             return self._package_id, {}
@@ -264,7 +268,7 @@ class VkAdapter(VkClient):
     def _state(self, value: str) -> str:
         return "active" if self._marking_confirmed and API_FORMAT["statuses"].get(value) == "active" else "blocked"
 
-    def _group_body(self, group: AdGroupSpec, url: int, package_id: int) -> dict:
+    def _group_body(self, group: AdGroupSpec, url: int) -> dict:
         banners = []
         for ad in group.ads:
             banner = {
@@ -284,26 +288,40 @@ class VkAdapter(VkClient):
             "status": self._state(group.status),
             "targetings": _targetings(group.targeting),
             "banners": banners,
-            "package_id": package_id,
         }
         interests = [_integer(target.value) for target in group.targets if target.status == "active"]
         if interests:
             body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
         return body
 
+    def _campaign_body(self, name: str, package_id: int, package: dict[str, Any]) -> dict:
+        """Campaign плана (живой валидатор требует уровень campaigns): пакет, цель и стратегия живут здесь,
+        не на плане. priced_goal — цель оптимизации Top@Mail/приложений; без неё некоторые пакеты не создаются,
+        цель Метрики VK через API не принимает (source_id счётчика отвергнут живьём, 01.11)."""
+        objective, autobidding = self._package_objective(package)
+        body = {
+            "name": name,
+            "package_id": package_id,
+            "objective": objective,
+            "autobidding_mode": autobidding,
+        }
+        source_id = self._priced_goal_source_id
+        if isinstance(source_id, int) and not isinstance(source_id, bool) and source_id > 0:
+            body["priced_goal"] = {"name": self._priced_goal_name, "source_id": source_id}
+        return body
+
     async def _plan_body(self, plan: CampaignTreeSpec) -> dict:
         url = (await self._add("urls", {"url": self._href}))["id"]
         package_id, package = await self._resolve_package()
-        objective, autobidding = self._package_objective(package)
         # Живой API принимает ровно один лимит плана: «Can't set both budget_limit and budget_limit_day».
         # Держим дневной лимит (рычаг пейсинга), месяц закрывает страж бюджета — механика пауз платформонезависима.
+        # Схема плана подтверждена живым валидатором (01.11): campaign-поля — на уровне campaigns, не плана.
         return {
             "name": _named(plan.name, plan.idempotency_key),
             "status": self._state(plan.status),
-            "objective": objective,
-            "autobidding_mode": autobidding,
             "budget_limit_day": _rub(self._to_api(plan.daily_limit_kop)),
-            "ad_groups": [self._group_body(group, url, package_id) for group in plan.groups],
+            "campaigns": [self._campaign_body(plan.name, package_id, package)],
+            "ad_groups": [self._group_body(group, url) for group in plan.groups],
         }
 
     async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
@@ -323,9 +341,10 @@ class VkAdapter(VkClient):
         if found:
             group_id = found[0]["id"]
         else:
-            package_id, _ = await self._resolve_package()
+            # package_id в ad_group не шлём: пакет живёт на campaign плана и группа наследует его (связка
+            # campaign↔ad_group на живом API не подтверждена — проверить при первом успешном создании, 01.11).
             url = (await self._add("urls", {"url": self._href}))["id"]
-            group_body = self._group_body(group, url, package_id) | {"ad_plan_id": int(campaign_id)}
+            group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id)}
             group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {
             str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
