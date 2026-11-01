@@ -42,7 +42,14 @@ from app.platforms.base import (
 from app.platforms.direct import budget_end, weekly_limit
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import STOPPED
-from app.services.changes import CLOSED_ACCOUNT, AdapterResolver, ChangeConflict, ChangesService, ServerBusy
+from app.services.changes import (
+    CLOSED_ACCOUNT,
+    MODERATION_PENDING,
+    AdapterResolver,
+    ChangeConflict,
+    ChangesService,
+    ServerBusy,
+)
 from app.services.demo import configure_adapter
 from app.services.onboarding import DRAFT_STATUSES, NotFound, description_draft
 from app.services.plan import (
@@ -75,6 +82,12 @@ INTERRUPTED = (
 )
 RUNNING = "Запуск уже идёт. Подождите минуту и обновите страницу."
 SILENT = "Площадка «{}» не отвечает. Повторите запуск через несколько минут."
+MODERATION_WAIT = (
+    "Площадка «{}» проверяет объявления: реклама включится автоматически, как только проверка закончит, — "
+    "нажимать «Запустить рекламу» снова не нужно. Если включение не завершится само, причину объяснит запись "
+    "в журнале изменений."
+)
+PLATFORM_CREATE_FAILED = "Площадка «{}» не создала рекламу: {}"
 LAUNCHED_OTHER = "Реклама уже запущена по более новому плану. Обновите страницу."
 OUTDATED = "План устарел: сведения о бизнесе изменились, и мы собрали новый. Обновите страницу и проверьте новый план."
 CLOSED = "Кабинет площадки не подключён или требует входа заново."
@@ -189,7 +202,7 @@ class LaunchService:
         plan = self.repository.get_plan(plan_id, business_id)
         if plan is None:
             raise NotFound("План не найден.")
-        if plan.status == "launched":
+        if plan.status == "launched" and not plan.payload["launch"].get("platform_errors"):
             return self.result(plan)
         # Блокировка держится от проверки плана до перевода бизнеса в running или до записи неудачи: шаги мастера и
         # перемотка демо получают 409, и бюджет со сведениями, по которым созданы кампании, не меняются, пока бизнес
@@ -213,7 +226,12 @@ class LaunchService:
                 raise NotFound("Бизнес не найден.")
             self.repository.refresh(plan)
             if plan.status == "launched":
-                return self.result(plan)
+                errors = plan.payload["launch"].get("platform_errors") or {}
+                if not errors:
+                    return self.result(plan)
+                # Частичный запуск: не запустившиеся площадки владелец может попробовать снова — остальные уже
+                # работают, и трогать их не нужно.
+                return await self.retry_platforms(business, plan, list(errors), now, today)
             # Запускается только последний план черновика: запуск плана из старой вкладки создал бы вторые кампании,
             # и у бизнеса стало бы два действующих плана с двойными кэпами.
             if business.status not in DRAFT_STATUSES:
@@ -254,13 +272,86 @@ class LaunchService:
                 batches={key: [group["id"] for group in groups] for key, (groups, _) in units.items()},
             )
             try:
-                refs = await self.create_paused(business, plan, units, adapters, geo)
-                await self.activate(business, plan, refs, adapters, units, now)
+                created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
+                failures = create_failures | await self.activate(business, plan, created, adapters, units, now)
             except Exception as error:
                 await self.stop_failed(plan, failure_reason(error), adapters, now)
                 raise LaunchFailed(plan.payload["launch"]["error"]) from error
-            self.finish(business, plan, platforms, limits, now, today)
+            # Изоляция площадок: сбой одной не роняет остальные — она фиксируется честной записью, а запуск
+            # доводится до конца на площадках, которые не отказали.
+            self.save_platform_failures(business, plan, failures)
+            succeeded = [platform for platform in platforms if platform not in failures]
+            if not succeeded:
+                await self.stop_failed(plan, " ".join(failures.values()), adapters, now)
+                raise LaunchFailed(plan.payload["launch"]["error"])
+            self.finish(business, plan, succeeded, limits, now, today)
         return self.result(plan)
+
+    async def retry_platforms(
+        self, business: Business, plan: Plan, platforms: list[str], now: datetime, today: date
+    ) -> dict:
+        """Повторный запуск площадок, отказавших в основной попытке: уже работающие не трогаем, а отказавшие
+        проходят тот же путь — создание (с переиспользованием кампаний попытки) и включение. Ошибки этих
+        площадок снова фиксируются честно, запись о неудаче плана не пишется: реклама на остальных работает."""
+        await self.settle_pending(plan, now)
+        limits = budget_limits(business, platforms, today, self.domain)
+        adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
+        units = campaign_units(plan, platforms, limits, minimums, today)
+        self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
+        try:
+            created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
+            failures = create_failures | await self.activate(business, plan, created, adapters, units, now)
+        except Exception as error:
+            # Повтор не роняет уже работающие площадки и не останавливает их: причина отдана владельцу,
+            # пометка неудачной площадки в плане осталась — повторить можно сразу.
+            reason = failure_reason(error)
+            self.save_launch(plan, started_at=None, error=None, reason=None)
+            raise LaunchFailed(
+                f"{reason} Реклама на уже запущенных площадках продолжает работать, они не тронуты."
+            ) from error
+        self.save_platform_failures(business, plan, failures)
+        succeeded = [platform for platform in platforms if platform not in failures]
+        if succeeded:
+            self.finish(business, plan, succeeded, limits, now, today)
+            errors = dict(plan.payload["launch"].get("platform_errors") or {})
+            for platform in succeeded:
+                errors.pop(platform, None)
+            self.save_launch(plan, platform_errors=errors)
+        return self.result(plan)
+
+    def save_platform_failures(self, business: Business, plan: Plan, failures: dict[str, str]) -> None:
+        """Незапустившаяся площадка — запись в журнале с понятной причиной и пометка в плане: экран плана и
+        повторные запуски видят, что реклама частичная и почему. Записи информационные: операций нет, откат
+        не нужен — на площадке ничего не создано или оно уже остановлено."""
+        if not failures:
+            return
+        for platform, reason in failures.items():
+            campaign_id = next(
+                (
+                    id_
+                    for key, id_ in plan.payload["launch"]["campaigns"].items()
+                    if campaign_platform(key) == platform
+                ),
+                None,
+            )
+            self.repository.save(
+                ChangeLog(
+                    business_id=business.id,
+                    actor="system",
+                    kind="launch",
+                    platform=platform,
+                    entity_type="campaign",
+                    entity_id=str(campaign_id or ""),
+                    operations=[],
+                    reason_code="LAUNCH_PLATFORM_FAILED",
+                    reason_params={},
+                    reason_text=reason,
+                    evidence={},
+                    status="failed",
+                )
+            )
+        errors = dict(plan.payload["launch"].get("platform_errors") or {}) | failures
+        self.save_launch(plan, platform_errors=errors)
 
     async def settle_pending(self, plan: Plan, now: datetime) -> None:
         """Включение, оборванное посреди (упал процесс, площадка не ответила, включилась ли кампания), оставляет
@@ -329,9 +420,12 @@ class LaunchService:
         units: dict[str, tuple[list[dict], PlatformLimit]],
         adapters: dict[str, AdPlatform],
         geo: dict[str, dict],
-    ) -> dict[str, tuple[Campaign, ExternalRefs]]:
-        """Кампании создаются остановленными, но уже с лимитами: сбой на любом шаге не оставляет трат."""
+    ) -> tuple[dict[str, tuple[Campaign, ExternalRefs]], dict[str, str]]:
+        """Кампании создаются остановленными, но уже с лимитами: сбой на любом шаге не оставляет трат. Сбой
+        площадки фиксируется причиной и не роняет создание остальных: возвращает созданные кампании и причины
+        отказавших площадок (изоляция площадок запуска)."""
         created = {}
+        failures: dict[str, str] = {}
         accounts = {account.platform: account for account in self.repository.accounts(business.id)}
         assets = {asset.id: asset for asset in self.repository.assets(business.id)}
         known = plan.payload.get("launch", {}).get("campaigns", {})
@@ -339,25 +433,31 @@ class LaunchService:
         configured = dict.fromkeys(adapters, 0)
         for key, (groups, limit) in units.items():
             platform = campaign_platform(key)
+            if platform in failures:
+                continue
             adapter = adapters[platform]
             self.repository.commit()
-            images = await self.upload_images(adapter, platform, groups, plan, assets)
-            campaign = self.repository.campaign(known[key]) if key in known else None
-            if campaign is None:
-                campaign = self.stage_rows(
-                    business, platform, campaign_name(business, key, groups), limit, accounts[platform].id, groups
+            try:
+                images = await self.upload_images(adapter, platform, groups, plan, assets)
+                campaign = self.repository.campaign(known[key]) if key in known else None
+                if campaign is None:
+                    campaign = self.stage_rows(
+                        business, platform, campaign_name(business, key, groups), limit, accounts[platform].id, groups
+                    )
+                    known = known | {key: campaign.id}
+                    self.save_launch(plan, campaigns=known)
+                spec = self.spec(
+                    business, campaign, groups, images, lambda group: geo[platform] | targeting(plan, platform, group)
                 )
-                known = known | {key: campaign.id}
-                self.save_launch(plan, campaigns=known)
-            spec = self.spec(
-                business, campaign, groups, images, lambda group: geo[platform] | targeting(plan, platform, group)
-            )
-            # Картинка объявления сохраняется в строке: по ней экраны показывают миниатюру.
-            self.repository.commit()
-            if demo_enabled() and isinstance(adapter, FakeAdapter):
-                configure_adapter(adapter, spec, configured[platform])
-                configured[platform] += len(spec.groups)
-            refs = await adapter.create_campaign_tree(spec)
+                # Картинка объявления сохраняется в строке: по ней экраны показывают миниатюру.
+                self.repository.commit()
+                if demo_enabled() and isinstance(adapter, FakeAdapter):
+                    configure_adapter(adapter, spec, configured[platform])
+                    configured[platform] += len(spec.groups)
+                refs = await adapter.create_campaign_tree(spec)
+            except PlatformError as error:
+                failures[platform] = PLATFORM_CREATE_FAILED.format(TITLES[platform], error)
+                continue
             for text in getattr(adapter, "content_mismatches", []):
                 # Содержимое кабинета отличалось от плана: адаптер пересоздал объявления и фразы, запуск честно
                 # пишет об этом в журнал — иначе «лишние» объявления в кабинете были бы непонятны владельцу.
@@ -412,7 +512,7 @@ class LaunchService:
             self.bind(campaign, refs)
             created[key] = (campaign, refs)
             self.repository.commit()
-        return created
+        return created, failures
 
     async def upload_images(
         self, adapter: AdPlatform, platform: str, groups: list[dict], plan: Plan, assets: dict[int, Asset]
@@ -561,8 +661,12 @@ class LaunchService:
         adapters: dict[str, AdPlatform],
         units: dict[str, tuple[list[dict], PlatformLimit]],
         now: datetime,
-    ) -> None:
+    ) -> dict[str, str]:
+        """Включение созданного: возвращает причины площадок, которые рекламу не включили, — запуск доводит
+        до конца остальные, а неудачную площадку фиксирует честно. Запись, оставшаяся pending (площадка
+        проверяет объявления или молчит), прерывает запуск: её доведёт сверка, повтор запуска продолжит."""
         # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
+        failures = {}
         for key, (campaign, refs) in created.items():
             platform, limit = campaign_platform(key), units[key][1]
             operations = [
@@ -589,10 +693,13 @@ class LaunchService:
                 now=now,
             )
             if change.status == "pending":
+                if change.evidence["_service"].get("error") == MODERATION_PENDING:
+                    raise PlatformError(MODERATION_WAIT.format(TITLES[platform]))
                 raise PlatformError(f"Площадка «{TITLES[platform]}» не ответила, включилась ли реклама.")
             if change.status != "applied":
                 detail = change.evidence["_service"].get("error")
-                raise PlatformError(f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip())
+                failures[platform] = f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip()
+        return failures
 
     async def stop_failed(self, plan: Plan, reason: str | None, adapters: dict[str, AdPlatform], now: datetime) -> None:
         """Останавливает созданное неудавшимся запуском и записывает неудачу; reason — её причина, None — запуск
@@ -677,6 +784,7 @@ class LaunchService:
             "plan_id": plan.id,
             "launched_at": launch.get("launched_at"),
             "campaigns": launch["campaigns"],
+            "platform_errors": launch.get("platform_errors", {}),
         }
 
 

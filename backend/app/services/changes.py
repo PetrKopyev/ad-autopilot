@@ -46,6 +46,10 @@ MODERATION_TIMEOUT = (
     "площадки — возможно, оно ещё на проверке или отклонено. Изменение не применено, чтобы не блокировать остальные."
 )
 
+# Пометка ожидания проверки площадкой: общая для записи, оставленной отказом включения, и для сверки ожидания.
+# Запуск по ней отличает ожидание модерации от молчащей площадки и объясняет владельцу честно.
+MODERATION_PENDING = "Площадка ещё проверяет объявление. Включим его, как только одобрит."
+
 
 class ChangeConflict(ValueError):
     pass
@@ -583,7 +587,7 @@ class ChangesService:
                     await adapter.apply(operation)
         except AwaitingModeration:
             # Площадка ещё проверяет объявление: не провал. Изменение остаётся pending, воркер доведёт сверкой.
-            self._metadata(change, error="Площадка ещё проверяет объявление. Включим его, как только одобрит.")
+            self._metadata(change, error=MODERATION_PENDING)
             self.repository.save(change)
             return change
         except PlatformError:
@@ -607,12 +611,17 @@ class ChangesService:
             from app.platforms.direct import DirectAdapter
             from app.platforms.vk import VkAdapter
 
+            platform_pauses = isinstance(adapter, (DirectAdapter, VkAdapter))
             states = await adapter.get_state(refs)
-            mismatches = differences(
-                operations,
-                states,
-                platform_pauses=isinstance(adapter, (DirectAdapter, VkAdapter)),
-            )
+            mismatches = differences(operations, states, platform_pauses=platform_pauses)
+            if not mismatches and awaiting_moderation(operations, states):
+                # Объявление или кампания ещё на проверке: повторяем ожидающее включение (площадки принимают
+                # повторный moderate/resume) и сверяем снова. Живой Директ отклоняет resume кампании-черновика
+                # v501, пока не одобрены её объявления, — без повтора включение ждало бы ручного запуска
+                # владельцем и проваливалось по границе ожидания.
+                states, mismatches = await self._repeat_awaiting_activation(
+                    adapter, operations, refs, states, platform_pauses
+                )
         except PlatformError:
             # При недоступном чтении исход неизвестен: pending сверят следующий ход воркера или повтор запуска.
             self._metadata(change, error="Площадка не ответила, прошло ли изменение. Узнаем, когда она ответит снова.")
@@ -632,11 +641,7 @@ class ChangesService:
                 change.status = "failed"
                 self._metadata(change, error=MODERATION_TIMEOUT)
             else:
-                self._metadata(
-                    change,
-                    error="Площадка ещё проверяет объявление. Включим его, как только одобрит.",
-                    awaiting_since=since or now.isoformat(),
-                )
+                self._metadata(change, error=MODERATION_PENDING, awaiting_since=since or now.isoformat())
                 self.repository.save(change)
                 return
         else:
@@ -648,6 +653,35 @@ class ChangesService:
 
                 finish_revert(self.repository, change, now or datetime.now(UTC))
         self.repository.save(change)
+
+    @staticmethod
+    async def _repeat_awaiting_activation(
+        adapter: AdPlatform,
+        operations: Sequence[Operation],
+        refs: ExternalRefs,
+        states: Mapping[str, EntityState],
+        platform_pauses: bool,
+    ) -> tuple[Mapping[str, EntityState], list[dict]]:
+        """Повтор применения включений по сущностям, которые площадка ещё проверяет, и перечитывание состояния.
+        Бюджеты, тексты и таргетинг не трогаем: повторяется только активация, остальное сверяется как обычно.
+        Ошибка повтора (площадка снова отклонила включение как ожидающее проверки) — не провал: возвращаем
+        прежнее состояние, изменение остаётся pending с прежним текстом и той же границей ожидания."""
+        try:
+            for op in final_operations(operations):
+                state = states.get(op.entity_id)
+                if (
+                    state is not None
+                    and state.entity_type == op.entity_type
+                    and op.entity_type in {"ad", "campaign"}
+                    and op.kind == "set_status"
+                    and op.after == "active"
+                    and state.status in {"pending", "moderation", "draft"}
+                ):
+                    await adapter.apply(op)
+        except PlatformError:
+            return states, differences(operations, states, platform_pauses=platform_pauses)
+        states = await adapter.get_state(refs)
+        return states, differences(operations, states, platform_pauses=platform_pauses)
 
     async def recover_pending(
         self, resolve_adapter: AdapterResolver, *, business_id: int | None = None, now: datetime | None = None

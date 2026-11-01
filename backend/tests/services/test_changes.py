@@ -23,6 +23,7 @@ from app.platforms.base import (
 from app.platforms.fake import FakeAdapter
 from app.services.changes import (
     MODERATION_AWAITING_LIMIT,
+    MODERATION_PENDING,
     ChangeConflict,
     ChangesRepository,
     ChangesService,
@@ -269,6 +270,125 @@ async def test_reconcile_waits_for_moderation_and_then_applies(repository, tree,
     recovered = await service.recover_pending(lambda *_: adapter)
     assert [item.status for item in recovered] == ["applied"]
     assert change.status == "applied"
+
+
+async def launch_activation(service, adapter, refs):
+    return await service.apply_change(
+        business_id=1,
+        adapter=adapter,
+        refs=refs,
+        operations=[
+            Operation("set_status", "ad", refs.ads["ad"], "status", "paused_auto", "active"),
+            Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active"),
+        ],
+        actor="owner",
+        kind="launch",
+        platform="fake",
+        reason_code="CUSTOM",
+        reason_text="Тест запуска.",
+    )
+
+
+async def test_reconcile_repeats_activation_of_draft_campaign(repository, tree, monkeypatch):
+    """В1: сверка не просто ждёт кампанию-черновик, а повторяет отклонённое включение (площадки принимают
+    повторный resume). Площадка приняла повтор — объявления одобрены: изменение применилось без владельца."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+    get_state = adapter.get_state
+    real_apply = adapter.apply
+    calls = 0
+    resumes = 0
+    accepted = False
+
+    async def resume_after_moderation(operation):
+        nonlocal calls, resumes, accepted
+        calls += 1
+        if operation.entity_type == "campaign" and operation.after == "active":
+            resumes += 1
+            if resumes == 1:
+                raise AwaitingModeration(operation.entity_id)
+            accepted = True
+        await real_apply(operation)
+
+    async def reviewing(tree_refs):
+        states = await get_state(tree_refs)
+        if not accepted:
+            states = {
+                key: replace(state, status="draft") if state.entity_type == "campaign" else state
+                for key, state in states.items()
+            }
+        return states
+
+    monkeypatch.setattr(adapter, "apply", resume_after_moderation)
+    monkeypatch.setattr(adapter, "get_state", reviewing)
+    change = await launch_activation(service, adapter, refs)
+    assert change.status == "pending"
+    recovered = await service.recover_pending(lambda *_: adapter)
+    assert [item.status for item in recovered] == ["applied"]
+    assert change.status == "applied"
+    # Исходный resume, отклонённый площадкой, и его повтор в сверке.
+    assert accepted and calls == 3 and resumes == 2
+
+
+async def test_reconcile_keeps_pending_while_platform_still_reviews(repository, tree, monkeypatch):
+    """В1: площадка по-прежнему проверяет (повтор снова отклонён) — изменение остаётся pending с прежней
+    границей ожидания: сверка повторяет включение на каждом ходе, пока проверка не закончит."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+    get_state = adapter.get_state
+    real_apply = adapter.apply
+    calls = 0
+
+    async def still_reviewing(operation):
+        nonlocal calls
+        calls += 1
+        if operation.entity_type == "campaign" and operation.after == "active":
+            raise AwaitingModeration(operation.entity_id)
+        await real_apply(operation)
+
+    async def draft_campaign(tree_refs):
+        return {
+            key: replace(state, status="draft") if state.entity_type == "campaign" else state
+            for key, state in (await get_state(tree_refs)).items()
+        }
+
+    monkeypatch.setattr(adapter, "apply", still_reviewing)
+    monkeypatch.setattr(adapter, "get_state", draft_campaign)
+    change = await launch_activation(service, adapter, refs)
+    assert change.status == "pending"
+    now = datetime.now(UTC)
+    await service._reconcile(change, adapter, now=now)
+    assert change.status == "pending"
+    assert change.evidence["_service"]["awaiting_since"] == now.isoformat()
+    await service._reconcile(change, adapter, now=now + timedelta(hours=2))
+    assert change.status == "pending"
+    # Граница ожидания не сдвигается повторами: счёт идёт с первого виденного ожидания.
+    assert change.evidence["_service"]["awaiting_since"] == now.isoformat()
+    assert change.evidence["_service"]["error"] == MODERATION_PENDING
+    assert calls == 4  # исходная попытка и по повтору в каждой сверке
+
+
+async def test_reconcile_does_not_repeat_apply_for_plain_mismatch(repository, tree, monkeypatch):
+    """Расхождение не по ожиданию проверки (владелец остановил объявление в кабинете) сверяется как прежде:
+    без повторного применения — запись честно проваливается."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+    real_apply = adapter.apply
+
+    async def crashed(operation):
+        await real_apply(operation)
+        raise RuntimeError("process stopped")
+
+    monkeypatch.setattr(adapter, "apply", crashed)
+    with pytest.raises(RuntimeError):
+        await activation_change(service, adapter, refs)
+    change = repository.items[1]
+    assert change.status == "pending"
+    await real_apply(Operation("set_status", "ad", refs.ads["ad"], "status", "active", "paused_owner"))
+    monkeypatch.setattr(adapter, "apply", AsyncMock(side_effect=AssertionError("повтора быть не должно")))
+    recovered = await ChangesService(repository, dry_run=False).recover_pending(lambda *_: adapter)
+    assert recovered[0].status == "failed"
+    assert change.evidence["_service"]["differences"][0]["current"] == "paused_owner"
 
 
 async def test_reconcile_fails_moderation_wait_after_limit(repository, tree, monkeypatch):

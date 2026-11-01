@@ -11,13 +11,13 @@ import pytest
 from cryptography.fernet import InvalidToken
 
 from app.content.images import run_decoding
-from app.db.models import Ad, AdGroup, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
-from app.platforms.base import ExternalRefs, Operation, PlatformError
+from app.db.models import Ad, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
+from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError
 from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services import launch as launch_module
 from app.services import plan as plan_module
-from app.services.changes import ChangeConflict, load_operations
+from app.services.changes import MODERATION_PENDING, ChangeConflict, load_operations
 from app.services.launch import LaunchBlocked, LaunchFailed
 from app.services.onboarding import Blocked, NotFound, ai_budget
 from app.services.plan import budget_limits, launch_unsettled
@@ -68,6 +68,22 @@ class FailingActivation(FakeAdapter):
     async def apply(self, operation) -> None:
         if self.fail and operation.entity_type == "campaign" and operation.after == "active":
             raise PlatformError("ВКонтакте отклонил запуск.", status_code=500)
+        await super().apply(operation)
+
+
+class DraftCampaign(FakeAdapter):
+    """Кампания-черновик v501: включение отклоняется, пока площадка проверяет объявления; остановить
+    черновик нельзя — как живой Директ. После одобрения объявлений повторный resume принимается."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted = False
+
+    async def apply(self, operation) -> None:
+        if not self.accepted and operation.entity_type == "campaign" and operation.after == "active":
+            raise AwaitingModeration(operation.entity_id)
+        if not self.accepted and operation.entity_type == "campaign" and operation.after == "paused_auto":
+            raise PlatformError("Кампания является черновиком и не может быть остановлена.")
         await super().apply(operation)
 
 
@@ -236,63 +252,203 @@ async def test_second_launch_is_noop(tmp_path: Path) -> None:
     assert all(len(adapter._trees) == 1 for adapter in world.adapters.values())
 
 
-async def test_failure_midway_leaves_no_unlimited_or_active_campaign(tmp_path: Path) -> None:
+async def test_create_failure_of_one_platform_launches_the_rest(tmp_path: Path) -> None:
+    """В3: сбой создания на одной площадке не роняет запуск целиком: Директ создан, активирован и работает,
+    отказавшая площадка зафиксирована честной записью — владельцу не нужно ничего перезапускать вручную."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed) as error:
-        await launch(world, plan)
-    assert "ВКонтакте временно недоступен" in str(error.value) and "повтор безопасен" in str(error.value)
-    assert world.repository.latest_plan(world.business.id).status == "failed"
-    assert world.business.status == "plan_ready" and not world.repository.rows(ChangeLog)
+    result = await launch(world, plan)
+    assert result["status"] == "launched"
+    assert result["platform_errors"] == {
+        "vk": "Площадка «ВКонтакте» не создала рекламу: ВКонтакте временно недоступен."
+    }
+    assert world.business.status == "running"
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "launched"
+    assert stored.payload["launch"]["platform_errors"]["vk"].startswith("Площадка «ВКонтакте» не создала рекламу")
     direct = next(item for item in campaigns(world) if item.platform == "direct")
     state = (await states(world, direct))[direct.external_id]
-    assert state.status == "paused_auto" and state.daily_limit_kop > 0 and state.period_cap_kop > 0
-    assert (
-        direct.status == "paused_auto"
-        and not next(item for item in campaigns(world) if item.platform == "vk").external_id
-    )
+    assert state.status == "active" and state.daily_limit_kop > 0 and state.period_cap_kop > 0
+    vk = next(item for item in campaigns(world) if item.platform == "vk")
+    assert vk.external_id is None and vk.status == "paused_auto"
+    # Итог честен: одна запись об успешном запуске Директа и одна о неудаче ВКонтакте.
+    (record,) = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_PLATFORM_FAILED")
+    assert record.platform == "vk" and record.status == "failed" and record.actor == "system"
+    assert "ВКонтакте временно недоступен" in record.reason_text
+    launches = [row for row in world.repository.rows(ChangeLog, kind="launch") if row.status == "applied"]
+    assert [(row.platform, row.actor) for row in launches] == [("direct", "owner")]
+    # Бюджет защищён: лимиты дневные и кэпы у созданного, журнал расхода — только за запущенную площадку.
+    ledgers = world.repository.rows(BudgetLedger, business_id=world.business.id)
+    assert {row.platform for row in ledgers} == {"direct"}
     adapters["direct"].clock.advance(days=3)
-    assert await adapters["direct"].get_spend_today() == 0
+    assert await adapters["direct"].get_spend_today() > 0 and not adapters["vk"]._trees
 
 
-async def test_retry_after_failure_is_safe_and_idempotent(tmp_path: Path) -> None:
+async def test_failed_platform_can_be_retried_without_touching_launched_one(tmp_path: Path) -> None:
+    """В3: повторный запуск после частичного доводит только отказавшую площадку: Директ не пересоздаётся,
+    пометка о неудаче снимается."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
+    first = await launch(world, plan)
+    assert first["platform_errors"] and world.business.status == "running"
     adapters["vk"].fail = False
-    await launch(world, plan)
-    assert len(campaigns(world)) == 2 and len(world.repository.rows(AdGroup)) == len(plan["groups"]) == 4
-    assert len(adapters["direct"]._trees) == 1 and len(adapters["vk"]._trees) == 1
+    result = await launch(world, plan)
+    assert result["status"] == "launched" and result["platform_errors"] == {}
+    assert len(campaigns(world)) == 2 and len(adapters["direct"]._trees) == 1 and len(adapters["vk"]._trees) == 1
     assert world.business.status == "running"
     for item in campaigns(world):
         assert (await states(world, item))[item.external_id].status == "active"
+    ledgers = world.repository.rows(BudgetLedger, business_id=world.business.id)
+    assert {row.platform for row in ledgers} == {"direct", "vk"}
+    assert not world.repository.pending(world.business.id)
 
 
-async def test_activation_failure_pauses_already_started_platform(tmp_path: Path) -> None:
+async def test_activation_failure_of_platform_keeps_launched_ones(tmp_path: Path) -> None:
+    """В3: площадка, которая не включила рекламу, не гасит остальные: её кампания остаётся созданной,
+    но выключенной и ничего не тратит, а запущенные площадки работают."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed, match="не включила рекламу"):
-        await launch(world, plan)
+    result = await launch(world, plan)
+    assert result["platform_errors"]["vk"].startswith("Площадка «ВКонтакте» не включила рекламу.")
+    assert world.business.status == "running"
     for item in campaigns(world):
         state = (await states(world, item))[item.external_id]
-        assert state.status == "paused_auto" and state.period_cap_kop > 0 and item.status == "paused_auto"
-    assert world.business.status == "plan_ready"
+        assert state.status == ("paused_auto" if item.platform == "vk" else "active")
+        assert state.period_cap_kop > 0 and item.status == state.status
+    (record,) = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_PLATFORM_FAILED")
+    assert record.platform == "vk" and record.status == "failed" and "не включила рекламу" in record.reason_text
     for adapter in adapters.values():
         adapter.clock.advance(days=3)
-        assert await adapter.get_spend_today() == 0
+    assert await adapters["vk"].get_spend_today() == 0
+    assert await adapters["direct"].get_spend_today() > 0
 
 
-async def test_retry_after_activation_failure_starts_everything(tmp_path: Path) -> None:
+async def test_failed_platform_activation_is_retried_after_fix(tmp_path: Path) -> None:
+    """В3: после починки площадки повтор запуска включает и её — на кампаниях той же попытки."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
-    adapters["vk"].fail = False
     await launch(world, plan)
-    assert len(campaigns(world)) == 2
+    adapters["vk"].fail = False
+    result = await launch(world, plan)
+    assert result["platform_errors"] == {}
+    assert len(campaigns(world)) == 2 and len(adapters["vk"]._trees) == 1
     for item in campaigns(world):
         assert (await states(world, item))[item.external_id].status == "active"
+
+
+async def test_all_platforms_failed_launch_stops_everything_and_can_be_repeated(tmp_path: Path) -> None:
+    """Если не запустилась ни одна площадка, запуск по-прежнему целиком неудачный: созданное остановлено,
+    план пересобирается сразу, а повтор после починки идёт на тех же кампаниях."""
+    adapters = {"direct": FailingCreate(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    with pytest.raises(LaunchFailed) as error:
+        await launch(world, plan)
+    assert "повтор безопасен" in str(error.value) and world.business.status == "plan_ready"
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "failed" and stored.payload["launch"]["started_at"] is None
+    assert stored.payload["launch"]["platform_errors"].keys() == {"direct", "vk"}
+    # Упавший запуск остановил созданное: план с новыми данными собирается сразу, а не после воркера.
+    world.business.month_budget_kop += 100_000
+    rebuilt = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    assert rebuilt["id"] != plan["id"] and rebuilt["month_budget_kop"] == world.business.month_budget_kop
+    adapters["direct"].fail = False
+    adapters["vk"].fail = False
+    assert (await launch(world, rebuilt))["status"] == "launched"
+    assert len(campaigns(world)) == 4 and len(adapters["direct"]._trees) == 1 and len(adapters["vk"]._trees) == 1
+    statuses = {
+        item.platform: (await states(world, item))[item.external_id].status
+        for item in campaigns(world)
+        if item.external_id
+    }
+    assert statuses == {"direct": "active", "vk": "active"}
+
+
+async def test_launch_record_of_launched_platform_can_be_reverted(tmp_path: Path) -> None:
+    """В3: после частичного запуска запись запуска Директа откатывается как обычно (реклама останавливается),
+    а информационная запись об отказавшей площадке — нет: операций и откатывать нечего."""
+    from app.services.rollback import RollbackService, can_revert
+
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    result = await launch(world, plan)
+    assert result["platform_errors"]
+    launches = [row for row in world.repository.rows(ChangeLog, kind="launch") if row.business_id == world.business.id]
+    direct_launch = next(row for row in launches if row.platform == "direct" and row.status == "applied")
+    failed_record = next(row for row in launches if row.reason_code == "LAUNCH_PLATFORM_FAILED")
+    assert can_revert(direct_launch, world.business)
+    assert not can_revert(failed_record, world.business)
+    rollback = RollbackService(recovery_worker(world).repository, dry_run=False)
+    revert = await rollback.revert(
+        direct_launch.id, business_id=world.business.id, adapter=world.adapters["direct"], now=NOW
+    )
+    assert revert.status == "applied"
+    direct = next(item for item in campaigns(world) if item.platform == "direct")
+    assert (await states(world, direct))[direct.external_id].status == "paused_auto"
+
+
+async def test_moderation_interrupted_launch_is_explained_and_finished(tmp_path: Path) -> None:
+    """В1: запуск, прерванный проверкой объявлений (кампания-черновик v501), объясняет владельцу честно:
+    реклама включится автоматически, кнопку снова нажимать не нужно. Пока остановка не подтверждена, план
+    ждёт воркера; после одобрения объявлений повтор запуска доводит рекламу до конца на той же кампании."""
+    world, plan = await ready(tmp_path, platforms=("direct",), adapters={"direct": DraftCampaign()})
+    with pytest.raises(LaunchFailed) as failed:
+        await launch(world, plan)
+    text = str(failed.value)
+    assert "проверяет объявления" in text and "включится автоматически" in text
+    assert "включилась ли реклама" not in text
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "failed" and stored.payload["launch"]["started_at"]
+    reason = stored.payload["launch"]["reason"]
+    assert "проверяет объявления" in reason and "включилась ли реклама" not in reason
+    (pending,) = pending_launches(world)
+    assert pending.platform == "direct"
+    assert pending.evidence["_service"]["error"] == MODERATION_PENDING
+    # Остановить черновик нельзя: новый план не собирается, пока воркер не разберётся с запуском.
+    world.business.month_budget_kop += 100_000
+    with pytest.raises(Blocked, match="Прошлый запуск рекламы не завершился"):
+        await world.plans.get_plan(world.business.id, NOW, TODAY)
+    world.business.month_budget_kop -= 100_000
+
+    worker = recovery_worker(world, after=timedelta(minutes=11))
+    await worker.run_business_due(world.business.id)
+    # Кампания создана остановленной и ничего не тратит: воркер подтвердил остановку и записал неудачу.
+    assert stored.payload["launch"]["started_at"] is None
+    assert stored.payload["launch"]["error"] == launch_module.failed_launch(reason)
+    assert not pending_launches(world)
+    direct = next(item for item in campaigns(world) if item.platform == "direct")
+    assert (await states(world, direct))[direct.external_id].status == "paused_auto"
+
+    # Площадка одобрила объявления: повтор запуска включает рекламу на той же кампании.
+    world.adapters["direct"].accepted = True
+    assert (await launch(world, plan))["status"] == "launched"
+    assert world.business.status == "running" and len(campaigns(world)) == 1
+    assert (await states(world, direct))[direct.external_id].status == "active"
+
+
+async def test_retry_of_platform_waiting_for_moderation_keeps_others_running(tmp_path: Path) -> None:
+    """Повтор площадки, которая ушла на проверку, не роняет запрос необработанной ошибкой и не трогает уже
+    запущенные площадки: владелец получает честный текст, Директ продолжает работать."""
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    assert (await launch(world, plan))["platform_errors"].keys() == {"vk"}
+    world.adapters["vk"] = DraftCampaign()
+    with pytest.raises(LaunchFailed) as failed:
+        await launch(world, plan)
+    text = str(failed.value)
+    assert "проверяет объявления" in text and "включилась ли реклама" not in text
+    assert "продолжает работать" in text
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "launched" and stored.payload["launch"]["started_at"] is None
+    assert list(stored.payload["launch"]["platform_errors"]) == ["vk"]
+    direct = next(item for item in campaigns(world) if item.platform == "direct")
+    assert (await states(world, direct))[direct.external_id].status == "active"
+    assert world.business.status == "running"
+    # Проверка закончилась: следующий повтор доводит ВКонтакте до конца.
+    world.adapters["vk"].accepted = True
+    result = await launch(world, plan)
+    assert result["platform_errors"] == {}
+    vk = next(item for item in campaigns(world) if item.platform == "vk")
+    assert (await states(world, vk))[vk.external_id].status == "active"
 
 
 @pytest.mark.parametrize(
@@ -657,17 +813,18 @@ async def test_second_launch_while_first_is_running_creates_nothing(tmp_path: Pa
     assert (await launch(world, plan))["status"] == "launched"
 
 
-async def test_failed_launch_can_be_retried_at_once(tmp_path: Path, monkeypatch) -> None:
+async def test_retry_of_failed_platform_starts_clean(tmp_path: Path, monkeypatch) -> None:
+    """Повтор незапустившейся площадки не получает чужую ошибку и причину прошлой попытки: запуск чистый,
+    кампании плана — действующие."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
+    await launch(world, plan)
     adapters["vk"].fail = False
     activate, seen = world.launches.activate, []
 
     async def activate_watched(business, stored, *args) -> None:
         seen.append((stored.payload["launch"]["error"], stored.payload["launch"]["reason"]))
-        await activate(business, stored, *args)
+        return await activate(business, stored, *args)
 
     monkeypatch.setattr(world.launches, "activate", activate_watched)
     assert (await launch(world, plan))["status"] == "launched"
@@ -678,11 +835,14 @@ async def test_failed_launch_can_be_retried_at_once(tmp_path: Path, monkeypatch)
 
 
 async def test_stopped_failed_launch_lets_plan_be_rebuilt_at_once(tmp_path: Path) -> None:
-    """Упавший запуск остановил всё, что создал: план с новыми данными собирается сразу, а не после воркера."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    """Упавший запуск (все площадки отказали) остановил всё, что создал: план с новыми данными собирается
+    сразу, а не после воркера."""
+    adapters = {"direct": FailingCreate(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, plan)
+    assert world.business.status == "plan_ready"
+    assert world.repository.latest_plan(world.business.id).status == "failed"
     world.business.month_budget_kop += 100_000
     rebuilt = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert rebuilt["id"] != plan["id"] and rebuilt["month_budget_kop"] == world.business.month_budget_kop
@@ -785,7 +945,7 @@ async def test_launch_holds_lock_until_business_is_running(tmp_path: Path, monke
             seen.append("metrica saved")
         except ChangeConflict:
             seen.append("metrica 409")
-        await activate(*args)
+        return await activate(*args)
 
     def finish_watched(*args) -> None:
         seen.append(("finish", set(held), world.business.status))
@@ -935,7 +1095,7 @@ async def test_running_launch_holds_lock_and_is_not_touched(tmp_path: Path, monk
         seen.append(world.repository.latest_plan(world.business.id).payload["launch"]["started_at"])
         await worker.recover_launch(world.business.id)
         await worker.run_business_due(world.business.id)
-        await activate(*args)
+        return await activate(*args)
 
     monkeypatch.setattr(world.launches, "activate", worker_during_activation)
     assert (await launch(world, plan))["status"] == "launched"
@@ -1034,67 +1194,20 @@ async def test_closed_account_keeps_plan_unsettled_until_campaign_is_stopped(tmp
     assert rebuilt["id"] != plan["id"] and rebuilt["month_budget_kop"] == world.business.month_budget_kop
 
 
-async def test_failed_stop_after_failed_launch_is_finished_by_worker(tmp_path: Path) -> None:
-    adapters = {"direct": StuckPause(), "vk": FailingActivation()}
+async def test_partial_launch_reads_notices_that_are_no_longer_true(tmp_path: Path) -> None:
+    """Запуск, завершившийся частично (площадка не создалась), — тоже запуск: уведомления прошлых прерванных
+    попыток отмечает прочитанными, как успешный, — их тексты больше неправда."""
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed, match="Не все созданные кампании удалось остановить"):
-        await launch(world, plan)
-    stored = world.repository.latest_plan(world.business.id)
-    assert stored.status == "failed" and stored.payload["launch"]["started_at"]
-    assert (await platform_statuses(world))["direct"] == "active"
-    world.business.month_budget_kop += 100_000
-    with pytest.raises(Blocked, match="Прошлый запуск рекламы не завершился"):
-        await world.plans.get_plan(world.business.id, NOW, TODAY)
-    world.business.month_budget_kop -= 100_000
-
-    # Площадка не отвечает и воркеру: план остаётся незавершённым, ход повторится. Причина неудачи запуска
-    # сохраняется в объяснении воркера.
-    reason = stored.payload["launch"]["reason"]
-    assert reason.startswith("Площадка «ВКонтакте» не включила рекламу.")
-    worker = recovery_worker(world, after=timedelta(minutes=1))
-    await worker.run_business_due(world.business.id)
-    assert stored.payload["launch"]["started_at"]
-    assert stored.payload["launch"]["error"] == launch_module.interrupted_unstopped(["direct"], reason)
-    assert stored.payload["launch"]["error"].startswith(f"Запуск не удался: {reason} Остановить созданную")
-    adapters["direct"].stuck = False
-    worker.clock.advance(hours=0.5)
-    await worker.run_business_due(world.business.id)
-    assert await platform_statuses(world) == {"direct": "paused_auto", "vk": "paused_auto"}
-    assert stored.payload["launch"]["started_at"] is None
-    assert stored.payload["launch"]["error"] == launch_module.failed_launch(reason)
-    # ВКонтакте остановил сам запуск: воркер его не трогает. Директ — одна неудачная попытка и одна остановка.
-    assert sorted((row.platform, row.status) for row in interrupted_stops(world)) == [
-        ("direct", "applied"),
-        ("direct", "failed"),
-    ]
-    worker.clock.advance(hours=0.5)
-    await worker.run_business_due(world.business.id)
-    assert len(interrupted_stops(world)) == 2 and len(notices(world)) == 2
-
-
-@pytest.mark.parametrize("retry_succeeds", [True, False])
-async def test_settled_launch_reads_notices_that_are_no_longer_true(tmp_path: Path, retry_succeeds: bool) -> None:
-    """«Остановить не удалось» после запуска или после остановки при повторе уже неправда: уведомление темы плана
-    отмечается прочитанным."""
-    adapters = {"direct": StuckPause(), "vk": FailingActivation()}
-    world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
-    worker = recovery_worker(world, after=timedelta(minutes=1))
-    await worker.run_business_due(world.business.id)
-
-    def unread() -> list[WorkerRun]:
-        return worker.repository.unread_notifications(world.business.id, {"LAUNCH_INTERRUPTED"}, 5, worker.clock.now)
-
-    assert [row.log[0]["target_id"] for row in unread()] == [plan["id"]]
-    if retry_succeeds:
-        adapters["vk"].fail = False
-        assert (await launch(world, plan))["status"] == "launched"
-    else:
-        adapters["direct"].stuck = False
-        with pytest.raises(LaunchFailed, match="остановлено и ничего не тратит"):
-            await launch(world, plan)
-    assert not unread() and len(notices(world)) == 1
+    worker = recovery_worker(world)
+    for target in (plan["id"], plan["id"] + 100):
+        worker.notice(
+            world.business, "LAUNCH_INTERRUPTED", "Не удалось остановить.", key=f"k{target}", target_id=target
+        )
+    result = await launch(world, plan)
+    assert result["platform_errors"] and world.business.status == "running"
+    unread = worker.repository.unread_notifications(world.business.id, {"LAUNCH_INTERRUPTED"}, 5, NOW)
+    assert not unread and len(notices(world)) == 2
 
 
 async def test_campaign_missing_on_platform_does_not_hold_plan(tmp_path: Path, monkeypatch) -> None:
@@ -1261,15 +1374,17 @@ async def test_launched_plan_with_leftover_launch_marks_is_settled(tmp_path: Pat
 
 
 async def replaced_plan(tmp_path: Path) -> tuple[World, Campaign, set[int], Worker]:
-    """Запуск первого плана упал и остановил созданное, а бизнес запущен по новому плану: кампания Директа первого
-    плана остановлена и показывала бы устаревшие объявления."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    """Запуск первого плана упал целиком (Директ не включил рекламу, ВКонтакте не создалась) и остановил
+    созданное, а бизнес запущен по новому плану: кампания Директа первого плана остановлена и показывала бы
+    устаревшие объявления."""
+    adapters = {"direct": FailingActivation(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, plan)
-    (old,) = [item for item in campaigns(world) if item.external_id]
+    (old,) = [item for item in campaigns(world) if item.platform == "direct" and item.external_id]
     world.business.month_budget_kop += 100_000
     replacement = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    adapters["direct"].fail = False
     adapters["vk"].fail = False
     await world.launches.launch(world.business.id, replacement["id"], False, NOW, TODAY)
     current = set(world.repository.latest_plan(world.business.id).payload["launch"]["campaigns"].values())
@@ -1333,19 +1448,6 @@ async def test_campaigns_of_replaced_plan_are_neither_resumed_nor_rebalanced(tmp
     worker.step_key = "owner"
     await stop_all(business, worker=worker, actor="owner")
     assert (await states(world, old))[old.external_id].status == "paused_owner"
-
-
-async def test_unstopped_failed_launch_can_be_repeated_at_once(tmp_path: Path) -> None:
-    adapters = {"direct": StuckPause(), "vk": FailingActivation()}
-    world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
-    adapters["vk"].fail = False
-    assert (await launch(world, plan))["status"] == "launched"
-    assert len(campaigns(world)) == 2 and await platform_statuses(world) == {"direct": "active", "vk": "active"}
-    # Повтор подхватил кампании плана: теперь это кампании действующего плана.
-    worker = recovery_worker(world)
-    assert {item.id for item in worker.current_campaigns(world.business)} == {item.id for item in campaigns(world)}
 
 
 async def test_demo_rewind_does_not_look_for_abandoned_launches(tmp_path: Path, monkeypatch) -> None:
@@ -1418,7 +1520,7 @@ async def test_only_latest_plan_of_draft_is_launched(tmp_path: Path) -> None:
     """Запуск v1 упал и остановил созданное; бюджет меняли туда и обратно — v2, затем v3 с тем же хэшем, что у v1.
     Запуск v1 или v2 из старой вкладки не создаёт вторые кампании: действующий план у бизнеса один, а кэпы не
     удваиваются."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    adapters = {"direct": FailingActivation(), "vk": FailingActivation()}
     world, v1 = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, v1)
@@ -1428,6 +1530,7 @@ async def test_only_latest_plan_of_draft_is_launched(tmp_path: Path) -> None:
     world.business.month_budget_kop = base
     v3 = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert len({v1["id"], v2["id"], v3["id"]}) == 3
+    adapters["direct"].fail = False
     adapters["vk"].fail = False
     created = len(campaigns(world))
     for outdated in (v1, v2):
@@ -1656,12 +1759,11 @@ async def test_abandoned_launch_campaigns_are_not_current(tmp_path: Path, monkey
 
 
 async def test_retry_does_not_depend_on_current_campaigns(tmp_path: Path, monkeypatch) -> None:
-    """Во время повтора план ещё failed, и его кампании «заменённые»: запуск их не ищет среди действующих, а берёт из
-    плана."""
+    """Повтор незапустившейся площадки идёт по плану: запуск берёт кампании из плана, а не спрашивает
+    действующие."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
+    await launch(world, plan)
     adapters["vk"].fail = False
 
     def forbidden(self, business) -> None:
@@ -1713,15 +1815,17 @@ async def test_disconnecting_account_stops_old_plan_campaign_turned_on_in_cabine
 
 
 async def replaced_vk_plan(tmp_path: Path) -> tuple[World, Campaign, Worker]:
-    """Первый план упал на включении ВКонтакте и остановил созданное; новый план собрали, пока кабинет ВКонтакте ждал
-    входа, — только для Директа. Потом владелец вошёл снова: кампания ВКонтакте есть только у прежнего плана."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    """Первый план упал целиком (Директ не создался, ВКонтакте не включила рекламу) и остановил созданное; новый
+    план собрали, пока кабинет ВКонтакте ждал входа, — только для Директа. Потом владелец вошёл снова:
+    кампания ВКонтакте есть только у прежнего плана."""
+    adapters = {"direct": FailingCreate(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, plan)
     (old,) = [item for item in campaigns(world) if item.platform == "vk"]
     vk = next(item for item in world.repository.accounts(world.business.id) if item.platform == "vk")
     vk.status = "needs_reauth"
+    adapters["direct"].fail = False
     replacement = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert (await launch(world, replacement))["status"] == "launched"
     vk.status = "ok"
@@ -2017,28 +2121,6 @@ async def test_abandoned_launch_with_changed_budget_is_stopped_and_refused(tmp_p
     assert rebuilt["id"] != plan["id"] and rebuilt["month_budget_kop"] == world.business.month_budget_kop
 
 
-async def test_refused_retry_of_unstopped_launch_keeps_reason_and_waits_for_worker(tmp_path: Path) -> None:
-    """Упавший запуск не остановил Директ, а повтор не проходит проверки: созданное снова пробуют остановить. Площадка
-    опять не ответила — план ждёт воркера, причина первой неудачи сохраняется, «None» в тексте нет."""
-    adapters = {"direct": StuckPause(), "vk": FailingActivation()}
-    world, plan = await ready(tmp_path, adapters=adapters)
-    with pytest.raises(LaunchFailed):
-        await launch(world, plan)
-    stored = world.repository.latest_plan(world.business.id)
-    reason = stored.payload["launch"]["reason"]
-    world.business.month_budget_kop += 100_000
-    with pytest.raises(LaunchBlocked, match="изменились"):
-        await launch(world, plan)
-    assert stored.status == "failed" and stored.payload["launch"]["started_at"]
-    assert stored.payload["launch"]["error"] == launch_module.failed_launch(reason, stopped=False)
-    adapters["direct"].stuck = False
-    with pytest.raises(LaunchBlocked, match="изменились"):
-        await launch(world, plan)
-    assert await platform_statuses(world) == {"direct": "paused_auto", "vk": "paused_auto"}
-    assert stored.payload["launch"]["started_at"] is None
-    assert stored.payload["launch"]["error"] == launch_module.failed_launch(reason)
-
-
 async def test_abandoned_launch_in_closed_account_is_left_to_worker(tmp_path: Path, monkeypatch) -> None:
     """Повтор брошенного запуска отказан, а кабинет ВКонтакте требует входа: остановить там нечем, план ждёт воркера,
     и текст не обещает, что всё остановлено."""
@@ -2103,14 +2185,15 @@ async def test_busy_lock_pool_is_not_reported_as_running_launch(tmp_path: Path, 
 
 
 async def test_worker_stops_abandoned_new_plan_next_to_failed_old_one(tmp_path: Path, monkeypatch) -> None:
-    """v1 упал и остановил созданное, v2 брошен посреди запуска: предпроверка воркера находит брошенный запуск среди
-    нескольких планов и останавливает кампании v2."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    """v1 упал целиком и остановил созданное, v2 брошен посреди запуска: предпроверка воркера находит брошенный
+    запуск среди нескольких планов и останавливает кампании v2."""
+    adapters = {"direct": FailingActivation(), "vk": FailingActivation()}
     world, v1 = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, v1)
     world.business.month_budget_kop += 100_000
     v2 = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    adapters["direct"].fail = False
     adapters["vk"].fail = False
     await crash_before_finish(world, v2, monkeypatch)
     plans = world.repository.rows(Plan, business_id=world.business.id)
@@ -2124,7 +2207,7 @@ async def test_worker_stops_abandoned_new_plan_next_to_failed_old_one(tmp_path: 
 
 async def test_stopped_launch_reads_notices_of_its_plan_only(tmp_path: Path) -> None:
     """Неудача, которая всё остановила, отмечает прочитанным «не удалось остановить» своего плана, а не чужого."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    adapters = {"direct": FailingActivation(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
     worker = recovery_worker(world)
     for target in (plan["id"], plan["id"] + 100):
@@ -2169,15 +2252,16 @@ async def test_campaign_of_launched_plan_without_platform_id_is_not_current(tmp_
 
 
 async def test_only_campaigns_of_last_launched_of_three_plans_are_current(tmp_path: Path) -> None:
-    """v1 и v2 упали и остановили созданное, v3 запущен: действующие — только кампании v3, остальные — прежних планов,
-    и их остановку откат не отменяет."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    """v1 и v2 упали целиком и остановили созданное, v3 запущен: действующие — только кампании v3, остальные —
+    прежних планов, и их остановку откат не отменяет."""
+    adapters = {"direct": FailingActivation(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
     for _ in range(2):
         with pytest.raises(LaunchFailed):
             await launch(world, plan)
         world.business.month_budget_kop += 100_000
         plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
+    adapters["direct"].fail = False
     adapters["vk"].fail = False
     assert (await launch(world, plan))["status"] == "launched"
     latest = set(world.repository.latest_plan(world.business.id).payload["launch"]["campaigns"].values())
@@ -2191,10 +2275,11 @@ async def test_only_campaigns_of_last_launched_of_three_plans_are_current(tmp_pa
 async def test_interrupted_retry_of_failed_plan_is_explained_and_continued(tmp_path: Path, monkeypatch) -> None:
     """Повтор упавшего запуска оборвался: план ещё failed, но без объяснения прошлой неудачи. Экран плана говорит, что
     запуск не завершился, а следующий повтор его продолжает."""
-    adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
+    adapters = {"direct": FailingActivation(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
     with pytest.raises(LaunchFailed):
         await launch(world, plan)
+    adapters["direct"].fail = False
     adapters["vk"].fail = False
     await crash_before_finish(world, plan, monkeypatch)
     stored = world.repository.latest_plan(world.business.id)
