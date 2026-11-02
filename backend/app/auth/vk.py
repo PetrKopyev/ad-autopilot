@@ -156,8 +156,9 @@ class VkClient:
     @staticmethod
     def _field_errors(value: Any, path: str = "", depth: int = 0) -> list[str]:
         """Пути полей с ошибками из вложенного 'fields' живого ответа: 'campaigns[0].priced_goal: required ...'.
-        Глубина ограничена; обёртка списка (items) не добавляет сегмента в путь."""
-        if depth > 4:
+        Узлы-обёртки списков (items) и контейнеры с items прозрачны: спускаемся до листьев, где конкретная
+        причина. Глубина ограничена."""
+        if depth > 8:
             return []
         if isinstance(value, list):
             return [
@@ -168,15 +169,18 @@ class VkClient:
         if not isinstance(value, dict):
             return []
         reason = " ".join(str(value[key]) for key in ("code", "message") if value.get(key))
-        if reason and path:
-            return [f"{path}: {reason}"]
-        if set(value) == {"items"}:
-            return VkClient._field_errors(value["items"], path, depth + 1)
-        return [
+        here = [f"{path}: {reason}"] if reason and path else []
+        items = value.get("items")
+        nested = [
             item
             for key, element in value.items()
+            if key != "items"
             for item in VkClient._field_errors(element, f"{path}.{key}" if path else str(key), depth + 1)
         ]
+        if isinstance(items, list):
+            nested += VkClient._field_errors(items, path, depth + 1)
+        # Контейнер с вложенными причинами раскрываем глубже; лист без вложенного — сам причина.
+        return nested or here
 
     @staticmethod
     def _error_detail(data: Any) -> str | None:
@@ -188,7 +192,7 @@ class VkClient:
             if fields:
                 parts.append("; ".join(fields[:5]))
             detail = "; ".join(parts)
-            return detail[:300].rstrip(".; ") or None
+            return detail[:600].rstrip(".; ") or None
         if isinstance(error, str) and error:
             return error.rstrip(".")
         return None

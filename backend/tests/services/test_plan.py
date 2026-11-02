@@ -598,7 +598,7 @@ async def test_demo_llm_first_angle_title_is_phrase_not_bare_service_name() -> N
 
 async def test_demo_plan_ad_titles_are_phrases_and_differ(world: World) -> None:
     """В плане демо у групп Директа оба текста имеют разные заголовки-фразы — без голого имени услуги.
-    У VK заголовок 25 знаков: длинное название услуги с поводом не влезает — там имя услуги допустимо."""
+    У VK заголовок 40 знаков: длинное название услуги с поводом не влезает — там имя услуги допустимо."""
     from app.services.registry import DemoLLM
 
     world.plans.llm = DemoLLM()

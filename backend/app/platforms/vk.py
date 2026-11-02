@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -31,26 +32,35 @@ from app.platforms.regions import AREAS, Region, RegionCache, find_region, not_f
 API_FORMAT = {
     "autobidding_mode": "max_goals",
     "objective": "site_conversions",
+    # Баннер универсального пакета сайта (паттерн multiformat_square, banner_patterns.json): главная
+    # картинка 600×600 + иконка 256×256, заголовок 40 знаков, текст 90, кнопка — обязательные поля.
     "image_key": "image_600x600",
-    "title_key": "title_25",
+    "icon_key": "icon_256x256",
+    "title_key": "title_40_vkads",
     "text_key": "text_90",
-    "title_limit": 25,
+    "cta_key": "cta_sites_full",
+    "cta_text": "Подробнее",
+    "title_limit": 40,
     "text_limit": 90,
     "statuses": {"active": "active", "paused_owner": "blocked", "paused_auto": "blocked", "archived": "deleted"},
     "min_daily_limit_kop": 30000,
     "page": 250,
 }
-# Пакет VK обязателен в ad_groups (живой кабинет, 31.10). Подходит не каждый пакет из packages.json:
-# - флаг no_create_campaigns закрывает создание кампаний через API (живой ответ: Invalid package);
-# - карусель, посты сообщества и MAX — иной формат баннеров; этим пакетам нужна цель priced_goal
-#   (Top@Mail/мобильные приложения), а цель Метрики через API не привязывается — нам такие пакеты не подходят.
+# Пакет VK обязателен в campaign плана. Подходит не каждый пакет из packages.json (живые пробы 02.11):
+# - универсальные пакеты выводятся из работы: в списке остаются «active», но создание падает «Invalid package»
+#   (пакета нет и в деталях — GET packages/3104.json → 404), поэтому подходящих кандидатов перебираем при отказе;
+# - доступные VK универсальные пакеты сайта: 3229/3232/3509/3858/4617; пакеты oCPM conversions требуют
+#   цель priced_goal (событие пикселя VK: счётчик Top@Mail + цель, Метрика не подходит — ответ поддержки VK),
+#   cpc-пакеты (3232) создаются без цели, objective и autobidding_mode живут на уровне ПЛАНА, не campaign.
 PACKAGE_REJECT_FLAGS = {"no_create_campaigns"}
-PACKAGE_REJECT_HINTS = ("carousel", "карусель", "пост", "post", "max")
+# Отсечение по токенам имени (разделитель «_»): «max»/«post» подстрокой зацепили бы «multiformat» —
+# а это как раз универсальные пакеты сайта, которые нам нужны.
+PACKAGE_REJECT_TOKENS = {"carousel", "карусель", "пост", "post", "max", "charity"}
+PACKAGE_GOAL_REQUIRED_HINT = "ocpm"
 PACKAGE_UNAVAILABLE = (
-    "В кабинете VK Рекламы нет пакета, на котором API может создать кампанию: универсальные пакеты «Сайт» "
-    "закрыты для создания (no_create_campaigns), а остальные — карусель, посты сообщества и MAX, которым нужна "
-    "цель Top@Mail или приложения (priced_goal), а её у бизнеса нет. Запросите у VK пакет для API-создания "
-    "(ads_api@vk.team) или задайте подходящий id в VK_PACKAGE_ID."
+    "В кабинете VK Рекламы нет пакета, на котором API может создать кампанию сайта без цели пикселя. "
+    "Создайте пиксель VK (ads.vk.com → счётчик Top@Mail) и цель, задайте её в VK_PRICED_GOAL_SOURCE_ID "
+    "и VK_PRICED_GOAL_NAME — или укажите подходящий пакет в VK_PACKAGE_ID. Поддержка VK: ads_api@vk.team."
 )
 # Регионы VK со своими id (не Яндекса): GET /api/v2/regions.json, см. https://ads.vk.com/doc/api/object/Region
 RUSSIA = 188
@@ -106,7 +116,31 @@ def _package_fits(item: dict) -> bool:
     if any(flag in PACKAGE_REJECT_FLAGS for flag in item.get("flags") or []):
         return False
     text = f"{item.get('name', '')} {item.get('description', '')}".lower()
-    return not any(hint in text for hint in PACKAGE_REJECT_HINTS)
+    tokens = {part for part in re.split(r"[_\W]+", text) if part}
+    if tokens & PACKAGE_REJECT_TOKENS:
+        return False
+    objective = item.get("objective")
+    if isinstance(objective, list) and objective and objective[0] != API_FORMAT["objective"]:
+        # Пакет под другую цель (например branding) — для рекламы сайта с конверсиями не подходит.
+        return False
+    return True
+
+
+def _needs_priced_goal(item: dict) -> bool:
+    """Пакету нужна цель пикселя в priced_goal: живые пробы 02.11 — oCPM-пакеты conversions требуют цель,
+    cpc-пакеты (3232) создаются без неё. По имени пакета, признака в packages.json нет."""
+    return PACKAGE_GOAL_REQUIRED_HINT in str(item.get("name", "")).lower()
+
+
+def _package_candidates(items: list[dict[str, Any]], priced_goal_set: bool) -> list[tuple[int, dict[str, Any]]]:
+    """Кандидаты в порядке попыток создания: сначала пакеты без обязательной цели (минимальный id),
+    затем требующие цели — только если она задана в конфиге. Выведенные из работы пакеты отсеиваются
+    живым ответом «Invalid package» и перебираются дальше."""
+    suitable = sorted((item for item in items if _package_fits(item)), key=lambda item: item["id"])
+    without_goal = [item for item in suitable if not _needs_priced_goal(item)]
+    with_goal = [item for item in suitable if _needs_priced_goal(item)]
+    ordered = [*without_goal, *(with_goal if priced_goal_set else [])]
+    return [(item["id"], item) for item in ordered]
 
 
 def _targetings(targeting: dict) -> dict:
@@ -138,7 +172,9 @@ class VkAdapter(VkClient):
         super().__init__(token, **kwargs)
         self._href = href
         self._package_id = package_id
-        self._package_choice: dict[str, Any] | None = None
+        self._package_choice: list[tuple[int, dict[str, Any]]] | None = None
+        # Пакет, на котором реально создан план: новые группы кампании живут на нём же.
+        self._used_package_id: int | None = package_id
         self._marking_confirmed = marking_confirmed
         self._tz = ZoneInfo(getattr(self._config, "tz_default", "Europe/Moscow"))
         self._trees: dict[str, ExternalRefs] = {}
@@ -171,20 +207,24 @@ class VkAdapter(VkClient):
     def _today(self) -> date:
         return datetime.now(self._tz).date()
 
-    async def _items(self, path: str, params: dict, headers: dict | None = None) -> list[dict]:
+    async def _items(
+        self, path: str, params: dict, headers: dict | None = None, *, page: int | None = None
+    ) -> list[dict]:
+        # Живой пакетный лимит packages.json — меньше общего (250 отклоняются max_value, 02.11): страница меньше.
+        limit = page or API_FORMAT["page"]
         items: list[dict] = []
         while True:
             data = await self._request(
                 "GET",
                 f"{path}.json",
-                params={**params, "limit": API_FORMAT["page"], "offset": len(items)},
+                params={**params, "limit": limit, "offset": len(items)},
                 headers=headers,
             )
-            page = data.get("items")
-            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+            page_items = data.get("items")
+            if not isinstance(page_items, list) or any(not isinstance(item, dict) for item in page_items):
                 raise invalid_response()
-            items += page
-            if not page or len(items) >= data.get("count", len(items)):
+            items += page_items
+            if not page_items or len(items) >= data.get("count", len(items)):
                 return items
 
     async def _add(self, path: str, body: dict) -> dict:
@@ -196,31 +236,24 @@ class VkAdapter(VkClient):
     async def _update(self, path: str, id_: int, body: dict) -> None:
         await self._request("POST", f"{path}/{id_}.json", json=body)
 
-    async def _resolve_package(self) -> tuple[int, dict[str, Any]]:
-        """Пакет для campaign плана: id из конфига, иначе первый подходящий из packages.json (выбор кэшируется
-        на экземпляр, чтобы новые группы работающей кампании жили на том же пакете, что и план)."""
+    async def _resolve_packages(self) -> list[tuple[int, dict[str, Any]]]:
+        """Пакеты для campaign плана в порядке попыток: id из конфига (один), иначе кандидаты из packages.json
+        (выбор кэшируется на экземпляр, чтобы новые группы работающей кампании жили на том же пакете)."""
         if self._package_id is not None:
-            return self._package_id, {}
+            return [(self._package_id, {})]
         if self._package_choice is None:
             # Фильтр fields у packages.json не документирован: читаем элементы целиком (список — сотни позиций).
-            items = await self._items("packages", {})
-            suitable = sorted((item for item in items if _package_fits(item)), key=lambda item: item["id"])
-            if not suitable:
+            # Пакетный лимит packages.json живьём меньше общего: страницы по 50, не 250.
+            items = await self._items("packages", {}, page=50)
+            priced_goal_set = (
+                isinstance(self._priced_goal_source_id, int)
+                and not isinstance(self._priced_goal_source_id, bool)
+                and self._priced_goal_source_id > 0
+            )
+            self._package_choice = _package_candidates(items, priced_goal_set)
+            if not self._package_choice:
                 raise PlatformError(PACKAGE_UNAVAILABLE)
-            self._package_choice = suitable[0]
-        return self._package_choice["id"], self._package_choice
-
-    def _package_objective(self, package: dict[str, Any]) -> tuple[str, str]:
-        """Цель и стратегия плана: из полей выбранного пакета, если VK их отдаёт, иначе дефолты API_FORMAT."""
-        objective = package.get("objective")
-        if isinstance(objective, list) and objective and isinstance(objective[0], str) and objective[0]:
-            objective = objective[0]
-        else:
-            objective = None
-        autobidding = package.get("autobidding_mode")
-        if not isinstance(autobidding, str) or not autobidding:
-            autobidding = None
-        return objective or API_FORMAT["objective"], autobidding or API_FORMAT["autobidding_mode"]
+        return self._package_choice
 
     async def create_campaign_tree(self, plan_part: CampaignTreeSpec) -> ExternalRefs:
         key = plan_part.idempotency_key
@@ -242,33 +275,74 @@ class VkAdapter(VkClient):
             if any(target.kind != "interest" for target in group.targets):
                 raise PlatformError("VK принимает только интересы; фразы и аудитории задаются в targeting группы.")
         # Живой API не поддерживает фильтра по имени у ad_plans (unknown_filter "_name__contains"):
-        # читаем список целиком и отбираем суффикс ключа, как в адаптере Директа.
+        # читаем список целиком и отбираем суффикс ключа, как в адаптере Директа. Удалённые планы VK
+        # отдаёт в списке вместе с живыми — они не кандидаты.
         found = [
             item
-            for item in await self._items("ad_plans", {"fields": "id,name"})
-            if str(item.get("name", "")).endswith(f" {key}")
+            for item in await self._items("ad_plans", {"fields": "id,name,status"})
+            if item.get("status") != "deleted" and str(item.get("name", "")).endswith(f" {key}")
         ]
         if len(found) > 1:
             raise PlatformError("В VK Рекламе несколько кампаний с одним ключом идемпотентности.")
         if found:
-            plan = {"id": found[0]["id"]}
-            plan["ad_groups"] = await self._items("ad_groups", {"_ad_plan_id": plan["id"], "fields": "id,name"})
-            # Живой API: у banners фильтр плана — "_ad_group__ad_plan_id"; "_ad_plan_id" отвергается.
-            banners = await self._items(
-                "banners", {"_ad_group__ad_plan_id": plan["id"], "fields": "id,name,ad_group_id"}
-            )
-            for group in plan["ad_groups"]:
-                group["banners"] = [item for item in banners if item.get("ad_group_id") == group["id"]]
+            plan = await self._load_plan_tree(found[0]["id"])
         else:
-            plan = await self._add("ad_plans", await self._plan_body(plan_part))
+            # Выведенные из работы пакеты остаются в списке «active» и падают только на создании
+            # («Invalid package»): перебираем кандидатов, пока живой валидатор не примет план.
+            refusals = []
+            for package_id, _package in await self._resolve_packages():
+                created: dict[str, Any] | None = None
+                try:
+                    created = await self._add("ad_plans", await self._plan_body(plan_part, package_id))
+                    self._used_package_id = package_id
+                    # Живой ответ создания — только id плана и campaigns: дерево дочитываем; полный ответ
+                    # (тестовый стенд) берём как есть.
+                    plan = created if "ad_groups" in created else await self._load_plan_tree(created["id"])
+                    break
+                except PlatformError as error:
+                    text = str(error).lower()
+                    if "ord_data_required" in text or "ord data" in text:
+                        # Баннеры не создаются, пока в кабинете не заполнена маркировка (ОРД): план, если
+                        # успел создаться, остаётся пустым — убираем его, чтобы не плодить черновики.
+                        if created is not None:
+                            try:
+                                await self._update("ad_plans", created["id"], {"status": "deleted"})
+                            except PlatformError:
+                                pass
+                        raise PlatformError(
+                            "VK Реклама не приняла объявления: в кабинете не заполнены данные маркировки "
+                            "(ОРД). Откройте ads.vk.com → «Маркировка рекламы», заполните ИНН и название "
+                            "рекламодателя, затем повторите запуск."
+                        ) from error
+                    if "invalid package" not in text:
+                        raise
+                    refusals.append(f"пакет {package_id}: Invalid package")
+            else:
+                detail = f" Отказало: {'; '.join(refusals)}." if refusals else ""
+                raise PlatformError(f"{PACKAGE_UNAVAILABLE}{detail}")
         refs = self._refs(plan_part, plan)
         self._trees[key] = refs
         return refs
+
+    async def _load_plan_tree(self, plan_id: int) -> dict:
+        """Структура плана для _refs: ad_groups по плану и banners по группам (живой ответ создания
+        возвращает только id плана и campaigns — дерево дочитываем)."""
+        plan: dict[str, Any] = {"id": plan_id, "ad_groups": []}
+        plan["ad_groups"] = await self._items("ad_groups", {"_ad_plan_id": plan_id, "fields": "id,name"})
+        # Живой API: у banners фильтр плана — "_ad_group__ad_plan_id"; "_ad_plan_id" отвергается.
+        banners = await self._items(
+            "banners", {"_ad_group__ad_plan_id": plan_id, "fields": "id,name,ad_group_id"}
+        )
+        for group in plan["ad_groups"]:
+            group["banners"] = [item for item in banners if item.get("ad_group_id") == group["id"]]
+        return plan
 
     def _state(self, value: str) -> str:
         return "active" if self._marking_confirmed and API_FORMAT["statuses"].get(value) == "active" else "blocked"
 
     def _group_body(self, group: AdGroupSpec, url: int) -> dict:
+        """Рекламная группа плана (в схеме плана — уровень campaigns, а в списках — ad_groups: это один
+        объект, живой API, 02.11): имя, статус, таргетинги и баннеры по структуре паттерна пакета."""
         banners = []
         for ad in group.ads:
             banner = {
@@ -278,10 +352,14 @@ class VkAdapter(VkClient):
                 "textblocks": {
                     API_FORMAT["title_key"]: {"text": ad.title},
                     API_FORMAT["text_key"]: {"text": ad.text},
+                    API_FORMAT["cta_key"]: {"text": API_FORMAT["cta_text"]},
                 },
             }
             if ad.image_ref:
-                banner["content"] = {API_FORMAT["image_key"]: {"id": _integer(ad.image_ref)}}
+                # Одна картинка объявления закрывает обе обязательные роли паттерна: VK самостоятельно
+                # масштабирует контент (проверено загрузкой: валидатор принимает один content id в обеих ролях).
+                ref = {"id": _integer(ad.image_ref)}
+                banner["content"] = {API_FORMAT["image_key"]: ref, API_FORMAT["icon_key"]: ref}
             banners.append(banner)
         body = {
             "name": _named(group.name, f"ap-{group.id}"),
@@ -294,34 +372,32 @@ class VkAdapter(VkClient):
             body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
         return body
 
-    def _campaign_body(self, name: str, package_id: int, package: dict[str, Any]) -> dict:
-        """Campaign плана (живой валидатор требует уровень campaigns): пакет, цель и стратегия живут здесь,
-        не на плане. priced_goal — цель оптимизации Top@Mail/приложений; без неё некоторые пакеты не создаются,
-        цель Метрики VK через API не принимает (source_id счётчика отвергнут живьём, 01.11)."""
-        objective, autobidding = self._package_objective(package)
-        body = {
-            "name": name,
-            "package_id": package_id,
-            "objective": objective,
-            "autobidding_mode": autobidding,
-        }
+    def _campaign_body(self, name: str, package_id: int) -> dict:
+        """Campaign плана (живой валидатор требует уровень campaigns): только имя и пакет. Цель и стратегия
+        живут на уровне плана — на campaign живой API их отклоняет («Objective differ with ad_plan objective»,
+        «Unallowed value», пробы 02.11). priced_goal — цель пикселя VK (счётчик Top@Mail + цель; Метрика не
+        подходит — ответ поддержки VK): уходит, если задана в конфиге."""
+        body = {"name": name, "package_id": package_id}
         source_id = self._priced_goal_source_id
         if isinstance(source_id, int) and not isinstance(source_id, bool) and source_id > 0:
             body["priced_goal"] = {"name": self._priced_goal_name, "source_id": source_id}
         return body
 
-    async def _plan_body(self, plan: CampaignTreeSpec) -> dict:
+    async def _plan_body(self, plan: CampaignTreeSpec, package_id: int) -> dict:
         url = (await self._add("urls", {"url": self._href}))["id"]
-        package_id, package = await self._resolve_package()
         # Живой API принимает ровно один лимит плана: «Can't set both budget_limit and budget_limit_day».
         # Держим дневной лимит (рычаг пейсинга), месяц закрывает страж бюджета — механика пауз платформонезависима.
-        # Схема плана подтверждена живым валидатором (01.11): campaign-поля — на уровне campaigns, не плана.
+        # objective/autobidding_mode живут на уровне плана; уровень campaigns = рекламные группы (в списках —
+        # ad_groups): каждая с пакетом, таргетингами и баннерами (живая схема подтверждена 02.11).
+        priced_goal = self._campaign_body(plan.name, package_id)
+        campaigns = [priced_goal | self._group_body(group, url) for group in plan.groups]
         return {
             "name": _named(plan.name, plan.idempotency_key),
             "status": self._state(plan.status),
             "budget_limit_day": _rub(self._to_api(plan.daily_limit_kop)),
-            "campaigns": [self._campaign_body(plan.name, package_id, package)],
-            "ad_groups": [self._group_body(group, url) for group in plan.groups],
+            "objective": API_FORMAT["objective"],
+            "autobidding_mode": API_FORMAT["autobidding_mode"],
+            "campaigns": campaigns,
         }
 
     async def add_group(self, campaign_id: str, group: AdGroupSpec) -> ExternalRefs:
@@ -333,18 +409,19 @@ class VkAdapter(VkClient):
         key = f" ap-{group.id}"
         found = [
             item
-            for item in await self._items("ad_groups", {"_ad_plan_id": int(campaign_id), "fields": "id,name"})
-            if str(item.get("name", "")).endswith(key)
+            for item in await self._items("ad_groups", {"_ad_plan_id": int(campaign_id), "fields": "id,name,status"})
+            if item.get("status") != "deleted" and str(item.get("name", "")).endswith(key)
         ]
         if len(found) > 1:
             raise PlatformError("Неоднозначный ключ группы в VK Рекламе.")
         if found:
             group_id = found[0]["id"]
         else:
-            # package_id в ad_group не шлём: пакет живёт на campaign плана и группа наследует его (связка
-            # campaign↔ad_group на живом API не подтверждена — проверить при первом успешном создании, 01.11).
+            # Пакет обязателен в рекламной группе (живой валидатор): берём пакет кампании — при автовыборе
+            # первый кандидат (на нём план и создавался), при VK_PACKAGE_ID — заданный.
+            package_id = self._used_package_id or (await self._resolve_packages())[0][0]
             url = (await self._add("urls", {"url": self._href}))["id"]
-            group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id)}
+            group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id), "package_id": package_id}
             group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {
             str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
@@ -429,10 +506,12 @@ class VkAdapter(VkClient):
                 "textblocks": {
                     API_FORMAT["title_key"]: {"text": content["title"]},
                     API_FORMAT["text_key"]: {"text": content["text"]},
+                    API_FORMAT["cta_key"]: {"text": API_FORMAT["cta_text"]},
                 },
             }
             if content["image_ref"]:
-                body["content"] = {API_FORMAT["image_key"]: {"id": _integer(content["image_ref"])}}
+                ref = {"id": _integer(content["image_ref"])}
+                body["content"] = {API_FORMAT["image_key"]: ref, API_FORMAT["icon_key"]: ref}
             await self._add("banners", body)
 
     async def apply(self, operation: Operation) -> None:
@@ -474,7 +553,10 @@ class VkAdapter(VkClient):
         elif op.kind == "swap_ad_image":
             if op.after is None:
                 raise PlatformError("VK не позволяет убрать картинку у объявления.")
-            await self._update("banners", id_, {"content": {API_FORMAT["image_key"]: {"id": _integer(op.after)}}})
+            ref = {"id": _integer(op.after)}
+            await self._update(
+                "banners", id_, {"content": {API_FORMAT["image_key"]: ref, API_FORMAT["icon_key"]: ref}}
+            )
         elif op.kind == "set_targeting":
             await self._update("ad_groups", id_, {"targetings": _targetings(op.after)})
 

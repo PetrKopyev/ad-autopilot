@@ -425,9 +425,11 @@ async def test_fallback_takes_group_service_and_differs_from_other(salon: Descri
     second = await generate_ad_text(llm, salon, platform="vk", angle="результат", segment="к празднику",
                                     service=salon.services[2], other=first.ad)
     assert first.used_fallback and second.used_fallback
-    assert first.ad == AdText("Наращивание ресниц", "Наращивание ресниц — 3 000 ₽. Стерильные инструменты.")
-    # «Наращивание ресниц к празднику» не влезает в 25 знаков VK: тот же заголовок с другим текстом лучше голого повода.
-    assert second.ad == AdText("Наращивание ресниц", "Наращивание ресниц — 3 000 ₽")
+    assert first.ad == AdText("Наращивание ресниц к празднику",
+                              "Наращивание ресниц — 3 000 ₽. Стерильные инструменты.")
+    # «Наращивание ресниц к празднику» влезает в 40 знаков VK: повторять его во втором объявлении нельзя —
+    # берём другую форму повода.
+    assert second.ad == AdText("Наращивание ресниц: праздничный образ", "Стерильные инструменты")
     assert all("Гарантия" not in variant.ad.text for variant in (first, second))
     assert not errors(first.ad, salon, "vk") and not errors(second.ad, salon, "vk")
 
@@ -498,7 +500,10 @@ async def test_city_alone_is_not_a_location(sokolniki: DescriptionDraft, text: s
     assert "нет адреса" in json.loads(llm.calls[1][1])["previous_errors"][0]
 
 
-@pytest.mark.parametrize("service_index,title", [(0, "Снятие покрытия"), (1, "Маникюр рядом с домом")])
+@pytest.mark.parametrize(
+    "service_index,title",
+    [(0, "Снятие покрытия рядом с домом"), (1, "Маникюр без покрытия рядом с домом")],
+)
 async def test_near_home_fallback_is_not_bare_address_and_titles_service(
     sokolniki: DescriptionDraft, service_index: int, title: str
 ) -> None:
@@ -595,7 +600,7 @@ async def test_near_home_fallback_differs_from_first_beyond_punctuation(owner: D
     first = AdText("Снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽")
     variant = await generate_ad_text(FakeLLM("{}"), owner, platform="vk", angle="результат", segment="рядом с домом",
                                      service=owner.services[1], other=first)
-    assert variant.used_fallback and variant.ad.title == "Снятие покрытия"
+    assert variant.used_fallback and variant.ad.title == "Снятие покрытия рядом с домом"
     assert variant.ad.text == "Москва, Сокольники. Мастера со стажем от 4 лет, работаем по записи без очередей."
 
 
@@ -619,7 +624,10 @@ async def test_second_ad_takes_title_and_text_from_different_attempts(owner: Des
         [
             response("Снятие покрытия", "Москва, Сокольники. Лёгкая смена образа — снятие покрытия за 400 ₽"),
             response("Быстрое снятие покрытия", "Москва, Сокольники. Снятие покрытия — 400 ₽"),
-            response("Снятие покрытия в Сокольниках", "Москва, Сокольники. После процедуры покрытие будет удалено"),
+            response(
+                "Снятие гель-лакового покрытия в Сокольниках",
+                "Москва, Сокольники. После процедуры покрытие будет удалено",
+            ),
         ]
     )
     variant = await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="рядом с домом",
@@ -643,12 +651,12 @@ async def test_duplicate_and_same_title_are_reported_together(owner: Description
 
 
 async def test_title_length_names_the_title_and_the_excess(owner: DescriptionDraft) -> None:
-    llm = FakeLLM(response("Гель-лак для обновления образа", "Мастера со стажем от 4 лет"))
+    llm = FakeLLM(response("Гель-лак для обновления образа к празднику", "Мастера со стажем от 4 лет"))
     await generate_ad_text(llm, owner, platform="vk", angle="результат", segment="новый дизайн",
                            service=owner.services[0])
     assert json.loads(llm.calls[1][1])["previous_errors"] == [
-        "заголовок «Гель-лак для обновления образа» — 30 символов, нужно не больше 25: убери или замени слово, "
-        "чтобы стало хотя бы на 5 символов короче"
+        "заголовок «Гель-лак для обновления образа к празднику» — 42 символов, нужно не больше 40: убери или замени "
+        "слово, чтобы стало хотя бы на 2 символов короче"
     ]
 
 
@@ -735,9 +743,14 @@ async def test_occasion_glued_to_service_is_rewritten(salon: DescriptionDraft) -
 @pytest.mark.parametrize(
     "platform,name,segment,titles",
     [
-        ("vk", "Маникюр с покрытием гель-лаком", "к празднику", ("Маникюр к празднику", "Маникюр к торжеству")),
-        ("vk", "Маникюр без покрытия", "рядом с домом", ("Маникюр рядом с домом", "Маникюр недалеко от дома")),
-        ("vk", "Педикюр с покрытием", "новый дизайн", ("Педикюр: новый образ", "Педикюр для нового образа")),
+        ("vk", "Маникюр с покрытием гель-лаком", "к празднику", ("Маникюр к празднику", "Маникюр: праздничный образ")),
+        (
+            "vk",
+            "Маникюр без покрытия",
+            "рядом с домом",
+            ("Маникюр без покрытия рядом с домом", "Маникюр рядом с домом"),
+        ),
+        ("vk", "Педикюр с покрытием", "новый дизайн", ("Педикюр с покрытием: новый образ", "Педикюр: новый образ")),
         (
             "direct",
             "Наращивание ногтей",

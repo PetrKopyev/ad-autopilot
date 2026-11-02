@@ -121,28 +121,28 @@ async def test_create_tree_posts_whole_plan_with_exact_budgets(adapter: VkAdapte
     body = sent(route)
     # Живой API принимает ровно один лимит: уходит только дневной, период закрывает страж бюджета.
     assert body["name"] == "Маникюр ap-c1" and body["budget_limit_day"] == "150.50" and "budget_limit" not in body
-    # Campaign-поля живут на уровне campaigns (схема подтверждена живым валидатором 01.11), не на плане.
-    assert "objective" not in body and "autobidding_mode" not in body
+    # Цель и стратегия живут на уровне плана (схема подтверждена живым валидатором 02.11).
+    assert body["objective"] == "site_conversions" and body["autobidding_mode"] == "max_goals"
+    # Уровень campaigns = рекламные группы (в списках — ad_groups): пакет, таргетинги и баннеры живут здесь.
+    assert "ad_groups" not in body
     (campaign,) = body["campaigns"]
-    assert campaign == {
-        "name": "Маникюр",
-        "package_id": DEFAULT_PACKAGE["id"],
-        "objective": "site_conversions",
-        "autobidding_mode": "max_goals",
-    }
-    assert body["status"] == "active" and "package_id" not in body["ad_groups"][0]
-    group = body["ad_groups"][0]
-    assert group["name"] == "Ищут маникюр ap-g1"
-    assert group["targetings"] == {
+    assert campaign["name"] == "Ищут маникюр ap-g1" and campaign["package_id"] == DEFAULT_PACKAGE["id"]
+    assert campaign["status"] == "active"
+    assert campaign["targetings"] == {
         "geo": {"regions": [2]},
         "age": {"age_list": list(range(25, 41))},
         "sex": ["female"],
         "interests": [1234],
     }
-    banner = group["banners"][0]
+    banner = campaign["banners"][0]
     assert banner["name"] == "Маникюр рядом ap-a1" and banner["urls"] == {"primary": {"id": 7}}
-    assert banner["textblocks"] == {"title_25": {"text": "Маникюр рядом"}, "text_90": {"text": "Запишитесь онлайн"}}
-    assert banner["content"] == {"image_600x600": {"id": 501}}
+    # Баннер по структуре паттерна универсального пакета: заголовок 40, текст 90, кнопка, две роли картинки.
+    assert banner["textblocks"] == {
+        "title_40_vkads": {"text": "Маникюр рядом"},
+        "text_90": {"text": "Запишитесь онлайн"},
+        "cta_sites_full": {"text": "Подробнее"},
+    }
+    assert banner["content"] == {"image_600x600": {"id": 501}, "icon_256x256": {"id": 501}}
     assert (await adapter.create_campaign_tree(tree())) is refs
     assert route.call_count == 1
 
@@ -224,18 +224,91 @@ async def test_package_without_candidates_is_honest_error(adapter: VkAdapter, ap
         await adapter.create_campaign_tree(tree())
 
 
-async def test_package_fields_override_plan_objective(adapter: VkAdapter, api) -> None:
-    """У выбранного пакета есть свои objective/autobidding_mode: campaign уходит с ними, иначе — дефолты API_FORMAT."""
+async def test_package_fields_do_not_override_plan_objective(adapter: VkAdapter, api) -> None:
+    """Поля пакета не переносятся в campaign: живой валидатор держит objective/autobidding на плане,
+    campaign — группа с одним package_id (пробы 02.11: на campaign эти поля отклоняются)."""
     route = mock_creation(
         api,
         [{"id": 3858, "name": "no_conversions", "status": "active", "flags": [],
-          "objective": ["engagement"], "autobidding_mode": "max_shows"}],
+          "objective": ["site_conversions"], "autobidding_mode": "max_shows"}],
     )
     await adapter.create_campaign_tree(tree())
     body = sent(route)
-    campaign = body["campaigns"][0]
-    assert (campaign["objective"], campaign["autobidding_mode"]) == ("engagement", "max_shows")
-    assert campaign["package_id"] == 3858
+    assert body["objective"] == "site_conversions" and body["autobidding_mode"] == "max_goals"
+    assert body["campaigns"][0]["package_id"] == 3858
+    assert body["campaigns"][0]["name"] == "Ищут маникюр ap-g1"
+
+
+async def test_withdrawn_package_is_skipped_and_next_candidate_creates(adapter: VkAdapter, api) -> None:
+    """Выведенный из работы пакет остаётся «active» в списке и падает на создании: адаптер пробует его,
+    получает «Invalid package» и пересоздаёт план на следующем кандидате."""
+    route_listing = packages_stub(
+        api,
+        [
+            {"id": 3104, "name": "or_tt_crossdevice_site_multiformat_all_cpm_conversions", "status": "active"},
+            {"id": 3232, "name": "or_tt_crossdevice_site_multiformat_all_cpc_conversions", "status": "active"},
+        ],
+    )
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_plans.json")
+    create.side_effect = [
+        httpx.Response(400, json={"error": {"code": "validation_failed", "message": "Validation failed",
+                                           "fields": {"campaigns": {"items": [{"fields": {"package_id": {
+                                               "code": "invalid_package", "message": "Invalid package"}}}]}}}}),
+        httpx.Response(200, json=created_plan()),
+    ]
+    await adapter.create_campaign_tree(tree())
+    bodies = [json.loads(call.request.content) for call in create.calls]
+    assert [body["campaigns"][0]["package_id"] for body in bodies] == [3104, 3232]
+    assert route_listing.call_count == 1
+
+
+async def test_goal_requiring_packages_wait_for_priced_goal_config(api) -> None:
+    """Кандидаты, которым нужна цель пикселя (oCPM), перебираются только когда VK_PRICED_GOAL_SOURCE_ID
+    задан; без цели план создаётся на пакете без обязательной цели (cpc), она предпочтительнее."""
+    packages = [
+        {"id": 3229, "name": "or_tt_crossdevice_site_multiformat_all_ocpm_conversions", "status": "active"},
+        {"id": 3232, "name": "or_tt_crossdevice_site_multiformat_all_cpc_conversions", "status": "active"},
+    ]
+    config = configuration()
+    config.vk_priced_goal_source_id = 0
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api, packages)
+    create = api.post(f"{API}/ad_plans.json").respond(json=created_plan())
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(create)["campaigns"][0]["package_id"] == 3232
+
+
+async def test_priced_goal_config_opens_goal_requiring_packages(api) -> None:
+    """VK_PRICED_GOAL_SOURCE_ID задан: пакеты с oCPM доступны; без-цельный пакет всё равно предпочтительнее,
+    priced_goal уходит в campaign."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api, [
+        {"id": 3229, "name": "or_tt_crossdevice_site_multiformat_all_ocpm_conversions", "status": "active"},
+        {"id": 3232, "name": "or_tt_crossdevice_site_multiformat_all_cpc_conversions", "status": "active"},
+    ])
+    create = api.post(f"{API}/ad_plans.json").respond(json=created_plan())
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(create)["campaigns"][0]["package_id"] == 3232
+    assert sent(create)["campaigns"][0]["priced_goal"] == {"name": "Заявка", "source_id": 777}
+
+
+async def test_only_goal_requiring_packages_without_config_is_honest_error(adapter: VkAdapter, api) -> None:
+    """Доступны только oCPM-пакеты, а цель пикселя не задана: честная инструкция, без слепых попыток."""
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(
+        api, [{"id": 3229, "name": "or_tt_crossdevice_site_multiformat_all_ocpm_conversions", "status": "active"}]
+    )
+    with pytest.raises(PlatformError, match="VK_PRICED_GOAL_SOURCE_ID"):
+        await adapter.create_campaign_tree(tree())
 
 
 async def test_priced_goal_from_config_goes_to_campaign(api) -> None:
@@ -354,8 +427,8 @@ async def test_create_tree_stays_blocked_until_marking_confirmed(api) -> None:
         with pytest.raises(PlatformError, match="данные рекламодателя"):
             await vk.apply(Operation("set_status", "campaign", "10", "status", "paused_owner", "active"))
     body = sent(route)
-    assert body["status"] == "blocked" and body["ad_groups"][0]["status"] == "blocked"
-    assert body["ad_groups"][0]["banners"][0]["status"] == "blocked"
+    assert body["status"] == "blocked" and body["campaigns"][0]["status"] == "blocked"
+    assert body["campaigns"][0]["banners"][0]["status"] == "blocked"
 
 
 async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api) -> None:
@@ -379,8 +452,8 @@ async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api)
 
 
 async def test_create_tree_rejects_unsupported_input_before_requests(adapter: VkAdapter, api) -> None:
-    long_title = AdSpec("a1", "x" * 26, "текст")
-    with pytest.raises(PlatformError, match="до 25"):
+    long_title = AdSpec("a1", "x" * 41, "текст")
+    with pytest.raises(PlatformError, match="до 40"):
         await adapter.create_campaign_tree(tree(groups=(AdGroupSpec("g1", "Группа", (long_title,)),)))
     phrase = (TargetSpec("t1", "phrase", "маникюр"),)
     with pytest.raises(PlatformError, match="интересы"):
@@ -432,8 +505,8 @@ async def test_apply_updates_status_budget_text_image_targeting(adapter: VkAdapt
     ]
     assert [sent(banner, i) for i in range(3)] == [
         {"status": "active"},
-        {"textblocks": {"title_25": {"text": "Новый"}}},
-        {"content": {"image_600x600": {"id": 502}}},
+        {"textblocks": {"title_40_vkads": {"text": "Новый"}}},
+        {"content": {"image_600x600": {"id": 502}, "icon_256x256": {"id": 502}}},
     ]
     assert sent(group)["targetings"]["age"]["age_list"] == list(range(18, 76))
     await adapter.apply(Operation("set_status", "campaign", "10", "status", "active", "paused_owner"))
@@ -448,8 +521,8 @@ async def test_apply_refuses_unsafe_changes(adapter: VkAdapter, api) -> None:
         await adapter.apply(Operation("set_status", "ad", "30", "status", "paused_owner", "active"))
     with pytest.raises(PlatformError, match="Нулевой"):
         await adapter.apply(Operation("set_budget", "campaign", "10", "daily_limit_kop", 100, 0))
-    with pytest.raises(PlatformError, match="до 25"):
-        await adapter.apply(Operation("update_ad_text", "ad", "30", "title", "a", "x" * 26))
+    with pytest.raises(PlatformError, match="до 40"):
+        await adapter.apply(Operation("update_ad_text", "ad", "30", "title", "a", "x" * 41))
     with pytest.raises(PlatformError, match="цели"):
         await adapter.apply(Operation("set_status", "target", "20", "status", "active", "paused_owner"))
 
@@ -486,8 +559,8 @@ async def test_get_state_maps_entities(adapter: VkAdapter, api) -> None:
                     "name": "Б",
                     "status": "deleted",
                     "ad_group_id": 20,
-                    "textblocks": {"title_25": {"text": "З"}, "text_90": {"text": "Т"}},
-                    "content": {"image_600x600": {"id": 501}},
+                    "textblocks": {"title_40_vkads": {"text": "З"}, "text_90": {"text": "Т"}},
+                    "content": {"image_600x600": {"id": 501}, "icon_256x256": {"id": 501}},
                 }
             ],
         }
@@ -743,7 +816,7 @@ async def test_created_group_gets_vk_regions(adapter, api) -> None:
     group = replace(tree().groups[0], targeting=targeting)
     await adapter.create_campaign_tree(tree(groups=(group,)))
     body = json.loads(route.calls.last.request.content)
-    assert body["ad_groups"][0]["targetings"]["geo"] == {"regions": [2]}
+    assert body["campaigns"][0]["targetings"]["geo"] == {"regions": [2]}
 
 
 async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapter: VkAdapter, api) -> None:
@@ -753,6 +826,7 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
         httpx.Response(200, json={"count": 1, "items": [{"id": 20, "name": "Чужая ap-g10"}]}),
         httpx.Response(200, json={"count": 1, "items": [{"id": 21, "name": "Ищут маникюр ap-g1"}]}),
     ]
+    packages_stub(api)
     api.post(f"{API}/urls.json").respond(json={"id": 7})
     create = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
     api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
@@ -760,8 +834,8 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
     assert (refs.campaign_id, refs.groups, refs.ads, refs.targets) == ("10", {"g1": "21"}, {"a1": "31"}, {"t1": "21"})
     body = sent(create)
     assert body["ad_plan_id"] == 10 and body["name"] == "Ищут маникюр ap-g1"
-    # Пакет живёт на campaign плана: ad_group его не несёт, группа наследует пакет кампании.
-    assert "package_id" not in body
+    # Пакет обязателен в рекламной группе (живой валидатор): группа встаёт на пакет кампании.
+    assert body["package_id"] == DEFAULT_PACKAGE["id"]
     assert body["targetings"]["age"]["age_list"][0] == 25 and body["banners"][0]["name"] == "Маникюр рядом ap-a1"
     assert (await adapter.add_group("10", group)).ads == {"a1": "31"}
     assert create.call_count == 1
