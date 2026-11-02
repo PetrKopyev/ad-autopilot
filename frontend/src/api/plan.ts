@@ -13,6 +13,10 @@ export interface Plan {
   id: number; month_budget_kop: number; direct_budget_kop: number; vk_budget_kop: number;
   daily_kop: { direct?: number; vk?: number }; off: PlatformOff[]; groups: PlanGroup[]; generations_remaining: number; medical_level: 'none' | 'maybe' | 'required';
   marking_confirmed: boolean; ready_to_launch: boolean; blockers: string[]; launch_error?: string | null; status: 'draft' | 'launched';
+  /** Частичный запуск: причины, по которым площадка не запустилась. Повтор запуска доводит только их. */
+  platform_errors: Partial<Record<'direct' | 'vk', string>>;
+  /** Площадки, чьё включение ждёт проверки объявлений: сверка доведёт их сама, кнопка не нужна. */
+  awaiting_moderation: ('direct' | 'vk')[];
   /** Сколько групп Директа дало бы описание без потолка maxDirectGroups: больше — часть услуг в Директ не вошла. */
   direct_services_total: number;
   /** Кампании Директа: услуги каждой; у каждой услуги своя, если бюджет даёт каждой недельный минимум Директа. */
@@ -54,7 +58,10 @@ export async function saveAssets(asset_ids: number[]) {
   if (mockEnabled) { (await import('./mocks')).mockPlanAssets(asset_ids); return; }
   await api('/api/plan/assets', { method: 'PUT', body: { asset_ids } });
 }
-export async function launchPlan(plan_id: number, medical_acknowledged: boolean) {
-  if (mockEnabled) { (await import('./mocks')).mockPlanLaunch(medical_acknowledged); return; }
-  await api('/api/plan/launch', { method: 'POST', body: { plan_id, medical_acknowledged } });
+export interface LaunchResult { status: string; platform_errors: Plan['platform_errors']; awaiting_moderation: ('direct' | 'vk')[] }
+export async function launchPlan(plan_id: number, medical_acknowledged: boolean): Promise<LaunchResult> {
+  if (mockEnabled) { (await import('./mocks')).mockPlanLaunch(medical_acknowledged); return { status: 'launched', platform_errors: {}, awaiting_moderation: [] }; }
+  const result = await api<LaunchResult>('/api/plan/launch', { method: 'POST', body: { plan_id, medical_acknowledged } });
+  if (!result) throw new ApiError(copy.errors.invalidResponse);
+  return result;
 }

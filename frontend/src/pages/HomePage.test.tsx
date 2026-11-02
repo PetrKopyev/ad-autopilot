@@ -99,6 +99,8 @@ it('объясняет, почему реклама не включилась п
   vi.mocked(resumeAutopilot).mockResolvedValue(warning);
   await show(0, 0);
   fireEvent.click(await screen.findByRole('button', { name: copy.home.resumeAll }));
+  expect(resumeAutopilot).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: copy.home.resumeYes }));
   expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
   expect(await screen.findByText(warning)).toBeTruthy();
 });

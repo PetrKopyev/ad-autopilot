@@ -23,7 +23,7 @@ const interrupted = 'Запуск рекламы не завершился. Вс
 function plan(launch_error: string | null): Plan {
   return {
     id: 3, month_budget_kop: 3000000, direct_budget_kop: 3000000, vk_budget_kop: 0, daily_kop: { direct: 71225 }, off: [], generations_remaining: 2, medical_level: 'none',
-    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft', direct_services_total: 1, direct_campaigns: [], direct_campaigns_note: null, negative_phrases: [],
+    marking_confirmed: true, ready_to_launch: true, blockers: [], launch_error, status: 'draft', direct_services_total: 1, direct_campaigns: [], direct_campaigns_note: null, negative_phrases: [], platform_errors: {}, awaiting_moderation: [],
     groups: [{ id: 1, name: 'Маникюр', platform: 'direct', audience: 'Рядом', daily_limit_kop: 100000, ads: [{ title: 'Маникюр', text: 'Запись онлайн' }],
       assets: [{ id: 1, url: '/api/plan/assets/1/file', kind: 'image', alt: 'Френч с золотой фольгой', label: 'Френч с золотой фольгой', selected: true }] }],
   };
@@ -59,7 +59,7 @@ it('после новой неудачи запуска объяснение п�
 it('«Запустить рекламу» сначала говорит, что будет дальше; «Ещё посмотрю» ничего не запускает', async () => {
   vi.mocked(getPlan).mockResolvedValue(plan(null));
   vi.mocked(saveAssets).mockResolvedValue(undefined);
-  vi.mocked(launchPlan).mockReset().mockResolvedValue(undefined as never);
+  vi.mocked(launchPlan).mockReset().mockResolvedValue({ status: 'launched', platform_errors: {}, awaiting_moderation: [] });
   render(<MemoryRouter><PlanPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'Запустить рекламу' }));
   const dialog = within(screen.getByRole('dialog', { name: copy.plan.launchTitle }));

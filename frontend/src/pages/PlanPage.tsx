@@ -144,12 +144,21 @@ export function PlanPage() {
   const generationsLeft = (plan?.generations_remaining ?? 0) - jobs.filter((job) => job.kind === 'generate').length;
   async function launch(current: Plan) {
     await saveAssets(selectedIds(current));
-    try { await launchPlan(current.id, acknowledged); }
+    try {
+      const result = await launchPlan(current.id, acknowledged);
+      // Частичный запуск сразу виден на этом экране: причины незапустившихся площадок и ждущие модерации.
+      setEdited({ ...current, status: 'launched', platform_errors: result.platform_errors, awaiting_moderation: result.awaiting_moderation });
+    }
     catch (reason) {
       // Объяснение прошлой попытки уже неправда: о новой неудаче говорит сообщение об ошибке.
       setEdited({ ...current, launch_error: null }); throw reason;
     }
-    setEdited({ ...current, status: 'launched' });
+  }
+  // Повтор доводит только площадки из platform_errors: работающие сервер не тронет.
+  async function retry(current: Plan) {
+    const result = await launchPlan(current.id, true);
+    setEdited({ ...current, platform_errors: result.platform_errors, awaiting_moderation: result.awaiting_moderation });
+    resource.reload();
   }
   const launched = plan?.status === 'launched';
   const group = plan?.groups.find((item) => item.id === chosen) ?? plan?.groups[0];
@@ -166,6 +175,14 @@ export function PlanPage() {
         <p>{(launched ? copy.plan.platformOffLaunched : copy.plan.platformOff)(copy.setup.accounts[item.platform], formatMoney(item.from_kop), formatMoney(item.min_daily_kop))}</p>
       </div>)}
       {launched ? <>
+        {plan.awaiting_moderation.length > 0 && <div className="notice" role="status">
+          <p>{copy.launchFlow.awaitingLaunch(plan.awaiting_moderation.map((platform) => copy.setup.accounts[platform]).join(' и '))}</p>
+        </div>}
+        {Object.keys(plan.platform_errors).length > 0 && <div className="notice" role="status">
+          <p><strong>{copy.launchFlow.launchPartialTitle}</strong> {copy.launchFlow.launchPartialHint}</p>
+          <ul>{Object.entries(plan.platform_errors).map(([platform, text]) => <li key={platform}>{text}</li>)}</ul>
+          <Button variant="accent" disabled={busy} onClick={() => void act(() => retry(plan))}>{busy ? copy.launchFlow.retryingPlatforms : copy.launchFlow.retryPlatforms}</Button>
+        </div>}
         <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card>
         <PanelCard title={copy.common.budget} titleId="plan-budget"><div className="plan-budget"><BudgetRows plan={plan} /></div></PanelCard>
       </> : <>

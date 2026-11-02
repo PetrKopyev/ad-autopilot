@@ -277,6 +277,7 @@ export function HomePage() {
   const notifications = useResource(getNotifications);
   const business = useResource(getBusiness);
   const [asking, setAsking] = useState(false);
+  const [askingResume, setAskingResume] = useState(false);
   const stopLock = useRef(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string>();
@@ -296,11 +297,15 @@ export function HomePage() {
   // Автопилот работает, а показов нет: все кампании остановлены (например, кабинет отключили) — «всё по плану» не пишем.
   const noShows = status?.status === 'running' && !!ads.data?.items.length
     && ads.data.items.every((ad) => !['active', 'moderation'].includes(shownStatus(ad, ads.data!.campaigns)));
-  const statusText = noShows ? copy.home.noShows : status?.status === 'running' ? working
+  // День запуска: работающих объявлений ещё нет, площадки проверяют — баннер называет проверку, как и карточки.
+  const allChecking = status?.status === 'running' && !!ads.data?.items.length
+    && !ads.data.items.some((ad) => shownStatus(ad, ads.data!.campaigns) === 'active')
+    && ads.data.items.some((ad) => shownStatus(ad, ads.data!.campaigns) === 'moderation');
+  const statusText = noShows ? copy.home.noShows : allChecking ? copy.home.checkingAds : status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
       : status?.status === 'draft' ? copy.screens.draft : copy.home.pausedLine;
   const platformTrouble = !!status?.needs_attention.some((item) => item.id === 'platform' || item.id.startsWith('revoked_'));
-  const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at) && !noShows && !platformTrouble;
+  const onTrack = status?.status === 'running' && !stale && Boolean(status.last_check_at) && !noShows && !allChecking && !platformTrouble;
   const tone = !status ? 'neutral' : stale ? 'danger' : status.status === 'running' && !noShows ? 'success' : 'warning';
   const question = questions.data?.items.find((item) => !item.answered_at);
   // Строка о бюджете дублирует строку состояния и плитку бюджета; от владельца она нужна, только когда реклама стоит до его решения.
@@ -310,7 +315,7 @@ export function HomePage() {
   function askStop() { setStopError(undefined); setAsking(true); }
   function resume() {
     setResuming(true); setResumeError(''); setResumeWarning(null);
-    void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); autopilot.reload(); history.reload(); ads.reload(); })
+    void resumeAutopilot().then((warning) => { setResumeWarning(warning); setStopped(false); setAskingResume(false); autopilot.reload(); history.reload(); ads.reload(); })
       .catch((reason: unknown) => setResumeError(reason instanceof Error ? reason.message : copy.errors.generic))
       .finally(() => setResuming(false));
   }
@@ -326,7 +331,7 @@ export function HomePage() {
       : (status || autopilot.error) && <>
       {/* Одно действие — одна кнопка: «Остановить» и «Пауза» рядом делали одно и то же. */}
       {status?.status === 'paused'
-        ? <Button icon="play" onClick={resume} disabled={resuming}>{resuming ? copy.home.resumingAll : copy.home.resumeAll}</Button>
+        ? <Button icon="play" onClick={() => { setResumeError(''); setAskingResume(true); }} disabled={resuming}>{resuming ? copy.home.resumingAll : copy.home.resumeAll}</Button>
         : <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped}>{copy.home.stopAll}</Button>}
     </>} />
     <DemoNotice />
@@ -399,5 +404,7 @@ export function HomePage() {
     {summary && !prelaunch && <Sources summary={summary} />}
     <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}
       busy={stopping} error={stopError} onConfirm={() => void stop()} onClose={() => setAsking(false)}><p>{copy.screens.stopDescription}</p></ConfirmDialog>
+    <ConfirmDialog open={askingResume} title={copy.home.resumeTitle} confirm={copy.home.resumeYes} confirming={copy.home.resumingAll} cancel={copy.home.resumeNo}
+      busy={resuming} error={resumeError || undefined} onConfirm={resume} onClose={() => setAskingResume(false)}><p>{copy.home.resumeDescription}</p></ConfirmDialog>
   </div>;
 }
