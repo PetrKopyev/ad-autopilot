@@ -969,5 +969,10 @@ class PlanService:
             "ready_to_launch": not blockers,
             "blockers": blockers,
             "launch_error": launch_error(plan),
+            # Частичный запуск: причины незапустившихся площадок. Экран запущенного плана показывает их
+            # с предложением повторить (повтор доводит только эти площадки, работающие не трогает).
+            "platform_errors": payload.get("launch", {}).get("platform_errors", {}),
+            # Площадки, чьё включение ждёт проверки объявлений: сверка доведёт их сама, кнопка не нужна.
+            "awaiting_moderation": payload.get("launch", {}).get("awaiting_moderation", []),
             "status": "launched" if plan.status == "launched" else "draft",
         }

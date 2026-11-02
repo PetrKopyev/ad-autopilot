@@ -72,12 +72,20 @@ class FailingActivation(FakeAdapter):
 
 
 class DraftCampaign(FakeAdapter):
-    """Кампания-черновик v501: включение отклоняется, пока площадка проверяет объявления; остановить
-    черновик нельзя — как живой Директ. После одобрения объявлений повторный resume принимается."""
+    """Кампания-черновик v501: создаётся черновиком, включение отклоняется, пока площадка проверяет
+    объявления; остановить черновик нельзя — как живой Директ. После одобрения объявлений повторный
+    resume принимается."""
 
     def __init__(self) -> None:
         super().__init__()
         self.accepted = False
+
+    async def create_campaign_tree(self, plan_part):
+        refs = await super().create_campaign_tree(plan_part)
+        if not self.accepted:
+            state = self._states[refs.campaign_id]
+            self._states[refs.campaign_id] = replace(state, status="draft")
+        return refs
 
     async def apply(self, operation) -> None:
         if not self.accepted and operation.entity_type == "campaign" and operation.after == "active":
@@ -336,6 +344,68 @@ async def test_failed_platform_activation_is_retried_after_fix(tmp_path: Path) -
         assert (await states(world, item))[item.external_id].status == "active"
 
 
+class FailingSecondCreate(FakeAdapter):
+    """Сбой создания второй кампании площадки: первая уже создана, остальные — нет."""
+
+    fail = True
+    attempts = 0
+
+    async def create_campaign_tree(self, plan_part):
+        self.attempts += 1
+        if self.fail and self.attempts == 2:
+            raise PlatformError("Директ не ответил.", status_code=503)
+        return await super().create_campaign_tree(plan_part)
+
+
+async def test_partially_created_platform_is_not_activated_and_retry_completes(tmp_path: Path) -> None:
+    """В3-2: транзиентный сбой на второй кампании многоуслугового Директа. Созданная кампания площадки
+    не включается (журнал не утверждает «не создала рекламу», пока её кампания стоит), запись честна,
+    повтор доводит Директ на сохранённых кампаниях, работающую ВКонтакте не трогает."""
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц"]
+    adapters = {"direct": FailingSecondCreate(), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, services, adapters=adapters)
+    result = await launch(world, plan)
+    assert result["status"] == "launched"
+    assert result["awaiting_moderation"] == []
+    assert result["platform_errors"] == {
+        "direct": (
+            "Площадка «Яндекс Директ» создала рекламу частично и не включила её: Директ не ответил. "
+            "Повторный запуск доведёт площадку, работающие не тронет."
+        )
+    }
+    assert world.business.status == "running"
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "launched" and set(stored.payload["launch"]["platform_errors"]) == {"direct"}
+    # Созданная кампания Директ остановлена и на площадке, и у нас; вторая осталась строкой без external_id.
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    assert len(direct) == 2 and direct[0].external_id and direct[1].external_id is None
+    assert (await states(world, direct[0]))[direct[0].external_id].status == "paused_auto"
+    assert direct[0].status == "paused_auto"
+    (record,) = world.repository.rows(ChangeLog, kind="launch", reason_code="LAUNCH_PLATFORM_FAILED")
+    assert record.platform == "direct" and record.status == "failed"
+    assert "создала рекламу частично" in record.reason_text
+    # ВКонтакте работает и тратит, Директ — нет; журнал расхода только за ВКонтакте.
+    vk = next(item for item in campaigns(world) if item.platform == "vk")
+    assert (await states(world, vk))[vk.external_id].status == "active"
+    ledgers = world.repository.rows(BudgetLedger, business_id=world.business.id)
+    assert {row.platform for row in ledgers} == {"vk"}
+    adapters["direct"].clock.advance(days=2)
+    adapters["vk"].clock.advance(days=2)
+    assert await adapters["direct"].get_spend_today() == 0 and await adapters["vk"].get_spend_today() > 0
+
+    # Повтор после починки: Директ доводится на кампаниях той же попытки, ВКонтакте не пересоздаётся.
+    adapters["direct"].fail = False
+    retry = await launch(world, plan)
+    assert retry["status"] == "launched" and retry["platform_errors"] == {}
+    assert len(adapters["vk"]._trees) == 1
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    assert len(direct) == 3 and len(adapters["direct"]._trees) == 3
+    for item in direct:
+        assert item.status == "active"
+        assert (await states(world, item))[item.external_id].status == "active"
+    assert world.repository.latest_plan(world.business.id).payload["launch"]["platform_errors"] == {}
+
+
 async def test_all_platforms_failed_launch_stops_everything_and_can_be_repeated(tmp_path: Path) -> None:
     """Если не запустилась ни одна площадка, запуск по-прежнему целиком неудачный: созданное остановлено,
     план пересобирается сразу, а повтор после починки идёт на тех же кампаниях."""
@@ -386,69 +456,84 @@ async def test_launch_record_of_launched_platform_can_be_reverted(tmp_path: Path
     assert (await states(world, direct))[direct.external_id].status == "paused_auto"
 
 
-async def test_moderation_interrupted_launch_is_explained_and_finished(tmp_path: Path) -> None:
-    """В1: запуск, прерванный проверкой объявлений (кампания-черновик v501), объясняет владельцу честно:
-    реклама включится автоматически, кнопку снова нажимать не нужно. Пока остановка не подтверждена, план
-    ждёт воркера; после одобрения объявлений повтор запуска доводит рекламу до конца на той же кампании."""
+async def test_moderation_waiting_launch_finishes_and_is_brought_home_by_reconcile(tmp_path: Path) -> None:
+    """В1-2: запуск, упирающийся в проверку объявлений (кампания-черновик v501), завершается как обычно:
+    бизнес работает, площадка не в ошибках, включение доводит сверка. Текст про «не нажимать снова» —
+    правда, противоречия «нажмите ещё раз» на экране нет."""
     world, plan = await ready(tmp_path, platforms=("direct",), adapters={"direct": DraftCampaign()})
-    with pytest.raises(LaunchFailed) as failed:
-        await launch(world, plan)
-    text = str(failed.value)
-    assert "проверяет объявления" in text and "включится автоматически" in text
-    assert "включилась ли реклама" not in text
+    result = await launch(world, plan)
+    assert result["status"] == "launched"
+    assert result["awaiting_moderation"] == ["direct"] and result["platform_errors"] == {}
     stored = world.repository.latest_plan(world.business.id)
-    assert stored.status == "failed" and stored.payload["launch"]["started_at"]
-    reason = stored.payload["launch"]["reason"]
-    assert "проверяет объявления" in reason and "включилась ли реклама" not in reason
+    assert stored.status == "launched" and stored.payload["launch"]["started_at"] is None
+    assert stored.payload["launch"]["error"] is None
+    assert stored.payload["launch"]["awaiting_moderation"] == ["direct"]
+    # Повтор без изменений — тот же ответ: второй запуск не нужен.
+    assert await launch(world, plan) == result
+    # Включение ждёт проверки: запись launch pending с честной пометкой, кампания на площадке ещё черновик.
     (pending,) = pending_launches(world)
-    assert pending.platform == "direct"
+    assert pending.platform == "direct" and pending.kind == "launch"
     assert pending.evidence["_service"]["error"] == MODERATION_PENDING
-    # Остановить черновик нельзя: новый план не собирается, пока воркер не разберётся с запуском.
-    world.business.month_budget_kop += 100_000
-    with pytest.raises(Blocked, match="Прошлый запуск рекламы не завершился"):
-        await world.plans.get_plan(world.business.id, NOW, TODAY)
-    world.business.month_budget_kop -= 100_000
+    direct = next(item for item in campaigns(world) if item.platform == "direct")
+    assert (await states(world, direct))[direct.external_id].status == "draft"
+    _, ads, _ = world.repository.tree_rows(direct.id)
+    assert direct.status == "active" and {ad.status for ad in ads} == {"moderation"}
+    # Пока площадка проверяет, запуск не объявлен неудачным: записей о прерывании и уведомлений нет.
+    assert not world.repository.rows(ChangeLog, reason_code="LAUNCH_INTERRUPTED")
+    assert not notices(world)
 
+    # Площадка молчит: сверка оставляет ожидание с той же границей, рекламу не трогает.
     worker = recovery_worker(world, after=timedelta(minutes=11))
     await worker.run_business_due(world.business.id)
-    # Кампания создана остановленной и ничего не тратит: воркер подтвердил остановку и записал неудачу.
-    assert stored.payload["launch"]["started_at"] is None
-    assert stored.payload["launch"]["error"] == launch_module.failed_launch(reason)
-    assert not pending_launches(world)
-    direct = next(item for item in campaigns(world) if item.platform == "direct")
-    assert (await states(world, direct))[direct.external_id].status == "paused_auto"
+    assert pending.status == "pending" and pending.evidence["_service"]["error"] == MODERATION_PENDING
+    assert (await states(world, direct))[direct.external_id].status == "draft"
 
-    # Площадка одобрила объявления: повтор запуска включает рекламу на той же кампании.
+    # Площадка одобрила объявления: сверка повторяет включение и доводит его сама — владелец ничего
+    # не нажимал, план остался запущенным, кампания работает.
     world.adapters["direct"].accepted = True
-    assert (await launch(world, plan))["status"] == "launched"
+    worker = recovery_worker(world, after=timedelta(hours=1))
+    await worker.run_business_due(world.business.id)
+    assert not pending_launches(world)
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "launched" and stored.payload["launch"]["error"] is None
     assert world.business.status == "running" and len(campaigns(world)) == 1
     assert (await states(world, direct))[direct.external_id].status == "active"
 
 
 async def test_retry_of_platform_waiting_for_moderation_keeps_others_running(tmp_path: Path) -> None:
-    """Повтор площадки, которая ушла на проверку, не роняет запрос необработанной ошибкой и не трогает уже
-    запущенные площадки: владелец получает честный текст, Директ продолжает работать."""
+    """Повтор площадки, которая ушла на проверку, завершается штатно: владелец получает запущенный план,
+    незапустившаяся площадка помечена ожиданием проверки (не ошибкой), Директ продолжает работать."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
     assert (await launch(world, plan))["platform_errors"].keys() == {"vk"}
     world.adapters["vk"] = DraftCampaign()
-    with pytest.raises(LaunchFailed) as failed:
-        await launch(world, plan)
-    text = str(failed.value)
-    assert "проверяет объявления" in text and "включилась ли реклама" not in text
-    assert "продолжает работать" in text
+    result = await launch(world, plan)
+    assert result["status"] == "launched" and result["platform_errors"] == {}
+    assert result["awaiting_moderation"] == ["vk"]
     stored = world.repository.latest_plan(world.business.id)
     assert stored.status == "launched" and stored.payload["launch"]["started_at"] is None
-    assert list(stored.payload["launch"]["platform_errors"]) == ["vk"]
+    assert stored.payload["launch"]["awaiting_moderation"] == ["vk"]
+    assert (await launch(world, plan)) == result
     direct = next(item for item in campaigns(world) if item.platform == "direct")
     assert (await states(world, direct))[direct.external_id].status == "active"
     assert world.business.status == "running"
-    # Проверка закончилась: следующий повтор доводит ВКонтакте до конца.
+    # Проверка закончилась: сверка доводит ВКонтакте до конца без нового запуска.
     world.adapters["vk"].accepted = True
-    result = await launch(world, plan)
-    assert result["platform_errors"] == {}
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
     vk = next(item for item in campaigns(world) if item.platform == "vk")
     assert (await states(world, vk))[vk.external_id].status == "active"
+    assert world.repository.latest_plan(world.business.id).payload["launch"]["awaiting_moderation"] == ["vk"]
+
+
+async def test_retry_while_moderation_pending_names_moderation(tmp_path: Path, monkeypatch) -> None:
+    """Мелочь 3: брошенный запуск, чьё включение ждёт проверки, при повторе называет модерацию,
+    а не «площадка не отвечает»."""
+    world, plan = await ready(tmp_path, platforms=("direct",), adapters={"direct": DraftCampaign()})
+    await crash_before_finish(world, plan, monkeypatch)
+    with pytest.raises(LaunchBlocked) as blocked:
+        await launch(world, plan)
+    assert blocked.value.reasons == [MODERATION_PENDING]
+    assert "не отвечает" not in blocked.value.reasons[0]
 
 
 @pytest.mark.parametrize(

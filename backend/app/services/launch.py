@@ -88,6 +88,10 @@ MODERATION_WAIT = (
     "в журнале изменений."
 )
 PLATFORM_CREATE_FAILED = "Площадка «{}» не создала рекламу: {}"
+PLATFORM_PARTIALLY_CREATED = (
+    "Площадка «{}» создала рекламу частично и не включила её: {} "
+    "Повторный запуск доведёт площадку, работающие не тронет."
+)
 LAUNCHED_OTHER = "Реклама уже запущена по более новому плану. Обновите страницу."
 OUTDATED = "План устарел: сведения о бизнесе изменились, и мы собрали новый. Обновите страницу и проверьте новый план."
 CLOSED = "Кабинет площадки не подключён или требует входа заново."
@@ -273,13 +277,24 @@ class LaunchService:
             )
             try:
                 created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
-                failures = create_failures | await self.activate(business, plan, created, adapters, units, now)
+                failures, awaiting = await self.activate(
+                    business, plan, created, adapters, units, now, set(create_failures)
+                )
+                failures = create_failures | failures
             except Exception as error:
                 await self.stop_failed(plan, failure_reason(error), adapters, now)
                 raise LaunchFailed(plan.payload["launch"]["error"]) from error
             # Изоляция площадок: сбой одной не роняет остальные — она фиксируется честной записью, а запуск
             # доводится до конца на площадках, которые не отказали.
             self.save_platform_failures(business, plan, failures)
+            # Площадка, которая осталась ждать проверки объявлений, — не неудача: включение доведёт сверка,
+            # владельцу нажимать кнопку снова не нужно.
+            self.save_launch(
+                plan,
+                awaiting_moderation=sorted(
+                    set(plan.payload["launch"].get("awaiting_moderation", ())) | set(awaiting)
+                ),
+            )
             succeeded = [platform for platform in platforms if platform not in failures]
             if not succeeded:
                 await self.stop_failed(plan, " ".join(failures.values()), adapters, now)
@@ -300,7 +315,10 @@ class LaunchService:
         self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
         try:
             created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
-            failures = create_failures | await self.activate(business, plan, created, adapters, units, now)
+            failures, awaiting = await self.activate(
+                business, plan, created, adapters, units, now, set(create_failures)
+            )
+            failures = create_failures | failures
         except Exception as error:
             # Повтор не роняет уже работающие площадки и не останавливает их: причина отдана владельцу,
             # пометка неудачной площадки в плане осталась — повторить можно сразу.
@@ -310,6 +328,12 @@ class LaunchService:
                 f"{reason} Реклама на уже запущенных площадках продолжает работать, они не тронуты."
             ) from error
         self.save_platform_failures(business, plan, failures)
+        self.save_launch(
+            plan,
+            awaiting_moderation=sorted(
+                set(plan.payload["launch"].get("awaiting_moderation", ())) | set(awaiting)
+            ),
+        )
         succeeded = [platform for platform in platforms if platform not in failures]
         if succeeded:
             self.finish(business, plan, succeeded, limits, now, today)
@@ -368,6 +392,9 @@ class LaunchService:
                 raise closed_account(change.platform, error) from error
             await self.changes._reconcile(change, adapter, now=now)
             if change.status == "pending":
+                if change.evidence["_service"].get("error") == MODERATION_PENDING:
+                    # Площадка ещё проверяет объявления: включение доведёт сверка, повтор запуска пока рано.
+                    raise LaunchBlocked([MODERATION_PENDING])
                 raise LaunchBlocked([SILENT.format(TITLES[change.platform])])
 
     def adapters(self, plan: Plan) -> dict[str, AdPlatform]:
@@ -456,7 +483,12 @@ class LaunchService:
                     configured[platform] += len(spec.groups)
                 refs = await adapter.create_campaign_tree(spec)
             except PlatformError as error:
-                failures[platform] = PLATFORM_CREATE_FAILED.format(TITLES[platform], error)
+                if any(campaign_platform(item) == platform for item in created):
+                    # Часть кампаний площадки уже создана: созданное остаётся остановленным, пока повтор
+                    # не доведёт площадку, — текст говорит об этом честно.
+                    failures[platform] = PLATFORM_PARTIALLY_CREATED.format(TITLES[platform], error)
+                else:
+                    failures[platform] = PLATFORM_CREATE_FAILED.format(TITLES[platform], error)
                 continue
             for text in getattr(adapter, "content_mismatches", []):
                 # Содержимое кабинета отличалось от плана: адаптер пересоздал объявления и фразы, запуск честно
@@ -661,14 +693,20 @@ class LaunchService:
         adapters: dict[str, AdPlatform],
         units: dict[str, tuple[list[dict], PlatformLimit]],
         now: datetime,
-    ) -> dict[str, str]:
-        """Включение созданного: возвращает причины площадок, которые рекламу не включили, — запуск доводит
-        до конца остальные, а неудачную площадку фиксирует честно. Запись, оставшаяся pending (площадка
-        проверяет объявления или молчит), прерывает запуск: её доведёт сверка, повтор запуска продолжит."""
+        skip: set[str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Включение созданного: возвращает причины площадок, которые рекламу не включили, и площадки, чьё
+        включение осталось ждать проверки объявлений (не ошибка: сверка доведёт его сама, как в демо).
+        Запуск доводит до конца остальные. Платформы из skip (сбой создания) не включаются целиком: уже
+        созданное ими остаётся остановленным, пока повтор не доведёт площадку. Запись, оставшаяся pending
+        по неизвестной причине (площадка молчит), прерывает запуск: её доведёт сверка, повтор продолжит."""
         # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
         failures = {}
+        awaiting = {}
         for key, (campaign, refs) in created.items():
             platform, limit = campaign_platform(key), units[key][1]
+            if platform in skip:
+                continue
             operations = [
                 Operation("set_status", "ad", external_id, "status", "paused_auto", "active")
                 for external_id in refs.ads.values()
@@ -694,12 +732,13 @@ class LaunchService:
             )
             if change.status == "pending":
                 if change.evidence["_service"].get("error") == MODERATION_PENDING:
-                    raise PlatformError(MODERATION_WAIT.format(TITLES[platform]))
+                    awaiting[platform] = MODERATION_WAIT.format(TITLES[platform])
+                    continue
                 raise PlatformError(f"Площадка «{TITLES[platform]}» не ответила, включилась ли реклама.")
             if change.status != "applied":
                 detail = change.evidence["_service"].get("error")
                 failures[platform] = f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip()
-        return failures
+        return failures, awaiting
 
     async def stop_failed(self, plan: Plan, reason: str | None, adapters: dict[str, AdPlatform], now: datetime) -> None:
         """Останавливает созданное неудавшимся запуском и записывает неудачу; reason — её причина, None — запуск
@@ -785,6 +824,7 @@ class LaunchService:
             "launched_at": launch.get("launched_at"),
             "campaigns": launch["campaigns"],
             "platform_errors": launch.get("platform_errors", {}),
+            "awaiting_moderation": launch.get("awaiting_moderation", []),
         }
 
 
