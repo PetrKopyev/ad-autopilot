@@ -37,7 +37,8 @@ for (const width of [390, 1280]) {
     await page.getByRole('button', { name: copy.plan.launch, exact: true }).click();
     await page.getByRole('dialog', { name: copy.plan.launchTitle }).getByRole('button', { name: copy.plan.launchYes, exact: true }).click();
     await page.getByRole('link', { name: copy.launchFlow.openHome, exact: true }).click();
-    await expect(page.getByText(/^Работает,/)).toBeVisible();
+    // Запуск завершается честно: пока площадка проверяет объявления, дома статус проверки, не «Работает».
+    await expect(page.getByText(copy.home.checkingAds, { exact: true })).toBeVisible();
     const advance = page.waitForResponse((response) => response.url().endsWith('/api/demo/advance') && response.request().method() === 'POST');
     await page.getByRole('button', { name: '+30 дней', exact: true }).click();
     expect((await advance).status()).toBe(202);
@@ -73,6 +74,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('dialog', { name: copy.screens.stopTitle }).getByRole('button', { name: copy.screens.confirmStop, exact: true }).click();
     await expect(page.getByText(copy.home.pausedLine, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: copy.home.resumeAll, exact: true }).click();
+    await page.getByRole('dialog', { name: copy.home.resumeTitle }).getByRole('button', { name: copy.home.resumeYes, exact: true }).click();
     await expect(page.getByText(/^Работает,/)).toBeVisible();
     await expect(page.getByRole('button', { name: copy.home.stopAll, exact: true })).toBeEnabled();
 
