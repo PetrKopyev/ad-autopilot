@@ -202,6 +202,9 @@ class BudgetIn(BaseModel):
 class SettingsIn(BaseModel):
     auto_continue: StrictBool
     avg_check_kop: StrictInt | None = Field(default=None, gt=0)
+    # Цель VK кабинета (пиксель Top@Mail): id источника и имя цели. Не задано — не менять (В8).
+    vk_priced_goal_source_id: StrictInt | None = Field(default=None, gt=0)
+    vk_priced_goal_name: str = Field(default="", max_length=200)
 
 
 @router.get("/business")
@@ -218,4 +221,10 @@ async def save_budget(body: BudgetIn, business: CurrentBusiness, service: Screen
 @router.put("/business/settings", dependencies=[Depends(require_csrf)])
 def save_settings(body: SettingsIn, business: CurrentBusiness, service: Screens) -> dict:
     with human_errors():
-        return service.save_settings(business, body.auto_continue, body.avg_check_kop)
+        return service.save_settings(
+            business,
+            body.auto_continue,
+            body.avg_check_kop,
+            body.vk_priced_goal_source_id,
+            body.vk_priced_goal_name,
+        )

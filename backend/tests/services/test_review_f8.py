@@ -65,7 +65,7 @@ async def test_reserve_from_env_reaches_launch_and_rebalance(monkeypatch, rollov
     )
 
 
-async def test_guard_reconciliation_uses_configured_reserve(monkeypatch):
+async def test_guard_reconciliation_uses_full_allowed_without_reserve(monkeypatch):
     domain = reserve_settings(monkeypatch)
     world = await make_world()
     allowed = plan_budget(BUDGET_KOP, 0, today(world.clock), ("direct",), settings=domain).authorized
@@ -239,3 +239,24 @@ def test_media_directory_has_local_default_and_uses_config(monkeypatch, tmp_path
     # All users of the directory take the parsed setting, without rereading the environment.
     monkeypatch.setenv("MEDIA_DIR", str(tmp_path / "different"))
     assert media_root() == tmp_path
+
+
+async def test_guard_with_full_reserve_does_not_crash_on_zero_division(monkeypatch):
+    """В4: резерв 100% — вырожденный, но валидный конфиг; страж считает верхнюю границу сверки
+    с нулевым резервом и не падает на обращении доли (1 - 1 = 0)."""
+    from app.config import Settings, get_domain_settings
+
+    world = await make_world()
+    monkeypatch.setenv("BUDGET_RESERVE_PCT", "100")
+    monkeypatch.setattr("app.config.settings", Settings())
+    assert get_domain_settings().budget_reserve == Decimal("1")
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": 1}, {})))
+    await budget_guard(world.worker(), world.business, reconcile=True)
+    # Расход в пределах полного месячного бюджета не останавливает рекламу — краха нет, сверка честная.
+    assert world.business.status == "running"
+    monkeypatch.setattr(
+        "app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": BUDGET_KOP + 1}, {}))
+    )
+    await budget_guard(world.worker(), world.business, reconcile=True)
+    # Сверх полного разрешённого — сверка останавливает рекламу и при резерве 100%.
+    assert world.business.status == "budget_stop"

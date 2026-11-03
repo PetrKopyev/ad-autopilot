@@ -124,9 +124,9 @@ class VkClient:
         now = datetime.now(UTC)
         windows: dict[str, dict[str, Any]] = {}
         for name, value in response.headers.items():
-            # Окна считаем по парам заголовков: x-ratelimit-rps-remaining и x-ratelimit-remaining-sec —
-            # одно окно «sec/rps». Блокируем до reset исчерпанного окна: секундный отпускает через секунду,
-            # часовой и суточный ждут своего reset, а не вслепую 60 секунд.
+            # Окна считаем по парам заголовков: x-ratelimit-rps-remaining/x-ratelimit-rps-reset и т.п. —
+            # каждая пара своё окно (sec/rps, hour, day). Блокируем до reset исчерпанного окна: секундный
+            # отпускает через секунду, часовой и суточный ждут своего reset, а не вслепую 60 секунд.
             tokens = name.lower().split("-")
             if len(tokens) < 3 or tokens[0] != "x" or tokens[1] != "ratelimit":
                 continue
@@ -150,9 +150,14 @@ class VkClient:
         except ValueError:
             retry = 60
         if response.status_code == 429 or remaining and min(remaining) == 0:
+            # Блокируем до reset исчерпанных окон. Если reset неизвестен (429 без заголовков, remaining=0
+            # без reset), берём Retry-After или его умолчание — max() никогда не вызывается по пустой
+            # последовательности, а живое окно не продлевает блокировку дольше своего reset.
             exhausted = [item.get("reset") for item in windows.values() if item.get("remaining") == 0]
-            until = [now + timedelta(seconds=retry)] if "Retry-After" in response.headers else []
-            self._blocked_until = max([*until, *(reset for reset in exhausted if reset is not None), *resets])
+            candidates = [reset for reset in exhausted if reset is not None]
+            if not candidates:
+                candidates = [now + timedelta(seconds=retry)]
+            self._blocked_until = max(candidates)
             retry = max(1, int((self._blocked_until - now).total_seconds()))
         return retry
 

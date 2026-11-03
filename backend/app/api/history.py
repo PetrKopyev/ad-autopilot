@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -8,9 +9,12 @@ from app.auth.sessions import current_user, require_csrf
 from app.db.models import ChangeLog, User
 from app.demo_flags import demo_now
 from app.platforms.base import PlatformError
+from app.platforms.fake import VirtualClock
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository, ServerBusy
+from app.services.optimize import rebalance_budget
 from app.services.rollback import ConfirmationRequired, RollbackService, can_revert, superseded
 from app.worker.clock import SystemClock
+from app.worker.jobs import Worker
 
 router = APIRouter(prefix="/api/history", route_class=ReleasingRoute)
 
@@ -125,6 +129,18 @@ async def revert(
             confirm=confirm,
             now=demo_now(repository.business(original.business_id), SystemClock().now),
         )
+        if original.entity_type == "group" and original.evidence.get("group_limits"):
+            # Откат SCALE вернул лимиты групп (Н7): переносим их в лимиты кампаний пересчётом
+            # при текущем бюджете — иначе на площадке остались бы устаревшие абсолютные значения.
+            business = repository.business(original.business_id)
+            worker = Worker(
+                repository,
+                resolve_adapter,
+                dry_run=False,
+                clock=VirtualClock(demo_now(business, SystemClock().now)),
+            )
+            worker.step_key = f"owner:{uuid4()}"
+            await rebalance_budget(worker, business, force=True)
     except ConfirmationRequired as error:
         raise HTTPException(
             409, {"confirmation_required": True, "message": str(error), "changes": error.changes}

@@ -298,7 +298,7 @@ async def generate_variant(worker, business, campaign, control, source, hypothes
             raise Blocked("Не удалось проверить новый текст.")
         if (variant.ad.title, variant.ad.text) == (source.title, source.text):
             raise Blocked("Новый текст совпал с исходным.")
-        creative = creative | {"title": variant.ad.title, "text": variant.ad.text}
+        creative = creative | {"title": variant.ad.title, "title2": variant.ad.title2 or None, "text": variant.ad.text}
     else:
         if budget.limit_kop - budget.spent_kop < ART_COST_KOP:
             raise Blocked("Лимит генерации картинок исчерпан.")
@@ -529,7 +529,7 @@ async def launch_audience(worker, business, campaign, group, control, change, de
     spec = AdGroupSpec(
         str(variant_group.id),
         variant_group.theme,
-        (AdSpec(str(variant.id), variant.title, variant.text, source.image_ref),),
+        (AdSpec(str(variant.id), variant.title, variant.text, source.image_ref, title2=variant.title2),),
         tuple(TargetSpec(str(target.id), "phrase", target.value) for target in targets),
         audience["targeting"],
     )
@@ -561,7 +561,9 @@ async def launch_audience(worker, business, campaign, group, control, change, de
             min_effect=Decimal(str(DEFAULT_SETTINGS.test_win_lift)),
             started_at=started,
             # Вывод — когда уточнятся цифры последнего дня проверки; день запаса на шаг воркера.
-            deadline=started + timedelta(days=DEFAULT_SETTINGS.test_max_days + DEFAULT_SETTINGS.settlement_days + 1),
+            # settlement_days добавляет experiment_expire_date: здесь он не нужен, иначе группа занята
+            # на два дня дольше.
+            deadline=started + timedelta(days=DEFAULT_SETTINGS.test_max_days + 1),
             status="running",
             stats={
                 "launch_change_id": change.id,

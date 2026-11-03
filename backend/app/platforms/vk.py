@@ -180,6 +180,9 @@ class VkAdapter(VkClient):
         self._tz = ZoneInfo(getattr(self._config, "tz_default", "Europe/Moscow"))
         self._trees: dict[str, ExternalRefs] = {}
         self._add_ad_lock = asyncio.Lock()
+        # Ссылка плана создаётся один раз на дерево: при переборе пакетов (два круга) без кэша
+        # каждый кандидат создавал бы свою urls.json — до 2N лишних POST.
+        self._url_id: int | None = None
         # Суммы лимитов в API VK: по умолчанию уходят как есть. VK_AMOUNTS_INCLUDE_VAT=true — ставка НДС
         # сверх лимита VK (как у Директа при DIRECT_AMOUNTS_INCLUDE_VAT=false): лимит делим на (1 + НДС),
         # чтобы трата с НДС не превысила бюджет, и умножаем обратно при чтении.
@@ -293,6 +296,11 @@ class VkAdapter(VkClient):
             raise PlatformError("В VK Рекламе несколько кампаний с одним ключом идемпотентности.")
         if found:
             plan = await self._load_plan_tree(found[0]["id"])
+            # Повтор переиспользует план неудачной попытки: дневной лимит между попытками пересчитался —
+            # переносим на площадку сразу, иначе кабинет и база расходятся до первого rebalance.
+            await self._update(
+                "ad_plans", found[0]["id"], {"budget_limit_day": _rub(self._to_api(plan_part.daily_limit_kop))}
+            )
         else:
             # Выведенные из работы пакеты остаются в списке «active» и падают только на создании
             # («Invalid package»): перебираем кандидатов, пока живой валидатор не примет план. Отказ из-за
@@ -330,7 +338,9 @@ class VkAdapter(VkClient):
                                 "(ОРД). Откройте ads.vk.com → «Маркировка рекламы», заполните ИНН и название "
                                 "рекламодателя, затем повторите запуск."
                             ) from error
-                        if "invalid package" not in text and "priced_goal" not in text and "objective" not in text:
+                        # Отказ по цели/пакету продолжает перебор; отказ по objective — про конфликт самого
+                        # плана (маскирует настоящую ошибку под PACKAGE_UNAVAILABLE) — обрываем сразу.
+                        if "invalid package" not in text and "priced_goal" not in text:
                             raise
                         refusals.append(f"пакет {package_id}: {error}")
                 if plan is not None:
@@ -390,24 +400,28 @@ class VkAdapter(VkClient):
             body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
         return body
 
+    def _priced_goal_body(self) -> dict | None:
+        """Цель кабинета/конфига для плана и групп; None — цель не задана."""
+        source_id = self._priced_goal_source_id
+        if isinstance(source_id, int) and not isinstance(source_id, bool) and source_id > 0:
+            return {"name": self._priced_goal_name, "source_id": source_id}
+        return None
+
     def _campaign_body(self, name: str, package_id: int, *, with_goal: bool = True) -> dict:
         """Campaign плана (живой валидатор требует уровень campaigns): только имя и пакет. Цель и стратегия
         живут на уровне плана — на campaign живой API их отклоняет («Objective differ with ad_plan objective»,
         «Unallowed value», пробы 02.11). priced_goal — цель пикселя VK (счётчик Top@Mail + цель; Метрика не
         подходит — ответ поддержки VK): уходит, если задана в конфиге или для кабинета."""
         body = {"name": name, "package_id": package_id}
-        source_id = self._priced_goal_source_id
-        if (
-            with_goal
-            and isinstance(source_id, int)
-            and not isinstance(source_id, bool)
-            and source_id > 0
-        ):
-            body["priced_goal"] = {"name": self._priced_goal_name, "source_id": source_id}
+        priced_goal = self._priced_goal_body() if with_goal else None
+        if priced_goal is not None:
+            body["priced_goal"] = priced_goal
         return body
 
     async def _plan_body(self, plan: CampaignTreeSpec, package_id: int, *, with_goal: bool = True) -> dict:
-        url = (await self._add("urls", {"url": self._href}))["id"]
+        if self._url_id is None:
+            self._url_id = (await self._add("urls", {"url": self._href}))["id"]
+        url = self._url_id
         # Живой API принимает ровно один лимит плана: «Can't set both budget_limit and budget_limit_day».
         # Держим дневной лимит (рычаг пейсинга), месяц закрывает страж бюджета — механика пауз платформонезависима.
         # objective/autobidding_mode живут на уровне плана; уровень campaigns = рекламные группы (в списках —
@@ -452,8 +466,15 @@ class VkAdapter(VkClient):
                 None,
             )
             package_id = package_id or self._used_package_id or (await self._resolve_packages())[0][0]
-            url = (await self._add("urls", {"url": self._href}))["id"]
+            if self._url_id is None:
+                self._url_id = (await self._add("urls", {"url": self._href}))["id"]
+            url = self._url_id
             group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id), "package_id": package_id}
+            # Цель кабинета идёт и в группу: иначе новая группа (аудиторная проверка) создаётся без цели,
+            # хотя план с ней работает (В8).
+            priced_goal = self._priced_goal_body()
+            if priced_goal is not None:
+                group_body["priced_goal"] = priced_goal
             group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {
             str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
@@ -740,8 +761,12 @@ class VkAdapter(VkClient):
                     base = row["base"]
                     if not date_from <= day <= date_to:
                         raise ValueError
-                    if own is not None and parents.get(entity_id, entity_id) not in own:
-                        continue
+                    if own is not None:
+                        # Уровень campaign — это сами планы: родителя нет, строка наша, если id плана в own.
+                        # У групп и баннеров родитель обязателен: без него (удалили в кабинете) строку пропускаем.
+                        parent = parents.get(entity_id) or (entity_id if level == "campaign" else None)
+                        if parent not in own:
+                            continue
                     rows.append(
                         StatRow(
                             entity_id,

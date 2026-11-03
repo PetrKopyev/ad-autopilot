@@ -40,6 +40,8 @@ class AdSpec:
     image_ref: str | None = None
     status: str = "active"
     medical: bool = False
+    # Второй заголовок (Директ: Title2 у TextAd, второй элемент Titles у ResponsiveAd); VK его не имеет.
+    title2: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,12 +130,16 @@ class Operation:
             if self.before is not None or not isinstance(self.after, dict):
                 raise ValueError("Добавление объявления требует before=None и описание варианта.")
             required = {"group_id", "title", "text", "image_ref"}
+            extra = set(self.after) - required
             if (
-                set(self.after) != required
+                not extra <= {"title2"}
                 or any(
                     not isinstance(self.after[name], str) or not self.after[name].strip()
                     for name in ("group_id", "title", "text")
                 )
+                or "title2" in self.after
+                and self.after["title2"] is not None
+                and not isinstance(self.after["title2"], str)
                 or self.after["image_ref"] is not None
                 and not isinstance(self.after["image_ref"], str)
             ):
@@ -182,6 +188,7 @@ class EntityState:
     daily_limit_kop: int | None = None
     period_cap_kop: int | None = None
     title: str | None = None
+    title2: str | None = None
     text: str | None = None
     image_ref: str | None = None
     targeting: dict[str, Any] = field(default_factory=dict)
@@ -194,7 +201,13 @@ class EntityState:
     @property
     def creative(self) -> dict[str, Any]:
         """Снимок добавленного объявления для сверки операции add_ad."""
-        return {"group_id": self.parent_id, "title": self.title, "text": self.text, "image_ref": self.image_ref}
+        return {
+            "group_id": self.parent_id,
+            "title": self.title,
+            "title2": self.title2 or None,
+            "text": self.text,
+            "image_ref": self.image_ref,
+        }
 
 
 @dataclass(frozen=True)

@@ -363,10 +363,10 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     original = changes[-1]
     _, groups = await snapshot(worker, world.business)
     assert next(group for group in groups if group.id == original.entity_id).last_changed_at == original.created_at
-    untouched = world.worker().metadata(world.business)["group_limits"].copy()
-    campaign_budget = (world.campaign.daily_limit_kop, world.campaign.period_cap_kop)
-    # Пересчёт лимитов после SCALE менял бюджет кампании: откат возвращает прежние значения по факту,
-    # поэтому нужно подтверждение, как при любом расхождении настроек.
+    # Дрейф после SCALE (следующий пересчёт переписал лимиты групп): без подтверждения откат не проходит.
+    drifted = world.worker().metadata(world.business)["group_limits"].copy()
+    drifted[original.entity_id] += 1
+    world.worker().remember(world.business, group_limits=drifted)
     with pytest.raises(ConfirmationRequired):
         await RollbackService(world.repository, dry_run=False).revert(
             original.id, business_id=1, adapter=world.adapter, now=world.clock.now
@@ -379,21 +379,16 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
         confirm=True,
     )
     assert reverted.status == "applied" and original.status == "reverted"
-    before_limits = {
-        op["field"]: op["before"]
-        for op in original.operations
-        if op["kind"] == "set_budget" and op["entity_id"] == world.campaign.external_id
-    }
-    assert (
-        world.campaign.daily_limit_kop == before_limits.get("daily_limit_kop", campaign_budget[0])
-        and world.campaign.period_cap_kop == before_limits.get("period_cap_kop", campaign_budget[1])
-    )
-    limits = worker.metadata(world.business)["group_limits"]
+    # Абсолютные лимиты кампании запись не восстанавливает: конечная точка после отката зовёт
+    # rebalance_budget(force=True) — лимиты кампаний пересчитываются из возвращённых лимитов групп
+    # при текущем бюджете, платформа и база согласованы (Н7).
+    await rebalance_budget(worker, world.business, force=True)
+    limits = world.worker().metadata(world.business)["group_limits"]
     assert all(limits[key] == value for key, value in original.evidence["group_limits"]["before"].items())
-    assert all(
-        limits[key] == value
-        for key, value in untouched.items()
-        if key not in original.evidence["group_limits"]["before"]
+    state = (await world.adapter.get_state(world.refs))[world.campaign.external_id]
+    assert (state.daily_limit_kop, state.period_cap_kop) == (
+        world.campaign.daily_limit_kop,
+        world.campaign.period_cap_kop,
     )
     assert all(ad.frozen_until is None for ad in world.repository.rows(Ad))
     _, groups = await snapshot(worker, world.business)
@@ -402,10 +397,10 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     assert not group_available(worker, world.business, local)
 
 
-async def test_scale_uses_budget_freed_by_paused_ad_in_still_active_group():
-    """В2: остановка одного объявления из двух освобождает пропорциональную долю лимита группы, и на неё растёт
-    хорошая группа другой кампании. Иначе при 1–2 услугах (последнее объявление группы не остановить)
-    рост бюджета эффективной рекламы не наступал бы никогда — а это пункт приёмки."""
+async def test_partially_stopped_group_does_not_donate_to_scale():
+    """Н5: частично остановленная группа (одно из двух объявлений остановлено, второе работает — типичная
+    картина после A/B-теста с победителем) не донорит лимит: лимит на площадках общий на группу, работающее
+    объявление тратит его целиком. Иначе после каждого A/B-теста SCALE снимал бы деньги с группы победителя."""
     from tests.worker.test_guard_edges import with_vk, worker_for
 
     world = await make_world()
@@ -417,11 +412,10 @@ async def test_scale_uses_budget_freed_by_paused_ad_in_still_active_group():
     worker = worker_for(world, vk)
     await world.advance(worker, days=20)
     assert sum(ad.status != "active" for ad in weak) == 1, "одно объявление слабой группы остановлено"
-    scales = world.changes(reason_code="SCALE_UP", status="applied")
-    assert scales, "хорошая группа выросла на освободившееся от остановленного объявления"
-    donors = {key for change in scales for key in change.evidence["group_limits"]["before"]}
     weak_group = next(group for group in world.repository.rows(AdGroup) if group.theme == "Укладки")
-    assert weak_group.external_id in donors, "донор — частично остановленная группа"
+    for change in world.changes(reason_code="SCALE_UP"):
+        donors = set(change.evidence["group_limits"]["before"])
+        assert weak_group.external_id not in donors, "частично остановленная группа не донор"
 
 
 async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_budget_is_enough(monkeypatch):

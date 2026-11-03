@@ -48,13 +48,15 @@ LATER_COLUMNS = {
     "art_calls": ("operation_id", "seed", "created_at"),
     "businesses": ("created_at",),
     "platform_accounts": ("created_at",),
-    "ads": ("created_at",),
+    "ads": ("created_at", "title2"),
     "assets": ("created_at",),
     "llm_calls": ("created_at",),
     "worker_runs": ("slot_key",),
     "change_log": ("idempotency_key",),
     "marking_profiles": ("transmission",),
 }
+# Таблицы, появившиеся после 0001_initial: в реконструкции «схемы на момент 0001» не участвуют.
+LATER_TABLES = {"ai_spend_ledger"}
 INITIAL_INDEXES = {"ix_stats_daily_business_id_date", "ix_change_log_business_id_created_at"}
 
 
@@ -62,6 +64,8 @@ def metadata_before_additions() -> MetaData:
     """Metadata as of 0001_initial: without everything that 0002 and 0003 add or change."""
     metadata = MetaData(naming_convention=Base.metadata.naming_convention)
     for table in Base.metadata.sorted_tables:
+        if table.name in LATER_TABLES:
+            continue
         table.to_metadata(metadata)
     later_checks = {f"ck_{table}_{name}" for table, name, _ in load_revision("0003_storage_integrity").checks()}
     for table in metadata.tables.values():

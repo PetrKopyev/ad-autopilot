@@ -347,6 +347,7 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
     assert await adapter.create_campaign_tree(replace(plan, name="Другой", daily_limit_kop=1)) == first
     first.ads.clear()
     assert (await adapter.create_campaign_tree(plan)).ads == {"ad": "103"}
+    # Повтор внутри одного адаптера — из кэша дерева, без обращений к площадке.
     assert len(server.writes) == writes
     async with DirectAdapter(
         "test-only", config=configuration(), counter_ids=(12,), href="https://salon.example"
@@ -359,7 +360,11 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
             {"phrase": "104"},
             first.budget_context,
         )
-    assert len(server.writes) == writes
+    # Свежий адаптера повтора перечитывает кампанию и переносит пересчитанный лимит на площадку (К3):
+    # campaigns.get + один campaigns/update, новых созданий нет.
+    update = next((w for w in server.writes if w[0] == "campaigns" and w[1] == "update"), None)
+    assert update is not None and update[2]["Campaigns"][0]["Id"] == 101
+    assert len(server.writes) == writes + 1
 
 
 async def test_create_tree_leaves_draft_campaign_without_suspend(adapter, api, plan):
@@ -615,13 +620,17 @@ async def test_campaign_pagination(adapter, api, plan):
         side_effect=[
             httpx.Response(200, json={"result": {"Campaigns": [{"Id": 9, "Name": "Other"}], "LimitedBy": 1}}),
             httpx.Response(200, json={"result": {"Campaigns": [{"Id": 10, "Name": "Changed ap-salon"}]}}),
+            # Повтор переиспользует кампанию и обновляет лимит (campaigns/update).
+            httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 10}]}}),
         ]
     )
     result(api, "adgroups", AdGroups=[])
     empty = replace(plan, groups=())
     assert (await adapter.create_campaign_tree(empty)).campaign_id == "10"
-    assert request_body(route)["params"]["Page"]["Offset"] == 1
-    assert request_body(route)["params"]["SelectionCriteria"] == {}
+    assert json.loads(route.calls[1].request.content)["params"]["Page"]["Offset"] == 1
+    assert json.loads(route.calls[1].request.content)["params"]["SelectionCriteria"] == {}
+    # Повтор переиспользует кампанию и обновляет лимит (campaigns/update).
+    assert json.loads(route.calls.last.request.content)["method"] == "update"
 
 
 async def test_get_treats_missing_collection_key_as_empty(adapter, api):
@@ -1753,3 +1762,26 @@ async def test_add_group_into_running_campaign_is_idempotent(adapter, api, plan)
     assert [row["Keyword"] for row in keywords] == ["маникюр гель"] and len(ads) == 1
     assert added.ads == {"variant-1": str(ads[0]["Id"])} and "ap_ref=variant-1" in ads[0]["ResponsiveAd"]["Href"]
     assert [write[:2] for write in server.writes].count(("adgroups", "add")) == 2
+
+
+async def test_campaign_off_maps_to_auto_pause_in_apply(adapter, api, plan):
+    """В10: State=OFF кампании (пустой счёт, лимит площадки) читается как paused_auto и в apply, не
+    только в get_state: операция-пауза на уже остановленной площадкой кампании не дёргает API,
+    а запись изменения видит статус автопилота, а не «прежний» paused_owner."""
+    server = DirectServer()
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    server.rows["campaigns"][0]["State"] = "OFF"
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_auto"
+    operation = Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto")
+    writes = len(server.writes)
+    await adapter.apply(operation)
+    assert len(server.writes) == writes
+    assert server.rows["campaigns"][0]["State"] == "OFF"
+
+
+async def test_whoami_rejects_agency_account_with_clear_message(adapter, api):
+    """В6: агентский кабинет при подключении даёт понятную ошибку, а не загадочный отказ API."""
+    result(api, "clients", Clients=[{"ClientId": 7, "Login": "agency", "ClientInfo": "Агентство", "Type": "AGENCY"}])
+    with pytest.raises(PlatformError, match="Агентские кабинеты не поддерживаются"):
+        await adapter.whoami()

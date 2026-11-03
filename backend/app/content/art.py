@@ -29,6 +29,9 @@ class ArtBudgetExceeded(ArtError):
 class ArtBudget:
     limit_kop: int
     spent_kop: int = 0
+    # Резерв в общем пуле владельца до генерации (В11): закрывает гонку параллельных запросов.
+    # Ставит сервисный слой; бросает ArtBudgetExceeded при переполнении пула.
+    on_reserve: Callable[[], Awaitable[None]] | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -38,6 +41,8 @@ class ArtBudget:
             raise ValueError("Spent budget exceeds limit")
 
     async def reserve(self) -> None:
+        if self.on_reserve is not None:
+            await self.on_reserve()
         async with self._lock:
             if self.spent_kop + ART_COST_KOP > self.limit_kop:
                 raise ArtBudgetExceeded("YandexART budget exhausted")

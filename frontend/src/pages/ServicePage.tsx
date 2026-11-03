@@ -84,9 +84,17 @@ export function ServicePolicyPage() {
   const me = useSession();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [requisites, setRequisites] = useState('');
+  useEffect(() => {
+    const controller = new AbortController();
+    void getAuthConfig(controller.signal).then((config) => {
+      if (!controller.signal.aborted) setRequisites(config.operator_requisites ?? '');
+    }).catch(() => {});
+    return () => controller.abort();
+  }, []);
   return <div className="page-stack service"><PageHeader title={copy.service.policyTitle} description={copy.service.policyDescription} />
     <article className="panel service-panel service-doc">{copy.launchFlow.policy.map((text) => <p key={text}>{text}</p>)}
-      <p className="muted">{copy.launchFlow.policyNotice}</p></article>
+      <p className="muted">{requisites || copy.launchFlow.policyNotice}</p></article>
     {error && <ErrorBanner message={error} />}
     {me.data && <section className="panel service-panel service-account" aria-label={copy.launchFlow.signedIn(me.data.login)}>
       <p>{copy.launchFlow.signedIn(me.data.login)}</p>

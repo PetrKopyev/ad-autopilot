@@ -27,6 +27,8 @@ TABLES = {
     "worker_runs",
     "llm_calls",
     "art_calls",
+    # Учёт трат на ИИ без внешних ключей: удаление бизнеса/аккаунта лимит не обнуляет (В11).
+    "ai_spend_ledger",
 }
 
 
@@ -77,6 +79,9 @@ def test_indexes_and_unique_keys() -> None:
         "ix_change_log_business_id_platform_created_at",
         "ix_change_log_pending_created_at",
         "ix_worker_runs_business_id_started_at",
+        # ai_spend_ledger: внешних ключей нет, индексы объявлены явно.
+        "ix_ai_spend_ledger_owner",
+        "ix_ai_spend_ledger_business_id",
     }
     for name, where in partial_unique.items():
         assert indexes[name].unique and str(indexes[name].dialect_options["postgresql"]["where"]) == where
@@ -107,7 +112,7 @@ def test_indexes_and_unique_keys() -> None:
 
 def test_money_json_arrays_defaults_and_cascades() -> None:
     money_columns = [c for table in Base.metadata.tables.values() for c in table.c if c.name.endswith("_kop")]
-    assert len(money_columns) == 11
+    assert len(money_columns) == 12
     assert all(isinstance(column.type, BigInteger) for column in money_columns)
     for table in Base.metadata.tables.values():
         for fk in table.foreign_keys:

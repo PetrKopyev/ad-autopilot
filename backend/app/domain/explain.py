@@ -27,13 +27,13 @@ TEMPLATES = {
     ),
     "EXPERIMENT_WIN": (
         "Объявление {winner} показывали {impressions}, на него нажали {clicks} ({rate}%) против "
-        "{other_impressions} показов и {other_clicks} нажатий ({other_rate}%) у {loser}. {confidence}. "
+        "{other_impressions} и {other_clicks} ({other_rate}%) у {loser}. {confidence}. "
         "Оставили {winner}, {loser} остановили."
     ),
     "EXPERIMENT_NO_DIFF": (
-        "Убедительной разницы между объявлениями нет: объявление А показали {control_impressions}, нажали "
-        "{control_clicks} ({control_rate}%), объявление Б — {variant_impressions} показов и {variant_clicks} "
-        "нажатий ({variant_rate}%). Оставили прежнее, новое остановили."
+        "Убедительной разницы между объявлениями нет: у объявления А — {control_impressions}, "
+        "{control_clicks} ({control_rate}%), у объявления Б — {variant_impressions}, {variant_clicks} "
+        "({variant_rate}%). Оставили прежнее, новое остановили."
     ),
     "EXPERIMENT_EXPIRED": (
         "Срок проверки истёк. Победителя не выбирали, вариант остановили: по этим данным лучший не виден."
@@ -96,6 +96,12 @@ MONEY_FIELDS = {"spend", "ref_cpl", "old_limit", "new_limit", "spent", "budget",
 PLURALS = {
     "clicks": ("раз", "раза", "раз"),
     "impressions": ("раз", "раза", "раз"),
+    "other_impressions": ("показ", "показа", "показов"),
+    "other_clicks": ("нажатие", "нажатия", "нажатий"),
+    "control_impressions": ("показ", "показа", "показов"),
+    "control_clicks": ("нажатие", "нажатия", "нажатий"),
+    "variant_impressions": ("показ", "показа", "показов"),
+    "variant_clicks": ("нажатие", "нажатия", "нажатий"),
     "leads": ("обращение", "обращения", "обращений"),
     "extra_leads": ("обращение", "обращения", "обращений"),
     "n_per_arm": ("показ", "показа", "показов"),

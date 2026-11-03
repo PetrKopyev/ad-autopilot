@@ -369,7 +369,13 @@ class FakeAdapter:
             if operation.entity_id in tree.ads:
                 return
             ad_id = self._external_id(group.entity_id, "ad", operation.entity_id)
-            ad = AdSpec(operation.entity_id, content["title"], content["text"], content["image_ref"])
+            ad = AdSpec(
+                operation.entity_id,
+                content["title"],
+                content["text"],
+                content["image_ref"],
+                title2=content.get("title2") or "",
+            )
             self._states[ad_id] = EntityState(
                 ad_id,
                 "ad",
@@ -377,6 +383,7 @@ class FakeAdapter:
                 ad.title,
                 ad.status,
                 title=ad.title,
+                title2=ad.title2 or None,
                 text=ad.text,
                 image_ref=ad.image_ref,
             )

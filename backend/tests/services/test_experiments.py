@@ -313,6 +313,37 @@ async def test_tick_expired_test_does_not_touch_frozen_variant(experiment_world)
     assert await world.adapter.get_state(world.refs) == before
 
 
+async def test_tick_expired_test_stops_active_variant_when_control_frozen(experiment_world):
+    """Истёкшая проверка останавливает работающий вариант, даже когда контроль заморожен откатом
+    владельца: операция одна — на вариант, контроль не трогаем."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    experiment.deadline = world.clock.now + timedelta(days=13)
+    world.ads["borderline-1"].frozen_until = world.clock.now + timedelta(days=30)
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(), world.business)
+    assert experiment.status == "concluded" and experiment.verdict == "no_difference"
+    change = world.changes(kind="experiment_verdict")[0]
+    assert [op["entity_id"] for op in change.operations] == [world.ads["borderline-2"].external_id]
+    states = await world.adapter.get_state(world.refs)
+    assert states[world.ads["borderline-2"].external_id].status == "paused_auto"
+    assert states[world.ads["borderline-1"].external_id].status == "active"
+
+
+async def test_tick_expired_test_waits_when_business_is_not_running(experiment_world):
+    """Н8: реклама остановлена владельцем — тик закрытия просроченной проверки не идёт на площадку
+    (иначе apply падал бы на подключении кабинета и ронял весь тик): проверка остаётся запущенной
+    до тика работающего бизнеса."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    experiment.deadline = world.clock.now + timedelta(days=13)
+    world.business.status = "paused"
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(), world.business)
+    assert experiment.status == "running"
+    assert world.changes(kind="experiment_verdict") == []
+
+
 async def test_tick_on_deadline_day_evaluates_data_before_expiry(experiment_world):
     """К4: в день срока проверки тик сначала выносит вывод по данным, а не закрывает её «срок истёк»:
     срок сравнивается по дате, как в domain/evaluate_experiment, а не по времени старта — иначе тик

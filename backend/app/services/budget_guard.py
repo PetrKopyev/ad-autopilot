@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import ExitStack
+from dataclasses import replace
 from decimal import Decimal
 from math import ceil
 from time import monotonic
@@ -256,17 +257,18 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             observed_daily += ceil(max(0, spent.get(platform, 0) - ledger.spent_kop) * 86400 / seconds)
     # Ledger — снимок, а не разрешённый расход: во время простоя работают кэпы.
     # Верхняя граница сверки — разрешённое месяца без резерва: резерв держится на задержку отчётов
-    # площадок, а не на остановку на 92% бюджета.
+    # площадок, а не на остановку на 92% бюджета. Считаем с нулевым резервом, а не обращаем
+    # округлённую долю: при резерве 100% обращение дало бы деление на ноль.
     day = today(worker.clock)
+    no_reserve = replace(domain, budget_reserve=Decimal(0))
     allowed = plan_budget(
         business.month_budget_kop,
         0,
         day,
         ("all",),
         started_on=day.fromisoformat(worker.metadata(business).get("started_on", month.isoformat())),
-        settings=domain,
+        settings=no_reserve,
     ).authorized
-    allowed = int(Decimal(allowed) / (1 - Decimal(str(domain.budget_reserve))))
     mismatch = reconcile and reported > allowed
     result = decide_guard(
         business.month_budget_kop,

@@ -143,7 +143,8 @@ it('политика открывается гостю, а меню и служ�
   expect(screen.queryByRole('navigation')).toBeNull();
   expect(screen.queryByRole('link', { name: copy.service.errorsTitle })).toBeNull();
   expect(screen.queryByRole('link', { name: copy.setup.accounts.vk })).toBeNull();
-  expect(calls()).toEqual([]);
+  // Страница читает публичный конфиг ради реквизитов оператора; учётных данных не запрашивает.
+  expect(calls()).toEqual(['GET /api/auth/config']);
 });
 
 it('несуществующий адрес показывает «Страница не найдена» со ссылкой на главную', async () => {

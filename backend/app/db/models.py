@@ -269,6 +269,8 @@ class Ad(Base):
     ad_group_id: Mapped[int] = mapped_column(ForeignKey("ad_groups.id", ondelete="CASCADE"), index=True)
     external_id: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str] = mapped_column(Text)
+    # Второй заголовок объявления (генерация ad_text); пусто у площадок без второго заголовка (VK).
+    title2: Mapped[str] = mapped_column(Text, default="", server_default="")
     text: Mapped[str] = mapped_column(Text)
     display_url: Mapped[str | None] = mapped_column(Text)
     asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), index=True)
@@ -462,4 +464,25 @@ class ArtCall(Base):
     operation_id: Mapped[str | None] = mapped_column(Text)
     seed: Mapped[int | None] = mapped_column(BigInteger)
     rejection_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created()
+
+
+class AiSpendLedger(Base):
+    """Учёт трат на ИИ для лимитов владельца и суточного потолка сервиса.
+
+    Отдельная таблица без внешних ключей: удаление бизнеса или аккаунта не обнуляет лимит (иначе
+    трату оператору можно было бы сжигать бесконечно пересозданием аккаунта). owner_key — хэш
+    yandex_uid: персональный идентификатор в базе не храним. Строка с final=false — резерв
+    оценки до вызова (защита от параллельных запросов); после ответа строка уточняется до
+    фактической стоимости либо удаляется при отказе."""
+
+    __tablename__ = "ai_spend_ledger"
+    __table_args__ = (*non_negative("cost_kop"), Index("ix_ai_spend_ledger_owner", "owner_key", "created_at"))
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_key: Mapped[str] = mapped_column(Text)
+    business_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    kind: Mapped[str] = mapped_column(Text)
+    cost_kop: Mapped[int] = mapped_column(BigInteger)
+    final: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = created()

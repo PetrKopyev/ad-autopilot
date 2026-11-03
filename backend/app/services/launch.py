@@ -4,6 +4,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from textwrap import shorten
 from typing import TYPE_CHECKING
@@ -310,9 +311,19 @@ class LaunchService:
         month = today.replace(day=1)
         ledgers = self.repository.rows(BudgetLedger, business_id=business.id, month=month)
         spent = sum(row.spent_kop for row in ledgers)
-        started_on = date.fromisoformat(business.settings.get("_worker", {}).get("started_on", today.isoformat()))
+        meta = business.settings.get("_worker", {})
+        started_on = date.fromisoformat(meta.get("started_on", today.isoformat()))
+        # Доли после переноса бюджета между площадками (rebalance их запоминает в meta["shares"]):
+        # без них повтор вернул бы дефолтные пропорции и перекрыл бы перенесённое.
+        shares = {key: Decimal(value) for key, value in meta.get("shares", {}).items()}
         budget = plan_budget(
-            business.month_budget_kop, spent, today, plan_platforms, started_on=started_on, settings=self.domain
+            business.month_budget_kop,
+            spent,
+            today,
+            plan_platforms,
+            started_on=started_on,
+            shares=shares if set(shares) == set(plan_platforms) else None,
+            settings=self.domain,
         )
         result = {}
         for limit in budget.limits:
@@ -642,6 +653,7 @@ class LaunchService:
                     Ad(
                         ad_group_id=row.id,
                         title=ad["title"],
+                        title2=ad.get("title2", ""),
                         text=ad["text"],
                         display_url=business.site_url,
                         status="draft",
@@ -687,6 +699,7 @@ class LaunchService:
                             ad.text,
                             image_refs[ad.asset_id] if ad.asset_id else None,
                             medical=business.medical_level != "none",
+                            title2=ad.title2,
                         )
                         for ad in ads
                         if ad.ad_group_id == group.id
@@ -833,15 +846,12 @@ class LaunchService:
         plan.payload = plan.payload | {
             "launch": plan.payload["launch"] | {"launched_at": now.isoformat(), "error": None, "started_at": None}
         }
-        # Повтор частичного запуска не сдвигает дату старта внутри месяца: разрешённый расход считается
-        # от первого запуска, иначе остаток против полного расхода почти нулевый и страж бюджета ложно
-        # останавливает рекламу. В новом месяце дата обновляется — месячный бюджет начался заново.
+        # Повтор запуска никогда не сдвигает дату первого старта. Разрешённый расход месяца plan_budget
+        # считает как max(начало месяца, started_on): в новом месяце остаток и так полный, а перезапись
+        # даты (в том числе «Повторить» по второй площадке) ложно обнуляла бы остаток против полного расхода.
         worker_meta = business.settings.get("_worker", {})
         previous = worker_meta.get("started_on")
-        month_start = today.replace(day=1).isoformat()
-        worker_meta = worker_meta | {
-            "started_on": previous if previous is not None and previous >= month_start else today.isoformat()
-        }
+        worker_meta = worker_meta | {"started_on": previous if previous is not None else today.isoformat()}
         business.settings = business.settings | {"_worker": worker_meta}
         business.status = "running"
         # Уведомления о прерванных попытках этого и прежних планов: реклама запущена, их тексты уже неправда.

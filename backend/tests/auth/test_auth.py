@@ -517,7 +517,7 @@ def test_demo_gate_uses_both_explicit_settings(client, repository, monkeypatch, 
         monkeypatch.setenv("DEMO_LOGIN", flag)
     monkeypatch.setattr("app.config.settings", Settings())
     config = client.get("/api/auth/config")
-    assert config.json() == {"demo": enabled, "vk_oauth": False}
+    assert config.json() == {"demo": enabled, "vk_oauth": False, "operator_requisites": ""}
     assert config.headers["cache-control"] == "no-store"
     assert client.post("/api/auth/demo", headers=DEMO_HEADERS).status_code == (204 if enabled else 404)
     assert bool(repository.users) is enabled

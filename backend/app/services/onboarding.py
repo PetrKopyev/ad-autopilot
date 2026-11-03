@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import re
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -7,17 +8,27 @@ from datetime import UTC, date, datetime, time, timedelta
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from starlette.concurrency import run_in_threadpool
 
-from app.content.art import ArtBudget
+from app.content.art import ART_COST_KOP, ArtBudget, ArtBudgetExceeded
 from app.content.art import ArtCall as ArtRecord
 from app.content.llm import LLMClient
 from app.content.medical import MedicalLevel, classify
 from app.content.site_reader import SiteReadResult, extract_description, read_site, safe_url
 from app.content.verify import DescriptionDraft, Fact, OwnerQuestion, Service
 from app.content.yandexgpt import CompletionResult, YandexGPTError
-from app.db.models import ArtCall, Business, ChangeLog, LLMCall, MarkingProfile, Plan, PlatformAccount
+from app.db.models import (
+    AiSpendLedger,
+    ArtCall,
+    Business,
+    ChangeLog,
+    LLMCall,
+    MarkingProfile,
+    Plan,
+    PlatformAccount,
+    User,
+)
 from app.domain.budget import budget_minimum
 from app.domain.explain import explain, rubles
 from app.platforms.base import AdPlatform
@@ -48,6 +59,9 @@ MAX_FIELD = 2000
 # Строка цены длиннее — не цена; потолки держат разбор поля за миллисекунды.
 MAX_PRICE_LINE = 200
 MAX_SERVICES = 200
+# Сервисная advisory lock резервирования трат на ИИ: короткие операции (SUM + INSERT), одна на всех,
+# чтобы параллельные запросы не проходили проверку лимита одновременно.
+AI_SPEND_LOCK_KEY = 727_000_001
 QUESTIONS = {
     "services": "Какие услуги вы оказываете?",
     "prices": "Сколько стоят ваши услуги?",
@@ -170,9 +184,11 @@ def ai_budget(repository: "OnboardingRepository", business: Business, limits: Ai
     В демо (DemoLLM, DemoArt) ИИ бесплатный: вызовы не пишутся в llm_calls и art_calls, траты всегда 0, и сдвиг
     виртуальной даты демо относительно created_at (время базы) на лимит не влияет. Деньги в демо не тратятся.
 
-    Недельный пул — на владельца (User.yandex_uid), а не на бизнес: удаление бизнеса или аккаунта не даёт
-    нового лимита, иначе трату оператору можно было бы сжигать бесконечно. Бизнес всё равно не тратит больше
-    собственного лимита. Плюс суточный потолок на весь сервис.
+    Недельный пул и суточный потолок считаются по ai_spend_ledger: таблица без внешних ключей, удаление
+    бизнеса или аккаунта её не трогает — иначе трату оператору можно было бы сжигать бесконечным пересозданием
+    аккаунта. Ключ владельца — хэш yandex_uid, а не id пользователя: после удаления аккаунта и повторного входа
+    тот же Яндекс ID даёт тот же пул. Пул владельца = недельный + онбординг; бизнес всё равно не тратит больше
+    собственного лимита.
     """
     week_start = datetime.combine(today - timedelta(days=today.weekday()), time(), MOSCOW)
     if business.status in ("draft", "plan_ready"):
@@ -183,7 +199,8 @@ def ai_budget(repository: "OnboardingRepository", business: Business, limits: Ai
         limit, spent = limits.weekly_kop, repository.ai_spent(business.id, since)
     budget = ArtBudget(limit, min(max(spent, 0), limit))
     owner_pool = limits.weekly_kop + limits.onboarding_kop
-    owner_room = max(0, owner_pool - repository.ai_spent_for_owner(business.user_id, week_start))
+    owner = repository.owner_key(business)
+    owner_room = max(0, owner_pool - repository.ai_spent_for_owner_key(owner, week_start))
     room = min(budget.limit_kop - budget.spent_kop, owner_room)
     budget = ArtBudget(budget.spent_kop + max(0, room), budget.spent_kop)
     if limits.daily_cap_kop:
@@ -191,6 +208,8 @@ def ai_budget(repository: "OnboardingRepository", business: Business, limits: Ai
         day_room = max(0, limits.daily_cap_kop - repository.ai_spent_since(day_start))
         room = min(budget.limit_kop - budget.spent_kop, day_room)
         budget = ArtBudget(budget.spent_kop + max(0, room), budget.spent_kop)
+    if owner is not None:
+        budget.on_reserve = repository.art_reservation(business.id)
     return budget
 
 
@@ -209,11 +228,21 @@ class SpendLLM:
     async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
         if self.budget.spent_kop >= self.budget.limit_kop:
             raise YandexGPTError("Лимит трат на ИИ исчерпан.")
+        # Резерв оценки до вызова: параллельные запросы не проходят проверку одновременно, перерасход
+        # ограничен точностью оценки; после ответа резерв уточняется до фактической стоимости.
+        estimate = getattr(self.inner, "estimate_kop", None)
+        reservation = self.repository.reserve_ai(self.business_id, "llm", estimate(system, user)) if estimate else None
         try:
             result = await self.inner.complete_json(system, user, temperature)
         except YandexGPTError as error:
+            cost = error.result.cost_kop if isinstance(error.result, CompletionResult) else 0
+            if cost:
+                self.repository.settle_ai(reservation, cost)
+            else:
+                self.repository.release_ai(reservation)
             self.account(error.result)
             raise
+        self.repository.settle_ai(reservation, result.cost_kop if isinstance(result, CompletionResult) else 0)
         self.account(result)
         return result
 
@@ -258,28 +287,121 @@ class OnboardingRepository(ChangesRepository):
             total += int(self.db.scalar(statement))
         return total
 
-    def ai_spent_for_owner(self, user_id: int, since: datetime | None = None) -> int:
-        """Траты на ИИ по всем бизнесам владельца: недельный лимит — на владельца, а не на бизнес."""
-        total = 0
-        for model in (LLMCall, ArtCall):
-            statement = (
-                select(func.coalesce(func.sum(model.cost_kop), 0))
-                .join(Business, model.business_id == Business.id)
-                .where(Business.user_id == user_id)
-            )
-            if since is not None:
-                statement = statement.where(model.created_at >= since)
-            total += int(self.db.scalar(statement))
-        return total
+    def owner_key(self, business: Business) -> str | None:
+        """Ключ владельца для учёта трат на ИИ: хэш yandex_uid. Персональный идентификатор в базе не храним;
+        после удаления аккаунта и повторного входа тем же Яндекс ID ключ тот же — лимит не обнуляется."""
+        if business.user_id is None:
+            return None
+        yandex_uid = self.db.scalar(select(User.yandex_uid).where(User.id == business.user_id))
+        return hashlib.sha256(yandex_uid.encode()).hexdigest() if yandex_uid else None
+
+    @contextmanager
+    def ai_lock(self) -> Iterator[None]:
+        """Сериализует резервирование трат на ИИ. Postgres — advisory lock на отдельном соединении;
+        иначе (демо/SQLite) — без блокировки: конкурентности там нет."""
+        engine = self.db.get_bind().engine
+        if engine.dialect.name != "postgresql":
+            yield
+            return
+        from app.db.session import lock_bind
+
+        with lock_bind(engine).connect() as connection:
+            connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": AI_SPEND_LOCK_KEY})
+            try:
+                yield
+            finally:
+                connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": AI_SPEND_LOCK_KEY})
+
+    def _ai_pool_room(self, owner: str, estimate_kop: int, error_type: type[Exception]) -> None:
+        """Проверяет пул владельца и суточный потолок по ledger (включая открытые резервы) и бросает
+        исключение лимита, если оценка выше остатка."""
+        from app.config import settings as config
+
+        limits = AiLimits.from_settings(config)
+        now = datetime.now(MOSCOW)
+        week_start = datetime.combine(now.date() - timedelta(days=now.weekday()), time(), MOSCOW)
+        if self.ai_spent_for_owner_key(owner, week_start) + estimate_kop > limits.weekly_kop + limits.onboarding_kop:
+            raise error_type("Лимит трат на ИИ исчерпан.")
+        if limits.daily_cap_kop:
+            day_start = datetime.combine(now.date(), time(), MOSCOW)
+            if self.ai_spent_since(day_start) + estimate_kop > limits.daily_cap_kop:
+                raise error_type("Суточный лимит трат на ИИ исчерпан.")
+
+    def reserve_ai(self, business_id: int, kind: str, estimate_kop: int) -> int | None:
+        """Резервирует оценку траты до вызова ИИ: строка ledger с final=false под advisory lock.
+        Возвращает id резерва (None — бесплатный вызов без оценки или владелец неизвестен)."""
+        if estimate_kop <= 0:
+            return None
+        from app.demo_flags import demo_enabled
+
+        if demo_enabled():
+            return None  # демо: ИИ бесплатен, учёт не ведём
+        business = self.db.get(Business, business_id)
+        owner = self.owner_key(business) if business is not None else None
+        if owner is None:
+            return None
+        error_type = ArtBudgetExceeded if kind == "art" else YandexGPTError
+        with self.ai_lock():
+            self._ai_pool_room(owner, estimate_kop, error_type)
+            row = AiSpendLedger(owner_key=owner, business_id=business_id, kind=kind, cost_kop=estimate_kop)
+            self.db.add(row)
+            self.db.commit()
+            return row.id
+
+    def settle_ai(self, reservation_id: int | None, actual_cost_kop: int) -> None:
+        """Уточняет резерв до фактической стоимости ответа (освобождает завышенную оценку)."""
+        if reservation_id is None:
+            return
+        row = self.db.get(AiSpendLedger, reservation_id)
+        if row is not None:
+            row.cost_kop = actual_cost_kop
+            row.final = True
+            self.db.commit()
+
+    def release_ai(self, reservation_id: int | None) -> None:
+        """Снимает резерв при отказе до ответа: траты не было."""
+        if reservation_id is None:
+            return
+        row = self.db.get(AiSpendLedger, reservation_id)
+        if row is not None:
+            self.db.delete(row)
+            self.db.commit()
+
+    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[None]]:
+        """Хук ArtBudget: резерв цены картинки до генерации. Цена точная, поэтому резерв сразу final."""
+
+        async def reserve() -> None:
+            if self.reserve_ai(business_id, "art", ART_COST_KOP) is not None:
+                row = self.db.scalar(
+                    select(AiSpendLedger)
+                    .where(AiSpendLedger.business_id == business_id, AiSpendLedger.kind == "art")
+                    .order_by(AiSpendLedger.id.desc())
+                    .limit(1)
+                )
+                if row is not None:
+                    row.final = True
+                    self.db.commit()
+
+        return reserve
+
+    def ai_spent_for_owner_key(self, owner_key: str | None, since: datetime | None = None) -> int:
+        """Траты на ИИ по владельцу (все его бизнесы и аккаунты, включая удалённые): недельный лимит на владельца."""
+        if owner_key is None:
+            return 0
+        statement = select(func.coalesce(func.sum(AiSpendLedger.cost_kop), 0)).where(
+            AiSpendLedger.owner_key == owner_key
+        )
+        if since is not None:
+            statement = statement.where(AiSpendLedger.created_at >= since)
+        return int(self.db.scalar(statement))
 
     def ai_spent_since(self, since: datetime) -> int:
         """Траты на ИИ по сервису с момента: суточный потолок."""
-        total = 0
-        for model in (LLMCall, ArtCall):
-            total += int(
-                self.db.scalar(select(func.coalesce(func.sum(model.cost_kop), 0)).where(model.created_at >= since))
+        return int(
+            self.db.scalar(
+                select(func.coalesce(func.sum(AiSpendLedger.cost_kop), 0)).where(AiSpendLedger.created_at >= since)
             )
-        return total
+        )
 
     def launched_at(self, business_id: int) -> datetime | None:
         value = self.db.scalar(

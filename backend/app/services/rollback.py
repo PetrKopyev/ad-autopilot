@@ -288,11 +288,12 @@ class RollbackService:
                     for key, value in group_limits["after"].items()
                     if current_limits.get(key) != value
                 ]
-                # Лимиты кампании возвращаем на площадке сразу, а не ждём пересчёта: сверяем их как обычные
-                # операции — если бюджет с тех пор трогали (пересчёт, другой SCALE), просим подтверждение.
-                mismatches += differences(
-                    [op for op in operations if op.kind == "set_budget"], states
-                )
+                # Абсолютные лимиты кампании не восстанавливаем: после отката вызывающий код вернёт
+                # group_limits и запустит rebalance_budget(force=True) — лимиты кампаний пересчитаются
+                # из лимитов групп при текущем бюджете. Иначе откат возвращал «до» на момент SCALE
+                # (устаревало после пересчёта → каждый откат упирался в подтверждение, а ночью лимит
+                # выше бюджета держался часами), а накопленный кэп мог оказаться ниже уже потраченного.
+                operations = [op for op in operations if op.kind != "set_budget"]
             else:
                 mismatches = differences(operations, states)
             if mismatches and not confirm:
@@ -343,7 +344,7 @@ class RollbackService:
                                 "set_status", "ad", ad.external_id, "status", states[ad.external_id].status, status
                             )
                         )
-            return await self.changes._apply_change(
+            change = await self.changes._apply_change(
                 business_id=business_id,
                 adapter=adapter,
                 refs=refs,
@@ -358,7 +359,7 @@ class RollbackService:
                 # _apply_change берёт готовый текст, только если кода нет в шаблонах: REVERT там есть, свой код —
                 # нет, текст составляем по факту отката.
                 reason_text=experiment_verdict_revert_text(inverse, ads, skipped) if verdict else None,
-                record_only=verdict and not inverse,
+                record_only=(verdict or group_limits is not None) and not inverse,
                 evidence={
                     "confirmed": confirm,
                     "conflicts": mismatches,
@@ -383,3 +384,12 @@ class RollbackService:
                 reverts_id=original.id,
                 now=now or datetime.now(UTC),
             )
+            if group_limits is not None:
+                # Возвращаем лимиты групп: rebalance_budget(force=True), который вызывает конечная точка,
+                # перенесёт их в лимиты кампаний при текущем бюджете.
+                business = self.repository.business(business_id)
+                meta = business.settings.get("_worker", {})
+                restored = dict(meta.get("group_limits", {})) | dict(group_limits["before"])
+                business.settings = business.settings | {"_worker": meta | {"group_limits": restored}}
+                self.repository.save(business)
+            return change

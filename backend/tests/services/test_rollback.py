@@ -180,9 +180,11 @@ async def test_campaign_budget_rollback_freezes_campaign_without_freezing_its_ad
     assert set(frozen) == {f"campaign:{refs.campaign_id}"}
 
 
-async def test_scale_rollback_restores_campaign_limits_on_platform_at_once(repository, tree):
-    """В1: откат SCALE сразу возвращает на площадке прежние лимиты кампании, а не ждёт следующего пересчёта:
-    в истории уже «Вы отменили», и лимит в кабинете должен быть прежним."""
+async def test_scale_rollback_restores_group_limits_and_leaves_campaign_limits_to_rebalance(repository, tree):
+    """Н7: откат SCALE возвращает лимиты групп в _worker и не трогает платформу абсолютными «до»:
+    конечная точка сразу зовёт rebalance_budget(force=True), который пересчитает лимит кампании
+    из лимитов групп при текущем бюджете — иначе на площадку уходили устаревшие значения (сверка
+    расходилась после rebalance, а накопленный кэп мог оказаться ниже уже потраченного)."""
     adapter, refs = tree
     group_id = refs.groups["group"]
     repository.business.return_value.settings = {
@@ -207,13 +209,13 @@ async def test_scale_rollback_restores_campaign_limits_on_platform_at_once(repos
     assert (platform.daily_limit_kop, platform.period_cap_kop) == (12_000, 360_000)
     revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
     assert revert.status == "applied"
+    # Платформа без изменений: абсолютные лимиты в записи отката не восстанавливаются.
     platform = (await adapter.get_state(refs))[refs.campaign_id]
-    assert (platform.daily_limit_kop, platform.period_cap_kop) == (10_000, 300_000)
-    restored = {
-        (op.field, op.before, op.after) for op in load_operations(revert) if op.kind == "set_budget"
-    }
-    assert ("daily_limit_kop", 12_000, 10_000) in restored
-    assert ("period_cap_kop", 360_000, 300_000) in restored
+    assert (platform.daily_limit_kop, platform.period_cap_kop) == (12_000, 360_000)
+    assert not [op for op in load_operations(revert) if op.kind == "set_budget"]
+    # Лимиты групп возвращены — их заберёт rebalance_budget(force=True) конечной точки.
+    limits = repository.business.return_value.settings["_worker"]["group_limits"]
+    assert limits == {group_id: 5_000}
 
 
 async def test_conflict_requires_confirmation_and_records_real_before(repository, tree):
@@ -643,6 +645,14 @@ async def test_postgresql_rollback_updates_original_ad_and_experiment(tree, monk
                         kind="experiment_verdict",
                         platform="fake",
                         reason_code="EXPERIMENT_NO_DIFF",
+                        reason_params={
+                            "control_impressions": 3000,
+                            "control_clicks": 30,
+                            "control_rate": 1.0,
+                            "variant_impressions": 3100,
+                            "variant_clicks": 31,
+                            "variant_rate": 1.0,
+                        },
                     )
                     experiment = Experiment(
                         business_id=business.id,

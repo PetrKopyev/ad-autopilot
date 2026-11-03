@@ -13,7 +13,7 @@ jobs:
         working-directory: backend
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:b95b87e93ceb7594715d5c71fb6e09f6fc878851ab537735d617325eb9ba8b1b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -44,7 +44,7 @@ jobs:
           diff -u "$GITHUB_WORKSPACE/backend/requirements.lock" requirements.lock
           diff -u "$GITHUB_WORKSPACE/backend/requirements-dev.lock" requirements-dev.lock
       - name: Install dependencies
-        run: python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock
+        run: "python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock"
       - name: Ruff
         run: ruff check .
       - name: Pytest
@@ -87,9 +87,9 @@ jobs:
           cp .env.demo.example .env.demo
           password=$(openssl rand -hex 16)
           secret=$(openssl rand -hex 32)
-          fernet=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          fernet=$(python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())")
           sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$password/" .env.demo
-          sed -i "s/^DATABASE_URL=.*/DATABASE_URL=postgresql+psycopg:\/\/postgres:$password@db:5432\/autopilot/" .env.demo
+          sed -i "s/^DATABASE_URL=.*/DATABASE_URL=postgresql+psycopg:\/\/autopilot_demo:$password@db:5432\/autopilot_demo/" .env.demo
           sed -i "s/^SECRET_KEY=.*/SECRET_KEY=$secret/" .env.demo
           sed -i "s/^TOKEN_ENCRYPTION_KEY=.*/TOKEN_ENCRYPTION_KEY=$fernet/" .env.demo
       - name: Build frontend
@@ -97,8 +97,19 @@ jobs:
         run: npm ci && npm run build
       - name: Demo stack
         run: sh deploy/demo.sh --build
+      - name: Wait for demo API
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sk --fail https://localhost/api/health >/dev/null 2>&1; then
+              echo "demo API healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "demo API did not become healthy"
+          exit 1
       - name: End-to-end scenario
         working-directory: frontend
         run: |
-          npx playwright install chromium
+          npx playwright install --with-deps chromium
           BASE_URL=https://localhost npm run e2e

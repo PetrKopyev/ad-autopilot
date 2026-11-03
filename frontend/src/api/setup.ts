@@ -46,8 +46,9 @@ export async function getMe(signal?: AbortSignal): Promise<Me> {
   if (mockEnabled) return (await import('./mocks')).mockSetupMe();
   return setupGet('/api/me', signal);
 }
-/** vk_oauth — на сервере настроено приложение VK: можно войти через VK, а не только ключом API. */
-export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean; vk_oauth: boolean }> {
+/** vk_oauth — на сервере настроено приложение VK: можно войти через VK, а не только ключом API.
+ *  operator_requisites — реквизиты оператора для страницы политики (заполняются при развёртывании). */
+export async function getAuthConfig(signal?: AbortSignal): Promise<{ demo: boolean; vk_oauth: boolean; operator_requisites?: string }> {
   if (mockEnabled) return { demo: false, vk_oauth: false };
   return setupGet('/api/auth/config', signal);
 }

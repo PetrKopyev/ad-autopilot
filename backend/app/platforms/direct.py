@@ -417,14 +417,25 @@ class DirectAdapter:
         )
 
     async def whoami(self) -> dict[str, str]:
-        data = await self._api("clients", "get", {"FieldNames": ["ClientId", "Login", "ClientInfo", "Currency"]})
+        # Type просим для понятной ошибки про агентские кабинеты: живой API у самостоятельного клиента
+        # отвечает "CLIENT" (или не отдаёт поле вовсе) — тогда проверка прозрачна.
+        data = await self._api(
+            "clients", "get", {"FieldNames": ["ClientId", "Login", "ClientInfo", "Currency", "Type"]}
+        )
         try:
             item = data["Clients"][0]
+            if str(item.get("Type", "CLIENT")).upper() != "CLIENT":
+                raise PlatformError(
+                    "Агентские кабинеты не поддерживаются: подключите рекламный кабинет рекламодателя, "
+                    "не управляемый через агентство (самостоятельный или прямой договор с площадкой)."
+                )
             id_ = item["ClientId"]
             name = item.get("ClientInfo") or item["Login"]
             if type(id_) is not int or id_ <= 0 or not isinstance(name, str) or not name:
                 raise ValueError
             return {"id": str(id_), "name": name}
+        except PlatformError:
+            raise
         except (KeyError, IndexError, TypeError, ValueError):
             raise _invalid() from None
 
@@ -524,6 +535,15 @@ class DirectAdapter:
         campaign_kind = "TextCampaign" if self._text_campaign else "UnifiedCampaign"
         if found:
             campaign_id = str(found[0]["Id"])
+            # Повтор переиспользует кампанию неудачной попытки: лимиты между попытками пересчитались —
+            # переносим на площадку сразу, иначе кабинет и база расходятся до первого rebalance.
+            weekly = self._weekly_limit(plan.daily_limit_kop, plan.period_cap_kop)
+            if weekly:
+                await self._api(
+                    "campaigns",
+                    "update",
+                    {"Campaigns": [{"Id": int(campaign_id), campaign_kind: self._campaign_settings(weekly)}]},
+                )
         else:
             weekly = self._weekly_limit(plan.daily_limit_kop, plan.period_cap_kop)
             if not weekly:
@@ -600,11 +620,17 @@ class DirectAdapter:
                 if self._text_campaign:
                     ad_kind = "TextAd"
                     content = {"Title": ad.title, "Text": ad.text, "Href": self._href, "Mobile": "NO"}
+                    if ad.title2:
+                        content["Title2"] = ad.title2
                     if image:
                         content["AdImageHash"] = image
                 else:
                     ad_kind = "ResponsiveAd"
-                    content = {"Titles": [ad.title], "Texts": [ad.text], "Href": self._href}
+                    content = {
+                        "Titles": [ad.title] + ([ad.title2] if ad.title2 else []),
+                        "Texts": [ad.text],
+                        "Href": self._href,
+                    }
                     if image:
                         content["AdImageHashes"] = [image]
                 match = next((item for item in ads if self._same_ad(item.get(ad_kind, {}), content)), None)
@@ -838,12 +864,14 @@ class DirectAdapter:
                         "Href": self._variant_href(operation.entity_id),
                         "Mobile": "NO",
                     }
+                    if content.get("title2"):
+                        body["Title2"] = content["title2"]
                     if image:
                         body["AdImageHash"] = image
                 else:
                     kind = "ResponsiveAd"
                     body = {
-                        "Titles": [content["title"]],
+                        "Titles": [content["title"]] + ([content["title2"]] if content.get("title2") else []),
                         "Texts": [content["text"]],
                         "Href": self._variant_href(operation.entity_id),
                     }
@@ -914,7 +942,7 @@ class DirectAdapter:
                 rejection = self._moderation(item)
                 if rejection.status == "rejected":
                     raise ModerationRejected(op.entity_id, rejection.reason or "Объявление отклонено.")
-            current_status = _status(item)
+            current_status = _status(item, campaign=op.entity_type == "campaign")
             if current_status == "archived" and op.after != "archived":
                 await self._api(services[op.entity_type], "unarchive", {"SelectionCriteria": {"Ids": [id_]}})
             elif current_status == op.after or current_status == "paused_owner" and op.after == "paused_auto":
@@ -1150,6 +1178,7 @@ class DirectAdapter:
                     content.get("Title", titles[0] if titles else ""),
                     _status(item),
                     title=content.get("Title", titles[0] if titles else None),
+                    title2=content.get("Title2", titles[1] if len(titles) > 1 else None),
                     text=content.get("Text", texts[0] if texts else None),
                     image_ref=content.get("AdImageHash", images[0] if images else None),
                 )

@@ -49,8 +49,12 @@ class Settings(BaseSettings):
     budget_reserve_pct: int = Field(default=8, ge=0, le=100)
     ai_spend_onboarding_limit_rub: Decimal = Field(default=Decimal("60"), ge=0)
     ai_spend_weekly_limit_rub: Decimal = Field(default=Decimal("25"), ge=0)
-    # Общий суточный потолок трат на ИИ на весь сервис, ₽; 0 — без ограничения.
-    ai_daily_cap_rub: Decimal = Field(default=Decimal("0"), ge=0)
+    # Общий суточный потолок трат на ИИ на весь сервис, ₽; 0 — без ограничения. Ненулевой по умолчанию:
+    # страховка от всплеска трат (ошибка генерации в цикле, злоупотребление) поверх недельного лимита владельца.
+    ai_daily_cap_rub: Decimal = Field(default=Decimal("300"), ge=0)
+    # Реквизиты оператора для страницы «Данные и политика» (/policy); пусто — экран честно говорит,
+    # что реквизиты задаются при развёртывании. Без секретов: это публичная строка.
+    operator_requisites: str = ""
     tz_default: str = "Europe/Moscow"
 
     @field_validator("secret_key")

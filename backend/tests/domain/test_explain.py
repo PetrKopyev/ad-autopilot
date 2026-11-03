@@ -157,8 +157,8 @@ def test_no_difference_verdict_shows_impressions_clicks_and_rates_of_both_arms()
     result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 0.4, 0.1)
     a, b = Metrics(10_000, 11_400, 137, 10), Metrics(10_300, 11_900, 152, 12)
     text = explain_experiment(result, a, b)
-    assert "объявление А показали 11 400, нажали 137 (1,2%)" in text
-    assert "объявление Б — 11 900 показов и 152 нажатий (1,3%)" in text
+    assert "у объявления А — 11 400 показов, 137 нажатий (1,2%)" in text
+    assert "у объявления Б — 11 900 показов, 152 нажатия (1,3%)" in text
     assert "Оставили прежнее, новое остановили" in text
 
 

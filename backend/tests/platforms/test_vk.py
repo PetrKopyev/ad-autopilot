@@ -10,6 +10,7 @@ import pytest
 import respx
 from PIL import Image
 
+from app.auth.vk import VkClient
 from app.platforms.base import (
     AdGroupSpec,
     AdPlatform,
@@ -20,6 +21,7 @@ from app.platforms.base import (
     ModerationRejected,
     Operation,
     PlatformError,
+    PlatformLimits,
     RateLimited,
     TargetSpec,
     lead_count,
@@ -498,9 +500,13 @@ async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api)
         json={"count": 1, "items": [{"id": 30, "name": "Маникюр рядом ap-a1", "ad_group_id": 20}]}
     )
     create = api.post(f"{API}/ad_plans.json")
+    update = api.post(f"{API}/ad_plans/10.json").respond(status_code=204)
     refs = await adapter.create_campaign_tree(tree())
     assert refs.campaign_id == "10" and refs.ads == {"a1": "30"}
     assert not create.called
+    # Повтор переиспользует план и переносит пересчитанный дневной лимит на площадку (К3).
+    assert update.called
+    assert json.loads(update.calls[0].request.content)["budget_limit_day"] == "150.50"
     params = parse_qs(api.calls[0].request.url.query.decode())
     # Живой API отвергает фильтр по имени у ad_plans: список читаем целиком, отбор по суффиксу — на нашей стороне.
     assert "_name__contains" not in params
@@ -950,3 +956,82 @@ async def test_add_group_uses_package_of_plan_groups_not_first_candidate(adapter
     api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
     await adapter.add_group("10", group)
     assert sent(create)["package_id"] == DEFAULT_PACKAGE["id"]
+
+
+def _limits_client() -> VkClient:
+    client = VkClient.__new__(VkClient)
+    client._limits = PlatformLimits()
+    client._blocked_until = None
+    return client
+
+
+def test_rate_limit_429_without_headers_blocks_for_default_retry() -> None:
+    client = _limits_client()
+    retry = client._read_limits(httpx.Response(429))
+    now = datetime.now(UTC)
+    assert retry == 60
+    assert client._blocked_until is not None
+    assert timedelta(seconds=59) < client._blocked_until - now <= timedelta(seconds=61)
+
+
+def test_rate_limit_zero_remaining_without_reset_does_not_raise() -> None:
+    client = _limits_client()
+    retry = client._read_limits(httpx.Response(200, headers={"X-RateLimit-RPS-Remaining": "0"}))
+    now = datetime.now(UTC)
+    assert retry == 60
+    assert client._blocked_until is not None
+    assert client._blocked_until - now <= timedelta(seconds=61)
+
+
+def test_rate_limit_zero_rps_ignores_reset_of_non_exhausted_daily_window() -> None:
+    client = _limits_client()
+    rps_reset = int((datetime.now(UTC) + timedelta(seconds=3)).timestamp())
+    daily_reset = int((datetime.now(UTC) + timedelta(hours=24)).timestamp())
+    retry = client._read_limits(
+        httpx.Response(
+            200,
+            headers={
+                "X-RateLimit-RPS-Remaining": "0",
+                "X-RateLimit-RPS-Reset": str(rps_reset),
+                "X-RateLimit-Daily-Remaining": "500",
+                "X-RateLimit-Daily-Reset": str(daily_reset),
+            },
+        )
+    )
+    now = datetime.now(UTC)
+    assert retry <= 5
+    assert client._blocked_until is not None
+    # Блокировка по reset исчерпанного секундного окна, а не по суточному reset живого окна.
+    assert client._blocked_until - now <= timedelta(seconds=5)
+
+
+async def test_get_stats_skips_banner_without_group(adapter: VkAdapter, api) -> None:
+    """Баннер, у которого в кабинете удалили группу, не портит статистику и не попадает в неё:
+    строка без родителя пропускается, а не получает родителем сама себя."""
+    today = datetime.now(adapter._tz).date().isoformat()
+    api.get(f"{API}/ad_groups.json").respond(
+        json={"count": 1, "items": [{"id": 20, "ad_plan_id": 10}]}
+    )
+    api.get(f"{API}/banners.json").respond(
+        json={
+            "count": 2,
+            "items": [
+                {"id": 30, "ad_group_id": 20},
+                # Сирота: группа удалена в кабинете, ad_group_id не сходится ни с одной живой группой.
+                {"id": 99, "ad_group_id": 7777},
+            ],
+        }
+    )
+    api.get(f"{API}/statistics/banners/day.json").respond(
+        json={
+            "items": [
+                {"id": 30, "rows": [{"date": today, "base": {"shows": 4, "clicks": 1, "spent": "2.02"}}]},
+                {"id": 99, "rows": [{"date": today, "base": {"shows": 9, "clicks": 9, "spent": "9.99"}}]},
+            ]
+        }
+    )
+    rows = await adapter.get_stats(
+        date.fromisoformat(today), date.fromisoformat(today), "ad", campaign_ids={"10"}
+    )
+    assert [row.entity_id for row in rows] == ["30"]
+    assert [row.cost_kop for row in rows] == [202]

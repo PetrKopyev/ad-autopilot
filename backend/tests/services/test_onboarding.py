@@ -171,7 +171,13 @@ class MemoryRepository(LaunchRepository):
             if since is None or item.created_at is None or item.created_at >= since
         )
 
-    def ai_spent_for_owner(self, user_id: int, since: datetime | None = None) -> int:
+    def owner_key(self, business: Business) -> str | None:
+        return f"owner-{business.user_id}" if business.user_id else None
+
+    def ai_spent_for_owner_key(self, owner_key: str | None, since: datetime | None = None) -> int:
+        if owner_key is None:
+            return 0
+        user_id = int(owner_key.removeprefix("owner-"))
         return sum(
             item.cost_kop
             for model in (LLMCall, ArtCall)
@@ -179,6 +185,21 @@ class MemoryRepository(LaunchRepository):
             for item in self.rows(model, business_id=business.id)
             if since is None or item.created_at is None or item.created_at >= since
         )
+
+    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[None]]:
+        async def reserve() -> None:
+            return None
+
+        return reserve
+
+    def reserve_ai(self, business_id: int, kind: str, estimate_kop: int) -> None:
+        return None
+
+    def settle_ai(self, reservation_id: int | None, actual_cost_kop: int) -> None:
+        return None
+
+    def release_ai(self, reservation_id: int | None) -> None:
+        return None
 
     def ai_spent_since(self, since: datetime) -> int:
         return sum(

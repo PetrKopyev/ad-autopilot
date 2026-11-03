@@ -150,6 +150,13 @@ class YandexGPTClient:
             return self._parse(response)
         raise AssertionError("Unreachable retry state")
 
+    def estimate_kop(self, system: str, user: str) -> int:
+        """Верхняя оценка стоимости до вызова: вход по символам (грубо 3 символа на токен с учётом кириллицы
+        и служебной строки JSON), выход — потолок max_tokens. Резерв по оценке снимается до фактической
+        стоимости после ответа (В11): перерасход пула ограничен точностью оценки."""
+        tokens_in = math.ceil((len(system) + len(user) + 40) / 3)
+        return self.tariff.cost(tokens_in, self.max_tokens)
+
     def _parse(self, response: httpx.Response) -> CompletionResult:
         try:
             data = response.json()["result"]

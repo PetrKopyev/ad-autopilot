@@ -596,10 +596,24 @@ class ScreensService:
                 )
         return self.business(business) | {"warning": warning}
 
-    def save_settings(self, business: Business, auto_continue: bool, avg_check_kop: int | None) -> dict:
+    def save_settings(
+        self,
+        business: Business,
+        auto_continue: bool,
+        avg_check_kop: int | None,
+        vk_priced_goal_source_id: int | None = None,
+        vk_priced_goal_name: str = "",
+    ) -> dict:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
             business.auto_continue = auto_continue
             business.avg_check_kop = avg_check_kop
+            # Цель VK кабинета: None — не менять. Стратегия оплаты за конверсию будет опираться на неё (В8).
+            settings = business.settings | (
+                {"vk_priced_goal_source_id": vk_priced_goal_source_id, "vk_priced_goal_name": vk_priced_goal_name}
+                if vk_priced_goal_source_id
+                else {}
+            )
+            business.settings = settings
             self.repository.save(business)
         return self.business(business)

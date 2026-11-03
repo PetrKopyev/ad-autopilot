@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
@@ -183,18 +182,12 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
     return ref_cpl(business.avg_check_kop, ads, today(worker.clock), answers)
 
 
-def freed_daily_budget(ads: Sequence[AdSnapshot], groups: Sequence[GroupSnapshot]) -> int:
-    """Лимит, освободившийся остановленными объявлениями (RULES: деньги берутся из освободившегося):
-    целиком у неактивных групп и пропорционально доле остановленных объявлений у частично остановленных —
-    на площадках лимит общий на группу, и остановленные объявления его не тратят. Без этого при 1–2 услугах
-    рост бюджета эффективной рекламы не наступал бы никогда."""
-    ads_per_group = Counter(ad.group_id for ad in ads)
-    stopped_per_group = Counter(ad.group_id for ad in ads if not ad.active)
-    return sum(
-        group.daily_limit * stopped_per_group[group.id] // ads_per_group[group.id]
-        for group in groups
-        if group.active and stopped_per_group[group.id]
-    ) + sum(group.daily_limit for group in groups if not group.active)
+def freed_daily_budget(groups: Sequence[GroupSnapshot]) -> int:
+    """Лимит, освободившийся полностью остановленными группами (RULES: деньги берутся из освободившегося).
+    Частично остановленная группа не донорит: лимит на площадках общий на группу, оставшиеся объявления
+    тратят его целиком — иначе после каждого A/B-теста группа с одним победителем «освобождала» бы
+    половину лимита и SCALE снимал бы деньги с работающей рекламы."""
+    return sum(group.daily_limit for group in groups if not group.active)
 
 
 async def optimize(worker: Worker, business: Business) -> None:
@@ -207,7 +200,7 @@ async def optimize(worker: Worker, business: Business) -> None:
     ads, groups = await snapshot(worker, business)
     limits = {group.id: group.daily_limit for group in groups}
     # Освободившаяся доля остаётся доступной, но не доливается в пограничные объявления.
-    free = freed_daily_budget(ads, groups)
+    free = freed_daily_budget(groups)
     decisions = decide(
         ads,
         groups,
@@ -249,23 +242,18 @@ async def optimize(worker: Worker, business: Business) -> None:
             before = limits.copy()
             scaled = limits.copy()
             increment = decision.new_daily_limit - limits[group_id]
-            # Сначала забираем средства у остановленных групп; сумма лимитов не растёт. У группы из другой кампании
-            # берём только то, что выше минимума площадки для её кампании: иначе, когда группа снова заработает,
-            # её кампания встанет на паузу из-за минимума. Частично остановленная группа донорит пропорционально
-            # доле остановленных объявлений: на площадках лимит общий, и они его не тратят (RULES).
-            ads_per_group = Counter(ad.group_id for ad in ads)
-            stopped_per_group = Counter(ad.group_id for ad in ads if not ad.active)
+            # Сначала забираем средства у полностью остановленных групп; сумма лимитов не растёт. Частично
+            # остановленная группа не донорит: лимит общий на группу, работающие объявления тратят его
+            # целиком (иначе SCALE снимал бы деньги с группы победителя A/B). У группы из другой кампании
+            # берём только то, что выше минимума площадки для её кампании: иначе, когда группа снова
+            # заработает, её кампания встанет на паузу из-за минимума.
             for donor in groups:
                 donor_group = next(item for item in local_groups if item.external_id == donor.id)
                 if donor_group.id in testing or increment <= 0 or donor.id == group_id:
                     continue
                 if donor.active:
-                    stopped = stopped_per_group[donor.id]
-                    if not stopped:
-                        continue
-                    spare = scaled[donor.id] * stopped // ads_per_group[donor.id]
-                else:
-                    spare = scaled[donor.id]
+                    continue
+                spare = scaled[donor.id]
                 if donor_group.campaign_id != campaign.id:
                     if donor.platform not in floors:
                         floors[donor.platform] = ceil(
@@ -281,21 +269,13 @@ async def optimize(worker: Worker, business: Business) -> None:
                 scaled[donor.id] -= take
                 scaled[group_id] += take
                 increment -= take
-            # Лимит кампании — доля её действующих групп (rebalance_budget): перенесённая доля сразу поднимает лимит
-            # кампании этой группы. Остановленные группы-доноры в лимиты кампаний не входили, их кампании не теряют.
-            # Частично остановленная группа входит с тратоспособной частью: лимит на площадке общий, и её
-            # остановленные объявления его не тратят — как у freed_daily_budget (RULES).
+            # Лимит кампании — сумма лимитов её действующих групп: та же база, что у rebalance_budget,
+            # иначе перенос искажал лимит кампании (Н6). Остановленные группы-доноры в лимиты кампаний
+            # не входили, их кампании не теряют.
             own = {item.external_id for item in local_groups if item.campaign_id == campaign.id}
             active = [item.id for item in groups if item.id in own and item.active]
-
-            def spendable(source: dict[str, int], key: str) -> int:
-                stopped = stopped_per_group[key]
-                if not stopped:
-                    return source[key]
-                return source[key] * (ads_per_group[key] - stopped) // ads_per_group[key]
-
-            share_before = sum(spendable(before, key) for key in active)
-            share_after = sum(spendable(scaled, key) for key in active)
+            share_before = sum(before[key] for key in active)
+            share_after = sum(scaled[key] for key in active)
             if share_after == share_before or not share_before:
                 continue
             if lifetime is None:
@@ -608,7 +588,8 @@ def experiment_expire_date(experiment: Experiment) -> date:
     день закрывал бы проверку без вывода). У аудитории срок держится ещё settlement_days: вывод —
     когда площадка уточнит цифры последнего дня (RULES)."""
     extra = DEFAULT_SETTINGS.settlement_days if experiment.metric == "cpl" else 0
-    return experiment.deadline.date() + timedelta(days=extra)
+    # Сравнение по дате, как в domain/evaluate_experiment, в московском поясе тика (а не в UTC-дате дедлайна).
+    return experiment.deadline.astimezone(MOSCOW).date() + timedelta(days=extra)
 
 
 async def experiments_tick(worker: Worker, business: Business) -> None:
@@ -648,20 +629,33 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             )
             text = "Срок проверки истёк. Победителя не выбирали, вариант остановили: по этим данным лучший не виден."
             if operations:
-                change = await worker.apply(
-                    business,
-                    campaign,
-                    operations,
-                    kind="experiment_verdict",
-                    reason_code="EXPERIMENT_EXPIRED",
-                    reason_text=text,
-                    suffix=f"experiment:{experiment.id}",
-                    evidence={"experiment_id": experiment.id, "result": asdict(result)},
-                )
-                if change is not None and worker.proposed(business):
+                if business.status != "running":
+                    # Кабинет отключён или реклама остановлена: платформу не тронуть (apply упал бы на
+                    # подключении кабинета и ронял бы весь тик), проверку закрываем на следующем тике.
+                    continue
+                try:
+                    change = await worker.apply(
+                        business,
+                        campaign,
+                        operations,
+                        kind="experiment_verdict",
+                        reason_code="EXPERIMENT_EXPIRED",
+                        reason_text=text,
+                        suffix=f"experiment:{experiment.id}",
+                        evidence={"experiment_id": experiment.id, "result": asdict(result)},
+                    )
+                except PlatformError:
+                    # Площадка не приняла операцию (сеть, закрытый кабинет, конфликт изменений):
+                    # вывод не фиксируем, повторим на следующем тике.
+                    continue
+                if change is None or change.status == "failed":
+                    # Операция не прошла — оставляем проверку запущенной, тик повторит попытку.
+                    continue
+                if worker.proposed(business):
                     change.status = "proposed"
                     worker.repository.save(change)
             else:
+                text = "Срок проверки истёк. Победителя не выбирали: по этим данным лучший не виден."
                 change = ChangeLog(
                     business_id=business.id,
                     actor="autopilot",
