@@ -495,7 +495,7 @@ class DirectAdapter:
     def _ad_fields(self) -> dict:
         fields = {"FieldNames": ["Id", "CampaignId", "AdGroupId", "State", "Status", "StatusClarification", "Type"]}
         if self._text_campaign:
-            fields["TextAdFieldNames"] = ["Title", "Text", "Href", "AdImageHash", "AdImageModeration"]
+            fields["TextAdFieldNames"] = ["Title", "Title2", "Text", "Href", "AdImageHash", "AdImageModeration"]
         else:
             fields["ResponsiveAdFieldNames"] = ["Titles", "Texts", "Href", "AdImages"]
         return fields

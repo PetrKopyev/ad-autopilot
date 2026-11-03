@@ -94,7 +94,12 @@ def differences(
         ):
             # API площадок возвращает одну паузу без автора; автора хранит наш журнал.
             continue
-        if state is None or state.entity_type != op.entity_type or getattr(state, op.field) != op.after:
+        after = op.after
+        if op.field == "creative" and isinstance(after, dict) and "title2" not in after:
+            # Записи add_ad до появления title2 (миграция 0006) не содержат ключа: сравниваем как None,
+            # иначе каждый откат старой записи просил бы подтверждение (мелочь круга 3).
+            after = after | {"title2": None}
+        if state is None or state.entity_type != op.entity_type or getattr(state, op.field) != after:
             current = getattr(state, op.field) if state is not None and state.entity_type == op.entity_type else None
             if (
                 op.field in {"daily_limit_kop", "period_cap_kop"}

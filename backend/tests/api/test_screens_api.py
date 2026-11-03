@@ -554,6 +554,30 @@ def test_settings_values_are_saved(setup):
     assert client.put("/api/business/settings", json={"auto_continue": True, "avg_check_kop": -1}).status_code == 422
 
 
+def test_vk_goal_can_be_set_and_reset(setup):
+    """В6: цель VK сохраняется вместе с именем; source_id=0 сбрасывает оба ключа."""
+    client, world = setup
+    saved = client.put(
+        "/api/business/settings",
+        json={
+            "auto_continue": True,
+            "avg_check_kop": None,
+            "vk_priced_goal_source_id": 4242,
+            "vk_priced_goal_name": "Запись онлайн",
+        },
+    )
+    assert saved.status_code == 200
+    assert world.business.settings["vk_priced_goal_source_id"] == 4242
+    assert world.business.settings["vk_priced_goal_name"] == "Запись онлайн"
+    reset = client.put(
+        "/api/business/settings",
+        json={"auto_continue": True, "avg_check_kop": None, "vk_priced_goal_source_id": 0},
+    )
+    assert reset.status_code == 200
+    assert "vk_priced_goal_source_id" not in world.business.settings
+    assert "vk_priced_goal_name" not in world.business.settings
+
+
 @pytest.mark.parametrize("amount", [0, -1, 1_000_000_001])
 def test_budget_bounds_are_validated_before_platform_calls(setup, monkeypatch, amount):
     from unittest.mock import AsyncMock

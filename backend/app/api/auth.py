@@ -282,6 +282,17 @@ def yandex_start(
     return response
 
 
+async def verify_direct_account(access_token: str, login: str) -> None:
+    """Кабинет рекламодателя, а не агентский: whoami падает с понятной ошибкой для агентств (В5)."""
+    from app.platforms.base import PlatformError
+    from app.platforms.direct import DirectAdapter
+
+    try:
+        await DirectAdapter(access_token, client_login=login).whoami()
+    except PlatformError as failure:
+        raise yandex.YandexError(str(failure)) from None
+
+
 @router.get("/auth/yandex/callback")
 async def yandex_callback(
     request: Request,
@@ -312,6 +323,9 @@ async def yandex_callback(
     try:
         tokens = await yandex.exchange_code(code, oauth_state, business_id)
         profile = await yandex.get_profile(tokens["access_token"])
+        if oauth_state.purpose == "direct":
+            # Агентские кабинеты не поддерживаются: отказ понятный и до сохранения аккаунта (В5).
+            await verify_direct_account(tokens["access_token"], profile["login"])
     except yandex.YandexError as failure:
         raise HTTPException(400, str(failure)) from None
     response = _redirect("/setup/2" if oauth_state.purpose == "direct" else "/")

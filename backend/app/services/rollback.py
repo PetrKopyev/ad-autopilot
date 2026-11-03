@@ -384,9 +384,10 @@ class RollbackService:
                 reverts_id=original.id,
                 now=now or datetime.now(UTC),
             )
-            if group_limits is not None:
+            if group_limits is not None and change.status != "pending":
                 # Возвращаем лимиты групп: rebalance_budget(force=True), который вызывает конечная точка,
-                # перенесёт их в лимиты кампаний при текущем бюджете.
+                # перенесёт их в лимиты кампаний при текущем бюджете. Пока запись отката pending (запись
+                # на площадке не подтверждена), локальные лимиты не трогаем — сверкой решим сами (мелочь круга 3).
                 business = self.repository.business(business_id)
                 meta = business.settings.get("_worker", {})
                 restored = dict(meta.get("group_limits", {})) | dict(group_limits["before"])

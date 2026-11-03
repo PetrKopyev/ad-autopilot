@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import re
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -62,6 +63,10 @@ MAX_SERVICES = 200
 # Сервисная advisory lock резервирования трат на ИИ: короткие операции (SUM + INSERT), одна на всех,
 # чтобы параллельные запросы не проходили проверку лимита одновременно.
 AI_SPEND_LOCK_KEY = 727_000_001
+# Сколько резерв (final=false) ждёт ответа ИИ: старше — фиксируется по оценке, деньги могли уйти (В4).
+AI_RESERVATION_TTL = timedelta(minutes=15)
+# Сколько храним итоговые траты на ИИ: недельный пул смотрит 7 дней назад, запас на окно свипера (В9).
+AI_LEDGER_KEEP_DAYS = 14
 QUESTIONS = {
     "services": "Какие услуги вы оказываете?",
     "prices": "Сколько стоят ваши услуги?",
@@ -210,6 +215,15 @@ def ai_budget(repository: "OnboardingRepository", business: Business, limits: Ai
         budget = ArtBudget(budget.spent_kop + max(0, room), budget.spent_kop)
     if owner is not None:
         budget.on_reserve = repository.art_reservation(business.id)
+
+        async def settle(token: int | None) -> None:
+            repository.settle_ai(token, ART_COST_KOP)
+
+        async def release(token: int | None) -> None:
+            repository.release_ai(token)
+
+        budget.on_settle = settle
+        budget.on_release = release
     return budget
 
 
@@ -241,6 +255,11 @@ class SpendLLM:
             else:
                 self.repository.release_ai(reservation)
             self.account(error.result)
+            raise
+        except BaseException:
+            # Отмена задачи или неожиданный сбой: ответа не получили — резерв снимаем, чтобы строка
+            # с final=false не висела в пуле владельца и суточном потолке навсегда (В4 круга 3).
+            self.repository.release_ai(reservation)
             raise
         self.repository.settle_ai(reservation, result.cost_kop if isinstance(result, CompletionResult) else 0)
         self.account(result)
@@ -288,12 +307,19 @@ class OnboardingRepository(ChangesRepository):
         return total
 
     def owner_key(self, business: Business) -> str | None:
-        """Ключ владельца для учёта трат на ИИ: хэш yandex_uid. Персональный идентификатор в базе не храним;
-        после удаления аккаунта и повторного входа тем же Яндекс ID ключ тот же — лимит не обнуляется."""
+        """Ключ владельца для учёта трат на ИИ: HMAC от yandex_uid. Персональный идентификатор в базе не храним;
+        после удаления аккаунта и повторного входа тем же Яндекс ID ключ тот же — лимит не обнуляется.
+        HMAC, а не голый sha256 (В9): идентификатор Яндекса из малого числового диапазона восстанавливается
+        перебором; ключ отдельный от SECRET_KEY, чтобы его ротация не обнуляла пулы."""
         if business.user_id is None:
             return None
         yandex_uid = self.db.scalar(select(User.yandex_uid).where(User.id == business.user_id))
-        return hashlib.sha256(yandex_uid.encode()).hexdigest() if yandex_uid else None
+        if not yandex_uid:
+            return None
+        from app.config import settings as config
+
+        key = (config.ai_owner_key_secret or config.secret_key.get_secret_value()).encode()
+        return hmac.new(key, yandex_uid.encode(), hashlib.sha256).hexdigest()
 
     @contextmanager
     def ai_lock(self) -> Iterator[None]:
@@ -342,6 +368,8 @@ class OnboardingRepository(ChangesRepository):
             return None
         error_type = ArtBudgetExceeded if kind == "art" else YandexGPTError
         with self.ai_lock():
+            # Под тем же локом — чтобы открытые резервы не копились после отмен задач (В4).
+            self.sweep_ai_reservations(datetime.now(MOSCOW))
             self._ai_pool_room(owner, estimate_kop, error_type)
             row = AiSpendLedger(owner_key=owner, business_id=business_id, kind=kind, cost_kop=estimate_kop)
             self.db.add(row)
@@ -367,22 +395,31 @@ class OnboardingRepository(ChangesRepository):
             self.db.delete(row)
             self.db.commit()
 
-    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[None]]:
-        """Хук ArtBudget: резерв цены картинки до генерации. Цена точная, поэтому резерв сразу final."""
+    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[int | None]]:
+        """Хук ArtBudget: резерв цены картинки до генерации. Возвращает id строки ledger
+        (final=false); закрытие — через settle_ai по успеху или release_ai при явном отказе (В3)."""
 
-        async def reserve() -> None:
-            if self.reserve_ai(business_id, "art", ART_COST_KOP) is not None:
-                row = self.db.scalar(
-                    select(AiSpendLedger)
-                    .where(AiSpendLedger.business_id == business_id, AiSpendLedger.kind == "art")
-                    .order_by(AiSpendLedger.id.desc())
-                    .limit(1)
-                )
-                if row is not None:
-                    row.final = True
-                    self.db.commit()
+        async def reserve() -> int | None:
+            return self.reserve_ai(business_id, "art", ART_COST_KOP)
 
         return reserve
+
+    def sweep_ai_reservations(self, now: datetime) -> None:
+        """Закрывает просроченные резервы и подчищает старые строки (В4/В9).
+
+        Строки final=false старше TTL фиксируются по оценке — запрос мог уйти и списать деньги после
+        отмены задачи или потери ответа. Итоговые траты старше хранения удаляются: лимиты смотрят
+        максимум на неделю назад, старые строки — только лишний персональный след."""
+        cutoff = now - AI_RESERVATION_TTL
+        rows = self.db.scalars(
+            select(AiSpendLedger).where(AiSpendLedger.final.is_(False), AiSpendLedger.created_at < cutoff)
+        )
+        for row in rows:
+            row.final = True
+        keep = now - timedelta(days=AI_LEDGER_KEEP_DAYS)
+        for row in self.db.scalars(select(AiSpendLedger).where(AiSpendLedger.created_at < keep)):
+            self.db.delete(row)
+        self.db.commit()
 
     def ai_spent_for_owner_key(self, owner_key: str | None, since: datetime | None = None) -> int:
         """Траты на ИИ по владельцу (все его бизнесы и аккаунты, включая удалённые): недельный лимит на владельца."""

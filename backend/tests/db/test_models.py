@@ -82,6 +82,7 @@ def test_indexes_and_unique_keys() -> None:
         # ai_spend_ledger: внешних ключей нет, индексы объявлены явно.
         "ix_ai_spend_ledger_owner",
         "ix_ai_spend_ledger_business_id",
+        "ix_ai_spend_ledger_created_at",
     }
     for name, where in partial_unique.items():
         assert indexes[name].unique and str(indexes[name].dialect_options["postgresql"]["where"]) == where

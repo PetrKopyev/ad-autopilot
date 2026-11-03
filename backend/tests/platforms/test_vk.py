@@ -958,6 +958,95 @@ async def test_add_group_uses_package_of_plan_groups_not_first_candidate(adapter
     assert sent(create)["package_id"] == DEFAULT_PACKAGE["id"]
 
 
+async def test_cabinet_priced_goal_name_overrides_config(api) -> None:
+    """В6: имя цели кабинета (business.settings) важнее общего VK_PRICED_GOAL_NAME: на VK уходит
+    кабинетное имя и кабинетный source_id, а не значения из конфига сервиса."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    config.vk_priced_goal_name = "Имя из конфига"
+    route = mock_creation(api)
+    async with VkAdapter(
+        "tok",
+        config=config,
+        href="https://shop.example/",
+        marking_confirmed=True,
+        priced_goal_source_id=555,
+        priced_goal_name="Заявка с сайта салона",
+    ) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(route)["campaigns"][0]["priced_goal"] == {"name": "Заявка с сайта салона", "source_id": 555}
+
+
+async def test_add_group_without_goal_when_plan_lived_without_it(api) -> None:
+    """В7: план создан без цели (второй круг перебора пакетов) — новая группа создаётся без priced_goal,
+    иначе пакет, не принявший цель в плане, отверг бы и всю группу."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api)
+    create = api.post(f"{API}/ad_plans.json")
+    create.side_effect = [
+        httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "validation_failed",
+                    "message": "Validation failed",
+                    "fields": {
+                        "campaigns": {
+                            "items": [
+                                {"fields": {"package_id": {"code": "invalid_package", "message": "Invalid package"}}}
+                            ]
+                        }
+                    },
+                }
+            },
+        ),
+        httpx.Response(200, json=created_plan()),
+    ]
+    group = tree().groups[0]
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+        api.get(f"{API}/ad_groups.json").respond(json={"count": 0, "items": []})
+        add = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
+        api.get(f"{API}/banners.json").respond(
+            json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]}
+        )
+        await vk.add_group("10", group)
+    assert "priced_goal" not in sent(add)
+
+
+async def test_add_group_retries_without_goal_when_package_rejects_it(api) -> None:
+    """В7: план создан раньше этой памяти — add_group шлёт цель, при отказе повторяет без неё,
+    как перебор пакетов при создании плана."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    group = tree().groups[0]
+    packages_stub(api)
+    api.get(f"{API}/ad_groups.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_groups.json")
+    create.side_effect = [
+        httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "validation_failed",
+                    "message": "Validation failed",
+                    "fields": {"priced_goal": {"code": "invalid", "message": "Invalid goal"}},
+                }
+            },
+        ),
+        httpx.Response(200, json={"id": 21}),
+    ]
+    api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.add_group("10", group)
+    assert "priced_goal" in sent(create, 0)
+    assert "priced_goal" not in sent(create, 1)
+
+
 def _limits_client() -> VkClient:
     client = VkClient.__new__(VkClient)
     client._limits = PlatformLimits()

@@ -17,7 +17,9 @@ export function LoginPage() {
   const stopResult = (useLocation().state as { stopResult?: StopResult } | null)?.stopResult;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [demo, setDemo] = useState(false);
+  // null — конфиг входа ещё не прочитан: кнопку демо не показываем, но и молчать не оставляем (З1 круга 3).
+  const [demo, setDemo] = useState<boolean | null>(null);
+  const [configFailed, setConfigFailed] = useState(false);
   const [agreed, setAgreed] = useState(false);
   // Куда вести после входа. Переходим, только когда сессия перечитана: иначе раздел ещё видит гостя и вернёт на вход.
   const [next, setNext] = useState('/');
@@ -29,9 +31,19 @@ export function LoginPage() {
   useEffect(() => { if (stopResult) session.reload(); }, [stopResult]);
   useEffect(() => {
     const controller = new AbortController();
-    void getAuthConfig(controller.signal).then((config) => {
-      if (!controller.signal.aborted) setDemo(config.demo === true);
-    }).catch(() => {});
+    let attempts = 0;
+    const load = () => {
+      void getAuthConfig(controller.signal).then((config) => {
+        if (!controller.signal.aborted) setDemo(config.demo === true);
+      }).catch(() => {
+        if (controller.signal.aborted) return;
+        // Сразу после деплоя API поднимается дольше страницы: повторяем, потом честно говорим об ошибке.
+        attempts += 1;
+        if (attempts < 5) setTimeout(load, 2000);
+        else { setDemo(false); setConfigFailed(true); }
+      });
+    };
+    load();
     return () => controller.abort();
   }, []);
   async function loginDemo() {
@@ -65,6 +77,7 @@ export function LoginPage() {
         <h1 id="login-title">{copy.login.title}</h1>
         <p className="login__description">{copy.login.description}</p>
         {error && <ErrorBanner message={error} />}
+        {configFailed && <ErrorBanner message={copy.login.configFailed} />}
         <label className="login__consent">
           <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />
           <span>{copy.login.consent} <Link to="/policy" target="_blank" rel="noopener">{copy.login.policy}</Link></span>
@@ -77,7 +90,8 @@ export function LoginPage() {
             </svg>
             {copy.login.action}
           </button>
-          {demo && <Button variant="secondary" disabled={busy || !agreed} onClick={() => void loginDemo()}>{copy.login.demo}</Button>}
+          {demo === null && <p className="login__starting" role="status">{copy.login.starting}</p>}
+          {demo === true && <Button variant="secondary" disabled={busy || !agreed} onClick={() => void loginDemo()}>{copy.login.demo}</Button>}
         </div>
       </section>
     </div>

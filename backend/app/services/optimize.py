@@ -41,7 +41,7 @@ from app.domain.types import (
 )
 from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import closed_platforms, read_spend
-from app.services.changes import budget_operations
+from app.services.changes import ChangeConflict, budget_operations
 from app.services.experiments import completed_hypotheses, experiment_settings, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
@@ -644,9 +644,9 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
                         suffix=f"experiment:{experiment.id}",
                         evidence={"experiment_id": experiment.id, "result": asdict(result)},
                     )
-                except PlatformError:
-                    # Площадка не приняла операцию (сеть, закрытый кабинет, конфликт изменений):
-                    # вывод не фиксируем, повторим на следующем тике.
+                except (PlatformError, ChangeConflict):
+                    # Площадка не приняла операцию (сеть, закрытый кабинет) или слот занят конфликтующим
+                    # изменением: вывод не фиксируем, повторим на следующем тике (В2 круга 3).
                     continue
                 if change is None or change.status == "failed":
                     # Операция не прошла — оставляем проверку запущенной, тик повторит попытку.

@@ -4,16 +4,17 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from random import Random
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.content.art import ArtBudget, FakeArt
+from app.content.art import ART_COST_KOP, ArtBudget, ArtError, FakeArt
 from app.content.art import ArtCall as ArtRecord
 from app.content.images import DEFAULT_FONT
 from app.content.site_reader import Page, SiteReadResult
@@ -27,6 +28,7 @@ from app.db.models import (
     Business,
     Campaign,
     ChangeLog,
+    Experiment,
     LLMCall,
     MarkingProfile,
     Plan,
@@ -37,7 +39,7 @@ from app.db.models import (
 from app.platforms.base import PlatformError
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, replaced_campaigns
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
     LOCK_WAITERS,
@@ -65,6 +67,7 @@ from app.services.onboarding import (
     valid_inn,
 )
 from app.services.plan import PlanService
+from app.worker.jobs import budget_contexts
 
 NOW = datetime(2026, 1, 1, 9, tzinfo=UTC)
 TODAY = date(2026, 1, 1)
@@ -101,10 +104,24 @@ class MemoryRepository(LaunchRepository):
         self.tables: dict[type, list] = {}
         self.locked = False
 
-    def rows(self, model: type, **keys: object) -> list:
+    def rows(self, model: type, business_id: int | None = None, **keys: object) -> list:
+        """Строки модели; business_id — как у WorkerRepository: с join-семантикой для AdGroup/Ad/Target."""
+        rows = self.tables.get(model, [])
+        if business_id is not None:
+            if model is Business:
+                rows = [row for row in rows if row.id == business_id]
+            elif model is AdGroup:
+                campaign_ids = {row.id for row in self.tables.get(Campaign, []) if row.business_id == business_id}
+                rows = [row for row in rows if row.campaign_id in campaign_ids]
+            elif model in (Ad, Target):
+                campaign_ids = {row.id for row in self.tables.get(Campaign, []) if row.business_id == business_id}
+                group_ids = {row.id for row in self.tables.get(AdGroup, []) if row.campaign_id in campaign_ids}
+                rows = [row for row in rows if row.ad_group_id in group_ids]
+            else:
+                rows = [row for row in rows if getattr(row, "business_id", None) == business_id]
         return [
             item
-            for item in self.tables.get(model, [])
+            for item in rows
             if all(getattr(item, name) == value for name, value in keys.items())
         ]
 
@@ -114,6 +131,9 @@ class MemoryRepository(LaunchRepository):
             if getattr(item, column.key) is None and column.default is not None:
                 arg = column.default.arg
                 setattr(item, column.key, arg(None) if column.default.is_callable else arg)
+        if isinstance(item, ChangeLog):
+            # Как JSONB в проде: операции хранятся dict'ами, читаются через load_operations.
+            item.operations = [asdict(op) if not isinstance(op, dict) else op for op in item.operations]
         if hasattr(item, "id") and item.id is None:
             item.id = max((row.id for row in table), default=0) + 1
         if item not in table:
@@ -143,6 +163,83 @@ class MemoryRepository(LaunchRepository):
 
     def get(self, change_id: int, business_id: int) -> ChangeLog | None:
         return next(iter(self.rows(ChangeLog, id=change_id, business_id=business_id)), None)
+
+    def get_owned(self, change_id: int, user_id: int) -> ChangeLog | None:
+        """Как в ChangesRepository: запись чужого владельца не отдаём."""
+        change = next(iter(self.rows(ChangeLog, id=change_id)), None)
+        if change is None:
+            return None
+        business = next(iter(self.rows(Business, id=change.business_id)), None)
+        return change if business is not None and business.user_id == user_id else None
+
+    def reverts(self, change_id: int) -> list[ChangeLog]:
+        return self.rows(ChangeLog, reverts_id=change_id)
+
+    def experiments(self, change: ChangeLog) -> list[Experiment]:
+        rows = self.rows(Experiment, business_id=change.business_id)
+        if change.entity_type == "experiment" and change.entity_id.isdecimal():
+            return [row for row in rows if row.change_id == change.id or row.id == int(change.entity_id)]
+        return [row for row in rows if row.change_id == change.id]
+
+    def applied_budget_contexts(self, business_id: int) -> list[ChangeLog]:
+        """Применённые изменения с контекстом бюджета, по порядку; как у воркера в памяти."""
+        return sorted(
+            (row for row in self.rows(ChangeLog, business_id, status="applied") if budget_contexts(row)),
+            key=lambda row: row.id,
+        )
+
+    def last_status_change(
+        self, business_id: int, platform: str, entity_type: str, entity_id: str
+    ) -> ChangeLog | None:
+        return max(
+            (
+                row
+                for row in self.rows(ChangeLog, business_id, platform=platform, status="applied")
+                if any(
+                    (op.get("entity_type"), op.get("entity_id"), op.get("field")) == (entity_type, entity_id, "status")
+                    for op in row.operations
+                )
+            ),
+            key=lambda row: row.id,
+            default=None,
+        )
+
+    def change_by_key(self, business_id: int, key: str) -> ChangeLog | None:
+        return next(iter(self.rows(ChangeLog, business_id=business_id, idempotency_key=key)), None)
+
+    def find(self, model, **keys):
+        return next(iter(self.rows(model, **keys)), None)
+
+    def replaced_entities(self, business_id: int) -> set[tuple[str, str]]:
+        """Кампании прежних планов на площадках: (площадка, внешний id)."""
+        ids = replaced_campaigns(self.rows(Plan, business_id=business_id))
+        return {
+            (campaign.platform, campaign.external_id)
+            for campaign in self.rows(Campaign, business_id=business_id)
+            if campaign.id in ids and campaign.external_id is not None
+        }
+
+    def status_changes(self, business_id: int, since: int = 0) -> list[ChangeLog]:
+        """Применённые изменения с id не меньше since, менявшие статус объектов, по порядку."""
+        return sorted(
+            (
+                item
+                for item in self.rows(ChangeLog, business_id=business_id, status="applied")
+                if item.id >= since
+                and any(
+                    (op.get("field") if isinstance(op, dict) else op.field) == "status" for op in item.operations
+                )
+            ),
+            key=lambda item: item.id,
+        )
+
+    def campaign_names(self, business_id: int) -> dict[tuple[str, str], str]:
+        """Названия кампаний по (площадка, внешний id) — для заголовков журнала."""
+        return {
+            (campaign.platform, campaign.external_id): campaign.name
+            for campaign in self.rows(Campaign, business_id=business_id)
+            if campaign.external_id is not None
+        }
 
     def pending(self, business_id: int | None = None) -> list[ChangeLog]:
         return [item for item in self.rows(ChangeLog, status="pending") if business_id in (None, item.business_id)]
@@ -186,9 +283,11 @@ class MemoryRepository(LaunchRepository):
             if since is None or item.created_at is None or item.created_at >= since
         )
 
-    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[None]]:
-        async def reserve() -> None:
-            return None
+    def art_reservation(self, business_id: int) -> Callable[[], Awaitable[int | None]]:
+        """Как в OnboardingRepository: резерв — через reserve_ai, токен закрывается снаружи."""
+
+        async def reserve() -> int | None:
+            return self.reserve_ai(business_id, "art", ART_COST_KOP)
 
         return reserve
 
@@ -1491,6 +1590,43 @@ async def test_ai_spend_limit_stops_paid_calls(tmp_path: Path) -> None:
         await guard.complete_json("Напиши объявление", "{}")
     assert world.llm.calls.count("ad") == 1
     assert [call.cost_kop for call in world.repository.rows(LLMCall)] == [4000, 4000]
+
+
+async def test_ai_reservation_released_on_llm_cancellation(world: World) -> None:
+    """В4: отмена задачи (CancelledError и прочие не-YandexGPTError) снимает резерв: строка ledger
+    с final=false не остаётся в пуле владельца и суточном потолке навсегда."""
+    released: list[int | None] = []
+    world.repository.release_ai = released.append
+
+    class Cancelling:
+        def estimate_kop(self, system: str, user: str) -> int:
+            return 100
+
+        async def complete_json(self, system: str, user: str, temperature: float = 0.2) -> str:
+            raise asyncio.CancelledError()
+
+    budget = SimpleNamespace(spent_kop=0, limit_kop=10_000)
+    guard = SpendLLM(Cancelling(), world.repository, world.business.id, budget, "test")
+    with pytest.raises(asyncio.CancelledError):
+        await guard.complete_json("Напиши объявление", "{}")
+    assert released, "резерв не снят: он бы съел пул владельда навсегда"
+
+
+async def test_ai_reservation_released_on_art_rejection(world: World) -> None:
+    """В3: отказ генерации снимает резерв в общем пуле; успех фиксирует трату."""
+    released: list[int | None] = []
+    settled: list[tuple[int | None, int]] = []
+    world.repository.reserve_ai = lambda business_id, kind, estimate_kop: 7
+    world.repository.release_ai = released.append
+    world.repository.settle_ai = lambda rid, cost: settled.append((rid, cost))
+    budget = ai_budget(world.repository, world.business, LIMITS, TODAY)
+    rejecting = FakeArt(b"img", budget, rejection_reason="moderation")
+    with pytest.raises(ArtError):
+        await rejecting.generate("Идея", seed=1, business_id=world.business.id)
+    assert released == [7] and not settled
+    succeeding = FakeArt(b"img", budget)
+    await succeeding.generate("Идея", seed=2, business_id=world.business.id)
+    assert settled == [(7, ART_COST_KOP)]
 
 
 async def test_ai_weekly_limit_tracks_owner_across_businesses(world: World) -> None:

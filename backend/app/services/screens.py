@@ -452,9 +452,16 @@ class ScreensService:
             )
             if experiment.status == "cancelled":
                 conclusion = "Проверку остановили. Победителя не выбирали."
-            # Аудитории сравниваются за полный срок, а не по числу показов.
+            # Аудитории сравниваются за полный срок, а не по числу показов; у них к сроку добавляются
+            # дни на уточнение цифр площадки (settlement_days), как в experiment_expire_date.
             remaining = 0 if audiences else sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
-            days = max(0, (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days)
+            from app.domain.settings import DEFAULT_SETTINGS
+
+            extra = DEFAULT_SETTINGS.settlement_days if experiment.metric == "cpl" else 0
+            days = max(
+                0,
+                (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days + extra,
+            )
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудитории"}[experiment.hypothesis]
             variants = [ads.get(id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)]
             # Варианты (А и Б) экран показывает сам, из arms; строка comparing говорит только, что между ними меняется.
@@ -608,12 +615,21 @@ class ScreensService:
         with self.repository.business_lock(business.id):
             business.auto_continue = auto_continue
             business.avg_check_kop = avg_check_kop
-            # Цель VK кабинета: None — не менять. Стратегия оплаты за конверсию будет опираться на неё (В8).
-            settings = business.settings | (
-                {"vk_priced_goal_source_id": vk_priced_goal_source_id, "vk_priced_goal_name": vk_priced_goal_name}
-                if vk_priced_goal_source_id
-                else {}
-            )
+            # Цель VK кабинета: None — не менять, 0 — сбросить (без id имя не имеет смысла). Стратегия
+            # оплаты за конверсию будет опираться на неё (В8).
+            if vk_priced_goal_source_id == 0:
+                settings = {
+                    key: value
+                    for key, value in business.settings.items()
+                    if key not in {"vk_priced_goal_source_id", "vk_priced_goal_name"}
+                }
+            elif vk_priced_goal_source_id:
+                settings = business.settings | {
+                    "vk_priced_goal_source_id": vk_priced_goal_source_id,
+                    "vk_priced_goal_name": vk_priced_goal_name,
+                }
+            else:
+                settings = business.settings
             business.settings = settings
             self.repository.save(business)
         return self.business(business)

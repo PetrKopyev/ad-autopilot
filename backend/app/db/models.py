@@ -471,13 +471,18 @@ class AiSpendLedger(Base):
     """Учёт трат на ИИ для лимитов владельца и суточного потолка сервиса.
 
     Отдельная таблица без внешних ключей: удаление бизнеса или аккаунта не обнуляет лимит (иначе
-    трату оператору можно было бы сжигать бесконечно пересозданием аккаунта). owner_key — хэш
-    yandex_uid: персональный идентификатор в базе не храним. Строка с final=false — резерв
-    оценки до вызова (защита от параллельных запросов); после ответа строка уточняется до
-    фактической стоимости либо удаляется при отказе."""
+    трату оператору можно было бы сжигать бесконечно пересозданием аккаунта). owner_key — HMAC
+    от yandex_uid (ключ AI_OWNER_KEY_SECRET): персональный идентификатор в базе не храним.
+    Строка с final=false — резерв оценки до вызова (защита от параллельных запросов); после
+    ответа строка уточняется до фактической стоимости либо удаляется при отказе. Итоговые
+    строки старше 14 дней удаляет свипер (лимиты смотрят максимум неделю назад)."""
 
     __tablename__ = "ai_spend_ledger"
-    __table_args__ = (*non_negative("cost_kop"), Index("ix_ai_spend_ledger_owner", "owner_key", "created_at"))
+    __table_args__ = (
+        *non_negative("cost_kop"),
+        Index("ix_ai_spend_ledger_owner", "owner_key", "created_at"),
+        Index("ix_ai_spend_ledger_created_at", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     owner_key: Mapped[str] = mapped_column(Text)

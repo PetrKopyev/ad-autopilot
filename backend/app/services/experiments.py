@@ -400,6 +400,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
             ad_group_id=group.id,
             external_id=state.entity_id,
             title=state.title,
+            title2=state.title2 or "",
             text=state.text,
             asset_id=asset_id,
             status="moderation",
@@ -508,6 +509,7 @@ async def launch_audience(worker, business, campaign, group, control, change, de
         variant = Ad(
             ad_group_id=variant_group.id,
             title=control.title,
+            title2=control.title2,
             text=control.text,
             asset_id=control.asset_id,
             status="moderation",

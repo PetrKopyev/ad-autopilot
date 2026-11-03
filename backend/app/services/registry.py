@@ -38,8 +38,9 @@ class AccountInfo:
     goal_ids: tuple[int, ...] = ()
     goal_value_kop: int | None = None
     # Цель пикселя VK кабинета (business.settings["vk_priced_goal_source_id"]): у каждого кабинета своя,
-    # общий VK_PRICED_GOAL_SOURCE_ID — только fallback на весь сервис.
+    # общий VK_PRICED_GOAL_SOURCE_ID — только fallback на весь сервис. Имя цели хранится там же (В6).
     vk_priced_goal_source_id: int | None = None
+    vk_priced_goal_name: str | None = None
 
 
 type Loader = Callable[[int, str], AccountInfo | None]
@@ -61,6 +62,7 @@ def db_loader(session_factory: Callable[[], Session]) -> Loader:
             valid_goal = (
                 isinstance(cabinet_goal, int) and not isinstance(cabinet_goal, bool) and cabinet_goal > 0
             )
+            cabinet_name = (business.settings or {}).get("vk_priced_goal_name")
             return AccountInfo(
                 account.status,
                 business.site_url,
@@ -70,6 +72,7 @@ def db_loader(session_factory: Callable[[], Session]) -> Loader:
                 tuple(business.lead_goal_ids[:DIRECT_MAX_GOALS]),
                 business.avg_check_kop,
                 cabinet_goal if valid_goal else None,
+                cabinet_name if isinstance(cabinet_name, str) and cabinet_name else None,
             )
 
     return load
@@ -127,6 +130,7 @@ class AdapterRegistry:
                 package_id=getattr(self.config, "vk_package_id", None),
                 marking_confirmed=info.marking_confirmed,
                 priced_goal_source_id=info.vk_priced_goal_source_id,
+                priced_goal_name=info.vk_priced_goal_name,
                 config=self.config,
                 client=self.http,
             )

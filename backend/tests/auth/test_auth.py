@@ -184,6 +184,24 @@ def test_direct_uses_separate_account_and_encrypted_fields(
     assert "csrf_secret" not in me.text
 
 
+def test_agency_direct_account_is_rejected_before_saving(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """В5: агентский кабинет отклоняется при подключении — с понятной ошибкой и без сохранения аккаунта."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "agency"})
+    mock_yandex.post("https://api.direct.yandex.com/json/v5/clients").respond(
+        json={"result": {"Clients": [{"ClientId": 9, "Login": "agency", "Type": "AGENCY"}]}}
+    )
+    params = start(client, "direct")
+    response = callback(client, params["state"])
+    assert response.status_code == 400
+    assert "Агентские кабинеты не поддерживаются" in response.json()["detail"]
+    assert 1 not in repository.accounts
+
+
 def test_me_tells_whether_setup_created_business(
     client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
 ) -> None:

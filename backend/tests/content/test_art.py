@@ -233,8 +233,11 @@ async def test_fake_budget_and_rejections() -> None:
     with pytest.raises(ArtError):
         await fake.generate("Idea", seed=2, business_id=1)
     assert fake.calls[-1].rejection_reason == "moderation"
+    # Отказ не оплачивается: резерв возвращён, лимит снова есть — как у YandexArt.
+    fake.rejection_reason = None
+    assert (await fake.generate("Idea", seed=3, business_id=1)).image == b"image"
     with pytest.raises(ArtBudgetExceeded):
-        await fake.generate("Idea", seed=3, business_id=1)
+        await fake.generate("Idea", seed=4, business_id=1)
     assert fake.budget.spent_kop == 446
 
 

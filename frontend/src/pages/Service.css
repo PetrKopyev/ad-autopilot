@@ -19,6 +19,7 @@
 .login__consent input { flex: 0 0 22px; width: 22px; height: 22px; margin: 0; accent-color: var(--color-primary); cursor: pointer; }
 .login__actions { display: grid; gap: var(--space-3); }
 .login__actions .button { min-height: 48px; }
+.login__starting { margin: 0; color: var(--color-muted); text-align: center; }
 .login .yandex-id-button { display: flex; justify-content: center; align-items: center; gap: var(--space-3); width: 100%; min-height: 52px; padding: var(--space-3) var(--space-5); border: 0; border-radius: var(--radius-small); color: #fff; background: #000; cursor: pointer; font: inherit; font-weight: 600; font-size: 1rem; line-height: 1.3; }
 .login .yandex-id-button:hover:not(:disabled) { background: #262626; }
 .login .yandex-id-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }

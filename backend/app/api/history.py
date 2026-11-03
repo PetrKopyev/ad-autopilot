@@ -1,6 +1,6 @@
+import logging
 from collections.abc import AsyncIterator
 from typing import Annotated, Literal
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -17,6 +17,7 @@ from app.worker.clock import SystemClock
 from app.worker.jobs import Worker
 
 router = APIRouter(prefix="/api/history", route_class=ReleasingRoute)
+logger = logging.getLogger(__name__)
 
 
 async def get_history_repository() -> AsyncIterator[ChangesRepository]:
@@ -132,15 +133,24 @@ async def revert(
         if original.entity_type == "group" and original.evidence.get("group_limits"):
             # Откат SCALE вернул лимиты групп (Н7): переносим их в лимиты кампаний пересчётом
             # при текущем бюджете — иначе на площадке остались бы устаревшие абсолютные значения.
+            # Пересчёт только при работающей рекламе: force идёт мимо стража business.status/kill_switch
+            # и возобновил бы кампании, которые «Остановить всю рекламу» пропустила (К1 круга 3).
             business = repository.business(original.business_id)
-            worker = Worker(
-                repository,
-                resolve_adapter,
-                dry_run=False,
-                clock=VirtualClock(demo_now(business, SystemClock().now)),
-            )
-            worker.step_key = f"owner:{uuid4()}"
-            await rebalance_budget(worker, business, force=True)
+            meta = business.settings.get("_worker", {})
+            if business.status == "running" and not meta.get("kill_switch"):
+                worker = Worker(
+                    repository,
+                    resolve_adapter,
+                    dry_run=False,
+                    clock=VirtualClock(demo_now(business, SystemClock().now)),
+                )
+                worker.step_key = f"owner:revert-scale:{change.id}"
+                try:
+                    await rebalance_budget(worker, business, force=True)
+                except (ChangeConflict, PlatformError):
+                    # Откат уже применён: сбой пересчёта не должен выглядеть как сбой отката (В1).
+                    # Лимиты кампаний досчитает штатный тик воркера.
+                    logger.warning("Пересчёт лимитов кампаний после отката SCALE не выполнен", exc_info=True)
     except ConfirmationRequired as error:
         raise HTTPException(
             409, {"confirmation_required": True, "message": str(error), "changes": error.changes}

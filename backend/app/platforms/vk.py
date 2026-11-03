@@ -168,11 +168,13 @@ class VkAdapter(VkClient):
         package_id: int | None = None,
         marking_confirmed: bool = False,
         priced_goal_source_id: int | None = None,
+        priced_goal_name: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(token, **kwargs)
         self._href = href
         self._package_id = package_id
+        self._goal_on_plan: bool | None = None
         self._package_choice: list[tuple[int, dict[str, Any]]] | None = None
         # Пакет, на котором реально создан план: новые группы кампании живут на нём же.
         self._used_package_id: int | None = package_id
@@ -200,7 +202,7 @@ class VkAdapter(VkClient):
             if priced_goal_source_id is not None
             else getattr(self._config, "vk_priced_goal_source_id", None)
         )
-        self._priced_goal_name = getattr(self._config, "vk_priced_goal_name", None) or "Заявка"
+        self._priced_goal_name = priced_goal_name or getattr(self._config, "vk_priced_goal_name", None) or "Заявка"
 
     def _to_api(self, kop: int) -> int:
         """Сумма с НДС (как бюджет и расход) в копейки лимита API; без НДС — вниз, чтобы не превысить бюджет."""
@@ -319,6 +321,9 @@ class VkAdapter(VkClient):
                             "ad_plans", await self._plan_body(plan_part, package_id, with_goal=with_goal)
                         )
                         self._used_package_id = package_id
+                        # Запоминаем, с целью ли создан план: add_group без этой цели падает на пакетах,
+                        # которые её не принимают (В7).
+                        self._goal_on_plan = with_goal
                         # Живой ответ создания — только id плана и campaigns: дерево дочитываем; полный ответ
                         # (тестовый стенд) берём как есть.
                         plan = created if "ad_groups" in created else await self._load_plan_tree(created["id"])
@@ -471,11 +476,20 @@ class VkAdapter(VkClient):
             url = self._url_id
             group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id), "package_id": package_id}
             # Цель кабинета идёт и в группу: иначе новая группа (аудиторная проверка) создаётся без цели,
-            # хотя план с ней работает (В8).
+            # хотя план с ней работает (В8). План создан без цели (второй круг перебора пакетов) — не шлём:
+            # пакет её не примет и отвергнет всю группу (В7).
             priced_goal = self._priced_goal_body()
-            if priced_goal is not None:
+            if priced_goal is not None and self._goal_on_plan is not False:
                 group_body["priced_goal"] = priced_goal
-            group_id = (await self._add("ad_groups", group_body))["id"]
+            try:
+                group_id = (await self._add("ad_groups", group_body))["id"]
+            except PlatformError:
+                if "priced_goal" not in group_body:
+                    raise
+                # План живёт без цели (создан до этой памяти или пережил смену кэша адаптера):
+                # повторяем без цели, как при создании плана.
+                del group_body["priced_goal"]
+                group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {
             str(item.get("name", "")).rsplit(" ", 1)[-1]: str(item["id"])
             for item in await self._items("banners", {"_ad_group_id": group_id, "fields": "id,name"})

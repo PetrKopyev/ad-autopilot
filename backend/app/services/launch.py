@@ -451,8 +451,13 @@ class LaunchService:
             try:
                 adapters[platform] = self.resolve_adapter(business.id, platform)
                 minimum = minimums[platform] = await adapters[platform].min_budgets()
+                if platform == "direct":
+                    # Агентские кабинеты не поддерживаются: понятный отказ до создания кампаний (В5).
+                    await adapters[platform].whoami()
             except CLOSED_ACCOUNT as error:
                 raise closed_account(platform, error) from error
+            except PlatformError as error:
+                raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
             if reason := below_minimum(platform, limits[platform], minimum, today):
                 raise LaunchBlocked([reason])
             try:

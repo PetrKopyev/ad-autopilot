@@ -13,6 +13,7 @@ from app.content.art import ART_COST_KOP
 from app.db.models import Ad, AdGroup, ArtCall, ChangeLog, Experiment, LLMCall, StatsDaily, Target, WorkerRun
 from app.domain.experiments import evaluate_experiment
 from app.domain.types import AdSnapshot, DaySpend, ExperimentDesign, Verdict
+from app.services.changes import ChangeConflict
 from app.services.experiments import completed_hypotheses, create_experiment
 from app.services.onboarding import AiLimits, Blocked
 from app.services.optimize import experiments_tick
@@ -392,6 +393,24 @@ async def test_tick_expired_test_stops_variant_like_no_difference_verdict(experi
     states = await world.adapter.get_state(world.refs)
     assert states[world.ads["borderline-2"].external_id].status == "paused_auto"
     assert states[world.ads["borderline-1"].external_id].status == "active"
+
+
+async def test_tick_expired_test_survives_apply_conflict(experiment_world, monkeypatch):
+    """В2: конфликт слота изменений (параллельный тик) при закрытии просроченной проверки не роняет
+    весь тик и не закрывает проверку без вывода — попытка повторится на следующем тике."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    experiment.deadline = world.clock.now + timedelta(days=13)
+    world.clock.advance(days=14)
+    worker = world.worker()
+
+    async def conflict(*args, **kwargs):
+        raise ChangeConflict("Изменение этого бизнеса уже выполняется.")
+
+    monkeypatch.setattr(worker, "apply", conflict)
+    await experiments_tick(worker, world.business)
+    assert experiment.status == "running"
+    assert world.changes(kind="experiment_verdict") == []
 
 
 async def test_tick_dry_run_does_not_conclude_or_pause_existing_test(experiment_world):

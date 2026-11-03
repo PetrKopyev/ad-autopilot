@@ -400,7 +400,8 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
 async def test_partially_stopped_group_does_not_donate_to_scale():
     """Н5: частично остановленная группа (одно из двух объявлений остановлено, второе работает — типичная
     картина после A/B-теста с победителем) не донорит лимит: лимит на площадках общий на группу, работающее
-    объявление тратит его целиком. Иначе после каждого A/B-теста SCALE снимал бы деньги с группы победителя."""
+    объявление тратит его целиком. Иначе после каждого A/B-теста SCALE снимал бы деньги с группы победителя.
+    Полный донор (вторая группа, остановленная целиком) при этом донорит — иначе SCALE не случился бы вовсе."""
     from tests.worker.test_guard_edges import with_vk, worker_for
 
     world = await make_world()
@@ -408,14 +409,30 @@ async def test_partially_stopped_group_does_not_donate_to_scale():
     weak = [world.ads["weak-1"], world.ads["weak-2"]]
     # Второе объявление слабой группы заморожено: группа останется работать с одним объявлением.
     weak[1].frozen_until = world.clock.now + timedelta(days=60)
-    world.repository.save(weak[1])
+    # Группа borderline остановлена владельцем целиком до перемотки — полный донор для SCALE.
+    # Активность решает снимок площадки (snapshot читает статус из платформы), поэтому ставим
+    # паузу и в базе, и в состоянии FakeAdapter, как сделал бы штатный stop_all.
+    from dataclasses import replace
+
+    borderline = [world.ads["borderline-1"], world.ads["borderline-2"]]
+    for ad in borderline:
+        world.adapter._states[ad.external_id] = replace(
+            world.adapter._states[ad.external_id], status="paused_owner"
+        )
+        ad.status = "paused_owner"
+    world.repository.save(weak[1], *borderline)
     worker = worker_for(world, vk)
     await world.advance(worker, days=20)
     assert sum(ad.status != "active" for ad in weak) == 1, "одно объявление слабой группы остановлено"
+    scaled = world.changes(reason_code="SCALE_UP")
+    assert scaled, "SCALE должен случиться: без этого проверка доноров пустая и тест ничего не ловит"
     weak_group = next(group for group in world.repository.rows(AdGroup) if group.theme == "Укладки")
-    for change in world.changes(reason_code="SCALE_UP"):
-        donors = set(change.evidence["group_limits"]["before"])
-        assert weak_group.external_id not in donors, "частично остановленная группа не донор"
+    borderline_group = next(
+        group for group in world.repository.rows(AdGroup) if group.id == borderline[0].ad_group_id
+    )
+    donors = {key for change in scaled for key in change.evidence["group_limits"]["before"]}
+    assert weak_group.external_id not in donors, "частично остановленная группа не донор"
+    assert borderline_group.external_id in donors, "полностью остановленная группа донорит"
 
 
 async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_budget_is_enough(monkeypatch):

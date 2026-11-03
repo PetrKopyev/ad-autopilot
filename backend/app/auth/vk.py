@@ -155,6 +155,11 @@ class VkClient:
             # последовательности, а живое окно не продлевает блокировку дольше своего reset.
             exhausted = [item.get("reset") for item in windows.values() if item.get("remaining") == 0]
             candidates = [reset for reset in exhausted if reset is not None]
+            # Retry-After длиннее reset исчерпанного окна не игнорируем: ждём max() от обоих (мелочь круга 3).
+            try:
+                candidates.append(now + timedelta(seconds=max(1, int(response.headers["Retry-After"]))))
+            except (KeyError, ValueError):
+                pass
             if not candidates:
                 candidates = [now + timedelta(seconds=retry)]
             self._blocked_until = max(candidates)
