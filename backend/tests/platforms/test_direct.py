@@ -657,7 +657,7 @@ async def test_upload_image(adapter, api, tmp_path: Path):
     [
         ("title", "update_ad_text", "Новый", {"Titles": ["Новый"]}),
         ("text", "update_ad_text", "Текст", {"Texts": ["Текст"]}),
-        ("image_ref", "swap_ad_image", "new-hash", {"AdImageHashes": {"Items": ["new-hash"]}}),
+        ("image_ref", "swap_ad_image", "new-hash", {"AdImageHashes": ["new-hash"]}),
         ("image_ref", "swap_ad_image", None, {"AdImageHashes": None}),
     ],
 )
@@ -862,6 +862,34 @@ async def test_offline_report(adapter, api, monkeypatch):
     assert route.calls.last.request.headers["skipReportHeader"] == "true"
     assert "returnMoneyInMicros" not in route.calls.last.request.headers
     assert (await adapter.limits()).remaining_units == 99
+
+
+def tsv_campaigns(rows: list[tuple[str, str, str]]) -> str:
+    """Кампании произвольным числом строк: (день, CampaignId, Cost в микро)."""
+    return (
+        "Date\tCampaignId\tImpressions\tClicks\tCost\tConversions_34_LSCCD\n"
+        + "".join(f"{day}\t{campaign_id}\t10\t1\t{cost}\t0\n" for day, campaign_id, cost in rows)
+    )
+
+
+async def test_live_report_filters_by_own_campaigns(adapter, api):
+    """К1: вне песочницы отчёт строится только по кампаниям бизнеса — чужой расход кабинета не засчитывается."""
+    route = api.post(f"{V5}/reports").respond(
+        text=tsv_campaigns([("2026-10-23", "1", "3000000"), ("2026-10-23", "9", "7000000")])
+    )
+    rows = await adapter.get_stats(date(2026, 10, 23), TODAY, "campaign", campaign_ids={"1"})
+    assert [row.campaign_id for row in rows] == ["1"]
+    assert [row.cost_kop for row in rows] == [300]
+    selection = json.loads(route.calls.last.request.content)["params"]["SelectionCriteria"]
+    assert selection["Filter"] == [{"Field": "CampaignId", "Operator": "IN", "Values": ["1"]}]
+
+
+async def test_spend_today_counts_only_own_campaigns(adapter, api):
+    """К1: «расход сегодня» считается только по кампаниям бизнеса, иначе чужие траты режут наши лимиты."""
+    api.post(f"{V5}/reports").respond(
+        text=tsv_campaigns([(TODAY.isoformat(), "1", "3000000"), (TODAY.isoformat(), "9", "7000000")])
+    )
+    assert await adapter.get_spend_today(campaign_ids={"1"}) == 300
 
 
 async def test_report_counts_business_goals_without_priority_goals(api):

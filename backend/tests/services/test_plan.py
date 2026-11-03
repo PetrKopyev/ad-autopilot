@@ -1067,6 +1067,21 @@ def test_phrase_takes_four_words_lowercase_and_city_of_area() -> None:
     assert phrase("Стрижка", "Москва и Московская область") == "стрижка москва"
 
 
+def test_phrase_cleans_symbols_forbidden_by_direct_and_caps_words() -> None:
+    """В7: знаки, которые API Директа отклоняет вместе с созданием всей кампании (запятые, /, скобки, %, №,
+    операторы + ! [ ] ( ) " |), вычищаются; слов в фразе не больше семи."""
+    assert phrase("Маникюр, педикюр", "Самара") == "маникюр педикюр самара"
+    assert phrase("Стрижка/укладка", "Самара") == "стрижка укладка самара"
+    assert phrase("Массаж (60 мин)", "Самара") == "массаж 60 мин самара"
+    long_name = "Уход за волосами с кератином и ламинированием ботоксом"
+    assert len(phrase(long_name, "Санкт-Петербург").split()) <= 7
+
+
+def test_direct_services_skips_service_without_phrase_after_cleaning() -> None:
+    services = [service("!!!"), service("Маникюр")]
+    assert [item.name for item in direct_services(services, "Самара")] == ["Маникюр"]
+
+
 def test_direct_services_skip_same_phrase_and_respect_limit() -> None:
     services = [service("Маникюр"), service("маникюр"), service("МАНИКЮР  "), service("Педикюр"), service("Стрижка")]
 

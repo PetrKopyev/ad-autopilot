@@ -81,6 +81,9 @@ def design_experiment(
     nonnegative_int(group_daily_impressions, "group_daily_impressions")
     nonnegative_int(group_daily_budget, "group_daily_budget")
     hypothesis = next_hypothesis(completed_hypotheses, group_daily_budget, settings)
+    # Кликабельность из жизни бывает выше ~77% (малая выборка, бренд): без края шаг экспериментов падал бы каждый
+    # день на ValueError. Край допустимого диапазона оставляем самой функции выборки.
+    baseline_ctr = min(max(baseline_ctr, 1e-6), 0.75)
     n = sample_size(baseline_ctr, settings.test_design_lift, settings.test_alpha, settings.test_power)
     test_impressions = int(group_daily_impressions * settings.test_budget_share)
     days = ceil(2 * n / test_impressions) + settings.settlement_days if test_impressions else settings.test_max_days + 1

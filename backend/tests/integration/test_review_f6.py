@@ -36,7 +36,8 @@ async def test_experiment_starts_after_eight_days_of_scheduler_ticks(tmp_path, m
 async def test_expired_experiment_closes_before_platform_reads_or_cooldown(monkeypatch, status):
     world = await make_world()
     experiment = running_experiment(world)
-    world.clock.advance(days=14)
+    # За день после срока (14-й день — ещё вывод по данным, см. К4).
+    world.clock.advance(days=15)
     world.business.status = status
     world.ads["borderline-2"].status = "paused_owner"
     worker = world.worker()

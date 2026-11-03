@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
@@ -206,15 +207,24 @@ def budget_view(monthly_budget: int, connected: list[str], today: date, domain: 
     }
 
 
+def phrase_words(text: str) -> list[str]:
+    """Слова фразы Директа: только буквы, цифры и дефис внутри слова. Остальные знаки (запятые, скобки, /, %, №,
+    операторы + ! [ ] ( ) " |) API отклоняет вместе с созданием всей кампании — чистим до отправки."""
+    return re.findall(r"[0-9a-zа-яё]+(?:-[0-9a-zа-яё]+)*", text.lower())
+
+
 def phrase(service: str, city: str) -> str:
-    return f"{' '.join(service.split()[:4])} {phrase_city(city)}".lower()
+    return " ".join((phrase_words(service)[:4] + phrase_words(phrase_city(city)))[:7])
 
 
 def direct_services(services: list[Service], city: str, limit: int | None = MAX_SERVICE_GROUPS) -> list[Service]:
     """Услуги групп Директа: у каждой своя ключевая фраза, и группы кампании не спорят за один запрос. Услуги с той
-    же фразой, что у прежней, пропускаются; групп не больше limit — первые услуги описания."""
+    же фразой, что у прежней, пропускаются; услуга без фразы после чистки знаков API не запустилась бы — не берём;
+    групп не больше limit — первые услуги описания."""
     chosen: dict[str, Service] = {}
     for service in services:
+        if not phrase_words(service.name):
+            continue
         chosen.setdefault(phrase(service.name, city), service)
     return list(chosen.values())[:limit]
 

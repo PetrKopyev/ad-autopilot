@@ -25,7 +25,7 @@ from app.db.models import (
     WorkerRun,
 )
 from app.demo_flags import demo_enabled
-from app.domain.budget import meets_minimum
+from app.domain.budget import campaign_limits, meets_minimum, plan_budget
 from app.domain.explain import rubles
 from app.domain.settings import DomainSettings
 from app.domain.types import PlatformLimit
@@ -302,6 +302,24 @@ class LaunchService:
             self.finish(business, plan, succeeded, limits, now, today)
         return self.result(plan)
 
+    def retry_limits(self, business: Business, plan: Plan, today: date) -> dict[str, PlatformLimit]:
+        """Лимиты повторного запуска: доли — по всем площадкам плана (повтор одной не отдаёт ей бюджет
+        работающих), расход месяца вычитаем из разрешённого, дату старта не сдвигаем. Иначе кампания
+        повтора получает дневной лимит всего бюджета, а площадки вместе держат больше 100%."""
+        plan_platforms = tuple(plan.payload["platforms"])
+        month = today.replace(day=1)
+        ledgers = self.repository.rows(BudgetLedger, business_id=business.id, month=month)
+        spent = sum(row.spent_kop for row in ledgers)
+        started_on = date.fromisoformat(business.settings.get("_worker", {}).get("started_on", today.isoformat()))
+        budget = plan_budget(
+            business.month_budget_kop, spent, today, plan_platforms, started_on=started_on, settings=self.domain
+        )
+        result = {}
+        for limit in budget.limits:
+            daily, cap = campaign_limits(limit.daily_limit, limit.remaining_cap, today)
+            result[limit.platform] = PlatformLimit(limit.platform, cap, daily, cap)
+        return result
+
     async def retry_platforms(
         self, business: Business, plan: Plan, platforms: list[str], now: datetime, today: date
     ) -> dict:
@@ -309,7 +327,7 @@ class LaunchService:
         проходят тот же путь — создание (с переиспользованием кампаний попытки) и включение. Ошибки этих
         площадок снова фиксируются честно, запись о неудаче плана не пишется: реклама на остальных работает."""
         await self.settle_pending(plan, now)
-        limits = budget_limits(business, platforms, today, self.domain)
+        limits = self.retry_limits(business, plan, today)
         adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
         units = campaign_units(plan, platforms, limits, minimums, today)
         self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
@@ -473,6 +491,13 @@ class LaunchService:
                     )
                     known = known | {key: campaign.id}
                     self.save_launch(plan, campaigns=known)
+                else:
+                    # Повтор переиспользует кампанию неудачной попытки, а лимиты за это время пересчитались
+                    # (другие расход месяца и доли площадок): оставленные значения прошлой попытки обновляем,
+                    # иначе кампания создастся с лимитом «как будто площадка одна».
+                    campaign.daily_limit_kop = limit.daily_limit
+                    campaign.period_cap_kop = limit.remaining_cap
+                    campaign.platform_account_id = accounts[platform].id
                 spec = self.spec(
                     business, campaign, groups, images, lambda group: geo[platform] | targeting(plan, platform, group)
                 )
@@ -808,9 +833,16 @@ class LaunchService:
         plan.payload = plan.payload | {
             "launch": plan.payload["launch"] | {"launched_at": now.isoformat(), "error": None, "started_at": None}
         }
-        business.settings = business.settings | {
-            "_worker": business.settings.get("_worker", {}) | {"started_on": today.isoformat()}
+        # Повтор частичного запуска не сдвигает дату старта внутри месяца: разрешённый расход считается
+        # от первого запуска, иначе остаток против полного расхода почти нулевый и страж бюджета ложно
+        # останавливает рекламу. В новом месяце дата обновляется — месячный бюджет начался заново.
+        worker_meta = business.settings.get("_worker", {})
+        previous = worker_meta.get("started_on")
+        month_start = today.replace(day=1).isoformat()
+        worker_meta = worker_meta | {
+            "started_on": previous if previous is not None and previous >= month_start else today.isoformat()
         }
+        business.settings = business.settings | {"_worker": worker_meta}
         business.status = "running"
         # Уведомления о прерванных попытках этого и прежних планов: реклама запущена, их тексты уже неправда.
         self.repository.read_notices(business.id, now)

@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -336,6 +337,42 @@ async def test_priced_goal_absent_without_config(adapter: VkAdapter, api) -> Non
     assert "priced_goal" not in sent(route)["campaigns"][0]
 
 
+async def test_priced_goal_per_account_overrides_service_config(api) -> None:
+    """В8: цель уровня кабинета (у каждого кабинета VK — своя цель пикселя) важнее общей настройки сервиса:
+    без этого второй пользователь сервиса получал бы чужую цель и не смог бы запустить рекламу."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    route = mock_creation(api)
+    async with VkAdapter(
+        "tok", config=config, href="https://shop.example/", marking_confirmed=True, priced_goal_source_id=555
+    ) as vk:
+        await vk.create_campaign_tree(tree())
+    assert sent(route)["campaigns"][0]["priced_goal"] == {"name": "Заявка", "source_id": 555}
+
+
+async def test_cpc_refusal_of_priced_goal_tries_next_package_then_without_goal(api) -> None:
+    """В8: отказ пакета из-за priced_goal не обрывает перебор кандидатов: сначала ищем пакет, который примет
+    цель, и только если никто не принял — создаём без цели с честной ошибкой, если и так никто."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    packages_stub(api, [{"id": 3232, "name": "site_multiformat_all_cpc", "status": "active", "flags": []}])
+    create = api.post(f"{API}/ad_plans.json")
+    create.side_effect = [
+        httpx.Response(
+            400,
+            json={"error": {"code": "unallowed_field", "message": "priced_goal is not allowed for cpc package"}},
+        ),
+        httpx.Response(200, json=created_plan()),
+    ]
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        await vk.create_campaign_tree(tree())
+    bodies = [json.loads(call.request.content) for call in create.calls]
+    assert "priced_goal" in bodies[0]["campaigns"][0]
+    assert "priced_goal" not in bodies[1]["campaigns"][0]
+
+
 async def test_set_budget_divides_limits_when_vat_configured(api) -> None:
     route = api.post(f"{API}/ad_plans/10.json").respond(json={})
     async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
@@ -365,6 +402,27 @@ async def test_get_state_restores_gross_limits_when_vat_configured(api) -> None:
     async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
         state = (await vk.get_state(ExternalRefs("10", {}, {}, {})))["10"]
     assert (state.daily_limit_kop, state.period_cap_kop) == (12_200, 449_999)
+
+
+async def test_get_stats_and_balance_gross_up_when_vat_configured(api) -> None:
+    """В5: расход и баланс при VK_AMOUNTS_INCLUDE_VAT=true приводятся к суммам с НДС, как бюджет: иначе
+    расход занижался на ставку НДС и страж бюджета срабатывал позже превышения."""
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {"id": 10, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "10.00"}}]}
+            ]
+        }
+    )
+    api.get(f"{API}/user.json").respond(json={"account": {"balance": "1000.00"}})
+    async with VkAdapter("tok", config=vat_configuration(), href="https://shop.example/", marking_confirmed=True) as vk:
+        rows = await vk.get_stats(
+            date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids={"10"}
+        )
+        assert rows[0].cost_kop == 1220
+        assert await vk.get_spend_today(campaign_ids={"10"}) == 1220
+        assert await vk.get_balance_hint() == 122_000
 
 
 async def test_get_state_without_period_limit_maps_to_none(adapter: VkAdapter, api) -> None:
@@ -668,6 +726,40 @@ async def test_get_spend_today_sums_campaigns(adapter: VkAdapter, api) -> None:
     assert await adapter.get_spend_today() == 1515
 
 
+async def test_get_stats_counts_only_own_plans(adapter: VkAdapter, api) -> None:
+    """К1: статистика запрашивается по id наших планов — чужой расход кабинета не попадает в ответ."""
+    today = datetime.now(adapter._tz).date().isoformat()
+    route = api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {"id": 10, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "10.10"}}]},
+                {"id": 11, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "5.05"}}]},
+            ]
+        }
+    )
+    rows = await adapter.get_stats(
+        date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids={"11"}
+    )
+    assert [row.campaign_id for row in rows] == ["11"]
+    assert [row.cost_kop for row in rows] == [505]
+    query = parse_qs(route.calls[0].request.url.query.decode())
+    assert query["id"] == ["11"]
+
+
+async def test_get_spend_today_counts_only_own_plans(adapter: VkAdapter, api) -> None:
+    """К1: «расход сегодня» считается только по нашим планам."""
+    today = datetime.now(adapter._tz).date().isoformat()
+    api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {"id": 10, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "10.10"}}]},
+                {"id": 11, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "5.05"}}]},
+            ]
+        }
+    )
+    assert await adapter.get_spend_today(campaign_ids={"10"}) == 1010
+
+
 async def test_get_stats_rejects_broken_answers(adapter: VkAdapter, api) -> None:
     api.get(f"{API}/statistics/ad_plans/day.json").respond(json={"items": [{"id": 1, "rows": [{"date": "bad"}]}]})
     with pytest.raises(PlatformError):
@@ -839,3 +931,22 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
     assert body["targetings"]["age"]["age_list"][0] == 25 and body["banners"][0]["name"] == "Маникюр рядом ap-a1"
     assert (await adapter.add_group("10", group)).ads == {"a1": "31"}
     assert create.call_count == 1
+
+
+async def test_add_group_uses_package_of_plan_groups_not_first_candidate(adapter: VkAdapter, api) -> None:
+    """В9: пакет новой группы читается из групп плана, а не из первого кандидата списка: после пересоздания
+    адаптера (токен живёт сутки) первым кандидатом может оказаться отказавший пакет, не тот, на котором
+    создан план."""
+    group = tree().groups[0]
+    packages_stub(api, [{"id": 1111, "name": "cpc_min", "status": "active", "flags": []}, DEFAULT_PACKAGE])
+    api.get(f"{API}/ad_groups.json").respond(
+        json={
+            "count": 1,
+            "items": [{"id": 20, "name": "Ищут маникюр ap-g10", "status": "active", "package_id": 3106}],
+        }
+    )
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_groups.json").respond(json={"id": 21})
+    api.get(f"{API}/banners.json").respond(json={"count": 1, "items": [{"id": 31, "name": "Маникюр рядом ap-a1"}]})
+    await adapter.add_group("10", group)
+    assert sent(create)["package_id"] == DEFAULT_PACKAGE["id"]

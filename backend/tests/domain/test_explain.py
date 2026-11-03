@@ -118,12 +118,14 @@ def test_experiment_explanation_contains_actual_counts_and_rates():
         impressions=11_400,
         clicks=190,
         rate=Decimal("1.7"),
+        other_impressions=11_400,
+        other_clicks=137,
         other_rate=Decimal("1.2"),
         confidence="Разница почти наверняка не случайна",
     )
-    assert "11 400 раз" in text and "190 раз (1,7%)" in text and "1,2%" in text
+    assert "11 400 раз" in text and "190 раз (1,7%)" in text and "137 нажатий (1,2%)" in text
     values = {"winner": "Б", "loser": "А", "rate": 1, "other_rate": 1, "confidence": "Вывод"}
-    text = explain("EXPERIMENT_WIN", values, impressions=1_002, clicks=2)
+    text = explain("EXPERIMENT_WIN", values, impressions=1_002, clicks=2, other_impressions=1_000, other_clicks=3)
     assert "показывали 1 002 раза, на него нажали 2 раза" in text
     assert explain("EXPERIMENT_START", hypothesis="text", n_per_arm=5_489, days=12).startswith(
         "Проверяем другой текст: сравним по 5 489 показов"
@@ -142,11 +144,22 @@ def test_experiment_copy_is_derived_from_the_winning_arm():
     a, b = Metrics(10_000, 11_400, 137, 10), Metrics(10_000, 11_400, 190, 15)
     text = explain_experiment(result, a, b)
     assert "Объявление Б" in text and "190 раз (1,7%)" in text
-    assert "1,2% у А. Разница почти наверняка не случайна." in text
+    assert "11 400 показов и 137 нажатий (1,2%) у А" in text
+    assert "Разница почти наверняка не случайна." in text
     assert "Оставили Б, А остановили" in text and "вероятност" not in text.lower()
     reverse = ExperimentResult(Verdict.CONTROL, "EXPERIMENT_WIN", 0.03)
     assert "Объявление А" in explain_experiment(reverse, b, a)
     assert "Разница, скорее всего, не случайна" in explain_experiment(reverse, b, a)
+
+
+def test_no_difference_verdict_shows_impressions_clicks_and_rates_of_both_arms():
+    """В3: «разницы нет» — самый частый исход, по RULES в тексте обе стороны с цифрами."""
+    result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 0.4, 0.1)
+    a, b = Metrics(10_000, 11_400, 137, 10), Metrics(10_300, 11_900, 152, 12)
+    text = explain_experiment(result, a, b)
+    assert "объявление А показали 11 400, нажали 137 (1,2%)" in text
+    assert "объявление Б — 11 900 показов и 152 нажатий (1,3%)" in text
+    assert "Оставили прежнее, новое остановили" in text
 
 
 def test_clickbait_verdict_shows_click_and_lead_rates_of_both_arms():

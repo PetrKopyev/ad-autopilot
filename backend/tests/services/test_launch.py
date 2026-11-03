@@ -406,6 +406,75 @@ async def test_partially_created_platform_is_not_activated_and_retry_completes(t
     assert world.repository.latest_plan(world.business.id).payload["launch"]["platform_errors"] == {}
 
 
+async def test_retry_keeps_started_on_within_month(tmp_path: Path) -> None:
+    """К2: повтор частичного запуска не сдвигает started_on на сегодня. Иначе разрешённый расход месяца
+    считается от повтора, остаток против полного расхода почти нулевой, кампании встают без дневного
+    бюджета, а страж бюджета после перезапуска ложно останавливает рекламу."""
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    assert (await launch(world, plan))["status"] == "launched"
+    assert world.business.settings["_worker"]["started_on"] == TODAY.isoformat()
+    world.repository.save(
+        BudgetLedger(
+            business_id=world.business.id,
+            month=TODAY,
+            platform="direct",
+            allocated_kop=3_500_000,
+            period_cap_kop=3_500_000,
+            spent_kop=1_800_000,
+        )
+    )
+    adapters["direct"].clock.advance(days=10)
+    adapters["vk"].clock.advance(days=10)
+    adapters["vk"].fail = False
+    result = await world.launches.launch(
+        world.business.id, plan["id"], False, NOW + timedelta(days=10), TODAY + timedelta(days=10)
+    )
+    assert result["status"] == "launched"
+    assert world.business.settings["_worker"]["started_on"] == TODAY.isoformat()
+
+
+async def test_retry_limits_follow_plan_shares_and_month_spend(tmp_path: Path) -> None:
+    """К3: повтор считает лимиты от всех площадок плана и остатка месяца, а не как будто площадка одна:
+    иначе новая кампания получает дневной лимит всего бюджета, а площадки вместе держат ~170% бюджета."""
+    from app.config import get_domain_settings
+    from app.domain.budget import campaign_limits, plan_budget
+
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    assert (await launch(world, plan))["status"] == "launched"
+    spent = 1_800_000
+    world.repository.save(
+        BudgetLedger(
+            business_id=world.business.id,
+            month=TODAY,
+            platform="direct",
+            allocated_kop=3_500_000,
+            period_cap_kop=3_500_000,
+            spent_kop=spent,
+        )
+    )
+    adapters["direct"].clock.advance(days=10)
+    adapters["vk"].clock.advance(days=10)
+    adapters["vk"].fail = False
+    retry_day = TODAY + timedelta(days=10)
+    result = await world.launches.launch(world.business.id, plan["id"], False, NOW + timedelta(days=10), retry_day)
+    assert result["status"] == "launched"
+    domain = get_domain_settings()
+    budget = plan_budget(BUDGET_KOP, spent, retry_day, ("direct", "vk"), started_on=TODAY, settings=domain)
+    vk_plan_limit = next(item for item in budget.limits if item.platform == "vk")
+    expected_daily, expected_cap = campaign_limits(vk_plan_limit.daily_limit, vk_plan_limit.remaining_cap, retry_day)
+    vk_campaign = next(item for item in campaigns(world) if item.platform == "vk")
+    assert vk_campaign.daily_limit_kop == expected_daily
+    assert vk_campaign.period_cap_kop == expected_cap
+    (vk_ledger,) = [
+        row for row in world.repository.rows(BudgetLedger, business_id=world.business.id) if row.platform == "vk"
+    ]
+    assert vk_ledger.allocated_kop == expected_cap
+    # Регрессионная суть: дневной лимит повторной кампании — доля VK, а не весь бюджет площадке-одиночке.
+    assert expected_daily < BUDGET_KOP // 31
+
+
 async def test_all_platforms_failed_launch_stops_everything_and_can_be_repeated(tmp_path: Path) -> None:
     """Если не запустилась ни одна площадка, запуск по-прежнему целиком неудачный: созданное остановлено,
     план пересобирается сразу, а повтор после починки идёт на тех же кампаниях."""

@@ -3,7 +3,7 @@ import base64
 import csv
 import io
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -81,10 +81,12 @@ def _named(name: str, key: str) -> str:
     return f"{name[: 254 - len(key)]} {key}"
 
 
-def _status(item: dict) -> str:
+def _status(item: dict, *, campaign: bool = False) -> str:
     # Живой Direct у сущности на проверке шлёт Status=MODERATION/DRAFT при State=OFF: маппим по Status
     # первым, иначе ожидание модерации неотличимо от паузы (changes.py держит изменение pending по этим
     # статусам). Status не запрашивается у keywords — там прежняя логика по State.
+    # У кампаний по доке различаются OFF (показы не идут, в том числе без денег на счёте) и SUSPENDED
+    # (остановлена владельцем): OFF маппим в паузу площадки, иначе «Продолжить» падало бы на пустом счёте.
     status = item.get("Status")
     if status == "DRAFT":
         return "draft"
@@ -95,7 +97,9 @@ def _status(item: dict) -> str:
     state = item.get("State")
     if state == "ARCHIVED":
         return "archived"
-    if state in {"OFF", "SUSPENDED", "ENDED"}:
+    if state == "OFF":
+        return "paused_auto" if campaign else "paused_owner"
+    if state in {"SUSPENDED", "ENDED"}:
         return "paused_owner"
     if state == "ON":
         return "active"
@@ -629,6 +633,9 @@ class DirectAdapter:
                     # Черновики, объявления на модерации и отклонённые бюджет не тратят; архивировать их
                     # Директ не даст, а откат умеет восстанавливать только рабочие статусы.
                     continue
+                if before == "active":
+                    # Директ не архивирует работающее объявление: сначала пауза, потом архив.
+                    await self._api("ads", "suspend", {"SelectionCriteria": {"Ids": [item["Id"]]}})
                 await self._api("ads", "archive", {"SelectionCriteria": {"Ids": [item["Id"]]}})
                 self._foreign_stops.append(
                     Operation("set_status", "ad", str(item["Id"]), "status", before, "archived")
@@ -763,7 +770,17 @@ class DirectAdapter:
                     raise _invalid()
                 normalized[field] = [item[key] for item in values]
         if "AdImages" in content:
-            normalized["AdImageHashes"] = [item["ImageHash"] for item in (content["AdImages"] or {}).get("Items", [])]
+            images = content["AdImages"]
+            if isinstance(images, dict):
+                items = images.get("Items") or []
+            elif isinstance(images, list):
+                # Ответ API иногда приходит списком, а не обёрткой Items: не падаем, нормализуем.
+                items = images
+            else:
+                raise _invalid()
+            normalized["AdImageHashes"] = [
+                item["ImageHash"] if isinstance(item, dict) else str(item) for item in items
+            ]
         return normalized
 
     async def upload_image(self, file: Path) -> str:
@@ -905,6 +922,9 @@ class DirectAdapter:
                     return
             if op.entity_type == "ad" and op.after == "active" and item.get("Status") == "DRAFT":
                 await self._api("ads", "moderate", {"SelectionCriteria": {"Ids": [id_]}})
+            if op.entity_type == "ad" and op.after == "archived" and current_status == "active":
+                # Директ не архивирует работающее объявление: сначала пауза, потом архив.
+                await self._api("ads", "suspend", {"SelectionCriteria": {"Ids": [id_]}})
             try:
                 await self._api(services[op.entity_type], method, {"SelectionCriteria": {"Ids": [id_]}})
             except PlatformError as error:
@@ -939,9 +959,8 @@ class DirectAdapter:
                     raise PlatformError("Комбинаторное объявление не найдено.")
                 current = self._ad_content(ads[0]["ResponsiveAd"])
                 updated = {key: current[key] for key in ("Titles", "Texts", "Href") if key in current}
-                updated[field] = (
-                    ({"Items": [value]} if value is not None else None) if op.kind == "swap_ad_image" else [value]
-                )
+                # По доке API AdImageHashes — обычный массив строк, как в add (форма {Items: [...]} отклоняется).
+                updated[field] = [value] if value is not None else None
                 content = {"ResponsiveAd": updated}
             await self._api("ads", "update", {"Ads": [{"Id": id_, **content}]})
         elif op.kind == "set_targeting":
@@ -1086,7 +1105,7 @@ class DirectAdapter:
                 "campaign",
                 None,
                 item["Name"],
-                _status(item),
+                _status(item, campaign=True),
                 daily_limit_kop=daily,
                 period_cap_kop=period,
                 targeting={"weekly_limits_kop": budgets},
@@ -1191,7 +1210,16 @@ class DirectAdapter:
 
     async def _report(self, params: dict) -> str:
         name = sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:24]
-        body = {"params": {**params, "ReportName": f"ap-{name}"}}
+        try:
+            recent = date.fromisoformat(params.get("SelectionCriteria", {}).get("DateTo", "")) >= (
+                self._today() - timedelta(days=1)
+            )
+        except ValueError:
+            recent = False
+        # Отчёт за сегодня/вчера площадка ещё дописывает: заказ под тем же именем отдал бы старую
+        # версию, поэтому к свежим интервалам добавляем метку получаса.
+        marker = f"-{int(datetime.now(UTC).timestamp()) // 1800}" if recent else ""
+        body = {"params": {**params, "ReportName": f"ap-{name}{marker}"}}
         headers = {"processingMode": "offline", "skipReportHeader": "true", "skipReportSummary": "true"}
         for attempt in range(self._report_attempts):
             response = await self._post("reports", body, headers=headers)
@@ -1208,9 +1236,18 @@ class DirectAdapter:
             return response.text
         raise _invalid()
 
-    async def get_stats(self, date_from: date, date_to: date, level: StatLevel = "ad") -> list[StatRow]:
+    async def get_stats(
+        self,
+        date_from: date,
+        date_to: date,
+        level: StatLevel = "ad",
+        campaign_ids: Collection[str] | None = None,
+    ) -> list[StatRow]:
         if level not in {"campaign", "group", "ad"} or date_from > date_to:
             raise ValueError("Некорректный уровень или интервал статистики.")
+        own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
+        if own is not None and not own:
+            return []
         dimensions = ["Date", "CampaignId"]
         if level in {"group", "ad"}:
             dimensions.append("AdGroupId")
@@ -1226,12 +1263,20 @@ class DirectAdapter:
             "IncludeDiscount": "YES",
             "AttributionModels": ["LSCCD"],
         }
+        if own is not None:
+            # Кабинет может содержать чужую рекламу владельца (вне сервиса): в отчёт идём только
+            # за своими кампаниями, иначе их расход урезает наши лимиты и портит сверку бюджета.
+            params["SelectionCriteria"]["Filter"] = [
+                {"Field": "CampaignId", "Operator": "IN", "Values": sorted(own)}
+            ]
         if self._report_goals:
             params["Goals"] = [str(goal) for goal in self._report_goals]
         if self._sandbox:
             campaigns = await self._get("campaigns", "Campaigns", {"SelectionCriteria": {}, "FieldNames": ["Id"]})
             reports = []
             for campaign in campaigns:
+                if own is not None and str(campaign["Id"]) not in own:
+                    continue
                 selection = {
                     **params["SelectionCriteria"],
                     "Filter": [{"Field": "CampaignId", "Operator": "EQUALS", "Values": [str(campaign["Id"])]}],
@@ -1270,6 +1315,8 @@ class DirectAdapter:
                 entity_id = item[dimensions[-1]]
                 if _integer(entity_id) <= 0 or _integer(item["CampaignId"]) <= 0:
                     raise ValueError
+                if own is not None and item["CampaignId"] not in own:
+                    continue
                 rows.append(
                     StatRow(
                         entity_id,
@@ -1290,9 +1337,11 @@ class DirectAdapter:
             raise _invalid() from None
         return rows
 
-    async def get_spend_today(self) -> int:
+    async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
         today = self._today()
-        return sum(row.cost_kop for row in await self.get_stats(today, today, "campaign"))
+        return sum(
+            row.cost_kop for row in await self.get_stats(today, today, "campaign", campaign_ids=campaign_ids)
+        )
 
     async def get_balance_hint(self) -> int | None:
         """Остаток общего счёта в копейках (API v4 Live); общего счёта нет — None.

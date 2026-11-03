@@ -14,7 +14,7 @@ from app.services.budget_guard import budget_guard, read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
-from app.services.rollback import RollbackService
+from app.services.rollback import ConfirmationRequired, RollbackService
 from app.services.screens import ScreensService
 from app.worker.clock import today
 
@@ -54,9 +54,22 @@ async def test_restart_after_five_days_and_downtime_keeps_advertising(evil):
 async def test_startup_stops_real_spend_above_authorized_budget(monkeypatch):
     world = await make_world()
     worker = world.worker()
-    authorized = plan_budget(BUDGET_KOP, 0, today(world.clock), ("direct",)).authorized
+    plan = plan_budget(BUDGET_KOP, 0, today(world.clock), ("direct",))
+    authorized = plan.authorized
+    from app.config import get_domain_settings
+
+    full = int(Decimal(authorized) / (1 - Decimal(str(get_domain_settings().budget_reserve))))
+    # Расход в пределах резерва (между разрешённым с резервом и полным бюджетом) — обычное дело,
+    # сверка его не ловит и рекламу не останавливает.
     monkeypatch.setattr(
         "app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": authorized + 1}, {}))
+    )
+    await worker.startup()
+    assert world.business.status == "running"
+    assert not world.changes(reason_code="SPEND_MISMATCH")
+    # Выше полного разрешённого — расход невозможен без сбоя: сверка останавливает рекламу.
+    monkeypatch.setattr(
+        "app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": full + 1}, {}))
     )
     await worker.startup()
     assert world.business.status == "budget_stop"
@@ -352,14 +365,29 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     assert next(group for group in groups if group.id == original.entity_id).last_changed_at == original.created_at
     untouched = world.worker().metadata(world.business)["group_limits"].copy()
     campaign_budget = (world.campaign.daily_limit_kop, world.campaign.period_cap_kop)
+    # Пересчёт лимитов после SCALE менял бюджет кампании: откат возвращает прежние значения по факту,
+    # поэтому нужно подтверждение, как при любом расхождении настроек.
+    with pytest.raises(ConfirmationRequired):
+        await RollbackService(world.repository, dry_run=False).revert(
+            original.id, business_id=1, adapter=world.adapter, now=world.clock.now
+        )
     reverted = await RollbackService(world.repository, dry_run=False).revert(
         original.id,
         business_id=1,
         adapter=world.adapter,
         now=world.clock.now,
+        confirm=True,
     )
     assert reverted.status == "applied" and original.status == "reverted"
-    assert (world.campaign.daily_limit_kop, world.campaign.period_cap_kop) == campaign_budget
+    before_limits = {
+        op["field"]: op["before"]
+        for op in original.operations
+        if op["kind"] == "set_budget" and op["entity_id"] == world.campaign.external_id
+    }
+    assert (
+        world.campaign.daily_limit_kop == before_limits.get("daily_limit_kop", campaign_budget[0])
+        and world.campaign.period_cap_kop == before_limits.get("period_cap_kop", campaign_budget[1])
+    )
     limits = worker.metadata(world.business)["group_limits"]
     assert all(limits[key] == value for key, value in original.evidence["group_limits"]["before"].items())
     assert all(
@@ -372,6 +400,28 @@ async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     assert [group.id for group in groups if group.frozen_until is not None] == [original.entity_id]
     local = next(group for group in world.repository.rows(AdGroup) if group.external_id == original.entity_id)
     assert not group_available(worker, world.business, local)
+
+
+async def test_scale_uses_budget_freed_by_paused_ad_in_still_active_group():
+    """В2: остановка одного объявления из двух освобождает пропорциональную долю лимита группы, и на неё растёт
+    хорошая группа другой кампании. Иначе при 1–2 услугах (последнее объявление группы не остановить)
+    рост бюджета эффективной рекламы не наступал бы никогда — а это пункт приёмки."""
+    from tests.worker.test_guard_edges import with_vk, worker_for
+
+    world = await make_world()
+    vk, _ = await with_vk(world)
+    weak = [world.ads["weak-1"], world.ads["weak-2"]]
+    # Второе объявление слабой группы заморожено: группа останется работать с одним объявлением.
+    weak[1].frozen_until = world.clock.now + timedelta(days=60)
+    world.repository.save(weak[1])
+    worker = worker_for(world, vk)
+    await world.advance(worker, days=20)
+    assert sum(ad.status != "active" for ad in weak) == 1, "одно объявление слабой группы остановлено"
+    scales = world.changes(reason_code="SCALE_UP", status="applied")
+    assert scales, "хорошая группа выросла на освободившееся от остановленного объявления"
+    donors = {key for change in scales for key in change.evidence["group_limits"]["before"]}
+    weak_group = next(group for group in world.repository.rows(AdGroup) if group.theme == "Укладки")
+    assert weak_group.external_id in donors, "донор — частично остановленная группа"
 
 
 async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_budget_is_enough(monkeypatch):

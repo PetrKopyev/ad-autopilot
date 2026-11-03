@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -115,7 +115,10 @@ def salon_scenario(
 # Демо-кабинет: группы Директа по порядку плана — сильная, слабая и пограничная, остальные — как по умолчанию.
 # Те же числа берёт прогноз в демо, чтобы прогноз плана и цифры после запуска не расходились. Показов хватает, чтобы
 # группы тратили свой дневной лимит, как на площадке: иначе бюджет недовыбирался из-за спроса демо, а не из-за правил.
-# Клики дешёвые нарочно: проверка вариантов по кликабельности набирает выборку в срок демо (30–40 дней) только так.
+# Клики дешёвые нарочно: с жизненной ценой 30–80 ₽ (ревью 02.11 признало демо «игрушечным») проверка вариантов по
+# кликабельности при демо-бюджете не набрала бы выборку за срок демо (30–40 дней), и эксперименты не были бы видны
+# приёмщику вообще. Это осознанный компромисс: цены демо обозначены в интерфейсе как выдуманные, живая экономика —
+# забота боевых площадок. Цену клика поднимать только вместе с бюджетом демо и окном перемотки.
 DEMO_TRUTHS = (AdTruth(0.08, 25, 0.2, 3000), AdTruth(0.007, 62, 0.01, 3000), AdTruth(0.035, 45, 0.06, 3000))
 
 
@@ -501,10 +504,19 @@ class FakeAdapter:
             _, _, ad_id, day = heappop(self._pending)
             self._stats[ad_id, day].conversions += 1
 
-    async def get_stats(self, date_from: date, date_to: date, level: StatLevel = "ad") -> list[StatRow]:
+    async def get_stats(
+        self,
+        date_from: date,
+        date_to: date,
+        level: StatLevel = "ad",
+        campaign_ids: Collection[str] | None = None,
+    ) -> list[StatRow]:
         self._request()
         if date_from > date_to or level not in ("ad", "group", "campaign"):
             raise ValueError("Нужны включительный интервал дат и уровень ad/group/campaign.")
+        own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
+        if own is not None and not own:
+            return []
         entity_ids = {
             ad_id: ad_id if level == "ad" else self._states[ad_id].parent_id if level == "group" else campaign_id
             for ad_id, campaign_id in self._campaigns.items()
@@ -515,6 +527,8 @@ class FakeAdapter:
             if not date_from <= day <= date_to:
                 continue
             campaign_id = self._campaigns[ad_id]
+            if own is not None and campaign_id not in own:
+                continue
             target = aggregated.setdefault((entity_ids[ad_id], campaign_id, day), _Counters())
             target.impressions += counters.impressions
             target.clicks += counters.clicks
@@ -536,9 +550,14 @@ class FakeAdapter:
             for (entity_id, campaign_id, day), counters in sorted(aggregated.items())
         ]
 
-    async def get_spend_today(self) -> int:
+    async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
         self._request()
-        return sum(cost for (_, day), cost in self._spent_daily.items() if day == today(self.clock))
+        own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
+        return sum(
+            cost
+            for (ad_id, day), cost in self._spent_daily.items()
+            if day == today(self.clock) and (own is None or self._campaigns.get(ad_id) in own)
+        )
 
     async def get_balance_hint(self) -> int | None:
         self._request()

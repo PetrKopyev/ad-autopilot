@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -167,6 +167,7 @@ class VkAdapter(VkClient):
         href: str = "",
         package_id: int | None = None,
         marking_confirmed: bool = False,
+        priced_goal_source_id: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(token, **kwargs)
@@ -187,9 +188,15 @@ class VkAdapter(VkClient):
             if getattr(self._config, "vk_amounts_include_vat", False)
             else 0
         )
-        # Цель оптимизации campaign (Top@Mail/приложения): VK_PRICED_GOAL_SOURCE_ID, имя — VK_PRICED_GOAL_NAME.
-        # Не задана — в campaign не уходит: без неё часть пакетов не создастся, но отказ VK теперь виден в ошибке.
-        self._priced_goal_source_id = getattr(self._config, "vk_priced_goal_source_id", None)
+        # Цель оптимизации campaign (Top@Mail/приложения): у каждого кабинета VK своя цель пикселя,
+        # поэтому override уровня кабинета (priced_goal_source_id) важнее общей настройки сервиса
+        # VK_PRICED_GOAL_SOURCE_ID. Не задана нигде — в campaign не уходит: без неё часть пакетов не
+        # создастся, но отказ VK теперь виден в ошибке.
+        self._priced_goal_source_id = (
+            priced_goal_source_id
+            if priced_goal_source_id is not None
+            else getattr(self._config, "vk_priced_goal_source_id", None)
+        )
         self._priced_goal_name = getattr(self._config, "vk_priced_goal_name", None) or "Заявка"
 
     def _to_api(self, kop: int) -> int:
@@ -288,36 +295,47 @@ class VkAdapter(VkClient):
             plan = await self._load_plan_tree(found[0]["id"])
         else:
             # Выведенные из работы пакеты остаются в списке «active» и падают только на создании
-            # («Invalid package»): перебираем кандидатов, пока живой валидатор не примет план.
-            refusals = []
-            for package_id, _package in await self._resolve_packages():
-                created: dict[str, Any] | None = None
-                try:
-                    created = await self._add("ad_plans", await self._plan_body(plan_part, package_id))
-                    self._used_package_id = package_id
-                    # Живой ответ создания — только id плана и campaigns: дерево дочитываем; полный ответ
-                    # (тестовый стенд) берём как есть.
-                    plan = created if "ad_groups" in created else await self._load_plan_tree(created["id"])
+            # («Invalid package»): перебираем кандидатов, пока живой валидатор не примет план. Отказ из-за
+            # priced_goal (cpc-пакеты) не обрывает перебор: сначала ищем пакет, который примет цель, и
+            # только если никто не принял — второй круг без цели (иначе запуск умирал на первом отказе).
+            packages = await self._resolve_packages()
+            plan = None
+            refusals: list[str] = []
+            rounds = (True, False) if self._priced_goal_source_id else (True,)
+            for with_goal in rounds:
+                refusals = []
+                for package_id, _package in packages:
+                    created: dict[str, Any] | None = None
+                    try:
+                        created = await self._add(
+                            "ad_plans", await self._plan_body(plan_part, package_id, with_goal=with_goal)
+                        )
+                        self._used_package_id = package_id
+                        # Живой ответ создания — только id плана и campaigns: дерево дочитываем; полный ответ
+                        # (тестовый стенд) берём как есть.
+                        plan = created if "ad_groups" in created else await self._load_plan_tree(created["id"])
+                        break
+                    except PlatformError as error:
+                        text = str(error).lower()
+                        if "ord_data_required" in text or "ord data" in text:
+                            # Баннеры не создаются, пока в кабинете не заполнена маркировка (ОРД): план, если
+                            # успел создаться, остаётся пустым — убираем его, чтобы не плодить черновики.
+                            if created is not None:
+                                try:
+                                    await self._update("ad_plans", created["id"], {"status": "deleted"})
+                                except PlatformError:
+                                    pass
+                            raise PlatformError(
+                                "VK Реклама не приняла объявления: в кабинете не заполнены данные маркировки "
+                                "(ОРД). Откройте ads.vk.com → «Маркировка рекламы», заполните ИНН и название "
+                                "рекламодателя, затем повторите запуск."
+                            ) from error
+                        if "invalid package" not in text and "priced_goal" not in text and "objective" not in text:
+                            raise
+                        refusals.append(f"пакет {package_id}: {error}")
+                if plan is not None:
                     break
-                except PlatformError as error:
-                    text = str(error).lower()
-                    if "ord_data_required" in text or "ord data" in text:
-                        # Баннеры не создаются, пока в кабинете не заполнена маркировка (ОРД): план, если
-                        # успел создаться, остаётся пустым — убираем его, чтобы не плодить черновики.
-                        if created is not None:
-                            try:
-                                await self._update("ad_plans", created["id"], {"status": "deleted"})
-                            except PlatformError:
-                                pass
-                        raise PlatformError(
-                            "VK Реклама не приняла объявления: в кабинете не заполнены данные маркировки "
-                            "(ОРД). Откройте ads.vk.com → «Маркировка рекламы», заполните ИНН и название "
-                            "рекламодателя, затем повторите запуск."
-                        ) from error
-                    if "invalid package" not in text:
-                        raise
-                    refusals.append(f"пакет {package_id}: Invalid package")
-            else:
+            if plan is None:
                 detail = f" Отказало: {'; '.join(refusals)}." if refusals else ""
                 raise PlatformError(f"{PACKAGE_UNAVAILABLE}{detail}")
         refs = self._refs(plan_part, plan)
@@ -372,24 +390,29 @@ class VkAdapter(VkClient):
             body["targetings"]["interests"] = [*body["targetings"].get("interests", []), *interests]
         return body
 
-    def _campaign_body(self, name: str, package_id: int) -> dict:
+    def _campaign_body(self, name: str, package_id: int, *, with_goal: bool = True) -> dict:
         """Campaign плана (живой валидатор требует уровень campaigns): только имя и пакет. Цель и стратегия
         живут на уровне плана — на campaign живой API их отклоняет («Objective differ with ad_plan objective»,
         «Unallowed value», пробы 02.11). priced_goal — цель пикселя VK (счётчик Top@Mail + цель; Метрика не
-        подходит — ответ поддержки VK): уходит, если задана в конфиге."""
+        подходит — ответ поддержки VK): уходит, если задана в конфиге или для кабинета."""
         body = {"name": name, "package_id": package_id}
         source_id = self._priced_goal_source_id
-        if isinstance(source_id, int) and not isinstance(source_id, bool) and source_id > 0:
+        if (
+            with_goal
+            and isinstance(source_id, int)
+            and not isinstance(source_id, bool)
+            and source_id > 0
+        ):
             body["priced_goal"] = {"name": self._priced_goal_name, "source_id": source_id}
         return body
 
-    async def _plan_body(self, plan: CampaignTreeSpec, package_id: int) -> dict:
+    async def _plan_body(self, plan: CampaignTreeSpec, package_id: int, *, with_goal: bool = True) -> dict:
         url = (await self._add("urls", {"url": self._href}))["id"]
         # Живой API принимает ровно один лимит плана: «Can't set both budget_limit and budget_limit_day».
         # Держим дневной лимит (рычаг пейсинга), месяц закрывает страж бюджета — механика пауз платформонезависима.
         # objective/autobidding_mode живут на уровне плана; уровень campaigns = рекламные группы (в списках —
         # ad_groups): каждая с пакетом, таргетингами и баннерами (живая схема подтверждена 02.11).
-        priced_goal = self._campaign_body(plan.name, package_id)
+        priced_goal = self._campaign_body(plan.name, package_id, with_goal=with_goal)
         campaigns = [priced_goal | self._group_body(group, url) for group in plan.groups]
         return {
             "name": _named(plan.name, plan.idempotency_key),
@@ -407,19 +430,28 @@ class VkAdapter(VkClient):
         if any(target.kind != "interest" for target in group.targets):
             raise PlatformError("VK принимает только интересы; фразы и аудитории задаются в targeting группы.")
         key = f" ap-{group.id}"
-        found = [
-            item
-            for item in await self._items("ad_groups", {"_ad_plan_id": int(campaign_id), "fields": "id,name,status"})
-            if item.get("status") != "deleted" and str(item.get("name", "")).endswith(key)
-        ]
+        items = await self._items(
+            "ad_groups", {"_ad_plan_id": int(campaign_id), "fields": "id,name,status,package_id"}
+        )
+        live = [item for item in items if item.get("status") != "deleted"]
+        found = [item for item in live if str(item.get("name", "")).endswith(key)]
         if len(found) > 1:
             raise PlatformError("Неоднозначный ключ группы в VK Рекламе.")
         if found:
             group_id = found[0]["id"]
         else:
-            # Пакет обязателен в рекламной группе (живой валидатор): берём пакет кампании — при автовыборе
-            # первый кандидат (на нём план и создавался), при VK_PACKAGE_ID — заданный.
-            package_id = self._used_package_id or (await self._resolve_packages())[0][0]
+            # Пакет обязателен в рекламной группе (живой валидатор). Берём пакет существующих групп плана:
+            # после пересоздания адаптера (токен живёт сутки) память о выборе теряется, а первый кандидат
+            # списка — возможно отказавший пакет, не тот, на котором создан план.
+            package_id = next(
+                (
+                    item["package_id"]
+                    for item in live
+                    if isinstance(item.get("package_id"), int) and not isinstance(item.get("package_id"), bool)
+                ),
+                None,
+            )
+            package_id = package_id or self._used_package_id or (await self._resolve_packages())[0][0]
             url = (await self._add("urls", {"url": self._href}))["id"]
             group_body = self._group_body(group, url) | {"ad_plan_id": int(campaign_id), "package_id": package_id}
             group_id = (await self._add("ad_groups", group_body))["id"]
@@ -665,21 +697,40 @@ class VkAdapter(VkClient):
         }
         if level == "group":
             return groups
-        return {
-            str(item["id"]): groups[str(item["ad_group_id"])]
-            for item in await self._items("banners", {"fields": "id,ad_group_id"})
-        }
+        parents = {}
+        for item in await self._items("banners", {"fields": "id,ad_group_id"}):
+            # Группа баннера могла быть удалена в кабинете: без родителя строка всё равно не сходится с нашим
+            # деревом (get_stats отфильтрует по кампаниям), но вся статистика VK не должна падать из-за одного
+            # такого баннера.
+            parent = groups.get(str(item.get("ad_group_id")))
+            if parent is not None:
+                parents[str(item["id"])] = parent
+        return parents
 
-    async def get_stats(self, date_from: date, date_to: date, level: StatLevel = "ad") -> list[StatRow]:
+    async def get_stats(
+        self,
+        date_from: date,
+        date_to: date,
+        level: StatLevel = "ad",
+        campaign_ids: Collection[str] | None = None,
+    ) -> list[StatRow]:
         if level not in STAT_PATHS or date_from > date_to:
             raise ValueError("Некорректный уровень или интервал статистики.")
+        # Кабинет может содержать чужую рекламу владельца: светим статистику только по своим планам.
+        # Для ad_plans id в запросе есть; для групп и баннеров id другого уровня — фильтруем ответ.
+        own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
+        if own is not None and not own:
+            return []
+        params: dict[str, Any] = {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "metrics": "base",
+        }
+        if own is not None and level == "campaign":
+            params["id"] = ",".join(sorted(own))
         try:
             parents = await self._parents(level)
-            data = await self._request(
-                "GET",
-                f"statistics/{STAT_PATHS[level]}/day.json",
-                params={"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "metrics": "base"},
-            )
+            data = await self._request("GET", f"statistics/{STAT_PATHS[level]}/day.json", params=params)
             fetched_at = datetime.now(UTC)
             rows = []
             for item in data["items"]:
@@ -689,6 +740,8 @@ class VkAdapter(VkClient):
                     base = row["base"]
                     if not date_from <= day <= date_to:
                         raise ValueError
+                    if own is not None and parents.get(entity_id, entity_id) not in own:
+                        continue
                     rows.append(
                         StatRow(
                             entity_id,
@@ -697,7 +750,9 @@ class VkAdapter(VkClient):
                             level,
                             _integer(base["shows"]),
                             _integer(base["clicks"]),
-                            _kop(base["spent"]),
+                            # Суммы API при VK_AMOUNTS_INCLUDE_VAT=true — без НДС, а бюджет с НДС: приводим
+                            # к общим единицам, иначе расход занижается на ставку НДС и бюджет превышается.
+                            self._from_api(_kop(base["spent"])),
                             {LEAD: _integer(base.get("goals", 0))},
                             fetched_at,
                             # Как в Директе и в подписи интерфейса «последние 2 дня уточняются»:
@@ -709,14 +764,16 @@ class VkAdapter(VkClient):
             raise invalid_response() from None
         return rows
 
-    async def get_spend_today(self) -> int:
+    async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
         today = self._today()
-        return sum(row.cost_kop for row in await self.get_stats(today, today, "campaign"))
+        return sum(
+            row.cost_kop for row in await self.get_stats(today, today, "campaign", campaign_ids=campaign_ids)
+        )
 
     async def get_balance_hint(self) -> int | None:
         data = await self._request("GET", "user.json", params={"fields": "account"})
         try:
-            return _kop(data["account"]["balance"])
+            return self._from_api(_kop(data["account"]["balance"]))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -771,11 +828,21 @@ class VkAdapter(VkClient):
         if profile["type"] not in INDIVIDUAL_TYPES:
             self._marking_confirmed = False
             return
-        await self._request(
-            "POST",
-            "ord_user.json",
-            json={"name": profile["name"], "phone": profile["phone"], "inn": profile["inn"]},
-        )
+        try:
+            await self._request(
+                "POST",
+                "ord_user.json",
+                json={"name": profile["name"], "phone": profile["phone"], "inn": profile["inn"]},
+            )
+        except PlatformError as error:
+            # Метод не подтверждён документацией VK Ads API (ОРД VK — отдельный сервис с ord.vk.com и своими
+            # токенами): если площадка его не знает, честно отправляем владельца заполнять маркировку в кабинете.
+            if error.status_code == 404:
+                raise PlatformError(
+                    "VK Реклама не приняла данные маркировки автоматически. Заполните маркировку в кабинете: "
+                    "ads.vk.com → «Маркировка рекламы», затем повторите."
+                ) from error
+            raise
         self._marking_confirmed = True
 
     def marking_instruction(self) -> str | None:

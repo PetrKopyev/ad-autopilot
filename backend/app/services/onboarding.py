@@ -109,10 +109,17 @@ class NotFound(Exception):
 class AiLimits:
     onboarding_kop: int
     weekly_kop: int
+    # Общий суточный потолок трат на ИИ на весь сервис, копейки; 0 — без ограничения. Страховка от всплеска
+    # трат (ошибка генерации в цикле, злоупотребление) поверх недельного лимита владельца.
+    daily_cap_kop: int = 0
 
     @classmethod
     def from_settings(cls, settings: Any) -> "AiLimits":
-        return cls(int(settings.ai_spend_onboarding_limit_rub * 100), int(settings.ai_spend_weekly_limit_rub * 100))
+        return cls(
+            int(settings.ai_spend_onboarding_limit_rub * 100),
+            int(settings.ai_spend_weekly_limit_rub * 100),
+            int(getattr(settings, "ai_daily_cap_rub", 0) * 100),
+        )
 
 
 def valid_inn(inn: str) -> bool:
@@ -162,14 +169,29 @@ def ai_budget(repository: "OnboardingRepository", business: Business, limits: Ai
 
     В демо (DemoLLM, DemoArt) ИИ бесплатный: вызовы не пишутся в llm_calls и art_calls, траты всегда 0, и сдвиг
     виртуальной даты демо относительно created_at (время базы) на лимит не влияет. Деньги в демо не тратятся.
+
+    Недельный пул — на владельца (User.yandex_uid), а не на бизнес: удаление бизнеса или аккаунта не даёт
+    нового лимита, иначе трату оператору можно было бы сжигать бесконечно. Бизнес всё равно не тратит больше
+    собственного лимита. Плюс суточный потолок на весь сервис.
     """
+    week_start = datetime.combine(today - timedelta(days=today.weekday()), time(), MOSCOW)
     if business.status in ("draft", "plan_ready"):
         limit, spent = limits.onboarding_kop, repository.ai_spent(business.id)
     else:
-        since = datetime.combine(today - timedelta(days=today.weekday()), time(), MOSCOW)
         launched = repository.launched_at(business.id)
-        limit, spent = limits.weekly_kop, repository.ai_spent(business.id, max(since, launched) if launched else since)
-    return ArtBudget(limit, min(max(spent, 0), limit))
+        since = max(week_start, launched) if launched else week_start
+        limit, spent = limits.weekly_kop, repository.ai_spent(business.id, since)
+    budget = ArtBudget(limit, min(max(spent, 0), limit))
+    owner_pool = limits.weekly_kop + limits.onboarding_kop
+    owner_room = max(0, owner_pool - repository.ai_spent_for_owner(business.user_id, week_start))
+    room = min(budget.limit_kop - budget.spent_kop, owner_room)
+    budget = ArtBudget(budget.spent_kop + max(0, room), budget.spent_kop)
+    if limits.daily_cap_kop:
+        day_start = datetime.combine(today, time(), MOSCOW)
+        day_room = max(0, limits.daily_cap_kop - repository.ai_spent_since(day_start))
+        room = min(budget.limit_kop - budget.spent_kop, day_room)
+        budget = ArtBudget(budget.spent_kop + max(0, room), budget.spent_kop)
+    return budget
 
 
 class SpendLLM:
@@ -234,6 +256,29 @@ class OnboardingRepository(ChangesRepository):
             if since is not None:
                 statement = statement.where(model.created_at >= since)
             total += int(self.db.scalar(statement))
+        return total
+
+    def ai_spent_for_owner(self, user_id: int, since: datetime | None = None) -> int:
+        """Траты на ИИ по всем бизнесам владельца: недельный лимит — на владельца, а не на бизнес."""
+        total = 0
+        for model in (LLMCall, ArtCall):
+            statement = (
+                select(func.coalesce(func.sum(model.cost_kop), 0))
+                .join(Business, model.business_id == Business.id)
+                .where(Business.user_id == user_id)
+            )
+            if since is not None:
+                statement = statement.where(model.created_at >= since)
+            total += int(self.db.scalar(statement))
+        return total
+
+    def ai_spent_since(self, since: datetime) -> int:
+        """Траты на ИИ по сервису с момента: суточный потолок."""
+        total = 0
+        for model in (LLMCall, ArtCall):
+            total += int(
+                self.db.scalar(select(func.coalesce(func.sum(model.cost_kop), 0)).where(model.created_at >= since))
+            )
         return total
 
     def launched_at(self, business_id: int) -> datetime | None:

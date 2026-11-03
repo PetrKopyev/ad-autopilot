@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -302,11 +302,22 @@ class AdPlatform(Protocol):
 
     async def get_moderation(self, refs: ExternalRefs) -> list[ModerationInfo]: ...
 
-    async def get_stats(self, date_from: date, date_to: date, level: StatLevel = "ad") -> list[StatRow]:
-        """Дневные строки за включительный интервал; конверсии отнесены к дате клика."""
+    async def get_stats(
+        self,
+        date_from: date,
+        date_to: date,
+        level: StatLevel = "ad",
+        campaign_ids: Collection[str] | None = None,
+    ) -> list[StatRow]:
+        """Дневные строки за включительный интервал; конверсии отнесены к дате клика.
+
+        campaign_ids — внешние id кампаний этого бизнеса: строки чужих кампаний того же кабинета
+        (другой рекламы владельца) не возвращаются. None — весь кабинет."""
         ...
 
-    async def get_spend_today(self) -> int: ...
+    async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
+        """Расход за сегодня по кампаниям бизнеса; None — по всему кабинету."""
+        ...
 
     async def get_balance_hint(self) -> int | None: ...
 

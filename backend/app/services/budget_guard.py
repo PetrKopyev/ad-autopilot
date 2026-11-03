@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import ExitStack
+from decimal import Decimal
 from math import ceil
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -44,15 +45,15 @@ async def read_spend(
     meta = worker.metadata(business)
     started_on = min(month, day.fromisoformat(meta.get("started_on", month.isoformat())))
     for platform in sorted(platforms):
+        known = {campaign.external_id for campaign in campaigns if campaign.platform == platform}
         try:
             adapter = worker.resolve_adapter(business.id, platform)
-            rows = await adapter.get_stats(started_on, day, "campaign")
-            reported_today = await adapter.get_spend_today()
+            rows = await adapter.get_stats(started_on, day, "campaign", campaign_ids=known)
+            reported_today = await adapter.get_spend_today(campaign_ids=known)
         except CLOSED_ACCOUNT:
             if not tolerate_errors:
                 raise
             continue
-        known = {campaign.external_id for campaign in campaigns if campaign.platform == platform}
         for row in rows:
             if row.campaign_id not in known:
                 continue
@@ -254,7 +255,8 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             seconds = max(seconds, domain.guard_poll_minutes * 60)
             observed_daily += ceil(max(0, spent.get(platform, 0) - ledger.spent_kop) * 86400 / seconds)
     # Ledger — снимок, а не разрешённый расход: во время простоя работают кэпы.
-    # Верхняя граница сверки — authorized месяца (PLAN 2.5), включая резерв.
+    # Верхняя граница сверки — разрешённое месяца без резерва: резерв держится на задержку отчётов
+    # площадок, а не на остановку на 92% бюджета.
     day = today(worker.clock)
     allowed = plan_budget(
         business.month_budget_kop,
@@ -264,6 +266,7 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
         started_on=day.fromisoformat(worker.metadata(business).get("started_on", month.isoformat())),
         settings=domain,
     ).authorized
+    allowed = int(Decimal(allowed) / (1 - Decimal(str(domain.budget_reserve))))
     mismatch = reconcile and reported > allowed
     result = decide_guard(
         business.month_budget_kop,

@@ -69,7 +69,16 @@ async def test_guard_reconciliation_uses_configured_reserve(monkeypatch):
     domain = reserve_settings(monkeypatch)
     world = await make_world()
     allowed = plan_budget(BUDGET_KOP, 0, today(world.clock), ("direct",), settings=domain).authorized
-    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": allowed + 1}, {})))
+    full = int(Decimal(allowed) / (1 - domain.budget_reserve))
+    # В пределах резерва (между разрешённым и полным) сверка не останавливает: резерв — на задержку отчётов.
+    monkeypatch.setattr(
+        "app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": allowed + 1}, {}))
+    )
+    await budget_guard(world.worker(), world.business, reconcile=True)
+    assert world.business.status == "running"
+    assert not world.changes(reason_code="SPEND_MISMATCH")
+    # Выше полного разрешённого — срабатывает сверка расхода.
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": full + 1}, {})))
     await budget_guard(world.worker(), world.business, reconcile=True)
     assert world.business.status == "budget_stop"
     assert world.changes(reason_code="SPEND_MISMATCH")
@@ -175,7 +184,8 @@ async def test_expired_dry_run_experiments_are_idempotent_across_ticks_and_can_l
     world = await make_world()
     first = running_experiment(world)
     second = running_experiment(world)
-    world.clock.advance(days=14)
+    # За день после срока (14-й день — ещё вывод по данным, см. К4).
+    world.clock.advance(days=15)
     monkeypatch.setattr("app.services.optimize.snapshot", AsyncMock(return_value=([], [])))
     for _ in range(3):
         await experiments_tick(world.worker(dry_run=True), world.business)

@@ -171,6 +171,23 @@ class MemoryRepository(LaunchRepository):
             if since is None or item.created_at is None or item.created_at >= since
         )
 
+    def ai_spent_for_owner(self, user_id: int, since: datetime | None = None) -> int:
+        return sum(
+            item.cost_kop
+            for model in (LLMCall, ArtCall)
+            for business in self.rows(Business, user_id=user_id)
+            for item in self.rows(model, business_id=business.id)
+            if since is None or item.created_at is None or item.created_at >= since
+        )
+
+    def ai_spent_since(self, since: datetime) -> int:
+        return sum(
+            item.cost_kop
+            for model in (LLMCall, ArtCall)
+            for item in self.rows(model)
+            if item.created_at is None or item.created_at >= since
+        )
+
     def launched_at(self, business_id: int) -> datetime | None:
         plans = self.rows(Plan, business_id=business_id, status="launched")
         latest = max(plans, key=lambda item: item.version, default=None)
@@ -1450,6 +1467,26 @@ async def test_ai_spend_limit_stops_paid_calls(tmp_path: Path) -> None:
         await guard.complete_json("Напиши объявление", "{}")
     assert world.llm.calls.count("ad") == 1
     assert [call.cost_kop for call in world.repository.rows(LLMCall)] == [4000, 4000]
+
+
+async def test_ai_weekly_limit_tracks_owner_across_businesses(world: World) -> None:
+    """В11: недельный пул ИИ — на владельца (yandex_uid), а не на бизнес: удаление бизнеса или аккаунта
+    не даёт нового лимита, иначе трату оператору можно было бы сжигать бесконечно."""
+    other = Business(user_id=world.business.user_id, site_url=SITE, city="Самара", month_budget_kop=BUDGET_KOP)
+    world.repository.add(other)
+    spend(world, 5800, NOW - timedelta(days=1))
+    budget = ai_budget(world.repository, other, LIMITS, TODAY)
+    pool = LIMITS.weekly_kop + LIMITS.onboarding_kop
+    assert budget.limit_kop == pool - 5800
+    assert budget.spent_kop == 0
+
+
+async def test_ai_daily_service_cap_stops_every_business(world: World) -> None:
+    """В11: суточный потолок на весь сервис ограничивает любой бизнес поверх лимитов владельца."""
+    spend(world, 900, NOW)
+    limits = AiLimits(LIMITS.onboarding_kop, LIMITS.weekly_kop, daily_cap_kop=1000)
+    budget = ai_budget(world.repository, world.business, limits, TODAY)
+    assert budget.limit_kop == 1000
 
 
 def spend(world: World, cost_kop: int, created_at: datetime) -> None:

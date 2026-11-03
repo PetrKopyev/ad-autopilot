@@ -471,7 +471,7 @@ async def budget_operations(repository, business, adapter, refs, operations, now
     day = now.astimezone(adapter._tz).date()
     month = day.replace(day=1)
     start = min(month, day.fromisoformat(business.settings.get("_worker", {}).get("started_on", month.isoformat())))
-    rows = await adapter.get_stats(start, day, "campaign")
+    rows = await adapter.get_stats(start, day, "campaign", campaign_ids={refs.campaign_id})
     week = day - timedelta(days=day.weekday())
     context["spent_before_week_kop"] = sum(
         row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date < week

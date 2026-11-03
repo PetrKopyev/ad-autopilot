@@ -11,6 +11,21 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Без этого пропускаются 117 тестов с базой: шифрование токенов, фильтр владельца, каскадное удаление.
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -55,3 +70,35 @@ jobs:
         run: npm test
       - name: Audit
         run: npm audit --audit-level=high
+
+  e2e:
+    name: e2e on demo stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Demo environment
+        working-directory: .
+        run: |
+          cp .env.demo.example .env.demo
+          password=$(openssl rand -hex 16)
+          secret=$(openssl rand -hex 32)
+          fernet=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$password/" .env.demo
+          sed -i "s/^DATABASE_URL=.*/DATABASE_URL=postgresql+psycopg:\/\/postgres:$password@db:5432\/autopilot/" .env.demo
+          sed -i "s/^SECRET_KEY=.*/SECRET_KEY=$secret/" .env.demo
+          sed -i "s/^TOKEN_ENCRYPTION_KEY=.*/TOKEN_ENCRYPTION_KEY=$fernet/" .env.demo
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Demo stack
+        run: sh deploy/demo.sh --build
+      - name: End-to-end scenario
+        working-directory: frontend
+        run: |
+          npx playwright install chromium
+          BASE_URL=https://localhost npm run e2e

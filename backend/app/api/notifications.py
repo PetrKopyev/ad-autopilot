@@ -29,6 +29,7 @@ NOTICES = {
     "EXPERIMENT_WIN": ("Проверка двух вариантов закончилась", "info"),
     "EXPERIMENT_NO_DIFF": ("Проверка двух вариантов закончилась", "info"),
     "EXPERIMENT_CLICKBAIT": ("Проверка двух вариантов закончилась", "info"),
+    "EXPERIMENT_EXPIRED": ("Проверка двух вариантов закончилась", "info"),
     "BUDGET_OPPORTUNITY": ("Можно получить больше обращений", "info"),
     "MIN_ACTIVE_GROUPS": ("Объявление требует внимания", "info"),
     "MONTH_CONTINUE_NOTICE": ("Скоро новый месяц", "info"),

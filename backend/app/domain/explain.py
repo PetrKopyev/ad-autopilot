@@ -26,11 +26,18 @@ TEMPLATES = {
         "Проверяем {hypothesis}: сравним по {n_per_arm} каждого объявления. Это займёт примерно {days}."
     ),
     "EXPERIMENT_WIN": (
-        "Объявление {winner} показывали {impressions}, на него нажали {clicks} ({rate}%) "
-        "против {other_rate}% у {loser}. {confidence}. "
+        "Объявление {winner} показывали {impressions}, на него нажали {clicks} ({rate}%) против "
+        "{other_impressions} показов и {other_clicks} нажатий ({other_rate}%) у {loser}. {confidence}. "
         "Оставили {winner}, {loser} остановили."
     ),
-    "EXPERIMENT_NO_DIFF": "Убедительной разницы между объявлениями нет. Оставили прежнее, новое остановили.",
+    "EXPERIMENT_NO_DIFF": (
+        "Убедительной разницы между объявлениями нет: объявление А показали {control_impressions}, нажали "
+        "{control_clicks} ({control_rate}%), объявление Б — {variant_impressions} показов и {variant_clicks} "
+        "нажатий ({variant_rate}%). Оставили прежнее, новое остановили."
+    ),
+    "EXPERIMENT_EXPIRED": (
+        "Срок проверки истёк. Победителя не выбирали, вариант остановили: по этим данным лучший не виден."
+    ),
     "AUDIENCE_START": (
         "Сравниваем аудитории группы «{group}»: {control} и {variant}. Объявление то же, для новой аудитории — "
         "отдельная группа. Через {days} сравним цену обращения и оставим ту аудиторию, где обращения дешевле."
@@ -195,7 +202,10 @@ def explain(
         if isinstance(data[key], int | Decimal) and not isinstance(data[key], bool):
             data[key] = plural(data[key], PLURALS[key])
     for key, value in data.items():
-        if isinstance(value, Decimal):
+        # Разряды отделяются пробелом, как в интерфейсе: «11 400 показов». plural() уже вернул строку.
+        if isinstance(value, int) and not isinstance(value, bool):
+            data[key] = f"{value:,}".replace(",", " ")
+        elif isinstance(value, Decimal):
             data[key] = format(value, ".1f").replace(".", ",")
     return TEMPLATES[reason_code].format_map(data)
 
@@ -213,7 +223,16 @@ def explain_experiment(
     if result.verdict == Verdict.CLICKBAIT:
         return explain_clickbait(control, variant)
     if result.verdict not in (Verdict.CONTROL, Verdict.VARIANT):
-        return explain(result.reason_code)
+        # Самый частый исход — «разницы нет»: по RULES в тексте обе стороны с показами, кликами и процентами.
+        return explain(
+            result.reason_code,
+            control_impressions=control.impressions,
+            control_clicks=control.clicks,
+            control_rate=control.ctr * 100,
+            variant_impressions=variant.impressions,
+            variant_clicks=variant.clicks,
+            variant_rate=variant.ctr * 100,
+        )
     if result.p_value is None:
         raise ValueError("A winning result must include its p-value")
     winner, loser = ("Б", "А") if result.verdict == Verdict.VARIANT else ("А", "Б")
@@ -229,6 +248,8 @@ def explain_experiment(
         impressions=metrics.impressions,
         clicks=metrics.clicks,
         rate=metrics.ctr * 100,
+        other_impressions=other.impressions,
+        other_clicks=other.clicks,
         other_rate=other.ctr * 100,
         confidence=confidence,
     )

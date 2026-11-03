@@ -449,7 +449,9 @@ class StubPlatform:
         self.cost = cost
         self.moderation = moderation
 
-    async def get_stats(self, date_from: date, date_to: date, level: str = "ad") -> list[StatRow]:
+    async def get_stats(
+        self, date_from: date, date_to: date, level: str = "ad", campaign_ids=None
+    ) -> list[StatRow]:
         return [StatRow("a-1", "c-1", TODAY - timedelta(days=3), "ad", 10, 1, self.cost, {"1": 1}, NOW, True)]
 
     async def get_moderation(self, refs) -> list[ModerationInfo]:

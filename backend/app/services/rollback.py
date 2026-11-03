@@ -1,5 +1,4 @@
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Experiment
@@ -289,19 +288,16 @@ class RollbackService:
                     for key, value in group_limits["after"].items()
                     if current_limits.get(key) != value
                 ]
+                # Лимиты кампании возвращаем на площадке сразу, а не ждём пересчёта: сверяем их как обычные
+                # операции — если бюджет с тех пор трогали (пересчёт, другой SCALE), просим подтверждение.
+                mismatches += differences(
+                    [op for op in operations if op.kind == "set_budget"], states
+                )
             else:
                 mismatches = differences(operations, states)
             if mismatches and not confirm:
                 raise ConfirmationRequired(mismatches)
             inverse = inverse_operations(operations, states)
-            if group_limits is not None:
-                # SCALE меняет доли групп. Перебалансированный кэп кампании сохраняем.
-                preserved = []
-                for op in inverse:
-                    entity = entities.get((op.entity_type, op.entity_id), states[op.entity_id])
-                    value = getattr(entity, op.field)
-                    preserved.append(replace(op, before=value, after=value))
-                inverse = preserved
             ads = {entity.id: entity for entity in entities.values() if isinstance(entity, Ad)}
             skipped: list[str] = []
             verdict = original.kind == "experiment_verdict"

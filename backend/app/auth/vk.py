@@ -122,18 +122,27 @@ class VkClient:
 
     def _read_limits(self, response: httpx.Response) -> int:
         now = datetime.now(UTC)
-        remaining = []
-        resets = []
+        windows: dict[str, dict[str, Any]] = {}
         for name, value in response.headers.items():
-            if not name.startswith("x-ratelimit-"):
+            # Окна считаем по парам заголовков: x-ratelimit-rps-remaining и x-ratelimit-remaining-sec —
+            # одно окно «sec/rps». Блокируем до reset исчерпанного окна: секундный отпускает через секунду,
+            # часовой и суточный ждут своего reset, а не вслепую 60 секунд.
+            tokens = name.lower().split("-")
+            if len(tokens) < 3 or tokens[0] != "x" or tokens[1] != "ratelimit":
                 continue
+            key = next((token for token in tokens[2:] if token in {"remaining", "reset"}), None)
+            if key is None:
+                continue
+            window = "-".join(token for token in tokens[2:] if token != key)
             try:
-                if "remaining" in name:
-                    remaining.append(max(0, int(value)))
-                elif "reset" in name:
-                    resets.append(datetime.fromtimestamp(int(value), UTC))
+                parsed = (
+                    max(0, int(value)) if key == "remaining" else datetime.fromtimestamp(int(value), UTC)
+                )
             except (ValueError, OverflowError, OSError):
                 continue
+            windows.setdefault(window, {})[key] = parsed
+        remaining = [item["remaining"] for item in windows.values() if "remaining" in item]
+        resets = [item["reset"] for item in windows.values() if "reset" in item]
         if remaining:
             self._limits = PlatformLimits(rate_limit_remaining=min(remaining), resets_at=max(resets, default=None))
         try:
@@ -141,8 +150,9 @@ class VkClient:
         except ValueError:
             retry = 60
         if response.status_code == 429 or remaining and min(remaining) == 0:
-            until = [now + timedelta(seconds=retry)] if "Retry-After" in response.headers or not resets else []
-            self._blocked_until = max([*until, *resets])
+            exhausted = [item.get("reset") for item in windows.values() if item.get("remaining") == 0]
+            until = [now + timedelta(seconds=retry)] if "Retry-After" in response.headers else []
+            self._blocked_until = max([*until, *(reset for reset in exhausted if reset is not None), *resets])
             retry = max(1, int((self._blocked_until - now).total_seconds()))
         return retry
 

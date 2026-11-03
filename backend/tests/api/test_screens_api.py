@@ -718,7 +718,8 @@ def test_concluded_experiment_shows_numbers_and_period_of_the_verdict(setup):
     assert concluded["period"] == {"from": first.isoformat(), "to": (first + timedelta(days=10)).isoformat()}
     assert running["period"] == {"from": first.isoformat(), "to": (first + timedelta(days=15)).isoformat()}
     assert concluded["conclusion"].startswith(
-        "Объявление Б показывали 3 100 раз, на него нажали 62 раза (2,0%) против 1,0% у А."
+        "Объявление Б показывали 3 100 раз, на него нажали 62 раза (2,0%)"
+        " против 3 000 показов и 30 нажатий (1,0%) у А."
     )
 
 

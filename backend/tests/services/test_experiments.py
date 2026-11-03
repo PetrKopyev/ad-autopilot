@@ -298,16 +298,69 @@ async def test_tick_applies_existing_test_and_saves_exact_evidence(
     factory.assert_not_called()
 
 
-async def test_tick_closes_expired_test_without_changing_frozen_group(experiment_world):
+async def test_tick_expired_test_does_not_touch_frozen_variant(experiment_world):
+    """Истёкшая проверка не трогает вариант, замороженный после отката владельца: закрывается запись
+    без операций, на площадке ничего не меняется."""
     world = experiment_world
     experiment = running_experiment(world)
-    world.ads["borderline-1"].frozen_until = world.clock.now + timedelta(days=30)
+    experiment.deadline = world.clock.now + timedelta(days=13)
+    world.ads["borderline-2"].frozen_until = world.clock.now + timedelta(days=30)
     world.clock.advance(days=14)
     before = await world.adapter.get_state(world.refs)
     await experiments_tick(world.worker(), world.business)
     assert experiment.status == "concluded" and experiment.verdict == "no_difference"
     assert world.changes(kind="experiment_verdict")[0].operations == []
     assert await world.adapter.get_state(world.refs) == before
+
+
+async def test_tick_on_deadline_day_evaluates_data_before_expiry(experiment_world):
+    """К4: в день срока проверки тик сначала выносит вывод по данным, а не закрывает её «срок истёк»:
+    срок сравнивается по дате, как в domain/evaluate_experiment, а не по времени старта — иначе тик
+    позже часа старта в последний день закрывал бы проверку без вывода."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    for ad_id, clicks, leads in (
+        (experiment.control_ad_id, 100, 30),
+        (experiment.variant_ad_id, 300, 90),
+    ):
+        for offset, impressions in ((-1, 1_000_000), (1, 10_000), (3, 1_000_000)):
+            world.repository.save(
+                StatsDaily(
+                    business_id=world.business.id,
+                    platform="direct",
+                    campaign_id=world.campaign.id,
+                    ad_id=ad_id,
+                    date=(world.clock.now + timedelta(days=offset)).date(),
+                    cost_kop=10_000,
+                    impressions=impressions,
+                    clicks=clicks,
+                    conversions={"1": leads},
+                    is_settled=True,
+                )
+            )
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(), world.business)
+    assert (experiment.status, experiment.verdict) == ("concluded", "variant_wins")
+    (change,) = world.changes(kind="experiment_verdict")
+    assert change.reason_code == "EXPERIMENT_VERDICT"
+    states = await world.adapter.get_state(world.refs)
+    assert states[world.ads["borderline-1"].external_id].status == "paused_auto"
+
+
+async def test_tick_expired_test_stops_variant_like_no_difference_verdict(experiment_world):
+    """К4: после срока проверку закрывает «срок истёк» с остановкой варианта: остаётся прежний вариант,
+    как при любом другом исходе без победителя (RULES)."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    experiment.deadline = world.clock.now + timedelta(days=13)
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(), world.business)
+    assert (experiment.status, experiment.verdict) == ("concluded", "no_difference")
+    (change,) = world.changes(kind="experiment_verdict")
+    assert change.reason_code == "EXPERIMENT_EXPIRED"
+    states = await world.adapter.get_state(world.refs)
+    assert states[world.ads["borderline-2"].external_id].status == "paused_auto"
+    assert states[world.ads["borderline-1"].external_id].status == "active"
 
 
 async def test_tick_dry_run_does_not_conclude_or_pause_existing_test(experiment_world):

@@ -83,7 +83,7 @@ async def tree():
     return adapter, await adapter.create_campaign_tree(plan)
 
 
-async def applied(repository, adapter, refs, *, operations=None, **kwargs):
+async def applied(repository, adapter, refs, *, operations=None, kind="pause", reason_code="CUSTOM", **kwargs):
     return await ChangesService(repository, dry_run=False).apply_change(
         business_id=1,
         adapter=adapter,
@@ -91,9 +91,9 @@ async def applied(repository, adapter, refs, *, operations=None, **kwargs):
         operations=operations
         or [Operation("set_status", "ad", refs.ads["control"], "status", "active", "paused_auto")],
         actor="autopilot",
-        kind="pause",
+        kind=kind,
         platform="fake",
-        reason_code="CUSTOM",
+        reason_code=reason_code,
         reason_text="Остановили объявление.",
         **kwargs,
     )
@@ -178,6 +178,42 @@ async def test_campaign_budget_rollback_freezes_campaign_without_freezing_its_ad
     assert all(ad.frozen_until is None for ad in ads)
     frozen = repository.business(1).settings["_worker"]["frozen_entities"]
     assert set(frozen) == {f"campaign:{refs.campaign_id}"}
+
+
+async def test_scale_rollback_restores_campaign_limits_on_platform_at_once(repository, tree):
+    """В1: откат SCALE сразу возвращает на площадке прежние лимиты кампании, а не ждёт следующего пересчёта:
+    в истории уже «Вы отменили», и лимит в кабинете должен быть прежним."""
+    adapter, refs = tree
+    group_id = refs.groups["group"]
+    repository.business.return_value.settings = {
+        "_worker": {"group_limits": {group_id: 7_000}}
+    }
+    original = await applied(
+        repository,
+        adapter,
+        refs,
+        entity_type="group",
+        entity_id=group_id,
+        kind="budget",
+        reason_code="SCALE_UP",
+        reason_params={"group": "Группа", "campaign": "Откат", "old_limit": 50, "new_limit": 70},
+        operations=[
+            Operation("set_budget", "campaign", refs.campaign_id, "daily_limit_kop", 10_000, 12_000),
+            Operation("set_budget", "campaign", refs.campaign_id, "period_cap_kop", 300_000, 360_000),
+        ],
+        evidence={"group_limits": {"before": {group_id: 5_000}, "after": {group_id: 7_000}}},
+    )
+    platform = (await adapter.get_state(refs))[refs.campaign_id]
+    assert (platform.daily_limit_kop, platform.period_cap_kop) == (12_000, 360_000)
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    assert revert.status == "applied"
+    platform = (await adapter.get_state(refs))[refs.campaign_id]
+    assert (platform.daily_limit_kop, platform.period_cap_kop) == (10_000, 300_000)
+    restored = {
+        (op.field, op.before, op.after) for op in load_operations(revert) if op.kind == "set_budget"
+    }
+    assert ("daily_limit_kop", 12_000, 10_000) in restored
+    assert ("period_cap_kop", 360_000, 300_000) in restored
 
 
 async def test_conflict_requires_confirmation_and_records_real_before(repository, tree):

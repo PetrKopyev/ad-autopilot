@@ -51,51 +51,63 @@ async def sync_stats(worker: Worker, business: Business) -> None:
     end = today(worker.clock)
     start = end - timedelta(days=6)
     campaigns = worker.campaigns(business)
+    failure = None
     for platform in sorted({campaign.platform for campaign in campaigns}):
-        entities = worker.repository.local_entities(business.id, platform)
-        ads = {external_id: item for (kind, external_id), item in entities.items() if kind == "ad"}
-        groups = {item.id: item for item in entities.values() if isinstance(item, AdGroup)}
-        own = {item.id: item for item in entities.values() if isinstance(item, Campaign)}
-        adapter = worker.resolve_adapter(business.id, platform)
-        fetched = await adapter.get_stats(start, end, "ad")
-        # Удалённая из отчёта строка тоже перезаписывается, а не остаётся старым расходом.
-        incoming = {row.entity_id: [] for row in fetched}
-        for row in fetched:
-            incoming[row.entity_id].append(row)
-        existing = {
-            (row.ad_id, row.date): row
-            for row in worker.repository.rows(StatsDaily, business.id, platform=platform, date=Window(start, end))
-        }
-        seen = set()
-        changed = []
-        for row in fetched:
-            ad = ads.get(row.entity_id)
-            group = groups.get(ad.ad_group_id) if ad else None
-            if group is None or own[group.campaign_id].external_id != row.campaign_id:
-                continue
-            key = (ad.id, row.date)
-            stored = existing.get(key) or StatsDaily(
-                business_id=business.id,
-                platform=platform,
-                campaign_id=group.campaign_id,
-                ad_id=ad.id,
-                date=row.date,
-            )
-            for name in ("impressions", "clicks", "cost_kop", "conversions"):
-                setattr(stored, name, getattr(row, name))
+        # Кабинет одной площадки не ответил: статистику другой всё равно доводим, иначе сбой Директа
+        # замирал бы и на статистике VK.
+        try:
+            await _sync_platform_stats(worker, business, platform, start, end)
+        except CLOSED_ACCOUNT as error:
+            failure = failure or error
+    if failure is not None:
+        raise failure
+
+
+async def _sync_platform_stats(worker: Worker, business: Business, platform: str, start, end) -> None:
+    entities = worker.repository.local_entities(business.id, platform)
+    ads = {external_id: item for (kind, external_id), item in entities.items() if kind == "ad"}
+    groups = {item.id: item for item in entities.values() if isinstance(item, AdGroup)}
+    own = {item.id: item for item in entities.values() if isinstance(item, Campaign)}
+    adapter = worker.resolve_adapter(business.id, platform)
+    fetched = await adapter.get_stats(start, end, "ad", campaign_ids={item.external_id for item in own.values()})
+    # Удалённая из отчёта строка тоже перезаписывается, а не остаётся старым расходом.
+    incoming = {row.entity_id: [] for row in fetched}
+    for row in fetched:
+        incoming[row.entity_id].append(row)
+    existing = {
+        (row.ad_id, row.date): row
+        for row in worker.repository.rows(StatsDaily, business.id, platform=platform, date=Window(start, end))
+    }
+    seen = set()
+    changed = []
+    for row in fetched:
+        ad = ads.get(row.entity_id)
+        group = groups.get(ad.ad_group_id) if ad else None
+        if group is None or own[group.campaign_id].external_id != row.campaign_id:
+            continue
+        key = (ad.id, row.date)
+        stored = existing.get(key) or StatsDaily(
+            business_id=business.id,
+            platform=platform,
+            campaign_id=group.campaign_id,
+            ad_id=ad.id,
+            date=row.date,
+        )
+        for name in ("impressions", "clicks", "cost_kop", "conversions"):
+            setattr(stored, name, getattr(row, name))
+        stored.fetched_at = worker.clock.now
+        stored.is_settled = row.is_settled and row.date <= end - timedelta(days=2)
+        changed.append(stored)
+        seen.add(key)
+    for key, stored in existing.items():
+        if key not in seen:
+            stored.impressions = stored.clicks = stored.cost_kop = 0
+            stored.conversions = {}
             stored.fetched_at = worker.clock.now
-            stored.is_settled = row.is_settled and row.date <= end - timedelta(days=2)
+            stored.is_settled = stored.date <= end - timedelta(days=2)
             changed.append(stored)
-            seen.add(key)
-        for key, stored in existing.items():
-            if key not in seen:
-                stored.impressions = stored.clicks = stored.cost_kop = 0
-                stored.conversions = {}
-                stored.fetched_at = worker.clock.now
-                stored.is_settled = stored.date <= end - timedelta(days=2)
-                changed.append(stored)
-        if changed:
-            worker.repository.save(*changed)
+    if changed:
+        worker.repository.save(*changed)
 
 
 async def sync_moderation(worker: Worker, business: Business) -> None:
