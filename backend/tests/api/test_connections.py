@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import Asset, Business, Session, User
+from app.db.models import AiSpendLedger, Asset, Business, Session, User
 from tests.services.test_onboarding import picture
 
 
@@ -59,6 +59,10 @@ def small_pool(monkeypatch, tmp_path):
         yield app, engine, token, asset.id
     finally:
         with factory() as db:
+            # Траты на ИИ учит ai_spend_ledger без внешних ключей (намеренно: удаление бизнеса лимит
+            # не обнуляет) — с User каскадом её не достать, чистим явно, иначе строки копятся
+            # в общей тестовой базе и со временем бьют по суточному потолку чужих прогонов.
+            db.execute(delete(AiSpendLedger).where(AiSpendLedger.business_id == business.id))
             db.execute(delete(User).where(User.id == user.id))
             db.commit()
         engine.dispose()

@@ -360,7 +360,10 @@ class VariedArt(FakeArt):
         try:
             return await super().generate(prompt, seed=seed, business_id=business_id)
         finally:
-            await self.record(self.calls[-1])
+            # При исключении до append (например ArtBudgetExceeded из budget.reserve) calls пуст —
+            # не маскируем настоящую ошибку IndexError.
+            if self.calls:
+                await self.record(self.calls[-1])
 
 
 def font_path() -> str:
