@@ -393,5 +393,7 @@ def test_excessive_offer_is_rejected(photo: Image.Image, monkeypatch: pytest.Mon
 
 
 def test_missing_font_is_explicit(photo: Image.Image) -> None:
+    # Имя несуществующее и нигде не ищется: PIL по пути без файла отвечает OSError,
+    # но по известному имени (DejaVuSans.ttf) подставит системный шрифт из поискового пути.
     with pytest.raises(OSError):
-        overlay_offer(photo, "Оффер", font_path="/nonexistent/DejaVuSans.ttf")
+        overlay_offer(photo, "Оффер", font_path="/nonexistent/no-such-font-autopilot-404.ttf")
