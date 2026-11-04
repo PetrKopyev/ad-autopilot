@@ -91,8 +91,21 @@ def _status(item: dict, *, campaign: bool = False) -> str:
     # Живой Direct у сущности на проверке шлёт Status=MODERATION/DRAFT при State=OFF: маппим по Status
     # первым, иначе ожидание модерации неотличимо от паузы (changes.py держит изменение pending по этим
     # статусам). Status не запрашивается у keywords — там прежняя логика по State.
+    # Сначала явные паузы по State: автопилот или владелец остановил кампанию, пока объявления на проверке
+    # (State=SUSPENDED, Status=MODERATION) — это пауза, а не «на проверке», иначе сверка остановки
+    # проваливалась бы до конца модерации, а страж бюджета падал на каждом ходу (В1 круга 7). OFF этого
+    # не касается: у черновика и модерируемой кампании State=OFF, их ждёт launch/changes.
     # У кампаний по доке различаются OFF (показы не идут, в том числе без денег на счёте) и SUSPENDED
     # (остановлена владельцем): OFF маппим в паузу площадки, иначе «Продолжить» падало бы на пустом счёте.
+    # ENDED — кампания закончилась по дате окончания, а не пауза владельца: month_rollover её продлит
+    # и возобновит (В4 круга 7), поэтому не paused_owner.
+    state = item.get("State")
+    if state == "ARCHIVED":
+        return "archived"
+    if state == "SUSPENDED":
+        return "paused_owner"
+    if state == "ENDED":
+        return "paused_auto" if campaign else "paused_owner"
     status = item.get("Status")
     if status == "DRAFT":
         return "draft"
@@ -100,13 +113,8 @@ def _status(item: dict, *, campaign: bool = False) -> str:
         return "moderation"
     if status == "REJECTED":
         return "rejected"
-    state = item.get("State")
-    if state == "ARCHIVED":
-        return "archived"
     if state == "OFF":
         return "paused_auto" if campaign else "paused_owner"
-    if state in {"SUSPENDED", "ENDED"}:
-        return "paused_owner"
     if state == "ON":
         return "active"
     return "pending"
@@ -477,8 +485,9 @@ class DirectAdapter:
         # Ключевые цели нужны только стратегии по конверсиям; при оплате за клики они меняли бы оптимизацию,
         # а для отчёта по обращениям хватает goal_ids.
         if self._strategy == "WB_MAXIMUM_CONVERSION_RATE":
+            # Ценность цели — сумма API: уходит без НДС, как и лимиты (мелочь 4 круга 7).
             settings["PriorityGoals"] = {
-                "Items": [{"GoalId": goal, "Value": value * MICROS_PER_KOP} for goal, value in self._goals.items()]
+                "Items": [{"GoalId": goal, "Value": self._to_api(value)} for goal, value in self._goals.items()]
             }
         return settings
 
@@ -1079,11 +1088,14 @@ class DirectAdapter:
     def _context_weekly(self, context: dict[str, int]) -> int:
         # WeeklySpendLimit включает уже потраченное на этой неделе. Наш period_cap
         # накопленный за жизнь кампании: убираем только расход предыдущих недель.
+        # spent_week_kop уже содержит сегодняшний расход: полный дневной лимит за сегодня сверху не
+        # прибавляем, иначе сегодня считалась бы дважды и лимит был бы завышен на сегодняшний расход.
         before = context.get("spent_before_week_kop", 0)
         week = context.get("spent_week_kop", 0)
+        today_spend = context.get("spent_today_kop", 0)
         return min(
             max(0, context["period_cap_kop"] - before),
-            week + self._weekly_limit(context["daily_limit_kop"], context["period_cap_kop"]),
+            week + self._weekly_limit(context["daily_limit_kop"], context["period_cap_kop"]) - today_spend,
         )
 
     async def get_state(self, refs: ExternalRefs) -> dict[str, EntityState]:
@@ -1140,6 +1152,7 @@ class DirectAdapter:
                 daily_limit_kop=daily,
                 period_cap_kop=period,
                 targeting={"weekly_limits_kop": budgets},
+                ended=item.get("State") == "ENDED",
             )
         if refs.groups:
             groups = await self._get(

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -110,6 +111,24 @@ def test_foreign_ad(setup):
     world.repository.save(Business(id=999, user_id=999), Ad(id=999, ad_group_id=999, status="active"))
     for action in ("pause", "resume"):
         assert client.post(f"/api/ads/999/{action}").status_code == 404
+
+
+async def test_pause_enqueues_stop_when_business_busy(monkeypatch):
+    """В3 круга 7: пока бизнес занят шагом воркера, кнопка «Остановить всю рекламу» не отвечает конфликтом
+    без следа: намерение фиксируется сразу, а остановку доводит страж бюджета по pending_stop."""
+    world = await make_world()
+    worker = world.worker()
+    screens = ScreensService(worker)
+    monkeypatch.setattr(
+        "app.services.screens.stop_all", AsyncMock(side_effect=ChangeConflict("Этот бизнес уже обрабатывается."))
+    )
+    await screens.pause(world.business)
+    assert worker.metadata(world.business)["pending_stop"]["reason_code"] == "OWNER_STOP"
+    assert worker.metadata(world.business)["kill_switch"] is True
+    monkeypatch.undo()
+    await worker.run("budget_guard", 1)
+    assert world.campaign.status == "paused_owner"
+    assert worker.metadata(world.business)["pending_stop"] is None
 
 
 def test_pause_resume_only_kill_switch_and_repeated_pause(setup):

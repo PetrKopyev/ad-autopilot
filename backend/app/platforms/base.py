@@ -2,6 +2,7 @@ from collections.abc import Collection, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -65,7 +66,10 @@ class CampaignTreeSpec:
 
     @property
     def idempotency_key(self) -> str:
-        return f"ap-{self.id}"
+        # Ключ содержит идентификатор установки: без него новая база приняла бы кампании ap-<id> от
+        # прежних прогонов того же кабинета за свои и переписала бы их (мелочь 2 круга 7). Хеш SECRET_KEY
+        # стабилен для установки и меняется при смене секрета (см. DEPLOY.md про SECRET_KEY).
+        return f"ap-{installation_key()}-{self.id}"
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -178,6 +182,14 @@ class Operation:
         )
 
 
+def installation_key() -> str:
+    """Короткий идентификатор установки: хеш SECRET_KEY. Отличает кампании этой базы от кампаний прежних
+    прогонов того же кабинета в ключе идемпотентности ap-<ключ установки>-<id>."""
+    from app.config import settings as config  # лениво: на импорте модуля env ещё не выставлен
+
+    return sha256(config.secret_key.get_secret_value().encode()).hexdigest()[:8]
+
+
 @dataclass(frozen=True)
 class EntityState:
     entity_id: str
@@ -192,6 +204,9 @@ class EntityState:
     text: str | None = None
     image_ref: str | None = None
     targeting: dict[str, Any] = field(default_factory=dict)
+    # Кампания закончилась по дате окончания (Direct State=ENDED): не пауза владельца, месячный переход
+    # продлевает дату и возобновляет кампанию (В4 круга 7).
+    ended: bool = False
 
     def __post_init__(self) -> None:
         for name in ("daily_limit_kop", "period_cap_kop"):

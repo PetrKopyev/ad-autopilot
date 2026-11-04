@@ -406,6 +406,22 @@ async def test_partially_created_platform_is_not_activated_and_retry_completes(t
     assert world.repository.latest_plan(world.business.id).payload["launch"]["platform_errors"] == {}
 
 
+async def test_retry_after_owner_stop_requires_resume_first(tmp_path: Path) -> None:
+    """В5 круга 7: повтор запуска после «Остановить всю рекламу» не снимает паузу сам и не ставит бизнесу
+    running с зажатым kill_switch: сначала «Продолжить», потом повтор."""
+    adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
+    world, plan = await ready(tmp_path, adapters=adapters)
+    assert (await launch(world, plan))["status"] == "launched"
+    world.business.settings = world.business.settings | {"_worker": {"kill_switch": True}}
+    world.business.status = "paused"
+    world.repository.save(world.business)
+    with pytest.raises(LaunchBlocked, match="Продолжить"):
+        await launch(world, plan)
+    assert world.business.status == "paused"
+    stored = world.repository.latest_plan(world.business.id)
+    assert set(stored.payload["launch"]["platform_errors"]) == {"vk"}
+
+
 async def test_retry_keeps_started_on_within_month(tmp_path: Path) -> None:
     """К2: повтор частичного запуска не сдвигает started_on на сегодня. Иначе разрешённый расход месяца
     считается от повтора, остаток против полного расхода почти нулевой, кампании встают без дневного

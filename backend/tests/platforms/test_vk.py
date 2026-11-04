@@ -24,6 +24,7 @@ from app.platforms.base import (
     PlatformLimits,
     RateLimited,
     TargetSpec,
+    installation_key,
     lead_count,
 )
 from app.platforms.vk import VkAdapter, _kop, _rub
@@ -123,7 +124,8 @@ async def test_create_tree_posts_whole_plan_with_exact_budgets(adapter: VkAdapte
     assert refs == ExternalRefs("10", {"g1": "20"}, {"a1": "30"}, {"t1": "20"})
     body = sent(route)
     # Живой API принимает ровно один лимит: уходит только дневной, период закрывает страж бюджета.
-    assert body["name"] == "Маникюр ap-c1" and body["budget_limit_day"] == "150.50" and "budget_limit" not in body
+    assert body["name"] == f"Маникюр ap-{installation_key()}-c1"
+    assert body["budget_limit_day"] == "150.50" and "budget_limit" not in body
     # Цель и стратегия живут на уровне плана (схема подтверждена живым валидатором 02.11).
     assert body["objective"] == "site_conversions" and body["autobidding_mode"] == "max_goals"
     # Уровень campaigns = рекламные группы (в списках — ad_groups): пакет, таргетинги и баннеры живут здесь.
@@ -493,7 +495,10 @@ async def test_create_tree_stays_blocked_until_marking_confirmed(api) -> None:
 
 async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api) -> None:
     api.get(f"{API}/ad_plans.json").respond(
-        json={"count": 2, "items": [{"id": 10, "name": "Маникюр ap-c1"}, {"id": 99, "name": "Чужая ap-c10"}]}
+        json={
+            "count": 2,
+            "items": [{"id": 10, "name": f"Маникюр ap-{installation_key()}-c1"}, {"id": 99, "name": "Чужая ap-c10"}],
+        }
     )
     api.get(f"{API}/ad_groups.json").respond(json={"count": 1, "items": [{"id": 20, "name": "Ищут маникюр ap-g1"}]})
     api.get(f"{API}/banners.json").respond(

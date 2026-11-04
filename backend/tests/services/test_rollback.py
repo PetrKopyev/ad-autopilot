@@ -14,7 +14,15 @@ from sqlalchemy.dialects.postgresql import dialect
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, PlatformAccount, User
-from app.platforms.base import AdGroupSpec, AdSpec, AwaitingModeration, CampaignTreeSpec, Operation, PlatformError
+from app.platforms.base import (
+    AdGroupSpec,
+    AdSpec,
+    AwaitingModeration,
+    CampaignTreeSpec,
+    Operation,
+    PlatformError,
+    installation_key,
+)
 from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
@@ -957,7 +965,7 @@ async def test_launch_foreign_stops_record_reverts_to_previous_statuses(reposito
 
     server = DirectServer()
     server.next_id = 200
-    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["campaigns"].append({"Id": 101, "Name": f"Салон ap-{installation_key()}-salon"})
     server.rows["adgroups"].append(
         {
             "Id": 102,

@@ -15,6 +15,7 @@ from app.db.models import (
     StatsDaily,
 )
 from app.db.query import Window
+from app.demo_flags import advance_jobs
 from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum, daily_minimum, stop_margin
 from app.domain.explain import PLURALS, explain_audience, explain_experiment, plural, rubles
 from app.domain.rules import first_decision_days
@@ -28,6 +29,7 @@ from app.services.optimize import experiment_expire_date, rebalance_budget
 from app.services.stats import aggregate, aggregate_budget, aggregate_daily
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
+from app.worker.locks import busy
 
 AUDIENCE_RUNNING = (
     "Проверка идёт. Цену обращения сравним за весь срок, когда площадка уточнит обращения за последние дни."
@@ -183,7 +185,22 @@ class ScreensService:
 
     async def pause(self, business: Business) -> dict:
         business = self.repository.business(business.id)
-        await stop_all(business, worker=self.worker, actor="owner")
+        # Пока идёт шаг воркера, кнопка не должна отвечать 409 без следа (В3 круга 7): намерение
+        # фиксируем сразу, а остановку доведёт страж бюджета по pending_stop на ближайшем ходу.
+        self.worker.remember(
+            business,
+            pending_stop={"reason_code": "OWNER_STOP", "reason_params": None, "budget_stop": False, "actor": "owner"},
+            kill_switch=True,
+        )
+        try:
+            await stop_all(business, worker=self.worker, actor="owner")
+        except ChangeConflict as conflict:
+            # Блокировка занята шагом воркера — остановку доведёт страж по pending_stop. Прочие конфликты
+            # (площадка не подтвердила остановку) по-прежнему доходят до владельца как 409. Перемотка демо
+            # держит блокировку надолго: там действия владельца ждут её окончания, как и прочие шаги мастера.
+            busy_conflict = conflict.args and conflict.args[0] == busy(business.id).args[0]
+            if advance_jobs.holds_lock(business.id) or not busy_conflict:
+                raise
         return self.status(business)
 
     async def month_spent(self, business: Business) -> int:

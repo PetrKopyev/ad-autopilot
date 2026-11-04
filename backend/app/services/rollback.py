@@ -228,6 +228,18 @@ def finish_revert(repository: ChangesRepository, revert: ChangeLog, now: datetim
         for entity in entities.values():
             if isinstance(entity, Ad) and (entity.id in affected or entity.ad_group_id in group_ids):
                 entity.frozen_until = max(entity.frozen_until or frozen_until, frozen_until)
+    if original.reason_code == "OWNER_STOP":
+        # Отмена «Остановить всю рекламу»: кампании вернули к прежним статусам, и бизнес тоже возвращаем
+        # в работу — иначе расход шёл бы при выключенном автопилоте, а главная показывала «на паузе»
+        # (мелочь 3 круга 7).
+        business = repository.business(revert.business_id)
+        meta = dict(business.settings.get("_worker", {}))
+        meta.pop("kill_switch", None)
+        meta.pop("pending_stop", None)
+        business.settings = business.settings | {"_worker": meta}
+        if business.status == "paused":
+            business.status = "running"
+        repository.save(business)
 
 
 class RollbackService:

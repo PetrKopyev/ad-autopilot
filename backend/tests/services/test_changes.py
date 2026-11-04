@@ -368,6 +368,51 @@ async def test_reconcile_keeps_pending_while_platform_still_reviews(repository, 
     assert calls == 4  # исходная попытка и по повтору в каждой сверке
 
 
+async def test_reconcile_long_moderation_still_activates_after_approval(repository, tree, monkeypatch):
+    """В2 круга 7: модерация дольше суток (запуск в пятницу вечером, одобрение в понедельник) не проваливает
+    включение: запись ждёт одобрения в пределах границы, а после него применяется сама — владельцу обещано
+    «включится автоматически, нажимать снова не нужно»."""
+    adapter, refs = tree
+    service = ChangesService(repository, dry_run=False)
+    get_state = adapter.get_state
+    real_apply = adapter.apply
+    accepted = False
+
+    async def rejected_resume(operation):
+        if operation.entity_type == "campaign" and operation.after == "active":
+            raise AwaitingModeration(operation.entity_id)
+        await real_apply(operation)
+
+    async def reviewing(tree_refs):
+        states = await get_state(tree_refs)
+        if not accepted:
+            states = {
+                key: replace(state, status="draft") if state.entity_type == "campaign" else state
+                for key, state in states.items()
+            }
+        return states
+
+    monkeypatch.setattr(adapter, "apply", rejected_resume)
+    monkeypatch.setattr(adapter, "get_state", reviewing)
+    change = await launch_activation(service, adapter, refs)
+    assert change.status == "pending"
+    now = datetime.now(UTC)
+    await service._reconcile(change, adapter, now=now)
+    assert change.status == "pending"
+    await service._reconcile(change, adapter, now=now + timedelta(hours=30))
+    assert change.status == "pending", "модерация 30 часов не должна проваливать включение"
+    # Площадка одобрила: повтор включения в сверке прошёл, изменение применилось без владельца.
+    async def accept(operation):
+        nonlocal accepted
+        accepted = True
+        await real_apply(operation)
+
+    monkeypatch.setattr(adapter, "apply", accept)
+    await service._reconcile(change, adapter, now=now + timedelta(hours=31))
+    assert change.status == "applied"
+    assert accepted
+
+
 async def test_reconcile_does_not_repeat_apply_for_plain_mismatch(repository, tree, monkeypatch):
     """Расхождение не по ожиданию проверки (владелец остановил объявление в кабинете) сверяется как прежде:
     без повторного применения — запись честно проваливается."""

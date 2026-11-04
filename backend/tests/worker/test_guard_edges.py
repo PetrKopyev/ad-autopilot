@@ -137,6 +137,70 @@ async def test_spend_equal_to_budget_stops_and_is_recorded(monkeypatch) -> None:
     assert world.changes(reason_code="BUDGET_STOP", status="applied")
 
 
+async def test_reverting_owner_stop_resumes_business() -> None:
+    """Мелочь 3 круга 7: отмена «Остановить всю рекламу» из истории возвращает бизнес в работу — кампании
+    включены, а kill_switch и пауза не остаются: иначе главная показывала «на паузе», хотя расход идёт."""
+    from app.services.rollback import RollbackService
+
+    world = await make_world()
+    worker = world.worker()
+    await stop_all(world.business, worker=worker, actor="owner")
+    assert world.business.status == "paused"
+    assert worker.metadata(world.business)["kill_switch"] is True
+    (stop,) = world.changes(reason_code="OWNER_STOP")
+    await RollbackService(world.repository).revert(
+        stop.id, business_id=world.business.id, adapter=world.adapter
+    )
+    assert status(world.adapter, world.refs.campaign_id) == "active"
+    assert "kill_switch" not in worker.metadata(world.business)
+    assert world.business.status == "running"
+
+
+async def test_guard_survives_unconfirmed_pending_stop(monkeypatch) -> None:
+    """В1 круга 7: страж бюджета не падает, пока остановка из pending_stop не подтверждена площадкой:
+    расход читается, pending_stop остаётся до следующего тика."""
+    world = await make_world()
+    worker = world.worker()
+    worker.remember(world.business, pending_stop={"reason_code": "OWNER_STOP", "budget_stop": False})
+    monkeypatch.setattr(
+        "app.services.budget_guard.stop_all", AsyncMock(side_effect=ChangeConflict("Площадки ещё подтверждают."))
+    )
+    read_spend = AsyncMock(return_value=({"direct": 0}, {}))
+    monkeypatch.setattr("app.services.budget_guard.read_spend", read_spend)
+    await worker.run("budget_guard", 1)
+    read_spend.assert_awaited_once()
+    assert worker.metadata(world.business)["pending_stop"]["reason_code"] == "OWNER_STOP"
+
+
+async def test_new_month_resumes_campaign_ended_by_finish_date(monkeypatch) -> None:
+    """В4 круга 7: кампания с State=ENDED (конец по дате окончания) на переходе месяца возобновляется,
+    а не числится паузой владельца, которую month_rollover пропустил бы."""
+    world = await make_world()
+    worker = world.worker()
+    real_get_state = world.adapter.get_state
+
+    async def ended_state(refs):
+        states = await real_get_state(refs)
+        # ENDED держим, пока кампания реально не включилась (после продления и resume площадка отвечает active).
+        return {
+            key: replace(state, status="paused_auto", ended=True)
+            if state.entity_type == "campaign" and world.adapter._states[key].status != "active"
+            else state
+            for key, state in states.items()
+        }
+
+    monkeypatch.setattr(world.adapter, "get_state", ended_state)
+    # Кампания в кабинете закончилась по дате (Direct State=ENDED маппится в paused_auto + ended).
+    world.adapter._states[world.refs.campaign_id] = replace(
+        world.adapter._states[world.refs.campaign_id], status="paused_auto"
+    )
+    move_to(world, datetime(2026, 1, 31, 21, tzinfo=UTC))
+    await worker.run("month_rollover", 1)
+    assert status(world.adapter, world.refs.campaign_id) == "active"
+    assert not world.campaign.owner_paused
+    assert world.changes(reason_code="MONTH_RESUME", status="applied")
+
+
 def move_to(world, moment: datetime) -> None:
     world.clock.advance(hours=(moment - world.clock.now).total_seconds() / 3600)
     assert world.clock.now == moment

@@ -28,9 +28,10 @@ from app.platforms.base import (
     PlatformError,
     RateLimited,
     TargetSpec,
+    installation_key,
     lead_count,
 )
-from app.platforms.direct import DirectAdapter, _status
+from app.platforms.direct import DirectAdapter, _status, budget_end
 
 V5 = "https://api.direct.yandex.com/json/v5"
 V501 = "https://api.direct.yandex.com/json/v501"
@@ -321,7 +322,7 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
         },
     )
     campaign = server.rows["campaigns"][0]
-    assert campaign["Name"] == "Салон ap-salon"
+    assert campaign["Name"] == f"Салон ap-{installation_key()}-salon"
     settings = campaign["UnifiedCampaign"]
     assert "TextCampaign" not in campaign
     assert settings["CounterIds"] == {"Items": [12]}
@@ -480,6 +481,20 @@ async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan)
     assert all(len(items) == 1 for items in server.rows.values())
 
 
+async def test_create_tree_ignores_campaigns_of_other_installations(adapter, api, plan):
+    """Мелочь 2 круга 7: ключ идемпотентности содержит идентификатор установки — кампания ap-salon от
+    прежних баз и прогонов того же кабинета не принимается за свою (иначе новая база переписала бы ей
+    стратегию и архивировала её объявления)."""
+    server = DirectServer()
+    server.next_id = 200
+    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon", "State": "ON", "Status": "ACCEPTED"})
+    server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    assert refs.campaign_id != "101"
+    assert server.rows["campaigns"][0]["State"] == "ON", "чужая кампания не тронута"
+
+
 async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api, plan):
     """Число объявлений совпало с планом, но содержимое — нет (владелец правил текст или фразы в кабинете):
     чужое не привязываем, плановое создаётся заново, чужое останавливается (архив/пауза — иначе оно тратило
@@ -487,7 +502,7 @@ async def test_create_tree_recreates_foreign_content_and_reports_it(adapter, api
     запуска. Повтор идемпотентен — созданное по плану находится по содержимому, без новых записей."""
     server = DirectServer()
     server.next_id = 200
-    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["campaigns"].append({"Id": 101, "Name": f"Салон ap-{installation_key()}-salon"})
     server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
     server.rows["ads"].append(
         {
@@ -532,7 +547,7 @@ async def test_create_tree_archives_extra_foreign_ad_beyond_plan(adapter, api, p
     лишнее архивируется с записью операции — активным и вне refs его оставлять нельзя."""
     server = DirectServer()
     server.next_id = 200
-    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["campaigns"].append({"Id": 101, "Name": f"Салон ap-{installation_key()}-salon"})
     server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
     server.rows["ads"].append(
         {
@@ -581,6 +596,21 @@ async def test_weekly_limit_respects_month_and_period(adapter, today, expected):
     assert adapter._weekly_limit(100000, 500000) == expected
 
 
+def test_context_weekly_counts_today_spend_once(adapter):
+    """Мелочь 1 круга 7: сегодняшний расход уже входит в потраченное за неделю, поэтому полный дневной
+    лимит за сегодня не прибавляем сверху — иначе недельный лимит в день пересчёта завышен ровно на
+    сегодняшний расход, и кэп недели разрешает больше месячного остатка."""
+    days = (budget_end(TODAY) - TODAY).days + 1
+    context = {
+        "daily_limit_kop": 10_000,
+        "period_cap_kop": 1_000_000,
+        "spent_before_week_kop": 0,
+        "spent_week_kop": 4_000,  # в том числе 4 000 потрачено сегодня
+        "spent_today_kop": 4_000,
+    }
+    assert adapter._context_weekly(context) == 10_000 * days
+
+
 async def test_conversion_strategy(adapter, api, plan):
     adapter._strategy = "WB_MAXIMUM_CONVERSION_RATE"
     server = DirectServer()
@@ -596,6 +626,20 @@ async def test_conversion_strategy(adapter, api, plan):
     }
     adapter._goals[35] = 100
     assert adapter._campaign_settings(100)["BiddingStrategy"]["Search"]["WbMaximumConversionRate"]["GoalId"] == 13
+
+
+async def test_priority_goals_value_excludes_vat(api):
+    """Мелочь 4 круга 7: ценность ключевой цели — сумма API, уходит без НДС, как и лимиты стратегии."""
+    async with DirectAdapter(
+        "test-only",
+        config=configuration(direct_amounts_include_vat=False),
+        counter_ids=(12,),
+        priority_goals={34: 12500},
+        href="https://salon.example",
+    ) as instance:
+        instance._strategy = "WB_MAXIMUM_CONVERSION_RATE"
+        settings = instance._campaign_settings(1000)
+    assert settings["PriorityGoals"] == {"Items": [{"GoalId": 34, "Value": 102_450_000}]}
 
 
 async def test_text_campaign_fallback(adapter, api, plan):
@@ -619,7 +663,9 @@ async def test_campaign_pagination(adapter, api, plan):
     route = api.post(f"{V501}/campaigns").mock(
         side_effect=[
             httpx.Response(200, json={"result": {"Campaigns": [{"Id": 9, "Name": "Other"}], "LimitedBy": 1}}),
-            httpx.Response(200, json={"result": {"Campaigns": [{"Id": 10, "Name": "Changed ap-salon"}]}}),
+            httpx.Response(
+                200, json={"result": {"Campaigns": [{"Id": 10, "Name": f"Changed ap-{installation_key()}-salon"}]}}
+            ),
             # Повтор переиспользует кампанию и обновляет лимит (campaigns/update).
             httpx.Response(200, json={"result": {"UpdateResults": [{"Id": 10}]}}),
         ]
@@ -1331,6 +1377,19 @@ def test_status_prefers_moderation_status_over_state(item, expected):
     assert _status(item) == expected
 
 
+@pytest.mark.parametrize("moderation_status", ["MODERATION", "REJECTED", "DRAFT"])
+def test_campaign_pause_during_moderation_reads_as_pause(moderation_status):
+    """В1 круга 7: остановленная кампания со статусом модерации — это пауза, а не «на проверке», иначе
+    сверка остановки проваливалась бы до конца модерации, а страж бюджета падал на каждом ходу."""
+    assert _status({"State": "SUSPENDED", "Status": moderation_status}, campaign=True) == "paused_owner"
+
+
+def test_ended_campaign_is_not_owner_pause():
+    """В4 круга 7: ENDED — конец по дате окончания, а не пауза владельца: месячный переход продлит и
+    возобновит кампанию, а не пропустит её как остановленную владельцем."""
+    assert _status({"State": "ENDED", "Status": "ACCEPTED"}, campaign=True) == "paused_auto"
+
+
 async def test_draft_campaign_activation_waits_for_ad_moderation(adapter, api):
     """resume кампании-черновика v501 отклоняется, пока её объявления не пройдут модерацию: это ожидание
     проверки, а не сбой — изменение останется pending, воркер повторит сверкой."""
@@ -1389,7 +1448,7 @@ async def test_create_tree_keeps_foreign_ad_awaiting_moderation(adapter, api, pl
     чтобы создание дерева не падало (живое ограничение API)."""
     server = DirectServer()
     server.next_id = 200
-    server.rows["campaigns"].append({"Id": 101, "Name": "Салон ap-salon"})
+    server.rows["campaigns"].append({"Id": 101, "Name": f"Салон ap-{installation_key()}-salon"})
     server.rows["adgroups"].append({"Id": 102, "Name": "Маникюр ap-nails", "CampaignId": 101})
     server.rows["ads"].append(
         {

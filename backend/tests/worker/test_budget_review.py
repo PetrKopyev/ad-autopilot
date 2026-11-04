@@ -11,7 +11,7 @@ from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget, stop
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import budget_guard, read_spend, stop_all
-from app.services.changes import ChangeConflict
+from app.services.changes import MODERATION_TIMEOUT, ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
 from app.services.rollback import ConfirmationRequired, RollbackService
@@ -349,6 +349,58 @@ async def test_new_month_handles_platform_pause_without_author_and_never_resumes
         assert not world.changes(reason_code="BUDGET_RESUME")
 
 
+async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch):
+    """В2 круга 7: включение потерялось по границе модерации (запись failed с MODERATION_TIMEOUT), площадка
+    одобрила объявления, а кампания в кабинете ещё draft/moderation. Сверка статусов повторяет resume
+    сама — владельцу не нужно нажимать «Запустить» снова, хотя первое включение провалила граница."""
+    world = await make_world()
+    worker = world.worker()
+    key = world.refs.campaign_id
+    world.repository.save(
+        ChangeLog(
+            business_id=1,
+            actor="system",
+            kind="launch",
+            platform="direct",
+            entity_type="campaign",
+            entity_id=key,
+            operations=[
+                {
+                    "kind": "set_status",
+                    "entity_type": "campaign",
+                    "entity_id": key,
+                    "field": "status",
+                    "before": "paused_owner",
+                    "after": "active",
+                }
+            ],
+            reason_code="LAUNCH",
+            reason_params={},
+            reason_text="Тестовый запуск.",
+            evidence={"_service": {"error": MODERATION_TIMEOUT}},
+            status="failed",
+            created_at=world.clock.now,
+        )
+    )
+    real = world.adapter.get_state
+
+    async def reviewing(refs):
+        states = await real(refs)
+        return {
+            key_: replace(state, status="moderation") if state.entity_type == "campaign" else state
+            for key_, state in states.items()
+        }
+
+    monkeypatch.setattr(world.adapter, "get_state", reviewing)
+    from app.services.sync import sync_campaign_status
+
+    await sync_campaign_status(worker, world.business)
+    assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
+    # Пока новая запись pending, платформа занята и повторная сверка не дублирует включение.
+    await sync_campaign_status(worker, world.business)
+    assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
+
+
 async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
     world = await make_world()
     worker = world.worker()
@@ -655,6 +707,8 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
         )
         == 30_000
     )
+    # Расход 100 ₽ уже сегодня: потолок недели — 200 ₽ (один день по 200 ₽), сегодняшний расход не
+    # прибавляем сверху дважды (мелочь 1 круга 7). 200 ₽ — ниже минимума 300 ₽.
     adapter.get_stats = AsyncMock(
         return_value=[StatRow("1", "1", date(2026, 11, 30), "campaign", 1, 1, 10_000, {}, now, False)]
     )
@@ -662,7 +716,7 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
         await below_platform_minimum(
             worker, repository.current_business, campaign, operations, 20_000, 500_000, {"weekly_limit_kop": 30_000}
         )
-        is None
+        == 30_000
     )
     await adapter.aclose()
 

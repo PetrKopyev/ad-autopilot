@@ -6,10 +6,10 @@ from collections.abc import Collection
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
+from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, StatsDaily
 from app.db.query import Window
 from app.platforms.base import Operation
-from app.services.changes import CLOSED_ACCOUNT
+from app.services.changes import CLOSED_ACCOUNT, MODERATION_TIMEOUT, ChangeConflict
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -218,12 +218,15 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             and campaign.status == "active"
             and not campaign.owner_paused
             and campaign.id not in held
+            and not state.ended
         )
         resumed_outside = state.status == "active" and campaign.status in {"paused_auto", "paused_owner"}
         if not (paused_outside or resumed_outside):
             if campaign.owner_paused and state.status == "active":
                 campaign.owner_paused = False
                 worker.repository.save(campaign)
+            elif campaign.status == "active" and state.status in {"draft", "moderation"}:
+                await _resume_lost_activation(worker, business, campaign, state)
             continue
         await worker.apply(
             business,
@@ -239,3 +242,41 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             campaign.frozen_until = worker.clock.now + timedelta(hours=get_domain_settings().owner_cooldown_hours)
             held.discard(campaign.id)
         worker.remember(business, campaign, below_minimum=sorted(held))
+
+
+async def _resume_lost_activation(worker: Worker, business: Business, campaign: Campaign, state) -> None:
+    """В2 круга 7: сверка провалила ожидающее включение по границе модерации (5 дней), а площадка потом
+    одобрила объявления. Кампания локально «active», а на площадке ещё draft/moderation — без повтора она
+    так и осталась бы выключенной, хотя владельцу обещано «включится автоматически». Повторяем resume:
+    новая запись закроет очередь платформы, пока она pending, сверка не дублирует."""
+    failed = worker.repository.rows(ChangeLog, business.id, platform=campaign.platform, status="failed")
+    lost = any(
+        any(
+            operation.get("entity_type") == "campaign"
+            and operation.get("entity_id") == campaign.external_id
+            and operation.get("field") == "status"
+            and operation.get("after") == "active"
+            for operation in item.operations
+        )
+        and MODERATION_TIMEOUT in (item.evidence or {}).get("_service", {}).get("error", "")
+        for item in failed
+    )
+    if not lost:
+        return
+    try:
+        await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
+            actor="system",
+            kind="resume",
+            reason_code="MODERATION_RESUME",
+            reason_text=(
+                "Площадка долго проверяла объявления, и первое включение не подтвердилось. "
+                "Проверка закончена: включили кампанию снова."
+            ),
+            suffix="moderation-resume",
+        )
+    except ChangeConflict:
+        # Площадка ещё проверяет объявления: запись осталась pending и доведётся сверкой, как обычное включение.
+        pass

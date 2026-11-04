@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from app.db.models import BudgetLedger, Business
 from app.domain.explain import MONTHS
-from app.platforms.base import Operation
+from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import stop_all
 from app.services.optimize import rebalance_budget
 from app.worker.clock import MOSCOW, today
@@ -50,13 +50,43 @@ async def month_rollover(worker: Worker, business: Business) -> None:
     was_stopped = business.status == "budget_stop"
     business.status = "running"
     worker.repository.save(business)
+    # Кампании, закончившиеся по дате окончания (Direct State=ENDED): продлеваем дату и возобновляем до
+    # пересчёта лимитов. Иначе rebalance их не увидит (локальный статус ещё active, а площадка прислала
+    # паузу), обнулит лимит, и месячный переход пропустил бы кампанию как недоступную (В4 круга 7).
+    for campaign in worker.current_campaigns(business):
+        adapter = worker.resolve_adapter(business.id, campaign.platform)
+        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        if not state.ended:
+            continue
+        if hasattr(adapter, "extend_end_date"):
+            try:
+                await adapter.extend_end_date(campaign.external_id)
+            except PlatformError:
+                worker.notice(
+                    business,
+                    "CAMPAIGN_EXTEND_FAILED",
+                    "Не удалось продлить кампанию в Директе. Повторим при следующем месячном переходе.",
+                    target_id=campaign.external_id,
+                )
+                continue
+        await worker.apply(
+            business,
+            campaign,
+            [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
+            actor="system",
+            kind="resume",
+            reason_code="MONTH_RESUME",
+            reason_text="Кампания закончилась по дате окончания: продлили дату и включили снова.",
+            suffix="resume",
+        )
     # Новые кэпы выставляются до возобновления кампаний.
     await rebalance_budget(worker, business)
     held = set(worker.metadata(business).get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
         if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
             continue
-        states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+        adapter = worker.resolve_adapter(business.id, campaign.platform)
+        states = await adapter.get_state(worker.refs(campaign))
         state = states[campaign.external_id]
         if was_stopped and campaign.status == "paused_auto" and state.status in {"paused_auto", "paused_owner"}:
             await worker.apply(

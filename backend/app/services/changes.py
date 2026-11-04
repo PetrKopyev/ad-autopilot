@@ -38,8 +38,9 @@ PENDING = "Площадка ещё не подтвердила предыдущ�
 
 # Сколько изменение может ждать проверки объявления площадкой. Неизвестный статус площадки (например,
 # терминальный статус VK вне известного набора) читается как «на проверке»: без границы такое изменение
-# держало бы очередь платформы вечно. За границей — failed с честным текстом.
-MODERATION_AWAITING_LIMIT = timedelta(hours=24)
+# держало бы очередь платформы вечно. За границей — failed с честным текстом. Граница — 5 дней: модерация
+# в выходные реально занимает дольше суток, а сверка после одобрения включает кампанию сама (В2 круга 7).
+MODERATION_AWAITING_LIMIT = timedelta(days=5)
 _MODERATION_AWAITING_HOURS = int(MODERATION_AWAITING_LIMIT.total_seconds() // 3600)
 MODERATION_TIMEOUT = (
     f"Площадка больше {_MODERATION_AWAITING_HOURS} часов не подтверждает объявление. Проверьте его в кабинете "
@@ -483,6 +484,11 @@ async def budget_operations(repository, business, adapter, refs, operations, now
     )
     context["spent_week_kop"] = sum(
         row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date >= week
+    )
+    # Сегодняшний расход отдельно: недельный лимит считает остаток дня, а не полный дневной лимит сверх
+    # уже потраченного (мелочь 1 круга 7 — иначе сегодня учитывался дважды).
+    context["spent_today_kop"] = sum(
+        row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date == day
     )
     refs = replace(refs, budget_context=context.copy())
     prepared = []
