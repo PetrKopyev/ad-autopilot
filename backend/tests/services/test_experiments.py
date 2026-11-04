@@ -243,6 +243,21 @@ async def test_proposals_follow_hypothesis_order_and_audience_budget(experiment_
     assert set(completed_hypotheses(worker, world.business, world.ads["borderline-1"].ad_group_id)) == set(completed)
 
 
+async def test_audience_hypothesis_not_offered_without_conversion_source(experiment_world):
+    """Площадка без источника конверсий (VK без пикселя): обращений видно не будет, поэтому проверку
+    аудиторий по цене обращения не предлагаем вовсе, а не запускаем тест на 14 дней с нулевыми обращениями."""
+    world = experiment_world
+    for hypothesis in ("text", "image"):
+        running_experiment(world, hypothesis=hypothesis, status="concluded")
+    world.campaign.platform = "vk"  # весь мир в памяти: кабинет VK без пикселя (vk_priced_goal_source_id не задан)
+    worker = world.worker(dry_run=True)
+    ad = control_snapshot(world)
+    worker.remember(world.business, group_limits={ad.group_id: 70_000})
+    proposal = await create_experiment(worker, world.business, ad, design())
+    assert proposal is None
+    assert not world.repository.rows(Experiment, world.business.id, hypothesis="audience")
+
+
 def test_guardrail_rejects_clickbait_with_real_significance_test():
     day = START.date()
     control = (DaySpend(day, 10_000, 10_000, 100, 30),)

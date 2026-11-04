@@ -39,6 +39,12 @@ from app.platforms.direct_forecast import DirectForecastClient
 from app.platforms.regions import CITY_IDS, Region, RegionCache, find_region, normalize, not_found
 
 MICROS_PER_KOP = 10_000
+# Отказ на подключении и запуске: отличить агентский кабинет по подстроке можно из любого места,
+# текст отказа живёт здесь, а не копией в api/auth.py.
+AGENCY_CABINETS_UNSUPPORTED = (
+    "Агентские кабинеты не поддерживаются: подключите рекламный кабинет рекламодателя, "
+    "не управляемый через агентство (самостоятельный или прямой договор с площадкой)."
+)
 # Цели в отчёте и ключевые цели стратегии: не больше десяти.
 MAX_GOALS = 10
 AUTH_URL = "https://oauth.yandex.ru/authorize"
@@ -425,10 +431,7 @@ class DirectAdapter:
         try:
             item = data["Clients"][0]
             if str(item.get("Type", "CLIENT")).upper() != "CLIENT":
-                raise PlatformError(
-                    "Агентские кабинеты не поддерживаются: подключите рекламный кабинет рекламодателя, "
-                    "не управляемый через агентство (самостоятельный или прямой договор с площадкой)."
-                )
+                raise PlatformError(AGENCY_CABINETS_UNSUPPORTED)
             id_ = item["ClientId"]
             name = item.get("ClientInfo") or item["Login"]
             if type(id_) is not int or id_ <= 0 or not isinstance(name, str) or not name:

@@ -282,22 +282,19 @@ def yandex_start(
     return response
 
 
-AGENCY_REJECTED = "Агентские кабинеты не поддерживаются"
-
-
 async def verify_direct_account(access_token: str, login: str) -> str | None:
     """Проверка кабинета при подключении Директа. Возвращает текст отказа для агентских кабинетов
     (В5) или None, если кабинет подходит — включая нештатные сбои whoami (сеть, 5xx Директа):
     подключение из-за них не обрываем, аккаунт сохраняется, диагностика повторится на экране
     «Проверить подключения» с понятным текстом, а не JSON-ошибкой (В4 круга 4)."""
     from app.platforms.base import PlatformError
-    from app.platforms.direct import DirectAdapter
+    from app.platforms.direct import AGENCY_CABINETS_UNSUPPORTED, DirectAdapter
 
     try:
         async with DirectAdapter(access_token, client_login=login) as adapter:
             await adapter.whoami()
     except PlatformError as failure:
-        if AGENCY_REJECTED in str(failure):
+        if AGENCY_CABINETS_UNSUPPORTED in str(failure):
             return str(failure)
         return None
     return None

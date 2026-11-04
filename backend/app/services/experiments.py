@@ -120,6 +120,8 @@ async def _create_experiment(
     worker: Worker, business: Business, ad: AdSnapshot, design: ExperimentDesign
 ) -> ChangeLog | None:
     """Оба варианта используют общий бюджет группы; отдельный кэп плеча недоступен."""
+    from app.services.optimize import missing_conversion_sources  # локально: optimize импортирует этот модуль
+
     if (
         business.status != "running"
         or worker.metadata(business).get("kill_switch")
@@ -148,6 +150,10 @@ async def _create_experiment(
         .get(group.external_id, campaign.daily_limit_kop // len(siblings))
     )
     hypothesis = next_hypothesis(completed_hypotheses(worker, business, group.id), budget, experiment_settings())
+    if hypothesis == "audience" and campaign.platform in missing_conversion_sources(business):
+        # Аудитории сравниваются по цене обращения: на площадке без источника конверсий она всегда была бы
+        # бесконечной, тест занял бы группу на весь срок и выдал бы ложный «вердикт» (В1 круга 5).
+        return None
     if hypothesis is None or not 0 < design.daily_budget <= int(budget * DEFAULT_SETTINGS.test_budget_share):
         return None
     # Ключ не зависит от расписания: повтор завтра не создаёт новое предложение.

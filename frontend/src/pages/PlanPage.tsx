@@ -234,7 +234,7 @@ export function PlanPage() {
           </div>)}
           {forecast && <div className="plan-total__cell"><p className="plan-total__key">{copy.plan.forecast}{forecast.demo && <span className="plan-demo">{copy.plan.demo}</span>}</p>
             <p className="plan-total__value mono">{forecast.status === 'ready' && forecast.leads_min !== null && forecast.leads_max !== null
-              ? <>{copy.plan.forecastLeads(forecast.leads_min, forecast.leads_max)} <small>{copy.plan.forecastShortUnit}</small></>
+              ? <>{copy.plan.forecastLeads(forecast.leads_min, forecast.leads_max)} <small>{copy.plan.forecastShortUnit(forecast.leads_max)}</small></>
               : <small>{forecast.status === 'pending' && !slow ? copy.plan.forecastWait : copy.plan.forecastNone}</small>}</p>
           </div>}
           <p className="plan-total__promise"><Icon name="shield" />{copy.plan.promise}</p>

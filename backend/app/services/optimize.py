@@ -175,6 +175,10 @@ async def snapshot(
 def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int | None:
     from app.db.models import LeadsSurvey
 
+    # В опорную цену обращения идёт расход только площадок с источником конверсий: у VK без пикселя
+    # обращений ноль, и её расход раздувал бы среднюю цену, на которую опираются правила Директа.
+    missing = missing_conversion_sources(business)
+    ads = [ad for ad in ads if ad.platform not in missing]
     answers = [
         ClientAnswer(row.week_start + timedelta(days=6), row.leads_count, row.clients_count)
         for row in worker.repository.rows(LeadsSurvey, business.id)
