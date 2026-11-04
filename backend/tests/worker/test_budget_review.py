@@ -349,10 +349,12 @@ async def test_new_month_handles_platform_pause_without_author_and_never_resumes
         assert not world.changes(reason_code="BUDGET_RESUME")
 
 
-async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch):
-    """В2 круга 7: включение потерялось по границе модерации (запись failed с MODERATION_TIMEOUT), площадка
-    одобрила объявления, а кампания в кабинете ещё draft/moderation. Сверка статусов повторяет resume
-    сама — владельцу не нужно нажимать «Запустить» снова, хотя первое включение провалила граница."""
+@pytest.mark.parametrize("platform_status", ["moderation", "paused_auto"])
+async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch, platform_status):
+    """В2 круга 7 + мелочь 1 круга 8: включение потерялось по границе модерации (запись failed с
+    MODERATION_TIMEOUT), а площадка потом одобрила объявления. Кампания в кабинете ещё draft/moderation
+    или уже OFF (paused_auto — Директ после одобрения): сверка статусов повторяет resume сама — владельцу
+    не нужно нажимать «Запустить» снова, хотя первое включение провалила граница."""
     world = await make_world()
     worker = world.worker()
     key = world.refs.campaign_id
@@ -386,12 +388,17 @@ async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch):
 
     async def reviewing(refs):
         states = await real(refs)
+        # Площадка отдаёт статус до одобрения; после применённого resume отвечает актуальным состоянием.
+        if world.adapter._states[key].status == "active":
+            return states
         return {
-            key_: replace(state, status="moderation") if state.entity_type == "campaign" else state
+            key_: replace(state, status=platform_status) if state.entity_type == "campaign" else state
             for key_, state in states.items()
         }
 
     monkeypatch.setattr(world.adapter, "get_state", reviewing)
+    # Кампания в кабинете ещё не включена (площадка отдаёт статус до одобрения).
+    world.adapter._states[key] = replace(world.adapter._states[key], status=platform_status)
     from app.services.sync import sync_campaign_status
 
     await sync_campaign_status(worker, world.business)
@@ -399,6 +406,28 @@ async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch):
     # Пока новая запись pending, платформа занята и повторная сверка не дублирует включение.
     await sync_campaign_status(worker, world.business)
     assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
+
+
+async def test_sync_keeps_plain_external_pause_without_lost_activation(monkeypatch):
+    """Мелочь 1 круга 8: пауза paused_auto БЕЗ потерянного включения — прежняя внешняя пауза с честной
+    записью, а не молчаливый пропуск."""
+    world = await make_world()
+    worker = world.worker()
+    real = world.adapter.get_state
+
+    async def paused(refs):
+        states = await real(refs)
+        return {
+            key_: replace(state, status="paused_auto") if state.entity_type == "campaign" else state
+            for key_, state in states.items()
+        }
+
+    monkeypatch.setattr(world.adapter, "get_state", paused)
+    from app.services.sync import sync_campaign_status
+
+    await sync_campaign_status(worker, world.business)
+    assert not world.changes(reason_code="MODERATION_RESUME")
+    assert world.changes(reason_code="EXTERNAL_PAUSE")
 
 
 async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():

@@ -469,6 +469,7 @@ async def test_reconcile_fails_moderation_wait_after_limit(repository, tree, mon
     await service._reconcile(change, adapter, now=now + MODERATION_AWAITING_LIMIT + timedelta(minutes=1))
     assert change.status == "failed"
     assert "не подтверждает объявление" in change.evidence["_service"]["error"]
+    assert "5 дней" in change.evidence["_service"]["error"]
     assert repository.pending() == []
 
 

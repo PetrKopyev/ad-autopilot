@@ -53,6 +53,7 @@ async def month_rollover(worker: Worker, business: Business) -> None:
     # Кампании, закончившиеся по дате окончания (Direct State=ENDED): продлеваем дату и возобновляем до
     # пересчёта лимитов. Иначе rebalance их не увидит (локальный статус ещё active, а площадка прислала
     # паузу), обнулит лимит, и месячный переход пропустил бы кампанию как недоступную (В4 круга 7).
+    held_before = set(meta.get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
@@ -69,6 +70,10 @@ async def month_rollover(worker: Worker, business: Business) -> None:
                     target_id=campaign.external_id,
                 )
                 continue
+        if campaign.owner_paused or campaign.id in held_before:
+            # В2 круга 8: владелец остановил кампанию сам, или она на паузе по минимуму площадки.
+            # Дату продлеваем (иначе она останется ENDED), а включение оставляем владельцу и пересчёту.
+            continue
         await worker.apply(
             business,
             campaign,

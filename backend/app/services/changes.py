@@ -41,9 +41,9 @@ PENDING = "Площадка ещё не подтвердила предыдущ�
 # держало бы очередь платформы вечно. За границей — failed с честным текстом. Граница — 5 дней: модерация
 # в выходные реально занимает дольше суток, а сверка после одобрения включает кампанию сама (В2 круга 7).
 MODERATION_AWAITING_LIMIT = timedelta(days=5)
-_MODERATION_AWAITING_HOURS = int(MODERATION_AWAITING_LIMIT.total_seconds() // 3600)
+_MODERATION_AWAITING_DAYS = MODERATION_AWAITING_LIMIT.days
 MODERATION_TIMEOUT = (
-    f"Площадка больше {_MODERATION_AWAITING_HOURS} часов не подтверждает объявление. Проверьте его в кабинете "
+    f"Площадка больше {_MODERATION_AWAITING_DAYS} дней не подтверждает объявление. Проверьте его в кабинете "
     "площадки — возможно, оно ещё на проверке или отклонено. Изменение не применено, чтобы не блокировать остальные."
 )
 

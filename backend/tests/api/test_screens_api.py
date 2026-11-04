@@ -113,22 +113,23 @@ def test_foreign_ad(setup):
         assert client.post(f"/api/ads/999/{action}").status_code == 404
 
 
-async def test_pause_enqueues_stop_when_business_busy(monkeypatch):
-    """В3 круга 7: пока бизнес занят шагом воркера, кнопка «Остановить всю рекламу» не отвечает конфликтом
-    без следа: намерение фиксируется сразу, а остановку доводит страж бюджета по pending_stop."""
+async def test_pause_waits_for_busy_business_then_asks_to_retry(monkeypatch):
+    """В1 круга 8: пока бизнес занят шагом воркера, кнопка «Остановить всю рекламу» ждёт блокировку
+    ограниченное время и, не дождавшись, отвечает честным 409 — ничего не записав: иначе намерение
+    стиралось бы шагом воркера из его старой копии business."""
+    from app.services import screens as screens_module
+
     world = await make_world()
     worker = world.worker()
-    screens = ScreensService(worker)
+    service = ScreensService(worker)
+    monkeypatch.setattr(screens_module, "PAUSE_LOCK_WAIT", 0.1)
     monkeypatch.setattr(
         "app.services.screens.stop_all", AsyncMock(side_effect=ChangeConflict("Этот бизнес уже обрабатывается."))
     )
-    await screens.pause(world.business)
-    assert worker.metadata(world.business)["pending_stop"]["reason_code"] == "OWNER_STOP"
-    assert worker.metadata(world.business)["kill_switch"] is True
-    monkeypatch.undo()
-    await worker.run("budget_guard", 1)
-    assert world.campaign.status == "paused_owner"
-    assert worker.metadata(world.business)["pending_stop"] is None
+    with pytest.raises(ChangeConflict, match="нажмите ещё раз через минуту"):
+        await service.pause(world.business)
+    assert "pending_stop" not in worker.metadata(world.business)
+    assert "kill_switch" not in worker.metadata(world.business)
 
 
 def test_pause_resume_only_kill_switch_and_repeated_pause(setup):

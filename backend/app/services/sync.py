@@ -213,6 +213,9 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             continue
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        if campaign.status == "active" and state.status in {"draft", "moderation", "paused_auto"}:
+            if await _resume_lost_activation(worker, business, campaign, state):
+                continue
         paused_outside = (
             state.status in {"paused_auto", "paused_owner"}
             and campaign.status == "active"
@@ -225,8 +228,6 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             if campaign.owner_paused and state.status == "active":
                 campaign.owner_paused = False
                 worker.repository.save(campaign)
-            elif campaign.status == "active" and state.status in {"draft", "moderation"}:
-                await _resume_lost_activation(worker, business, campaign, state)
             continue
         await worker.apply(
             business,
@@ -244,11 +245,12 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
         worker.remember(business, campaign, below_minimum=sorted(held))
 
 
-async def _resume_lost_activation(worker: Worker, business: Business, campaign: Campaign, state) -> None:
+async def _resume_lost_activation(worker: Worker, business: Business, campaign: Campaign, state) -> bool:
     """В2 круга 7: сверка провалила ожидающее включение по границе модерации (5 дней), а площадка потом
-    одобрила объявления. Кампания локально «active», а на площадке ещё draft/moderation — без повтора она
-    так и осталась бы выключенной, хотя владельцу обещано «включится автоматически». Повторяем resume:
-    новая запись закроет очередь платформы, пока она pending, сверка не дублирует."""
+    одобрила объявления. Кампания локально «active», а на площадке ещё draft/moderation (Директ после
+    одобрения может отдать OFF, то есть paused_auto) — без повтора она так и осталась бы выключенной,
+    хотя владельцу обещано «включится автоматически». Повторяем resume: новая запись закроет очередь
+    платформы, пока она pending, сверка не дублирует. Возвращает, повторил ли resume."""
     failed = worker.repository.rows(ChangeLog, business.id, platform=campaign.platform, status="failed")
     lost = any(
         any(
@@ -262,7 +264,7 @@ async def _resume_lost_activation(worker: Worker, business: Business, campaign: 
         for item in failed
     )
     if not lost:
-        return
+        return False
     try:
         await worker.apply(
             business,
@@ -280,3 +282,4 @@ async def _resume_lost_activation(worker: Worker, business: Business, campaign: 
     except ChangeConflict:
         # Площадка ещё проверяет объявления: запись осталась pending и доведётся сверкой, как обычное включение.
         pass
+    return True

@@ -1,6 +1,8 @@
+import asyncio
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from time import monotonic
 from uuid import uuid4
 
 from app.db.models import (
@@ -15,7 +17,7 @@ from app.db.models import (
     StatsDaily,
 )
 from app.db.query import Window
-from app.demo_flags import advance_jobs
+from app.demo_flags import ADVANCING, advance_jobs
 from app.domain.budget import PLATFORM_MINIMUMS, budget_minimum, daily_minimum, stop_margin
 from app.domain.explain import PLURALS, explain_audience, explain_experiment, plural, rubles
 from app.domain.rules import first_decision_days
@@ -34,6 +36,9 @@ from app.worker.locks import busy
 AUDIENCE_RUNNING = (
     "Проверка идёт. Цену обращения сравним за весь срок, когда площадка уточнит обращения за последние дни."
 )
+# Сколько кнопка «Остановить всю рекламу» ждёт блокировку бизнеса, занятую шагом воркера (LIMITATIONS.md).
+PAUSE_LOCK_WAIT = 15.0
+PAUSE_LOCK_RETRY = 0.5
 SAME_EXCEPT = {
     "text": "Меняем только текст объявления, картинка та же.",
     "image": "Меняем только картинку, текст объявления тот же.",
@@ -185,22 +190,32 @@ class ScreensService:
 
     async def pause(self, business: Business) -> dict:
         business = self.repository.business(business.id)
-        # Пока идёт шаг воркера, кнопка не должна отвечать 409 без следа (В3 круга 7): намерение
-        # фиксируем сразу, а остановку доведёт страж бюджета по pending_stop на ближайшем ходу.
-        self.worker.remember(
-            business,
-            pending_stop={"reason_code": "OWNER_STOP", "reason_params": None, "budget_stop": False, "actor": "owner"},
-            kill_switch=True,
-        )
-        try:
-            await stop_all(business, worker=self.worker, actor="owner")
-        except ChangeConflict as conflict:
-            # Блокировка занята шагом воркера — остановку доведёт страж по pending_stop. Прочие конфликты
-            # (площадка не подтвердила остановку) по-прежнему доходят до владельца как 409. Перемотка демо
-            # держит блокировку надолго: там действия владельца ждут её окончания, как и прочие шаги мастера.
-            busy_conflict = conflict.args and conflict.args[0] == busy(business.id).args[0]
-            if advance_jobs.holds_lock(business.id) or not busy_conflict:
-                raise
+        if advance_jobs.holds_lock(business.id):
+            # Перемотка демо держит блокировку надолго: как и прочие шаги мастера, кнопка ждёт её конца.
+            raise ChangeConflict(ADVANCING)
+        # Блокировка занята шагом воркера — ждём её освобождения (до 15 секунд, как обещано в
+        # LIMITATIONS.md): остановку выполняем только под блокировкой, иначе шаг воркера перепишет
+        # settings из своей копии business и нажатие «Остановить» пропадёт (В1 круга 8).
+        deadline = monotonic() + PAUSE_LOCK_WAIT
+        while True:
+            try:
+                with self.repository.business_lock(business.id):
+                    # Под блокировкой читаем бизнес заново: шаг воркера мог уже переписать settings
+                    # (remember пишет из его копии), и остановиться нужно на свежих данных.
+                    fresh = self.repository.business(business.id)
+                    self.repository.refresh(fresh)
+                    await stop_all(fresh, worker=self.worker, actor="owner")
+                break
+            except ChangeConflict as conflict:
+                busy_conflict = conflict.args and conflict.args[0] == busy(business.id).args[0]
+                if not busy_conflict:
+                    # Прочие конфликты (площадка не подтвердила остановку) — до владельца как 409.
+                    raise
+                if monotonic() >= deadline:
+                    raise ChangeConflict(
+                        "Автопилот сейчас вносит изменения, нажмите ещё раз через минуту."
+                    ) from conflict
+                await asyncio.sleep(PAUSE_LOCK_RETRY)
         return self.status(business)
 
     async def month_spent(self, business: Business) -> int:
