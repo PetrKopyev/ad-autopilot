@@ -118,17 +118,40 @@ async def test_pause_waits_for_busy_business_then_asks_to_retry(monkeypatch):
     ограниченное время и, не дождавшись, отвечает честным 409 — ничего не записав: иначе намерение
     стиралось бы шагом воркера из его старой копии business."""
     from app.services import screens as screens_module
+    from app.worker.locks import busy
 
     world = await make_world()
     worker = world.worker()
     service = ScreensService(worker)
     monkeypatch.setattr(screens_module, "PAUSE_LOCK_WAIT", 0.1)
     monkeypatch.setattr(
-        "app.services.screens.stop_all", AsyncMock(side_effect=ChangeConflict("Этот бизнес уже обрабатывается."))
+        "app.services.screens.wait_for_lock",
+        AsyncMock(side_effect=ChangeConflict(*busy(world.business.id).args)),
     )
     with pytest.raises(ChangeConflict, match="нажмите ещё раз через минуту"):
         await service.pause(world.business)
     assert "pending_stop" not in worker.metadata(world.business)
+    assert "kill_switch" not in worker.metadata(world.business)
+
+
+async def test_pause_during_demo_advance_reports_advancing(monkeypatch):
+    """Мелочь 2 круга 9: перемотка демо, начавшаяся во время ожидания блокировки, отвечает текстом
+    про перемотку, а не 15 секунд ожидания."""
+    from app.demo_flags import advance_jobs
+    from app.services import screens as screens_module
+
+    world = await make_world()
+    worker = world.worker()
+    service = ScreensService(worker)
+    monkeypatch.setattr(screens_module, "PAUSE_LOCK_WAIT", 15.0)
+
+    async def advance_started_during_wait(*args, **kwargs):
+        advance_jobs.start(world.business.id, 1).locked = True
+        raise ChangeConflict("Идёт перемотка времени. Дождитесь окончания.")
+
+    monkeypatch.setattr("app.services.screens.wait_for_lock", advance_started_during_wait)
+    with pytest.raises(ChangeConflict, match="перемотка"):
+        await service.pause(world.business)
     assert "kill_switch" not in worker.metadata(world.business)
 
 

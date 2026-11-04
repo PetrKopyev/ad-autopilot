@@ -1,8 +1,7 @@
-import asyncio
 import re
+from contextlib import ExitStack
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from time import monotonic
 from uuid import uuid4
 
 from app.db.models import (
@@ -24,21 +23,19 @@ from app.domain.rules import first_decision_days
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import STOPPED, closed_platforms, read_spend, stop_all
-from app.services.changes import ChangeConflict
+from app.services.changes import ChangeConflict, wait_for_lock
 from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
 from app.services.optimize import experiment_expire_date, rebalance_budget
 from app.services.stats import aggregate, aggregate_budget, aggregate_daily
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
-from app.worker.locks import busy
 
 AUDIENCE_RUNNING = (
     "Проверка идёт. Цену обращения сравним за весь срок, когда площадка уточнит обращения за последние дни."
 )
 # Сколько кнопка «Остановить всю рекламу» ждёт блокировку бизнеса, занятую шагом воркера (LIMITATIONS.md).
 PAUSE_LOCK_WAIT = 15.0
-PAUSE_LOCK_RETRY = 0.5
 SAME_EXCEPT = {
     "text": "Меняем только текст объявления, картинка та же.",
     "image": "Меняем только картинку, текст объявления тот же.",
@@ -193,29 +190,23 @@ class ScreensService:
         if advance_jobs.holds_lock(business.id):
             # Перемотка демо держит блокировку надолго: как и прочие шаги мастера, кнопка ждёт её конца.
             raise ChangeConflict(ADVANCING)
-        # Блокировка занята шагом воркера — ждём её освобождения (до 15 секунд, как обещано в
-        # LIMITATIONS.md): остановку выполняем только под блокировкой, иначе шаг воркера перепишет
-        # settings из своей копии business и нажатие «Остановить» пропадёт (В1 круга 8).
-        deadline = monotonic() + PAUSE_LOCK_WAIT
-        while True:
-            try:
-                with self.repository.business_lock(business.id):
-                    # Под блокировкой читаем бизнес заново: шаг воркера мог уже переписать settings
-                    # (remember пишет из его копии), и остановиться нужно на свежих данных.
-                    fresh = self.repository.business(business.id)
-                    self.repository.refresh(fresh)
-                    await stop_all(fresh, worker=self.worker, actor="owner")
-                break
-            except ChangeConflict as conflict:
-                busy_conflict = conflict.args and conflict.args[0] == busy(business.id).args[0]
-                if not busy_conflict:
-                    # Прочие конфликты (площадка не подтвердила остановку) — до владельца как 409.
-                    raise
-                if monotonic() >= deadline:
-                    raise ChangeConflict(
-                        "Автопилот сейчас вносит изменения, нажмите ещё раз через минуту."
-                    ) from conflict
-                await asyncio.sleep(PAUSE_LOCK_RETRY)
+        # Блокировка занята шагом воркера — ждём её освобождения до 15 секунд (LIMITATIONS.md), остановку
+        # выполняем только под блокировкой: иначе шаг воркера перепишет settings из своей копии business
+        # и нажатие «Остановить» пропадёт (В1 круга 8).
+        stack = ExitStack()
+        try:
+            await wait_for_lock(stack, self.repository, business.id, PAUSE_LOCK_WAIT)
+        except ChangeConflict as conflict:
+            # Не дождались: если перемотка демо началась во время ожидания — отвечаем про перемотку.
+            if advance_jobs.holds_lock(business.id):
+                raise ChangeConflict(ADVANCING) from conflict
+            raise ChangeConflict("Автопилот сейчас вносит изменения, нажмите ещё раз через минуту.") from conflict
+        with stack:
+            # Под блокировкой читаем бизнес заново: шаг воркера мог уже переписать settings
+            # (remember пишет из его копии), и остановиться нужно на свежих данных.
+            fresh = self.repository.business(business.id)
+            self.repository.refresh(fresh)
+            await stop_all(fresh, worker=self.worker, actor="owner")
         return self.status(business)
 
     async def month_spent(self, business: Business) -> int:

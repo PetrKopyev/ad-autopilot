@@ -201,9 +201,11 @@ async def test_new_month_resumes_campaign_ended_by_finish_date(monkeypatch) -> N
     assert world.changes(reason_code="MONTH_RESUME", status="applied")
 
 
-async def test_new_month_only_extends_owner_paused_campaign_ended_by_finish_date(monkeypatch) -> None:
-    """В2 круга 8: кампания, остановленная владельцем (owner_paused) и дошедшая до ENDED к концу месяца,
-    на переходе месяца только продлевается, но не включается — включение решает владелец."""
+@pytest.mark.parametrize("hold", ["owner_paused", "below_minimum"])
+async def test_new_month_only_extends_campaign_held_by_owner_or_minimum(monkeypatch, hold) -> None:
+    """В2 круга 8 + мелочь 3 круга 9: кампания, которую владелец остановил сам (owner_paused) или которая
+    на паузе по минимуму площадки (below_minimum), и которая дошла до ENDED к концу месяца, на переходе
+    месяца только продлевается, но не включается — включение решает владелец или пересчёт лимитов."""
     world = await make_world()
     worker = world.worker()
     real_get_state = world.adapter.get_state
@@ -226,12 +228,15 @@ async def test_new_month_only_extends_owner_paused_campaign_ended_by_finish_date
     world.adapter._states[world.refs.campaign_id] = replace(
         world.adapter._states[world.refs.campaign_id], status="paused_auto"
     )
-    world.campaign.owner_paused = True
+    if hold == "owner_paused":
+        world.campaign.owner_paused = True
+    else:
+        worker.remember(world.business, below_minimum=[world.campaign.id])
     move_to(world, datetime(2026, 1, 31, 21, tzinfo=UTC))
     await worker.run("month_rollover", 1)
     assert extended == [world.refs.campaign_id], "дату окончания продлили"
     assert status(world.adapter, world.refs.campaign_id) == "paused_auto"
-    assert not world.changes(reason_code="MONTH_RESUME"), "включения нет: кампанию остановил владелец"
+    assert not world.changes(reason_code="MONTH_RESUME"), "включения нет: кампанию держат паузой"
 
 
 def move_to(world, moment: datetime) -> None:

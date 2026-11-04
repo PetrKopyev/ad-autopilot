@@ -349,6 +349,35 @@ async def test_new_month_handles_platform_pause_without_author_and_never_resumes
         assert not world.changes(reason_code="BUDGET_RESUME")
 
 
+
+def lost_activation_record(world, key):
+    """Failed-запись запуска с MODERATION_TIMEOUT — включение, потерянное по границе модерации."""
+    return ChangeLog(
+        business_id=1,
+        actor="system",
+        kind="launch",
+        platform="direct",
+        entity_type="campaign",
+        entity_id=key,
+        operations=[
+            {
+                "kind": "set_status",
+                "entity_type": "campaign",
+                "entity_id": key,
+                "field": "status",
+                "before": "paused_owner",
+                "after": "active",
+            }
+        ],
+        reason_code="LAUNCH",
+        reason_params={},
+        reason_text="Тестовый запуск.",
+        evidence={"_service": {"error": MODERATION_TIMEOUT}},
+        status="failed",
+        created_at=world.clock.now,
+    )
+
+
 @pytest.mark.parametrize("platform_status", ["moderation", "paused_auto"])
 async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch, platform_status):
     """В2 круга 7 + мелочь 1 круга 8: включение потерялось по границе модерации (запись failed с
@@ -358,32 +387,7 @@ async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch, platf
     world = await make_world()
     worker = world.worker()
     key = world.refs.campaign_id
-    world.repository.save(
-        ChangeLog(
-            business_id=1,
-            actor="system",
-            kind="launch",
-            platform="direct",
-            entity_type="campaign",
-            entity_id=key,
-            operations=[
-                {
-                    "kind": "set_status",
-                    "entity_type": "campaign",
-                    "entity_id": key,
-                    "field": "status",
-                    "before": "paused_owner",
-                    "after": "active",
-                }
-            ],
-            reason_code="LAUNCH",
-            reason_params={},
-            reason_text="Тестовый запуск.",
-            evidence={"_service": {"error": MODERATION_TIMEOUT}},
-            status="failed",
-            created_at=world.clock.now,
-        )
-    )
+    world.repository.save(lost_activation_record(world, key))
     real = world.adapter.get_state
 
     async def reviewing(refs):
@@ -408,11 +412,40 @@ async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch, platf
     assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
 
 
-async def test_sync_keeps_plain_external_pause_without_lost_activation(monkeypatch):
-    """Мелочь 1 круга 8: пауза paused_auto БЕЗ потерянного включения — прежняя внешняя пауза с честной
-    записью, а не молчаливый пропуск."""
+async def test_sync_does_not_rerun_lost_activation_after_successful_resume(monkeypatch):
+    """В2 круга 9: старая failed-запись с MODERATION_TIMEOUT не вечная. Потерянное включение повторили
+    (MODERATION_RESUME применён), потом счёт кончился и площадка отдала OFF (paused_auto): это обычная
+    внешняя пауза — EXTERNAL_PAUSE и owner_paused, без новой записи MODERATION_RESUME."""
     world = await make_world()
     worker = world.worker()
+    key = world.refs.campaign_id
+    world.repository.save(lost_activation_record(world, key))
+    world.repository.save(
+        ChangeLog(
+            business_id=1,
+            actor="system",
+            kind="resume",
+            platform="direct",
+            entity_type="campaign",
+            entity_id=key,
+            operations=[
+                {
+                    "kind": "set_status",
+                    "entity_type": "campaign",
+                    "entity_id": key,
+                    "field": "status",
+                    "before": "moderation",
+                    "after": "active",
+                }
+            ],
+            reason_code="MODERATION_RESUME",
+            reason_params={},
+            reason_text="Проверка закончена: включили кампанию снова.",
+            evidence={},
+            status="applied",
+            created_at=world.clock.now,
+        )
+    )
     real = world.adapter.get_state
 
     async def paused(refs):
@@ -426,11 +459,33 @@ async def test_sync_keeps_plain_external_pause_without_lost_activation(monkeypat
     from app.services.sync import sync_campaign_status
 
     await sync_campaign_status(worker, world.business)
-    assert not world.changes(reason_code="MODERATION_RESUME")
+    assert not world.changes(status="failed", reason_code="MODERATION_RESUME")
     assert world.changes(reason_code="EXTERNAL_PAUSE")
+    assert world.campaign.owner_paused
 
 
-async def test_scale_is_logged_cools_down_and_can_be_reverted_for_one_group():
+async def test_sync_skips_ended_campaign_with_lost_activation(monkeypatch):
+    """В2 круга 9: кампания с State=ENDED и старой потерянной записью не включается и не дёргается
+    resume — месячный переход продлит её дату сам."""
+    world = await make_world()
+    worker = world.worker()
+    key = world.refs.campaign_id
+    world.repository.save(lost_activation_record(world, key))
+    real = world.adapter.get_state
+
+    async def ended(refs):
+        states = await real(refs)
+        return {
+            key_: replace(state, status="paused_auto", ended=True) if state.entity_type == "campaign" else state
+            for key_, state in states.items()
+        }
+
+    monkeypatch.setattr(world.adapter, "get_state", ended)
+    from app.services.sync import sync_campaign_status
+
+    await sync_campaign_status(worker, world.business)
+    assert not world.changes(reason_code="MODERATION_RESUME")
+    assert not world.changes(reason_code="EXTERNAL_PAUSE")
     world = await make_world()
     worker = world.worker()
     await world.advance(worker, days=20)

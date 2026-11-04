@@ -797,6 +797,19 @@ class Worker:
         if business.status not in {"running", "budget_stop", "paused"}:
             return
         with self.repository.business_lock(business.id), self.business_clock(business):
+            # В1 круга 9: бизнес могли загрузить в начале тика (identity map держит копию весь тик), а пока
+            # шли шаги, владелец нажал «Остановить». Свежим запросом отличаем это состояние: pause уже всё
+            # остановил и довёл, и шаг не выполняем — иначе его remember сотрёт kill_switch/pending_stop
+            # из свежей записи. Сам объект не трогаем: его identity map держит и демо-перемотка
+            # (перечитывание объекта ломает её шаги).
+            db = getattr(self.repository, "db", None)
+            fresh = (
+                db.execute(select(Business.status, Business.settings).where(Business.id == business.id)).one_or_none()
+                if db is not None
+                else None
+            )
+            if fresh is not None and fresh[0] == "paused" and fresh[1].get("_worker", {}).get("kill_switch"):
+                return
             slot = (business.id, key or schedule_key(kind, self.clock.now))
             if self._rewound is not None:
                 if slot in self._rewound:

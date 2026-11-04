@@ -213,7 +213,11 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             continue
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
-        if campaign.status == "active" and state.status in {"draft", "moderation", "paused_auto"}:
+        if (
+            campaign.status == "active"
+            and state.status in {"draft", "moderation", "paused_auto"}
+            and not state.ended
+        ):
             if await _resume_lost_activation(worker, business, campaign, state):
                 continue
         paused_outside = (
@@ -252,8 +256,10 @@ async def _resume_lost_activation(worker: Worker, business: Business, campaign: 
     хотя владельцу обещано «включится автоматически». Повторяем resume: новая запись закроет очередь
     платформы, пока она pending, сверка не дублирует. Возвращает, повторил ли resume."""
     failed = worker.repository.rows(ChangeLog, business.id, platform=campaign.platform, status="failed")
-    lost = any(
-        any(
+    lost_records = [
+        item
+        for item in failed
+        if any(
             operation.get("entity_type") == "campaign"
             and operation.get("entity_id") == campaign.external_id
             and operation.get("field") == "status"
@@ -261,9 +267,14 @@ async def _resume_lost_activation(worker: Worker, business: Business, campaign: 
             for operation in item.operations
         )
         and MODERATION_TIMEOUT in (item.evidence or {}).get("_service", {}).get("error", "")
-        for item in failed
-    )
-    if not lost:
+    ]
+    if not lost_records:
+        return False
+    last_failed = max(lost_records, key=lambda item: item.id or 0)
+    applied = worker.repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id)
+    if applied is not None and (last_failed.id is None or applied.id > last_failed.id):
+        # В2 круга 9: после провала границы модерации статус кампании уже меняли применённой записью
+        # (успешный MODERATION_RESUME) — включение не потеряно, а OFF/ENDED у площадки — обычная пауза.
         return False
     try:
         await worker.apply(
