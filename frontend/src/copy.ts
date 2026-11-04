@@ -325,7 +325,7 @@ export const copy = {
     forecast: 'Прогноз на месяц',
     forecastLeads: (min: number, max: number) => `≈ ${forecastBounds(min, max).map((value) => value.toLocaleString('ru-RU')).join('–')}`,
     forecastUnit: (min: number, max: number) => `${plural(forecastBounds(min, max).slice(-1)[0], 'обращение', 'обращения', 'обращений')} за месяц`,
-    forecastShortUnit: (max: number) => plural(forecastBounds(max, max)[0], 'обращение', 'обращения', 'обращений'),
+    forecastShortUnit: (min: number, max: number) => plural(forecastBounds(min, max).slice(-1)[0], 'обращение', 'обращения', 'обращений'),
     forecastPending: 'Считаем прогноз…',
     forecastSlow: 'Яндекс долго готовит прогноз, обновите страницу позже.',
     forecastMayErr: 'Прогноз может ошибаться.',

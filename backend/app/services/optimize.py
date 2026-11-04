@@ -792,7 +792,10 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             experiment.change_id = change.id
             worker.repository.save(experiment)
     now = worker.clock.now.astimezone(MOSCOW)
-    for ad in select_borderline(ads, now, reference(worker, business, ads), tuple(occupied_groups)):
+    missing_sources = missing_conversion_sources(business)
+    for ad in select_borderline(
+        ads, now, reference(worker, business, ads), tuple(occupied_groups), platforms_without_source=missing_sources
+    ):
         group = next(item for item in groups if item.id == ad.group_id)
         days = settled_days(ad.days, today(worker.clock))
         metrics = total_metrics(days)

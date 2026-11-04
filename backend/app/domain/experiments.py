@@ -1,5 +1,5 @@
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from math import ceil
@@ -26,6 +26,7 @@ def select_borderline(
     reference_cpl: int | None,
     active_test_groups: Sequence[str] = (),
     business_days: Sequence[DaySpend] = (),
+    platforms_without_source: Collection[str] = (),
     settings: DomainSettings = DEFAULT_SETTINGS,
 ) -> tuple[AdSnapshot, ...]:
     business_days = business_days or business_history(ads)
@@ -51,6 +52,7 @@ def select_borderline(
             reference_cpl,
             median(ctrs) if ctrs else None,
             any(item.leads for item in totals.values()),
+            conversion_source=ad.platform not in platforms_without_source,
             settings=settings,
         )
         if assessment.classification == Classification.BORDERLINE:
