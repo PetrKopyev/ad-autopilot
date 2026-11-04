@@ -190,6 +190,21 @@ def freed_daily_budget(groups: Sequence[GroupSnapshot]) -> int:
     return sum(group.daily_limit for group in groups if not group.active)
 
 
+def missing_conversion_sources(business: Business) -> set[str]:
+    """Площадки без источника конверсий: для них «нет обращений» не останавливает объявления (В1 круга 4).
+    VK без пикселя (цель кабинета или общая VK_PRICED_GOAL_SOURCE_ID) всегда давала бы 0 обращений,
+    Директ без счётчика и целей Метрики — то же."""
+    from app.config import settings as config
+
+    missing = set()
+    if not (business.metrica_counter_id and business.lead_goal_ids):
+        missing.add("direct")
+    cabinet_goal = (business.settings or {}).get("vk_priced_goal_source_id")
+    if not (cabinet_goal or getattr(config, "vk_priced_goal_source_id", None)):
+        missing.add("vk")
+    return missing
+
+
 async def optimize(worker: Worker, business: Business) -> None:
     from app.config import get_domain_settings
     from app.services.launch import sync_removed_services
@@ -207,6 +222,7 @@ async def optimize(worker: Worker, business: Business) -> None:
         worker.clock.now.astimezone(MOSCOW),
         reference(worker, business, ads),
         free_daily_budget=free,
+        platforms_without_source=missing_conversion_sources(business),
         settings=get_domain_settings(),
     )
     campaigns = worker.campaigns(business)

@@ -253,7 +253,10 @@ def audience(group: dict, city: str) -> str:
     if not themes:
         return f"Регион: {city}. Ключевых фраз пока нет: добавьте услуги в описание бизнеса."
     quoted = ", ".join(f"«{theme}»" for theme in themes)
-    return f"Тем, кто ищет в Яндексе {quoted}. Регион: {city}. Объявления — в поиске и на сайтах-партнёрах Яндекса."
+    return (
+        f"Тем, кто ищет в Яндексе {quoted}. Регион: {city}. "
+        "Показываем в поиске и на других сайтах, где Яндекс размещает рекламу."
+    )
 
 
 def campaign_platform(key: str) -> str:

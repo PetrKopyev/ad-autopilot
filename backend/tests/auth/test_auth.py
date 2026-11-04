@@ -202,6 +202,27 @@ def test_agency_direct_account_is_rejected_before_saving(
     assert 1 not in repository.accounts
 
 
+def test_direct_account_survives_whoami_outage(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """В4 круга 4: сбой whoami, не про агентство (Директ вернул 503), подключение не обрывает:
+    аккаунт сохраняется и владелец попадает на шаг подключений, где проверка повторится понятным
+    текстом, а не JSON-ошибкой."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    mock_yandex.post("https://api.direct.yandex.com/json/v5/clients").respond(
+        503, json={"error": {"error_code": 1000, "error_string": "Сервис временно недоступен"}}
+    )
+    params = start(client, "direct")
+    response = callback(client, params["state"])
+    assert response.status_code == 303, response.text
+    assert response.headers["location"] == "https://testserver/setup/2"
+    account = repository.accounts[1]
+    assert (account.external_login, account.status) == ("advertiser", "ok")
+
+
 def test_me_tells_whether_setup_created_business(
     client: TestClient, repository: FakeRepository, mock_yandex: respx.MockRouter
 ) -> None:

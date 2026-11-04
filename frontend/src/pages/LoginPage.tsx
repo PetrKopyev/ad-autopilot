@@ -32,6 +32,7 @@ export function LoginPage() {
   useEffect(() => {
     const controller = new AbortController();
     let attempts = 0;
+    let retry: ReturnType<typeof setTimeout> | undefined;
     const load = () => {
       void getAuthConfig(controller.signal).then((config) => {
         if (!controller.signal.aborted) setDemo(config.demo === true);
@@ -39,12 +40,12 @@ export function LoginPage() {
         if (controller.signal.aborted) return;
         // Сразу после деплоя API поднимается дольше страницы: повторяем, потом честно говорим об ошибке.
         attempts += 1;
-        if (attempts < 5) setTimeout(load, 2000);
+        if (attempts < 5) retry = setTimeout(load, 2000);
         else { setDemo(false); setConfigFailed(true); }
       });
     };
     load();
-    return () => controller.abort();
+    return () => { controller.abort(); if (retry) clearTimeout(retry); };
   }, []);
   async function loginDemo() {
     setBusy(true); setError('');

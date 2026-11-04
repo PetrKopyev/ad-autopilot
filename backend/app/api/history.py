@@ -137,7 +137,7 @@ async def revert(
             # и возобновил бы кампании, которые «Остановить всю рекламу» пропустила (К1 круга 3).
             business = repository.business(original.business_id)
             meta = business.settings.get("_worker", {})
-            if business.status == "running" and not meta.get("kill_switch"):
+            if change.status == "applied" and business.status == "running" and not meta.get("kill_switch"):
                 worker = Worker(
                     repository,
                     resolve_adapter,

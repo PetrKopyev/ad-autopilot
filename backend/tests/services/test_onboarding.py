@@ -36,6 +36,7 @@ from app.db.models import (
     Target,
     WorkerRun,
 )
+from app.db.query import matches
 from app.platforms.base import PlatformError
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
@@ -105,25 +106,21 @@ class MemoryRepository(LaunchRepository):
         self.locked = False
 
     def rows(self, model: type, business_id: int | None = None, **keys: object) -> list:
-        """Строки модели; business_id — как у WorkerRepository: с join-семантикой для AdGroup/Ad/Target."""
-        rows = self.tables.get(model, [])
-        if business_id is not None:
-            if model is Business:
-                rows = [row for row in rows if row.id == business_id]
-            elif model is AdGroup:
-                campaign_ids = {row.id for row in self.tables.get(Campaign, []) if row.business_id == business_id}
-                rows = [row for row in rows if row.campaign_id in campaign_ids]
-            elif model in (Ad, Target):
-                campaign_ids = {row.id for row in self.tables.get(Campaign, []) if row.business_id == business_id}
-                group_ids = {row.id for row in self.tables.get(AdGroup, []) if row.campaign_id in campaign_ids}
-                rows = [row for row in rows if row.ad_group_id in group_ids]
-            else:
-                rows = [row for row in rows if getattr(row, "business_id", None) == business_id]
-        return [
-            item
-            for item in rows
-            if all(getattr(item, name) == value for name, value in keys.items())
-        ]
+        """Строки модели; business_id — с join-семантикой для AdGroup/Ad/Target, фильтры — через
+        matches() из app/db/query.py (наборы значений и окна, как в SQL-репозитории), как у
+        MemoryWorkerRepository."""
+        items = [item for item in self.tables.get(model, ()) if matches(item, keys)]
+        if business_id is None:
+            return items
+        if model is Business:
+            scope = {"id": business_id}
+        elif model is AdGroup:
+            scope = {"campaign_id": {item.id for item in self.rows(Campaign, business_id)}}
+        elif model in (Ad, Target):
+            scope = {"ad_group_id": {item.id for item in self.rows(AdGroup, business_id)}}
+        else:
+            scope = {"business_id": business_id}
+        return [item for item in items if matches(item, scope)]
 
     def put(self, item: object) -> None:
         table = self.tables.setdefault(type(item), [])
@@ -226,9 +223,7 @@ class MemoryRepository(LaunchRepository):
                 item
                 for item in self.rows(ChangeLog, business_id=business_id, status="applied")
                 if item.id >= since
-                and any(
-                    (op.get("field") if isinstance(op, dict) else op.field) == "status" for op in item.operations
-                )
+                and any(op.get("field") == "status" for op in item.operations)
             ),
             key=lambda item: item.id,
         )

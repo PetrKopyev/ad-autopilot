@@ -111,6 +111,41 @@ def test_no_leads_hard_stop_boundary_even_during_warmup(make_ad, now, clicks, ha
         assert classify(young, now, None, business_had_leads=True).reason_code == "PAUSE_NO_LEADS"
 
 
+def test_no_leads_does_not_apply_without_conversion_source(make_ad, now):
+    """В1 круга 4: у площадки без источника конверсий (пиксель VK, цели Метрики) обращения неизвестны,
+    поэтому «нет обращений» и «слишком дорого» её не останавливают — иначе автопилот гасил бы всю
+    рекламу VK после 80 кликов."""
+    ad = make_ad(clicks=100, leads=0, spend=1_000_000)
+    assert classify(ad, now, 10_000, business_had_leads=True).reason_code == "PAUSE_NO_LEADS"
+    protected = classify(ad, now, 10_000, business_had_leads=True, conversion_source=False)
+    assert protected.classification == Classification.INSUFFICIENT
+    assert protected.reason_code is None
+
+
+def test_decide_skips_no_leads_on_platforms_without_conversion_source(now):
+    """decide по умолчанию ставит объявления VK на паузу по «нет обращений», а с platforms_without_source
+    (пиксель не задан) — нет; объявления Директа с источником конверсий паузятся в обоих случаях."""
+    from datetime import UTC, datetime
+
+    from app.domain.types import AdSnapshot
+
+    now = datetime(2026, 10, 26, tzinfo=UTC)
+    groups = [GroupSnapshot(f"{p}-{i}", p, 10_000) for p in ("direct", "vk") for i in range(3)]
+    day = DaySpend(now.date() - timedelta(days=2), 1_000_000, 1_000, 100, 0)
+    ads = [
+        AdSnapshot(f"{group.id}-1", group.id, group.platform, now - timedelta(days=10), (day,))
+        for group in groups
+    ]
+    history = (DaySpend(now.date() - timedelta(days=3), impressions=1, clicks=1, leads=1),)
+    default = decide(ads, groups, now, 10_000, history)
+    protected = decide(ads, groups, now, 10_000, history, platforms_without_source={"vk"})
+    default_pauses = {item.target_id for item in default if item.action == Action.PAUSE}
+    protected_pauses = {item.target_id for item in protected if item.action == Action.PAUSE}
+    assert {ad.id for ad in ads if ad.platform == "vk"} & default_pauses, "без защиты VK останавливается"
+    assert not ({ad.id for ad in ads if ad.platform == "vk"} & protected_pauses), "пикселя нет — не трогаем"
+    assert {ad.id for ad in ads if ad.platform == "direct"} & protected_pauses, "Директ с источником — паузится"
+
+
 @pytest.mark.parametrize("leads,expected", [(2, Classification.INSUFFICIENT), (3, Classification.GOOD)])
 def test_good_requires_three_leads(make_ad, now, leads, expected):
     assert classify(make_ad(leads=leads, spend=1_000), now, 10_000).classification == expected

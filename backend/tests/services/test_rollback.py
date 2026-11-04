@@ -14,7 +14,7 @@ from sqlalchemy.dialects.postgresql import dialect
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment, PlatformAccount, User
-from app.platforms.base import AdGroupSpec, AdSpec, CampaignTreeSpec, Operation, PlatformError
+from app.platforms.base import AdGroupSpec, AdSpec, AwaitingModeration, CampaignTreeSpec, Operation, PlatformError
 from app.platforms.direct import DirectAdapter
 from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
@@ -216,6 +216,55 @@ async def test_scale_rollback_restores_group_limits_and_leaves_campaign_limits_t
     # Лимиты групп возвращены — их заберёт rebalance_budget(force=True) конечной точки.
     limits = repository.business.return_value.settings["_worker"]["group_limits"]
     assert limits == {group_id: 5_000}
+
+
+async def test_failed_scale_rollback_does_not_restore_group_limits(repository, tree, monkeypatch):
+    """В2 круга 4: площадка не приняла откат изменения по группе с group_limits (failed) — локальные
+    лимиты групп не возвращаем: «откатано» на словах, а пересчёт из несостоявшегося отката ушёл бы
+    в неверный бюджет. Inverse здесь — включение остановленного объявления (default-операция applied)."""
+    adapter, refs = tree
+    group_id = refs.groups["group"]
+    repository.business.return_value.settings = {"_worker": {"group_limits": {group_id: 7_000}}}
+    original = await applied(
+        repository,
+        adapter,
+        refs,
+        entity_type="group",
+        entity_id=group_id,
+        kind="budget",
+        reason_code="SCALE_UP",
+        reason_params={"group": "Группа", "campaign": "Откат", "old_limit": 50, "new_limit": 70},
+        evidence={"group_limits": {"before": {group_id: 5_000}, "after": {group_id: 7_000}}},
+    )
+    monkeypatch.setattr(adapter, "apply", AsyncMock(side_effect=PlatformError("outage")))
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    assert revert.status == "failed"
+    limits = repository.business.return_value.settings["_worker"]["group_limits"]
+    assert limits == {group_id: 7_000}
+
+
+async def test_pending_scale_rollback_does_not_restore_group_limits(repository, tree, monkeypatch):
+    """В2 круга 4: откат остался pending (площадка ещё проверяет включение объявления) — лимиты групп
+    не трогаем, восстановление только после applied (штатно pending досчитывает сверка воркера)."""
+    adapter, refs = tree
+    group_id = refs.groups["group"]
+    repository.business.return_value.settings = {"_worker": {"group_limits": {group_id: 7_000}}}
+    original = await applied(
+        repository,
+        adapter,
+        refs,
+        entity_type="group",
+        entity_id=group_id,
+        kind="budget",
+        reason_code="SCALE_UP",
+        reason_params={"group": "Группа", "campaign": "Откат", "old_limit": 50, "new_limit": 70},
+        evidence={"group_limits": {"before": {group_id: 5_000}, "after": {group_id: 7_000}}},
+    )
+    monkeypatch.setattr(adapter, "apply", AsyncMock(side_effect=AwaitingModeration(refs.ads["control"])))
+    revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
+    assert revert.status == "pending"
+    limits = repository.business.return_value.settings["_worker"]["group_limits"]
+    assert limits == {group_id: 7_000}
 
 
 async def test_conflict_requires_confirmation_and_records_real_before(repository, tree):

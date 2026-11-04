@@ -282,15 +282,25 @@ def yandex_start(
     return response
 
 
-async def verify_direct_account(access_token: str, login: str) -> None:
-    """Кабинет рекламодателя, а не агентский: whoami падает с понятной ошибкой для агентств (В5)."""
+AGENCY_REJECTED = "Агентские кабинеты не поддерживаются"
+
+
+async def verify_direct_account(access_token: str, login: str) -> str | None:
+    """Проверка кабинета при подключении Директа. Возвращает текст отказа для агентских кабинетов
+    (В5) или None, если кабинет подходит — включая нештатные сбои whoami (сеть, 5xx Директа):
+    подключение из-за них не обрываем, аккаунт сохраняется, диагностика повторится на экране
+    «Проверить подключения» с понятным текстом, а не JSON-ошибкой (В4 круга 4)."""
     from app.platforms.base import PlatformError
     from app.platforms.direct import DirectAdapter
 
     try:
-        await DirectAdapter(access_token, client_login=login).whoami()
+        async with DirectAdapter(access_token, client_login=login) as adapter:
+            await adapter.whoami()
     except PlatformError as failure:
-        raise yandex.YandexError(str(failure)) from None
+        if AGENCY_REJECTED in str(failure):
+            return str(failure)
+        return None
+    return None
 
 
 @router.get("/auth/yandex/callback")
@@ -325,7 +335,9 @@ async def yandex_callback(
         profile = await yandex.get_profile(tokens["access_token"])
         if oauth_state.purpose == "direct":
             # Агентские кабинеты не поддерживаются: отказ понятный и до сохранения аккаунта (В5).
-            await verify_direct_account(tokens["access_token"], profile["login"])
+            # Прочие сбои whoami аккаунт не блокируют: сохраняем и до проверяем на экране подключений (В4).
+            if rejection := await verify_direct_account(tokens["access_token"], profile["login"]):
+                raise HTTPException(400, rejection)
     except yandex.YandexError as failure:
         raise HTTPException(400, str(failure)) from None
     response = _redirect("/setup/2" if oauth_state.purpose == "direct" else "/")

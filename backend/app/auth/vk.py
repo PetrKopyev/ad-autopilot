@@ -158,7 +158,9 @@ class VkClient:
             # Retry-After длиннее reset исчерпанного окна не игнорируем: ждём max() от обоих (мелочь круга 3).
             try:
                 candidates.append(now + timedelta(seconds=max(1, int(response.headers["Retry-After"]))))
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, OverflowError):
+                # Retry-After не число или не влезает в timedelta (абсурдно большое значение):
+                # не ломаемся, просто опираемся на reset окон.
                 pass
             if not candidates:
                 candidates = [now + timedelta(seconds=retry)]

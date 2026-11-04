@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app.api import history
 from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE, get_repository
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Session, Target, User
-from app.platforms.base import ExternalRefs, Operation, PlatformError
+from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError
 from tests.services.test_onboarding import NOW, TODAY, make_world, onboard
 
 SESSION = "history-session"
@@ -146,3 +146,64 @@ def test_rebalance_failure_does_not_fail_applied_revert(api, monkeypatch) -> Non
     assert response.status_code == 200, response.text
     reverted = context.world.repository.rows(ChangeLog, reverts_id=change.id)
     assert reverted and reverted[0].status == "applied"
+
+
+def test_failed_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
+    """В2 круга 4: площадка не приняла откат SCALE (failed) — пересчёта лимитов кампаний нет:
+    лимиты групп не возвращены, а force-rebalance пересчитал бы бюджет из несостоявшегося отката.
+    В записи SCALE — также операция паузы объявления: её inverse (включение) площадка «не принимает»."""
+    client, context = api
+    change = scale_change(context.world)
+    campaign = context.world.repository.rows(Campaign, business_id=context.world.business.id)[0]
+    group = context.world.repository.rows(AdGroup, campaign_id=campaign.id)[0]
+    ad = context.world.repository.rows(Ad, ad_group_id=group.id)[0]
+    adapter = context.world.adapters[campaign.platform]
+    # Объявление реально остановлено: ожидаемое состояние в записи совпадает с площадкой, откат без
+    # подтверждения; inverse — включение, сломанный apply оставляет на площадке «paused» → failed.
+    asyncio.run(adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto")))
+    change.operations = [
+        asdict(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto")),
+        *change.operations,
+    ]
+
+    async def broken(operation):
+        raise PlatformError("outage")
+
+    monkeypatch.setattr(adapter, "apply", broken)
+    response = client.post(f"/api/history/{change.id}/revert")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+    reverted = context.world.repository.rows(ChangeLog, reverts_id=change.id)
+    assert reverted and reverted[0].status == "failed"
+    group_id = change.entity_id
+    assert context.world.business.settings["_worker"]["group_limits"] == {group_id: 7_000}
+    assert context.calls == [], "пересчёт после failed-отката ушёл бы в несостоявшийся откат (В2)"
+
+
+def test_pending_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
+    """В2 круга 4: откат остался pending (площадка проверяет включение объявления) — пересчёта нет:
+    до applied записи на площадке не подтверждена, лимиты групп в business не возвращены."""
+    client, context = api
+    change = scale_change(context.world)
+    campaign = context.world.repository.rows(Campaign, business_id=context.world.business.id)[0]
+    group = context.world.repository.rows(AdGroup, campaign_id=campaign.id)[0]
+    ad = context.world.repository.rows(Ad, ad_group_id=group.id)[0]
+    adapter = context.world.adapters[campaign.platform]
+    asyncio.run(adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto")))
+    change.operations = [
+        asdict(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto")),
+        *change.operations,
+    ]
+
+    async def awaiting_moderation(operation):
+        raise AwaitingModeration(operation.entity_id)
+
+    monkeypatch.setattr(adapter, "apply", awaiting_moderation)
+    response = client.post(f"/api/history/{change.id}/revert")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "pending"
+    reverted = context.world.repository.rows(ChangeLog, reverts_id=change.id)
+    assert reverted and reverted[0].status == "pending"
+    group_id = change.entity_id
+    assert context.world.business.settings["_worker"]["group_limits"] == {group_id: 7_000}
+    assert context.calls == [], "пересчёт до подтверждения отката пересчитал бы бюджет из несостоявшегося отката"

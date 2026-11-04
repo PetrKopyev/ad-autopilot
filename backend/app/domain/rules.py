@@ -1,5 +1,5 @@
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from math import ceil
@@ -160,8 +160,12 @@ def classify(
     group_median_ctr: Decimal | None = None,
     business_had_leads: bool = False,
     price_frozen: bool = False,
+    conversion_source: bool = True,
     settings: DomainSettings = DEFAULT_SETTINGS,
 ) -> Assessment:
+    """conversion_source — False, если у площадки объявления нет источника конверсий (пиксель VK, цели
+    Метрики): обращения по ней неизвестны, и правило «нет обращений» не останавливало бы каждое
+    объявление после no_leads_clicks кликов (В1 круга 4)."""
     metrics = total_metrics(settled_days(ad.days, now.date(), settings))
     if reference_cpl is not None:
         nonnegative_int(reference_cpl, "reference_cpl")
@@ -174,7 +178,13 @@ def classify(
         and not any(day.impressions for day in ad.days)
     ):
         return Assessment(Classification.NOT_SHOWING, metrics, "NOT_SHOWING")
-    if not price_frozen and business_had_leads and metrics.clicks >= settings.no_leads_clicks and metrics.leads == 0:
+    if (
+        conversion_source
+        and not price_frozen
+        and business_had_leads
+        and metrics.clicks >= settings.no_leads_clicks
+        and metrics.leads == 0
+    ):
         return Assessment(Classification.BAD, metrics, "PAUSE_NO_LEADS")
     if (
         metrics.impressions >= settings.min_ctr_impressions
@@ -183,6 +193,11 @@ def classify(
         and metrics.ctr < settings.low_ctr_absolute
     ):
         return Assessment(Classification.LOW_CTR, metrics, "PAUSE_LOW_CTR")
+    if not conversion_source:
+        # Площадка без источника конверсий (пиксель VK, цели Метрики): по обращениям и цене обращения
+        # её судить нечем — «нет обращений» и «слишком дорого» остановили бы всю рекламу после пары дней
+        # (В1 круга 4). Остаются CTR и «не показывается», решения по цене — как при price_frozen.
+        return Assessment(Classification.INSUFFICIENT, metrics)
     if age < timedelta(days=settings.warmup_days):
         return Assessment(Classification.INSUFFICIENT, metrics)
     if price_frozen or reference_cpl is None or metrics.clicks < settings.min_price_clicks:
@@ -209,10 +224,14 @@ def decide(
     reference_cpl: int | None,
     business_days: Sequence[DaySpend] = (),
     free_daily_budget: int = 0,
+    platforms_without_source: Collection[str] = (),
     settings: DomainSettings = DEFAULT_SETTINGS,
 ) -> tuple[Decision, ...]:
-    """free_daily_budget is unassigned capacity already released from platform caps."""
+    """free_daily_budget is unassigned capacity already released from platform caps.
+    platforms_without_source — площадки без источника конверсий: для их объявлений «нет обращений»
+    не применяется (иначе автопилот остановил бы всю рекламу VK без пикселя, В1 круга 4)."""
     nonnegative_int(free_daily_budget, "free_daily_budget")
+    no_source = set(platforms_without_source)
     group_map = {group.id: group for group in groups}
     if len(group_map) != len(groups) or len({ad.id for ad in ads}) != len(ads):
         raise ValueError("Snapshot IDs must be unique")
@@ -238,7 +257,16 @@ def decide(
         group = group_map[ad.group_id]
         if not ad.active or not group.active:
             continue
-        assessment = classify(ad, now, reference_cpl, medians.get(ad.group_id), had_leads, frozen, settings)
+        assessment = classify(
+            ad,
+            now,
+            reference_cpl,
+            medians.get(ad.group_id),
+            had_leads,
+            frozen,
+            conversion_source=ad.platform not in no_source,
+            settings=settings,
+        )
         if assessment.classification == Classification.GOOD:
             if can_change(ad, now, settings):
                 good_groups.add(ad.group_id)

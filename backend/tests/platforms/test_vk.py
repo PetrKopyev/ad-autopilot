@@ -1047,6 +1047,32 @@ async def test_add_group_retries_without_goal_when_package_rejects_it(api) -> No
     assert "priced_goal" not in sent(create, 1)
 
 
+async def test_add_group_does_not_retry_without_goal_on_unrelated_error(api) -> None:
+    """В3 круга 4: повтор без цели — только когда отказ о priced_goal. Любая другая ошибка
+    (валидатор по другому полю) обрывается сразу: повтор дублировал запрос и маскировал причину."""
+    config = configuration()
+    config.vk_priced_goal_source_id = 777
+    group = tree().groups[0]
+    packages_stub(api)
+    api.get(f"{API}/ad_groups.json").respond(json={"count": 0, "items": []})
+    api.post(f"{API}/urls.json").respond(json={"id": 7})
+    create = api.post(f"{API}/ad_groups.json")
+    create.respond(
+        400,
+        json={
+            "error": {
+                "code": "validation_failed",
+                "message": "Validation failed",
+                "fields": {"name": {"code": "invalid", "message": "Too long"}},
+            }
+        },
+    )
+    async with VkAdapter("tok", config=config, href="https://shop.example/", marking_confirmed=True) as vk:
+        with pytest.raises(PlatformError, match="name"):
+            await vk.add_group("10", group)
+    assert len(create.calls) == 1, "повтор без цели на ошибке без priced_goal маскировал бы причину"
+
+
 def _limits_client() -> VkClient:
     client = VkClient.__new__(VkClient)
     client._limits = PlatformLimits()

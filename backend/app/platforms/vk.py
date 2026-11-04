@@ -483,11 +483,13 @@ class VkAdapter(VkClient):
                 group_body["priced_goal"] = priced_goal
             try:
                 group_id = (await self._add("ad_groups", group_body))["id"]
-            except PlatformError:
-                if "priced_goal" not in group_body:
+            except PlatformError as error:
+                if "priced_goal" not in group_body or "priced_goal" not in str(error).lower():
                     raise
                 # План живёт без цели (создан до этой памяти или пережил смену кэша адаптера):
-                # повторяем без цели, как при создании плана.
+                # повторяем без цели, как при создании плана. Повтор только по отказу с priced_goal в
+                # тексте: на любой другой ошибке (таймаут, валидация имени) повтор маскировал бы
+                # настоящую причину и дублировал запрос (В3 круга 4).
                 del group_body["priced_goal"]
                 group_id = (await self._add("ad_groups", group_body))["id"]
         banners = {

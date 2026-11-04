@@ -24,7 +24,7 @@ from app.services.budget_guard import STOPPED, closed_platforms, read_spend, sto
 from app.services.changes import ChangeConflict
 from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
-from app.services.optimize import rebalance_budget
+from app.services.optimize import experiment_expire_date, rebalance_budget
 from app.services.stats import aggregate, aggregate_budget, aggregate_daily
 from app.worker.clock import MOSCOW, today
 from app.worker.jobs import Worker
@@ -453,15 +453,10 @@ class ScreensService:
             if experiment.status == "cancelled":
                 conclusion = "Проверку остановили. Победителя не выбирали."
             # Аудитории сравниваются за полный срок, а не по числу показов; у них к сроку добавляются
-            # дни на уточнение цифр площадки (settlement_days), как в experiment_expire_date.
+            # дни на уточнение цифр площадки (settlement_days). Остаток считаем через
+            # experiment_expire_date, как воркер: одна формула срока в двух местах расходилась бы.
             remaining = 0 if audiences else sum(max(0, experiment.planned_n_per_arm - arm.impressions) for arm in arms)
-            from app.domain.settings import DEFAULT_SETTINGS
-
-            extra = DEFAULT_SETTINGS.settlement_days if experiment.metric == "cpl" else 0
-            days = max(
-                0,
-                (experiment.deadline.astimezone(MOSCOW).date() - today(self.worker.clock)).days + extra,
-            )
+            days = max(0, (experiment_expire_date(experiment) - today(self.worker.clock)).days)
             hypothesis = {"text": "текст", "image": "картинку", "audience": "аудитории"}[experiment.hypothesis]
             variants = [ads.get(id_) for id_ in (experiment.control_ad_id, experiment.variant_ad_id)]
             # Варианты (А и Б) экран показывает сам, из arms; строка comparing говорит только, что между ними меняется.
