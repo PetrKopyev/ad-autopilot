@@ -4,12 +4,13 @@ import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
+from html import escape
 from time import monotonic
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 from starlette.concurrency import run_in_threadpool
@@ -309,6 +310,43 @@ async def yandex_callback(
     resume: Resumer,
     code: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
     error: Annotated[str | None, Query(max_length=256)] = None,
+) -> Response:
+    """Сюда браузер приходит переходом от Яндекса, а не запросом приложения: ошибка показывается страницей
+    с понятным текстом и ссылкой «Войти заново», а не голым JSON с code= в адресе."""
+    try:
+        return await _yandex_callback(request, repository, session, state, resume, code, error)
+    except HTTPException as failure:
+        return callback_error_page(failure.status_code, str(failure.detail))
+
+
+def callback_error_page(status: int, message: str) -> HTMLResponse:
+    page = CALLBACK_ERROR_PAGE.replace("{message}", escape(message))
+    return HTMLResponse(
+        page,
+        status_code=status,
+        headers={"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"},
+    )
+
+
+CALLBACK_ERROR_PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вход не удался — Автопилот рекламы</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#eef1f2;
+font-family:system-ui,-apple-system,sans-serif;color:#10222a}main{background:#fff;border-radius:16px;padding:32px;
+max-width:440px;margin:16px}h1{font-size:22px;margin:0 0 12px}p{margin:0 0 24px;line-height:1.5}
+a{display:inline-block;background:#10222a;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;
+font-weight:600}</style></head>
+<body><main><h1>Вход не удался</h1><p>{message}</p><a href="/">Войти заново</a></main></body></html>"""
+
+
+async def _yandex_callback(
+    request: Request,
+    repository: Repository,
+    session: Session | None,
+    state: str,
+    resume: Resumer,
+    code: str | None,
+    error: str | None,
 ) -> Response:
     oauth_state = repository.get_state(state)
     if oauth_state is None or oauth_state.user_id != (session.user_id if session else None):

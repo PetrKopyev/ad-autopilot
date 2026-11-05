@@ -280,6 +280,47 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
 
 
+async def test_rejected_ad_waits_for_launch_moderation_before_rewrite(monkeypatch):
+    """Пока включение после запуска ждёт проверки, правка текста упала бы в конфликт: отклонённое объявление
+    переписывается на опросе после проверки, а не теряет отметку навсегда."""
+    from app.platforms.base import ModerationInfo
+    from app.services.changes import MODERATION_PENDING
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    ad = next(iter(world.ads.values()))
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    launch = ChangeLog(
+        business_id=world.business.id,
+        actor="owner",
+        kind="launch",
+        platform="direct",
+        entity_type="campaign",
+        entity_id=world.campaign.external_id,
+        operations=[],
+        reason_code="LAUNCH",
+        reason_text="Запустили рекламу.",
+        evidence={"_service": {"dry_run": False, "error": MODERATION_PENDING}},
+        status="pending",
+        created_at=world.clock.now,
+    )
+    world.repository.save(launch)
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", ad.external_id, "text", ad.text, "Исправлено")])
+    await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    rewrite.assert_not_awaited()
+    assert world.business.settings["_worker"].get("rewritten", []) == []
+    launch.status = "applied"
+    world.repository.save(launch)
+    world.clock.advance(hours=1)
+    await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    rewrite.assert_awaited_once()
+    assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
+
+
 async def test_rejected_ad_is_not_rewritten_in_dry_run(monkeypatch):
     from app.platforms.base import ModerationInfo
 

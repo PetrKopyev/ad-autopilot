@@ -2947,3 +2947,125 @@ async def test_continue_works_while_vk_account_stays_disconnected(tmp_path: Path
     await ScreensService(worker).resume(world.business)
     assert world.business.status == "running"
     assert {item.platform: item.status for item in campaigns(world)} == {"direct": "active", "vk": "paused_owner"}
+
+
+class CrashOnSecondActivation(SlowModeration):
+    """Процесс упал посреди включения: первая кампания ушла ждать проверки, исход второй неизвестен."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def apply(self, operation) -> None:
+        if not self.accepted and operation.entity_type == "campaign" and operation.after == "active":
+            self.calls += 1
+            if self.calls == 2:
+                raise asyncio.CancelledError()
+        await super().apply(operation)
+
+
+async def test_abandoned_launch_is_not_enabled_after_moderation(tmp_path: Path) -> None:
+    """Запуск, брошенный посреди включения, после одобрения площадкой не включает свои кампании: сверка
+    отменяет ожидания и не повторяет включение с неизвестным исходом, а воркер останавливает созданное."""
+    adapter = CrashOnSecondActivation()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await launch(world, plan)
+    assert launch_unsettled(world.repository.latest_plan(world.business.id))
+    adapter.accepted = True
+    world.business.status = "draft"
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
+    launches = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "LAUNCH"]
+    assert launches and all(row.status != "applied" for row in launches)
+
+
+class DraftRefusesSuspend(SlowModeration):
+    """Директ не даёт остановить кампанию-черновик, пока проверяются её объявления."""
+
+    async def apply(self, operation) -> None:
+        paused = operation.after in {"paused_owner", "paused_auto"}
+        if not self.accepted and operation.entity_type == "campaign" and paused:
+            raise PlatformError("Кампания-черновик не может быть остановлена.")
+        await super().apply(operation)
+
+
+async def test_stop_during_moderation_cancels_awaiting_launch(tmp_path: Path) -> None:
+    """«Остановить всю рекламу», пока площадка проверяет объявления: после одобрения сверка не включает
+    кампанию вопреки остановке, а отменяет ожидавшее включение."""
+    from app.services.budget_guard import stop_all
+
+    adapter = DraftRefusesSuspend()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    assert len(pending_launches(world)) == 1
+    worker = recovery_worker(world, after=timedelta(minutes=5), dry_run=False)
+    with pytest.raises(ChangeConflict):
+        await stop_all(world.business, worker=worker, actor="owner")
+    adapter.accepted = True
+    await worker.changes.recover_pending(worker.resolve_adapter, business_id=world.business.id, now=worker.clock.now)
+    (campaign,) = campaigns(world)
+    assert (await states(world, campaign))[campaign.external_id].status != "active"
+    (change,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "LAUNCH"]
+    assert change.status == "failed"
+
+
+class AcceptedOff(SlowModeration):
+    """После одобрения живой Директ показывает кампанию выключенной (Status=ACCEPTED, State=OFF), а не «на
+    проверке»; одно объявление площадка может отклонить."""
+
+    def accept(self, rejected: str | None = None) -> None:
+        self.accepted = True
+        for key, state in self._states.items():
+            if state.status == "draft":
+                self._states[key] = replace(state, status="paused_auto")
+            if key == rejected:
+                self._states[key] = replace(state, status="rejected")
+
+    async def apply(self, operation) -> None:
+        state = self._states.get(operation.entity_id)
+        if state is not None and state.status == "rejected":
+            return
+        await super().apply(operation)
+
+
+@pytest.mark.parametrize("reject_ad", [False, True])
+async def test_accepted_off_campaign_is_enabled_after_moderation(tmp_path: Path, reject_ad: bool) -> None:
+    """Одобренная, но выключенная кампания включается сверкой; отклонённое объявление не проваливает включение
+    остальных."""
+    adapter = AcceptedOff()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (change,) = pending_launches(world)
+    rejected = next(iter(load_refs_of(change).ads.values())) if reject_ad else None
+    adapter.accept(rejected)
+    worker = recovery_worker(world, after=timedelta(hours=2), dry_run=False)
+    await worker.changes.recover_pending(worker.resolve_adapter, business_id=world.business.id, now=worker.clock.now)
+    (campaign,) = campaigns(world)
+    assert (await states(world, campaign))[campaign.external_id].status == "active"
+    assert change.status == "applied"
+
+
+def load_refs_of(change: ChangeLog) -> ExternalRefs:
+    from app.services.changes import load_refs
+
+    return load_refs(change)
+
+
+async def test_reading_jobs_run_while_launch_awaits_moderation(tmp_path: Path, caplog) -> None:
+    """Пока площадка проверяет объявления, шаги чтения (статистика, модерация) работают, а шаги, которые меняют
+    рекламу, ждут без ERROR в журнале."""
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": SlowModeration()}
+    )
+    await launch(world, plan)
+    assert pending_launches(world)
+    world.business.status = "running"
+    worker = recovery_worker(world, after=timedelta(hours=7), dry_run=False)
+    await worker.run("sync_stats", world.business.id, key="r11-stats")
+    with pytest.raises(ChangeConflict):
+        await worker.run("optimize", world.business.id, key="r11-optimize")
+    rows = world.repository.tables.get(WorkerRun, [])
+    runs = {row.kind: row.status for row in rows if (row.slot_key or "").startswith("r11-")}
+    assert runs == {"sync_stats": "ok", "optimize": "failed"}

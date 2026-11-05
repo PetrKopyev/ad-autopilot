@@ -68,6 +68,32 @@ it('после сохранения отправляет все поля и по
     confirmed_in_platform: { direct: true, vk: false } });
 });
 
+it('неполный телефон: ошибка у поля, как в мастере, а не общая', async () => {
+  const block = await marking();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+  fireEvent.change(block.getByRole('textbox', { name: copy.setup.advertiser.taxId }), { target: { value: '500100732259' } });
+  fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.phone }), { target: { value: '+7 (999) 123-45-6' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  const phone = block.getByRole('textbox', { name: copy.launchFlow.phone });
+  expect(phone.getAttribute('aria-invalid')).toBe('true');
+  expect(document.getElementById('settings-phone-error')?.textContent).toBe(copy.setup.advertiser.phoneError);
+  expect(block.queryByText(copy.launchFlow.markingError)).toBeNull();
+  expect(saveMarking).not.toHaveBeenCalled();
+});
+
+it('подтверждение маркировки во ВКонтакте — только когда ВКонтакте подключён', async () => {
+  mockAccounts = [direct];
+  let block = await marking();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+  expect(block.getByRole('checkbox', { name: copy.launchFlow.confirmDirect })).toBeTruthy();
+  expect(block.queryByRole('checkbox', { name: copy.launchFlow.confirmVk })).toBeNull();
+  cleanup();
+  mockAccounts = [direct, { ...direct, id: 6, platform: 'vk' }];
+  block = await marking();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+  expect(block.getByRole('checkbox', { name: copy.launchFlow.confirmVk })).toBeTruthy();
+});
+
 it('без сохранённой маркировки сразу показывает форму', async () => {
   const block = await marking({ ...business, marking: null });
   expect((block.getByRole('textbox', { name: copy.setup.advertiser.taxId }) as HTMLInputElement).value).toBe('');

@@ -35,6 +35,9 @@ CLOSED_ACCOUNT = (PlatformError, LookupError, InvalidToken)
 
 # Тексты конфликтов доходят до владельца (409): без слов «сверка» и «применение».
 PENDING = "Площадка ещё не подтвердила предыдущее изменение. Попробуйте через несколько минут."
+PENDING_MODERATION = (
+    "Площадка ещё проверяет объявления после запуска. Менять рекламу можно будет после проверки — обычно до суток."
+)
 
 # Сколько изменение может ждать проверки объявления площадкой. Неизвестный статус площадки (например,
 # терминальный статус VK вне известного набора) читается как «на проверке»: без границы такое изменение
@@ -50,6 +53,10 @@ MODERATION_TIMEOUT = (
 # Пометка ожидания проверки площадкой: общая для записи, оставленной отказом включения, и для сверки ожидания.
 # Запуск по ней отличает ожидание модерации от молчащей площадки и объясняет владельцу честно.
 MODERATION_PENDING = "Площадка ещё проверяет объявление. Включим его, как только одобрит."
+ABANDONED_LAUNCH = (
+    "Запуск рекламы прервался до включения кампании: включение отменено, повторный запуск включит её заново."
+)
+STOPPED_WHILE_AWAITING = "Рекламу остановили, пока площадка проверяла объявления: включение отменено."
 
 
 class ChangeConflict(ValueError):
@@ -133,6 +140,20 @@ def differences(
                 }
             )
     return result
+
+
+def without_rejected_ads(mismatches: list[dict], states: Mapping[str, EntityState]) -> list[dict]:
+    """Отклонённое площадкой объявление не проваливает включение всей кампании: остальные одобренные объявления
+    работают, а отклонённое переписывает сверка модерации."""
+    return [
+        item
+        for item in mismatches
+        if not (
+            item["entity_type"] == "ad"
+            and (state := states.get(item["entity_id"])) is not None
+            and state.status == "rejected"
+        )
+    ]
 
 
 def awaiting_moderation(operations: Sequence[Operation], states: Mapping[str, EntityState]) -> bool:
@@ -559,16 +580,24 @@ class ChangesService:
         protective_stop = actor in {"system", "owner"} and all(
             op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )
-        if not protective_stop and any(
-            item.platform == platform
+        blocking = [
+            item
+            for item in self.repository.pending(business_id)
+            if item.platform == platform
             and not (
                 skip_pending_plan is not None
                 and item.reason_code == "LAUNCH"
                 and item.evidence.get("plan_id") == skip_pending_plan
+                and (item.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
             )
-            for item in self.repository.pending(business_id)
-        ):
-            raise ChangeConflict(PENDING)
+        ]
+        if not protective_stop and blocking:
+            awaiting = all(
+                item.reason_code == "LAUNCH"
+                and (item.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
+                for item in blocking
+            )
+            raise ChangeConflict(PENDING_MODERATION if awaiting else PENDING)
         if any(op.entity_id not in refs.entity_ids() for op in operations):
             raise ValueError("Операции должны относиться к переданному дереву кампании.")
         if actor == "autopilot" and not dry_run:
@@ -625,6 +654,11 @@ class ChangesService:
         await self._reconcile(change, adapter, now=now)
         return change
 
+    def _stopped(self, business_id: int) -> bool:
+        business = self.repository.business(business_id)
+        meta = (business.settings or {}).get("_worker") or {}
+        return bool(meta.get("kill_switch") or meta.get("pending_stop")) or business.status in {"paused", "budget_stop"}
+
     @staticmethod
     def _metadata(change: ChangeLog, **values) -> None:
         evidence = deepcopy(change.evidence)
@@ -642,9 +676,34 @@ class ChangesService:
             from app.platforms.vk import VkAdapter
 
             platform_pauses = isinstance(adapter, (DirectAdapter, VkAdapter))
+            service = change.evidence.get("_service") or {}
+            awaited = service.get("error") == MODERATION_PENDING
+            abandoned = bool(service.get("abandoned"))
+            if awaited and self._stopped(change.business_id):
+                # Владелец или страж остановили рекламу, пока площадка проверяла объявления: включение, которое
+                # ждало одобрения, отменяется — иначе после одобрения сверка включила бы рекламу вопреки остановке.
+                change.status = "failed"
+                self._metadata(change, error=STOPPED_WHILE_AWAITING)
+                self.repository.save(change)
+                return
             states = await adapter.get_state(refs)
             mismatches = differences(operations, states, platform_pauses=platform_pauses)
-            if not mismatches and awaiting_moderation(operations, states):
+            if awaited and mismatches:
+                # После одобрения площадка может показать кампанию выключенной (Директ: Status=ACCEPTED,
+                # State=OFF), а не «на проверке»: включение, которое ждало одобрения, повторяем и для неё,
+                # иначе запись провалилась бы, а одобренная кампания так и не включилась.
+                states, mismatches = await self._repeat_awaiting_activation(
+                    adapter, operations, refs, states, platform_pauses, retry_paused=True
+                )
+                mismatches = without_rejected_ads(mismatches, states)
+            elif not mismatches and awaiting_moderation(operations, states) and abandoned:
+                # Включение брошенного запуска (упал процесс, за кампанией никто не следит) не доводим: площадка
+                # ещё не включила кампанию — значит, включение не прошло, и повтор запустил бы её без присмотра.
+                change.status = "failed"
+                self._metadata(change, error=ABANDONED_LAUNCH)
+                self.repository.save(change)
+                return
+            elif not mismatches and awaiting_moderation(operations, states):
                 # Объявление или кампания ещё на проверке: повторяем ожидающее включение (площадки принимают
                 # повторный moderate/resume) и сверяем снова. Живой Директ отклоняет resume кампании-черновика
                 # v501, пока не одобрены её объявления, — без повтора включение ждало бы ручного запуска
@@ -691,11 +750,14 @@ class ChangesService:
         refs: ExternalRefs,
         states: Mapping[str, EntityState],
         platform_pauses: bool,
+        *,
+        retry_paused: bool = False,
     ) -> tuple[Mapping[str, EntityState], list[dict]]:
         """Повтор применения включений по сущностям, которые площадка ещё проверяет, и перечитывание состояния.
         Бюджеты, тексты и таргетинг не трогаем: повторяется только активация, остальное сверяется как обычно.
         Ошибка повтора (площадка снова отклонила включение как ожидающее проверки) — не провал: возвращаем
         прежнее состояние, изменение остаётся pending с прежним текстом и той же границей ожидания."""
+        retry = {"pending", "moderation", "draft"} | ({"paused_auto", "paused_owner"} if retry_paused else set())
         try:
             for op in final_operations(operations):
                 state = states.get(op.entity_id)
@@ -705,7 +767,7 @@ class ChangesService:
                     and op.entity_type in {"ad", "campaign"}
                     and op.kind == "set_status"
                     and op.after == "active"
-                    and state.status in {"pending", "moderation", "draft"}
+                    and state.status in retry
                 ):
                     await adapter.apply(op)
         except PlatformError:

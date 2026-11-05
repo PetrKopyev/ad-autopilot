@@ -158,3 +158,20 @@ it('phoneDigits: 10 цифр после +7, код страны отброшен
   expect(phoneDigits('+7 ')).toBe('');
   expect(phoneDigits('+7 (999')).toBe('999');
 });
+
+it('выделить весь номер и нажать Backspace — поле очищается', () => {
+  render(<Field initial="+7 (999) 123-45-67" />);
+  input().setSelectionRange(0, 18);
+  const event = fireEvent.keyDown(input(), { key: 'Backspace' });
+  expect(event).toBe(true); // не отменено: выделенное стирает браузер
+  typeAt('', 0);
+  expect(value).toBe('');
+});
+
+it('выделенный кусок номера стирается целиком, а не одна цифра перед ним', () => {
+  render(<Field initial="+7 (999) 123-45-67" />);
+  input().setSelectionRange(9, 12);
+  expect(fireEvent.keyDown(input(), { key: 'Backspace' })).toBe(true);
+  typeAt('+7 (999) -45-67', 9);
+  expect(value).toBe('+7 (999) 456-7');
+});

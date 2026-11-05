@@ -190,6 +190,10 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   const [editing, setEditing] = useState(!business.marking);
   const [marking, setMarking] = useState<Marking>(() => markingForm(stored));
   const [innTouched, setInnTouched] = useState(false);
+  const [phoneTouched, setPhoneTouched] = useState(false);
+  const accounts = useSession().data?.accounts ?? [];
+  // Подтверждать маркировку можно только в подключённом кабинете; Директ — основная площадка, он есть всегда.
+  const platforms = (['direct', 'vk'] as const).filter((platform) => platform === 'direct' || accounts.some((item) => item.platform === platform));
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
   const showInnError = (innTouched || !!marking.inn) && !innOk;
@@ -197,13 +201,15 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   const confirmed = stored ? (['direct', 'vk'] as const).filter((platform) => stored.confirmed_in_platform[platform]) : [];
   // Передача данных — по площадкам: кабинет принял данные сам или ждёт заполнения владельцем.
   const transmission = stored?.transmission;
+  const phoneError = phoneTouched && phoneDigits(marking.phone).length !== 10 ? copy.setup.advertiser.phoneError : undefined;
   function edit() {
-    section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setEditing(true);
+    section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setPhoneTouched(false); setEditing(true);
   }
   function submit() {
-    setInnTouched(true);
+    setInnTouched(true); setPhoneTouched(true);
     if (!innOk) { void section.run(() => Promise.reject(new Error(innError))); return; }
-    if (!marking.name.trim() || phoneDigits(marking.phone).length !== 10) {
+    if (phoneDigits(marking.phone).length !== 10) { void section.run(() => Promise.reject(new Error(copy.setup.advertiser.phoneError))); return; }
+    if (!marking.name.trim()) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
     void section.run(async () => {
@@ -222,9 +228,10 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
             aria-describedby={describedBy('settings-inn', undefined, showInnError)} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></Field>
       </div>
       <Field id="settings-name" label={copy.launchFlow.fullName}><input id="settings-name" className="input" required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></Field>
-      <Field id="settings-phone" label={copy.launchFlow.phone}><PhoneInput id="settings-phone" className="input" required placeholder="+7 (999) 123-45-67" value={marking.phone} onChange={(phone) => set({ phone })} /></Field>
+      <Field id="settings-phone" label={copy.launchFlow.phone} error={phoneError}><PhoneInput id="settings-phone" className="input" required placeholder="+7 (999) 123-45-67" value={marking.phone}
+        aria-invalid={!!phoneError} aria-describedby={describedBy('settings-phone', undefined, !!phoneError)} onChange={(phone) => set({ phone })} /></Field>
       <p className="notice">{copy.launchFlow.markingOverwrite}</p>
-      {(['direct', 'vk'] as const).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
+      {platforms.map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
         onChange={(event) => set({ confirmed_in_platform: { ...marking.confirmed_in_platform, [platform]: event.target.checked } })} />
         {platform === 'direct' ? copy.launchFlow.confirmDirect : copy.launchFlow.confirmVk}</label>)}
       <Status section={section} />

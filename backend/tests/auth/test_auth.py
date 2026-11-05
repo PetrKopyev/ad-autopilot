@@ -198,7 +198,7 @@ def test_agency_direct_account_is_rejected_before_saving(
     params = start(client, "direct")
     response = callback(client, params["state"])
     assert response.status_code == 400
-    assert "Агентские кабинеты не поддерживаются" in response.json()["detail"]
+    assert "Агентские кабинеты не поддерживаются" in response.text and "text/html" in response.headers["content-type"]
     assert 1 not in repository.accounts
 
 
@@ -763,3 +763,11 @@ def test_failed_resume_after_reconnect_keeps_redirect_and_logs_no_details(
     response = callback(client, start(client, "direct")["state"])
     assert response.status_code == 303 and repository.accounts[1].status == "ok"
     assert "RuntimeError" in caplog.text and "secret-token" not in caplog.text
+
+
+def test_callback_error_is_a_page_not_json(client: TestClient) -> None:
+    """Браузер пришёл переходом от Яндекса: ошибка входа — страница с текстом и ссылкой, без голого JSON."""
+    response = client.get("/api/auth/yandex/callback", params={"state": "unknown<script>", "code": "x"})
+    assert response.status_code == 400 and "text/html" in response.headers["content-type"]
+    assert "Не удалось проверить вход" in response.text and 'href="/"' in response.text
+    assert "<script>" not in response.text and response.headers["referrer-policy"] == "no-referrer"

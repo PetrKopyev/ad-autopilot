@@ -572,8 +572,16 @@ def test_invalid_inn(inn: str) -> None:
 def test_phone_is_normalized_and_validated() -> None:
     assert normalize_phone("8 (900) 123-45-67") == "+79001234567"
     assert normalize_phone("+7 900 123 45 67") == "+79001234567"
+    assert normalize_phone("+7 (987) 635-30-69") == "+79876353069"
+    assert normalize_phone("9001234567") == "+79001234567"
+
+
+@pytest.mark.parametrize(
+    "phone", ["12345", "", "abc0000000000", "+7 (012) 345-67-89", "99912345678", "+7 900 123 45 678", "900-12a-45-67"]
+)
+def test_phone_rejects_garbage(phone: str) -> None:
     with pytest.raises(OnboardingError):
-        normalize_phone("12345")
+        normalize_phone(phone)
 
 
 def test_niche_detection() -> None:

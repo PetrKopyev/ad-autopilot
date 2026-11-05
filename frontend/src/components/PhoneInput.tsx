@@ -52,6 +52,8 @@ export function PhoneInput({ value, onChange, onFocus, onKeyDown, onPaste, ...pr
   function keydown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== 'Backspace' && event.key !== 'Delete') return;
     const input = event.currentTarget;
+    // Выделенный кусок стирает сам браузер, а change переформатирует остаток.
+    if (input.selectionStart !== input.selectionEnd) return;
     const caret = input.selectionStart ?? 0;
     const digits = phoneDigits(input.value);
     const before = phoneDigits(input.value.slice(0, caret)).length;

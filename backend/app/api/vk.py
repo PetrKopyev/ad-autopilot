@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from app.api.auth import Resumer
 from app.api.limits import vk_key_limit, vk_start_limit
@@ -23,8 +23,8 @@ Accounts = Annotated[vk.VkAccountRepository, Depends(get_vk_accounts)]
 
 
 class VkKey(BaseModel):
-    client_id: str
-    client_secret: SecretStr
+    client_id: str = Field(max_length=128)
+    client_secret: SecretStr = Field(max_length=512)
     business_id: int | None = None
 
 

@@ -1003,8 +1003,16 @@ async def recover_launch(worker: Worker, business: Business) -> None:
     # как только площадка одобрит объявления, — а созданное остановлено и за ним никто не следит.
     plans = {plan.id: plan for plan in worker.repository.rows(Plan, business.id)}
     for change in worker.repository.pending(business.id):
-        if (plan := plans.get(change.evidence.get("plan_id"))) is not None and awaiting_launch_enable(plan, change):
+        plan = plans.get(change.evidence.get("plan_id"))
+        if plan is None or change.reason_code != "LAUNCH":
+            continue
+        if awaiting_launch_enable(plan, change):
             cancel_launch_change(worker.changes, change)
+        elif launch_unsettled(plan):
+            # Исход включения брошенного запуска неизвестен: сверка узнаёт, включилась ли кампания, но не повторяет
+            # включение — иначе кампания проваленного запуска заработала бы без присмотра.
+            worker.changes._metadata(change, abandoned=True)
+            worker.repository.save(change)
     if worker.repository.pending(business.id):
         await worker.changes.recover_pending(worker.resolve_adapter, business_id=business.id, now=worker.clock.now)
     for plan in worker.repository.rows(Plan, business.id):

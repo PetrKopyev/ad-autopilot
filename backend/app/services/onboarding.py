@@ -157,10 +157,12 @@ def valid_inn(inn: str) -> bool:
 
 
 def normalize_phone(phone: str) -> str:
+    """Российский номер из 10 цифр после +7 (или 8). Буквы и прочий мусор не принимаются: телефон уходит
+    в данные рекламодателя площадки для маркировки."""
     digits = re.sub(r"[^0-9]", "", phone)
     if len(digits) == 11 and digits[0] in "78":
-        return "+7" + digits[1:]
-    if len(digits) == 10:
+        digits = digits[1:]
+    if re.fullmatch(r"[+0-9()\s-]*", phone) and len(digits) == 10 and digits[0] in "3456789":
         return "+7" + digits
     raise OnboardingError("Укажите телефон в российском формате, например +7 900 000-00-00.")
 
