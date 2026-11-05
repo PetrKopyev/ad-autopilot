@@ -216,16 +216,24 @@ def waiting(lock: Callable[[], AbstractContextManager], seconds: float) -> Itera
         yield
 
 
-async def wait_for_lock(stack: ExitStack, repository: "ChangesRepository", business_id: int, seconds: float) -> None:
+async def wait_for_lock(
+    stack: ExitStack,
+    repository: "ChangesRepository",
+    business_id: int,
+    seconds: float,
+    *,
+    advancing_aborts: bool = False,
+) -> None:
     """Берёт блокировку бизнеса, дожидаясь, пока её отпустят (шаг воркера, другая запись); ждёт без блокировки цикла
-    событий. Не дождались за seconds — ChangeConflict."""
+    событий. Не дождались за seconds — ChangeConflict. advancing_aborts: выход сразу, когда бизнес заняла перемотка
+    демо, — её блокировку ждать до конца срока бессмысленно."""
     deadline = monotonic() + seconds
     while True:
         try:
             stack.enter_context(repository.business_lock(business_id))
             return
         except ChangeConflict:
-            if monotonic() >= deadline:
+            if monotonic() >= deadline or (advancing_aborts and advance_jobs.holds_lock(business_id)):
                 raise
         await asyncio.sleep(0.5)
 

@@ -132,6 +132,13 @@ class WorkerRepository(NoticesRepository, ChangesRepository):
     def refresh(self, item) -> None:
         self.db.refresh(item)
 
+    def fresh_business_state(self, business_id: int) -> tuple[str, dict] | None:
+        """Свежие (status, settings) напрямую из базы, минуя identity map: тик держит копию бизнеса
+        весь цикл, а владелец мог уже нажать «Остановить» или «Продолжить». None — бизнес удалён."""
+        return self.db.execute(
+            select(Business.status, Business.settings).where(Business.id == business_id)
+        ).one_or_none()
+
     def remove(self, item) -> None:
         self.db.delete(item)
         self.db.commit()
@@ -356,6 +363,11 @@ class MemoryWorkerRepository(WorkerRepository):
     def refresh(self, item) -> None:
         pass
 
+    def fresh_business_state(self, business_id: int) -> tuple[str, dict]:
+        # Объект в памяти один на всех: свежим он и есть (Worker.run сравнит его с самим собой).
+        business = self.business(business_id)
+        return business.status, business.settings
+
     def business(self, business_id: int) -> Business:
         business = self.find(Business, id=business_id)
         if business is None:
@@ -552,8 +564,10 @@ class Worker:
         return deepcopy(business.settings.get("_worker", {}))
 
     def remember(self, business: Business, *items, **values) -> None:
-        """items — строки, которые сохраняются тем же commit."""
-        business.settings = business.settings | {"_worker": self.metadata(business) | values}
+        """items — строки, которые сохраняются тем же commit. Значения копируются: иначе словарь
+        вызывающего (approvals в цикле sync_moderation) оставался бы в settings по ссылке, его
+        мутации после commit меняли бы объект без записи — и объект расходился бы с базой."""
+        business.settings = business.settings | {"_worker": self.metadata(business) | deepcopy(values)}
         self.repository.save(business, *items)
 
     def refs(self, campaign: Campaign, entities: dict | None = None) -> ExternalRefs:
@@ -797,18 +811,15 @@ class Worker:
         if business.status not in {"running", "budget_stop", "paused"}:
             return
         with self.repository.business_lock(business.id), self.business_clock(business):
-            # В1 круга 9: бизнес могли загрузить в начале тика (identity map держит копию весь тик), а пока
-            # шли шаги, владелец нажал «Остановить». Свежим запросом отличаем это состояние: pause уже всё
-            # остановил и довёл, и шаг не выполняем — иначе его remember сотрёт kill_switch/pending_stop
-            # из свежей записи. Сам объект не трогаем: его identity map держит и демо-перемотка
-            # (перечитывание объекта ломает её шаги).
-            db = getattr(self.repository, "db", None)
-            fresh = (
-                db.execute(select(Business.status, Business.settings).where(Business.id == business.id)).one_or_none()
-                if db is not None
-                else None
-            )
-            if fresh is not None and fresh[0] == "paused" and fresh[1].get("_worker", {}).get("kill_switch"):
+            # В1 кругов 9–10: бизнес могли загрузить в начале тика (identity map держит копию весь тик),
+            # а пока шли шаги, владелец нажал «Остановить»/«Продолжить» или отменил запись об остановке.
+            # Если свежая строка отличается от копии, перечитываем объект под блокировкой: иначе remember
+            # шага вернул бы старые kill_switch/pending_stop поверх свежей записи. Перемотка демо коммитит
+            # каждый шаг под этой же блокировкой: её копия совпадает с базой, refresh не случается.
+            fresh = self.repository.fresh_business_state(business.id)
+            if fresh is not None and tuple(fresh) != (business.status, business.settings):
+                self.repository.refresh(business)
+            if business.status not in {"running", "budget_stop", "paused"}:
                 return
             slot = (business.id, key or schedule_key(kind, self.clock.now))
             if self._rewound is not None:

@@ -135,23 +135,38 @@ async def test_pause_waits_for_busy_business_then_asks_to_retry(monkeypatch):
 
 
 async def test_pause_during_demo_advance_reports_advancing(monkeypatch):
-    """Мелочь 2 круга 9: перемотка демо, начавшаяся во время ожидания блокировки, отвечает текстом
-    про перемотку, а не 15 секунд ожидания."""
-    from app.demo_flags import advance_jobs
+    """Мелочь 2 кругов 9–10: перемотка демо, начавшаяся во время ожидания блокировки, отвечает
+    текстом про перемотку сразу, а не дожидается конца срока ожидания."""
+    from contextlib import contextmanager
+    from time import monotonic
+
+    from app.demo_flags import ADVANCING, advance_jobs
     from app.services import screens as screens_module
 
     world = await make_world()
     worker = world.worker()
     service = ScreensService(worker)
-    monkeypatch.setattr(screens_module, "PAUSE_LOCK_WAIT", 15.0)
+    monkeypatch.setattr(screens_module, "PAUSE_LOCK_WAIT", 10.0)
 
-    async def advance_started_during_wait(*args, **kwargs):
-        advance_jobs.start(world.business.id, 1).locked = True
-        raise ChangeConflict("Идёт перемотка времени. Дождитесь окончания.")
+    attempts = 0
 
-    monkeypatch.setattr("app.services.screens.wait_for_lock", advance_started_during_wait)
+    @contextmanager
+    def busy_then_advancing(business_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # Первая попытка: блокировку держит шаг воркера.
+            raise ChangeConflict("Этот бизнес уже обрабатывается.")
+        # Со второй попытки началась перемотка демо: она держит блокировку надолго.
+        progress = advance_jobs.get(world.business.id) or advance_jobs.start(world.business.id, 1)
+        progress.locked = True
+        raise ChangeConflict(ADVANCING)
+
+    monkeypatch.setattr(world.repository, "business_lock", busy_then_advancing)
+    started = monotonic()
     with pytest.raises(ChangeConflict, match="перемотка"):
         await service.pause(world.business)
+    assert monotonic() - started < 3.0, "ответ ждал конца срока, хотя перемотка держит блокировку"
     assert "kill_switch" not in worker.metadata(world.business)
 
 

@@ -725,3 +725,17 @@ def test_notices_without_target_are_grouped_by_text_not_merged(repository) -> No
     )
     unread = repository.unread_notifications(business_id, {"ANOMALY"}, 10, NOW)
     assert sorted(row.log[0]["text"] for row in unread) == ["Сайт не открывается", "Счётчик молчит"]
+
+
+def test_remember_copies_caller_dicts(repository) -> None:
+    """remember копирует значения: иначе словарь вызывающего (approvals в цикле sync_moderation)
+    оставался бы в settings по ссылке, его мутации после commit меняли бы объект без записи —
+    объект расходился с базой, а refresh в перемотке усиливал расхождение (e2e-флак круга 10)."""
+    world = tree(repository)
+    worker = Worker(repository, lambda *_: None, clock=VirtualClock(NOW))
+    approvals = {"direct:a-1": NOW.isoformat()}
+    worker.remember(world.business, approvals=approvals, rewritten=[])
+    approvals["direct:a-2"] = NOW.isoformat()
+    stored = worker.metadata(world.business)
+    assert list(stored["approvals"]) == ["direct:a-1"]
+    assert stored["rewritten"] == []

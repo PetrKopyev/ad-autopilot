@@ -195,7 +195,9 @@ class ScreensService:
         # и нажатие «Остановить» пропадёт (В1 круга 8).
         stack = ExitStack()
         try:
-            await wait_for_lock(stack, self.repository, business.id, PAUSE_LOCK_WAIT)
+            # Перемотка демо, начавшаяся во время ожидания, отпускает блокировку не раньше конца перемотки:
+            # ждать её до конца срока бессмысленно — выходим сразу (мелочь 2 круга 10).
+            await wait_for_lock(stack, self.repository, business.id, PAUSE_LOCK_WAIT, advancing_aborts=True)
         except ChangeConflict as conflict:
             # Не дождались: если перемотка демо началась во время ожидания — отвечаем про перемотку.
             if advance_jobs.holds_lock(business.id):

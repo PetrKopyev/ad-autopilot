@@ -29,7 +29,7 @@ pytestmark = pytest.mark.db
 
 
 @pytest.fixture(autouse=True)
-def cleanup_committed_world(engine=None):
+def cleanup_committed_world():
     """committed_world коммитит бизнес настоящим commit (второй сессии его иначе не видно) —
     подчищаем после каждого теста, savepoint-фикстура db_session их не откатит."""
     yield

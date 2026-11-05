@@ -270,9 +270,9 @@ async def _resume_lost_activation(worker: Worker, business: Business, campaign: 
     ]
     if not lost_records:
         return False
-    last_failed = max(lost_records, key=lambda item: item.id or 0)
+    last_failed = max(lost_records, key=lambda item: item.id)
     applied = worker.repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id)
-    if applied is not None and (last_failed.id is None or applied.id > last_failed.id):
+    if applied is not None and applied.id > last_failed.id:
         # В2 круга 9: после провала границы модерации статус кампании уже меняли применённой записью
         # (успешный MODERATION_RESUME) — включение не потеряно, а OFF/ENDED у площадки — обычная пауза.
         return False
