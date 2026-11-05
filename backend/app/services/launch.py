@@ -99,6 +99,31 @@ CLOSED = "Кабинет площадки не подключён или тре�
 INTERRUPTED_STOP = (
     "Запуск рекламы прервался, и за этой кампанией никто не следил. Остановили её, чтобы она не тратила бюджет."
 )
+LAUNCH_CANCELLED = "Запуск рекламы не удался, включение отменено: повторный запуск включает кампанию заново."
+
+
+def awaiting_launch_enable(plan: Plan, change: ChangeLog) -> bool:
+    """Ожидающее проверки включение кампании этим планом, чья попытка уже закончилась: запись проваленного
+    запуска. Включение ещё не прошло и применится, как только площадка одобрит объявления, — за провалившимся
+    запуском никто не следит, и сверка не должна доводить такое включение, иначе она включит остановленную
+    кампанию, и та будет тратить бюджет. Записи с неизвестным исходом (площадка молчала) не трогаем:
+    их исход обязана выяснить сверка."""
+    return (
+        change.reason_code == "LAUNCH"
+        and change.evidence.get("plan_id") == plan.id
+        and (change.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
+        and plan.status != "launched"
+        and not launch_unsettled(plan)
+    )
+
+
+def cancel_launch_change(changes: ChangesService, change: ChangeLog) -> None:
+    """Ожидающее включение отменяется записью «отменено» с понятной причиной: не applied — иначе журнал
+    утверждал бы, что реклама запущена, — и не pending — иначе сверка применила бы включение позже."""
+    change.status = "reverted"
+    change.reason_text = f"{change.reason_text} {LAUNCH_CANCELLED}"
+    changes._metadata(change, error=None)
+    changes.repository.save(change)
 
 
 def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
@@ -282,6 +307,11 @@ class LaunchService:
                     business, plan, created, adapters, units, now, set(create_failures)
                 )
                 failures = create_failures | failures
+            except ChangeConflict as error:
+                # Конфликт очереди платформы — не сбой площадки: созданное этой попыткой останавливается,
+                # как при любом провале, а владелец получает текст конфликта с 409, а не 502.
+                await self.stop_failed(plan, failure_reason(error), adapters, now)
+                raise
             except Exception as error:
                 await self.stop_failed(plan, failure_reason(error), adapters, now)
                 raise LaunchFailed(plan.payload["launch"]["error"]) from error
@@ -354,6 +384,10 @@ class LaunchService:
                 business, plan, created, adapters, units, now, set(create_failures)
             )
             failures = create_failures | failures
+        except ChangeConflict:
+            # Конфликт очереди платформы доходит до владельца своим текстом (409), а не ошибкой шлюза.
+            self.save_launch(plan, started_at=None, error=None, reason=None)
+            raise
         except Exception as error:
             # Повтор не роняет уже работающие площадки и не останавливает их: причина отдана владельцу,
             # пометка неудачной площадки в плане осталась — повторить можно сразу.
@@ -416,9 +450,14 @@ class LaunchService:
         """Включение, оборванное посреди (упал процесс, площадка не ответила, включилась ли кампания), оставляет
         изменение pending, и до сверки новое включение той же площадки запрещено. Под блокировкой запуска сверяем его
         сразу, а не ждём воркера. Площадка не ответила и сейчас — запуск откладывается, план остаётся как был.
-        Площадки не из плана запуск не включает: их изменения сверит воркер."""
+        Площадки не из плана запуск не включает: их изменения сверит воркер. Ожидающее включение от попытки,
+        которая уже провалилась и остановила созданное, запуск отменяет, а не ждёт: повтор включит кампанию
+        заново, а сверка старой записи после одобрения площадкой включила бы остановленную кампанию без присмотра."""
         for change in self.repository.pending(plan.business_id):
             if change.platform not in plan.payload["platforms"]:
+                continue
+            if awaiting_launch_enable(plan, change):
+                cancel_launch_change(self.changes, change)
                 continue
             self.repository.commit()
             try:
@@ -747,7 +786,9 @@ class LaunchService:
         """Включение созданного: возвращает причины площадок, которые рекламу не включили, и площадки, чьё
         включение осталось ждать проверки объявлений (не ошибка: сверка доведёт его сама, как в демо).
         Запуск доводит до конца остальные. Платформы из skip (сбой создания) не включаются целиком: уже
-        созданное ими остаётся остановленным, пока повтор не доведёт площадку. Запись, оставшаяся pending
+        созданное ими остаётся остановленным, пока повтор не доведёт площадку. Включение каждой кампании — своей
+        записью: ждущая проверки запись LAUNCH этого плана (skip_pending_plan) следующую кампанию не блокирует,
+        иначе плану из нескольких кампаний площадки не запуститься никогда. Запись, оставшаяся pending
         по неизвестной причине (площадка молчит), прерывает запуск: её доведёт сверка, повтор продолжит."""
         # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
         failures = {}
@@ -778,6 +819,7 @@ class LaunchService:
                 entity_type="campaign",
                 entity_id=refs.campaign_id,
                 now=now,
+                skip_pending_plan=plan.id,
             )
             if change.status == "pending":
                 if change.evidence["_service"].get("error") == MODERATION_PENDING:
@@ -789,9 +831,24 @@ class LaunchService:
                 failures[platform] = f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip()
         return failures, awaiting
 
+    def cancel_pending_launches(self, plan: Plan) -> None:
+        """Запуск, который не удался, отменяет свои включения, оставшиеся ждать проверки объявлений: эти
+        включения ещё не прошли и применятся, как только площадка одобрит, — а кампании уже остановлены и за
+        ними никто не следит. Сверка такую запись пропустила бы, и она включила бы кампанию проваленного
+        запуска: трата бюджета без присмотра. Записи с неизвестным исходом (площадка молчала) остаются
+        pending: их исход обязана выяснить сверка до повторного включения."""
+        for change in self.repository.pending(plan.business_id):
+            if (
+                change.reason_code == "LAUNCH"
+                and change.evidence.get("plan_id") == plan.id
+                and (change.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
+            ):
+                cancel_launch_change(self.changes, change)
+
     async def stop_failed(self, plan: Plan, reason: str | None, adapters: dict[str, AdPlatform], now: datetime) -> None:
         """Останавливает созданное неудавшимся запуском и записывает неудачу; reason — её причина, None — запуск
         прервался."""
+        self.cancel_pending_launches(plan)
         if await self.stop_created(plan, adapters):
             self.save_launch(plan, "failed", error=failed_launch(reason), reason=reason, started_at=None)
             # Созданное остановлено: прежнее «не удалось остановить» уже неправда.
@@ -942,6 +999,12 @@ async def recover_launch(worker: Worker, business: Business) -> None:
     остановка применяется, только если площадка показывает кампанию включённой."""
     # Включение, оборванное посреди, оставило изменение pending: сверка узнаёт, включилась ли кампания. Оно остаётся и
     # после запуска, который упал и сам остановил созданное, и до сверки запрещает повтор включения на той площадке.
+    # Ожидания же проверки уже провалившихся запусков отменяем до сверки: их включение ещё не прошло и применится,
+    # как только площадка одобрит объявления, — а созданное остановлено и за ним никто не следит.
+    plans = {plan.id: plan for plan in worker.repository.rows(Plan, business.id)}
+    for change in worker.repository.pending(business.id):
+        if (plan := plans.get(change.evidence.get("plan_id"))) is not None and awaiting_launch_enable(plan, change):
+            cancel_launch_change(worker.changes, change)
     if worker.repository.pending(business.id):
         await worker.changes.recover_pending(worker.resolve_adapter, business_id=business.id, now=worker.clock.now)
     for plan in worker.repository.rows(Plan, business.id):

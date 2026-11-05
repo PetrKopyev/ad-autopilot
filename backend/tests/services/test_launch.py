@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from cryptography.fernet import InvalidToken
 
 from app.content.images import run_decoding
 from app.db.models import Ad, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
-from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError
+from app.platforms.base import AwaitingModeration, CampaignTreeSpec, ExternalRefs, Operation, PlatformError
 from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services import launch as launch_module
@@ -98,6 +98,80 @@ class DraftCampaign(FakeAdapter):
 class StrictMinimum(FakeAdapter):
     async def min_budgets(self) -> dict[str, int]:
         return {"day": 10**9, "period": 0}
+
+
+class SlowModeration(FakeAdapter):
+    """Как живой Директ с кампаниями-черновиками v501: включение каждой кампании остаётся ждать проверки
+    объявлений, пока площадка не одобрит (accepted); после одобрения повторный resume принимается."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted = False
+
+    async def create_campaign_tree(self, plan_part):
+        refs = await super().create_campaign_tree(plan_part)
+        if not self.accepted:
+            state = self._states[refs.campaign_id]
+            self._states[refs.campaign_id] = replace(state, status="draft")
+        return refs
+
+    async def apply(self, operation) -> None:
+        if not self.accepted and operation.entity_type == "campaign" and operation.after == "active":
+            raise AwaitingModeration(operation.entity_id)
+        await super().apply(operation)
+
+
+class FirstCampaignModerates(FakeAdapter):
+    """Первая кампания включается с ожиданием проверки, остальные отклоняются: запуск падает после первого
+    ожидания — как на проде в ноябре 2026-го."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted = False
+        self.awaited = False
+
+    async def apply(self, operation) -> None:
+        if not self.accepted and operation.entity_type == "campaign" and operation.after == "active":
+            if not self.awaited:
+                self.awaited = True
+                raise AwaitingModeration(operation.entity_id)
+            raise PlatformError("Площадка отклонила запуск кампании.", status_code=500)
+        await super().apply(operation)
+
+
+def enable_operations(refs: ExternalRefs) -> list[Operation]:
+    return [
+        Operation("set_status", "ad", external_id, "status", "paused_auto", "active")
+        for external_id in refs.ads.values()
+    ] + [Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")]
+
+
+def leftover_activation(world: World, plan_id: int, campaign: Campaign) -> ChangeLog:
+    """Ожидающее проверки включение кампании от провалившегося запуска — как оставила в журнале старая
+    версия кода, которая не отменяла такие записи при неудаче."""
+    refs = refs_of(world, campaign)
+    return ChangeLog(
+        business_id=world.business.id,
+        actor="owner",
+        kind="launch",
+        platform=campaign.platform,
+        entity_type="campaign",
+        entity_id=refs.campaign_id,
+        operations=[asdict(operation) for operation in enable_operations(refs)],
+        reason_code="LAUNCH",
+        reason_params={"budget": world.business.month_budget_kop, "campaign": campaign.name},
+        reason_text="Запустили рекламу. Месячный бюджет — 35 000 ₽.",
+        evidence={
+            "plan_id": plan_id,
+            "_service": {
+                "refs": asdict(refs),
+                "dry_run": False,
+                "error": MODERATION_PENDING,
+                "awaiting_since": NOW.isoformat(),
+            },
+        },
+        status="pending",
+    )
 
 
 async def ready(tmp_path: Path, **kwargs) -> tuple[World, dict]:
@@ -619,6 +693,164 @@ async def test_retry_while_moderation_pending_names_moderation(tmp_path: Path, m
         await launch(world, plan)
     assert blocked.value.reasons == [MODERATION_PENDING]
     assert "не отвечает" not in blocked.value.reasons[0]
+
+
+async def test_launch_activates_every_campaign_of_platform_waiting_moderation(tmp_path: Path) -> None:
+    """План из нескольких кампаний одной площадки, где включение каждой остаётся ждать проверки объявлений:
+    запуск доводится до конца (включение каждой кампании — своей записью), и сверка после одобрения
+    включает каждую сама."""
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц"]
+    world, plan = await ready_with_services(
+        tmp_path, services, platforms=("direct",), adapters={"direct": SlowModeration()}
+    )
+    result = await launch(world, plan)
+    assert result["status"] == "launched" and result["awaiting_moderation"] == ["direct"]
+    assert world.business.status == "running"
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "launched" and stored.payload["launch"]["awaiting_moderation"] == ["direct"]
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    assert len(direct) == 3
+    pending = pending_launches(world)
+    assert len(pending) == 3
+    assert all(row.kind == "launch" and row.reason_code == "LAUNCH" and row.actor == "owner" for row in pending)
+    assert all(row.evidence["_service"]["error"] == MODERATION_PENDING for row in pending)
+    for campaign in direct:
+        assert campaign.status == "active"
+        assert (await states(world, campaign))[campaign.external_id].status == "draft"
+    # Площадка одобрила объявления: сверка включает каждую кампанию, владельцу нажимать снова не нужно.
+    world.adapters["direct"].accepted = True
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
+    assert not pending_launches(world)
+    for campaign in direct:
+        assert campaign.status == "active"
+        assert (await states(world, campaign))[campaign.external_id].status == "active"
+
+
+async def test_failed_launch_cancels_its_pending_activations(tmp_path: Path) -> None:
+    """Запуск, упавший после того, как включение первой кампании ушло ждать проверку, отменяет это включение:
+    иначе сверка после одобрения площадкой включила бы кампанию проваленного запуска, и она тратила бы
+    бюджет за запуском, который не состоялся."""
+    services = ["Маникюр", "Педикюр"]
+    adapter = FirstCampaignModerates()
+    world, plan = await ready_with_services(tmp_path, services, platforms=("direct",), adapters={"direct": adapter})
+    with pytest.raises(LaunchFailed, match="не включила рекламу"):
+        await launch(world, plan)
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "failed" and stored.payload["launch"]["started_at"] is None
+    direct = campaigns(world)
+    assert all(campaign.status == "paused_auto" for campaign in direct)
+    records = world.repository.rows(ChangeLog, business_id=world.business.id, reason_code="LAUNCH")
+    assert sorted(record.status for record in records) == ["failed", "reverted"]
+    cancelled = next(record for record in records if record.status == "reverted")
+    assert "Запустили рекламу" in cancelled.reason_text and "отменено" in cancelled.reason_text
+    assert not pending_launches(world)
+    # Площадка одобрила объявления: сверка не включает кампанию проваленного запуска.
+    adapter.accepted = True
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
+    assert cancelled.status == "reverted"
+    for campaign in direct:
+        assert campaign.status == "paused_auto"
+        assert (await states(world, campaign))[campaign.external_id].status == "paused_auto"
+
+
+async def test_worker_cancels_stale_pending_activation_of_failed_launch(tmp_path: Path) -> None:
+    """Висящее включение от провалившегося запуска (запись со времён, когда неудача её не отменяла) воркер
+    отменяет до сверки: одобрение площадкой больше не включает остановленную кампанию без присмотра."""
+    services = ["Маникюр", "Педикюр"]
+    adapter = FirstCampaignModerates()
+    world, plan = await ready_with_services(tmp_path, services, platforms=("direct",), adapters={"direct": adapter})
+    with pytest.raises(LaunchFailed):
+        await launch(world, plan)
+    stored = world.repository.latest_plan(world.business.id)
+    first = sorted(campaigns(world), key=lambda item: item.id)[0]
+    leftover = leftover_activation(world, stored.id, first)
+    world.repository.save(leftover)
+    adapter.accepted = True
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
+    assert leftover.status == "reverted" and "отменено" in leftover.reason_text
+    assert first.status == "paused_auto"
+    assert (await states(world, first))[first.external_id].status == "paused_auto"
+
+
+async def test_retry_after_failed_launch_ignores_leftover_pending_activation(tmp_path: Path) -> None:
+    """Состояние прода: запуск упал и остановил созданное, а включение первой кампании висит pending.
+    Повтор запуска проходит: прошлое ожидание отменяется, и все кампании плана включаются заново."""
+    services = ["Маникюр", "Педикюр", "Наращивание ресниц"]
+    adapter = FirstCampaignModerates()
+    world, plan = await ready_with_services(tmp_path, services, platforms=("direct",), adapters={"direct": adapter})
+    with pytest.raises(LaunchFailed):
+        await launch(world, plan)
+    stored = world.repository.latest_plan(world.business.id)
+    assert stored.status == "failed" and stored.payload["launch"]["started_at"] is None
+    first = sorted(campaigns(world), key=lambda item: item.id)[0]
+    leftover = leftover_activation(world, stored.id, first)
+    world.repository.save(leftover)
+    created = {campaign.id for campaign in campaigns(world)}
+    world.adapters["direct"] = SlowModeration()
+    result = await launch(world, plan)
+    assert result["status"] == "launched" and result["awaiting_moderation"] == ["direct"]
+    assert {campaign.id for campaign in campaigns(world)} == created
+    assert leftover.status == "reverted" and "отменено" in leftover.reason_text
+    pending = pending_launches(world)
+    assert len(pending) == 3 and all(row.id != leftover.id for row in pending)
+    direct = sorted((item for item in campaigns(world) if item.platform == "direct"), key=lambda item: item.id)
+    assert len(direct) == 3
+    # Одобрили: сверка включает каждую кампанию повторной попытки.
+    world.adapters["direct"].accepted = True
+    await recovery_worker(world, after=timedelta(hours=1)).run_business_due(world.business.id)
+    assert not pending_launches(world)
+    for campaign in direct:
+        assert (await states(world, campaign))[campaign.external_id].status == "active"
+
+
+async def test_pending_check_exempts_only_own_launch_records(tmp_path: Path) -> None:
+    """Очередь платформы: ждущая проверки запись LAUNCH своего плана следующую кампанию не блокирует,
+    а чужая неподтверждённая запись — по-прежнему ChangeConflict."""
+    world, plan = await ready(tmp_path, platforms=("direct",))
+    spec = CampaignTreeSpec("probe", "Проверка", 1000, 1000, (), "paused_auto")
+    refs = await world.adapters["direct"].create_campaign_tree(spec)
+
+    def stuck_record(reason_code: str, plan_id: int | None = None) -> ChangeLog:
+        return ChangeLog(
+            business_id=world.business.id,
+            actor="owner",
+            kind="launch" if reason_code == "LAUNCH" else "pause",
+            platform="direct",
+            entity_type="campaign",
+            entity_id="foreign-campaign",
+            operations=[],
+            reason_code=reason_code,
+            reason_text="Остановка рекламы.",
+            evidence=({"plan_id": plan_id} if plan_id is not None else {})
+            | {"_service": {"dry_run": False, "error": MODERATION_PENDING}},
+            status="pending",
+        )
+
+    own = stuck_record("LAUNCH", plan["id"])
+    foreign = stuck_record("OWNER_STOP")
+    world.repository.save(own)
+    world.repository.save(foreign)
+    call = {
+        "business_id": world.business.id,
+        "adapter": world.adapters["direct"],
+        "refs": refs,
+        "operations": [Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")],
+        "actor": "owner",
+        "kind": "launch",
+        "platform": "direct",
+        "reason_code": "LAUNCH",
+        "reason_params": {"budget": 35_000},
+        "reason_text": "Запустили рекламу.",
+        "now": NOW,
+    }
+    with pytest.raises(ChangeConflict, match="не подтвердила"):
+        await world.launches.changes._apply_change(**call)
+    # Чужая запись блокирует даже со снятием своего плана.
+    with pytest.raises(ChangeConflict, match="не подтвердила"):
+        await world.launches.changes._apply_change(**call, skip_pending_plan=plan["id"])
+    world.repository.tables[ChangeLog].remove(foreign)
+    applied = await world.launches.changes._apply_change(**call, skip_pending_plan=plan["id"])
+    assert applied.status == "applied"
 
 
 @pytest.mark.parametrize(
@@ -1822,7 +2054,8 @@ async def test_draft_without_abandoned_launch_is_not_locked_for_recovery(tmp_pat
 
 async def test_unexpected_error_text_is_not_shown_but_platform_conflict_is(tmp_path: Path, monkeypatch) -> None:
     """Текст чужого исключения может содержать закрытые данные: владелец видит «Непредвиденная ошибка». Отказ площадки
-    и конфликт изменений объясняют причину своими словами."""
+    объясняют причиной своими словами, а конфликт очереди платформы доходит до владельца своим текстом: записка
+    проваленной попытки пишется, как при любом другом сбое, но ответ — 409, а не 502."""
 
     class Leaking(FakeAdapter):
         async def create_campaign_tree(self, plan_part):
@@ -1841,8 +2074,10 @@ async def test_unexpected_error_text_is_not_shown_but_platform_conflict_is(tmp_p
 
     world.adapters["vk"] = FakeAdapter()
     monkeypatch.setattr(world.launches, "activate", conflict)
-    with pytest.raises(LaunchFailed, match="Площадка ещё не подтвердила предыдущее изменение."):
+    with pytest.raises(ChangeConflict, match="Площадка ещё не подтвердила предыдущее изменение"):
         await launch(world, plan)
+    assert stored.status == "failed" and stored.payload["launch"]["started_at"] is None
+    assert all(campaign.status == "paused_auto" for campaign in campaigns(world))
     assert stored.payload["launch"]["reason"] == "Площадка ещё не подтвердила предыдущее изменение."
 
 

@@ -539,11 +539,14 @@ class ChangesService:
         now: datetime | None = None,
         force: bool = False,
         record_only: bool = False,
+        skip_pending_plan: int | None = None,
     ) -> ChangeLog:
         """Пробный режим (DRY_RUN) касается только решений автопилота: действия владельца, отката и служебные
         (лимиты бюджета, продление кампании, страж бюджета) применяются всегда. force — защитное действие автопилота,
         которое выполняется и в пробном режиме. record_only — на площадке нечего менять (откат вывода сравнения,
-        чьё объявление владелец уже удалил): запись журнала и разбор эксперимента идут без операций."""
+        чьё объявление владелец уже удалил): запись журнала и разбор эксперимента идут без операций.
+        skip_pending_plan — включения кампаний одного запуска: ждущая проверки запись LAUNCH этого плана
+        следующую кампанию не блокирует, чужие неподтверждённые записи блокируют, как раньше."""
         if not operations and not record_only:
             raise ValueError("Нужна хотя бы одна операция.")
         business = self.repository.business(business_id)
@@ -556,7 +559,15 @@ class ChangesService:
         protective_stop = actor in {"system", "owner"} and all(
             op.kind == "set_status" and op.after in {"paused_auto", "paused_owner"} for op in operations
         )
-        if not protective_stop and any(item.platform == platform for item in self.repository.pending(business_id)):
+        if not protective_stop and any(
+            item.platform == platform
+            and not (
+                skip_pending_plan is not None
+                and item.reason_code == "LAUNCH"
+                and item.evidence.get("plan_id") == skip_pending_plan
+            )
+            for item in self.repository.pending(business_id)
+        ):
             raise ChangeConflict(PENDING)
         if any(op.entity_id not in refs.entity_ids() for op in operations):
             raise ValueError("Операции должны относиться к переданному дереву кампании.")

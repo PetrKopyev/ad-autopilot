@@ -212,6 +212,25 @@ def test_launch_blocked_is_conflict_with_reasons(api) -> None:
     assert response.status_code == 409 and "счётчика Метрики" in response.json()["detail"]
 
 
+def test_launch_conflict_inside_is_reported_as_conflict_not_gateway_error(api, monkeypatch) -> None:
+    """ChangeConflict посреди запуска — понятный 409, а не 502: созданное попыткой остановлено, план помечен."""
+    from app.services.changes import ChangeConflict
+
+    client, context = api
+    repository = context.world.repository
+
+    async def conflict(*args) -> None:
+        raise ChangeConflict("Площадка ещё не подтвердила предыдущее изменение.")
+
+    monkeypatch.setattr(context.world.launches, "activate", conflict)
+    response = client.post("/api/plan/launch", json={"plan_id": context.plan["id"], "medical_acknowledged": True})
+    assert response.status_code == 409, response.text
+    assert "не подтвердила предыдущее изменение" in response.json()["detail"]
+    assert repository.latest_plan(context.world.business.id).status == "failed"
+    created = repository.rows(Campaign)
+    assert created and all(campaign.status == "paused_auto" for campaign in created)
+
+
 def spent(context) -> int:
     repository = context.world.repository
     return sum(row.cost_kop for model in (ArtCall, LLMCall) for row in repository.rows(model))
