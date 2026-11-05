@@ -116,3 +116,4 @@ fieldset.plan-section > legend + * { clear: both; }
   .plan-total__actions .button { flex: 1 1 0; }
   .plan-total__actions .button--accent { flex-grow: 2; }
 }
+.plan-launched > .button { justify-self: start; }

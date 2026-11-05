@@ -183,7 +183,7 @@ export function PlanPage() {
           <ul>{Object.entries(plan.platform_errors).map(([platform, text]) => <li key={platform}>{text}</li>)}</ul>
           <Button variant="accent" disabled={busy} onClick={() => void act(() => retry(plan))}>{busy ? copy.launchFlow.retryingPlatforms : copy.launchFlow.retryPlatforms}</Button>
         </div>}
-        <Card className="page-stack"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card>
+        <Card className="page-stack plan-launched"><p>{copy.launchFlow.launchReview}</p><Link className="button button--primary" to="/">{copy.launchFlow.openHome}</Link></Card>
         <PanelCard title={copy.common.budget} titleId="plan-budget"><div className="plan-budget"><BudgetRows plan={plan} /></div></PanelCard>
       </> : <>
         {plan.launch_error && <div className="notice" role="status"><p>{plan.launch_error}</p></div>}
