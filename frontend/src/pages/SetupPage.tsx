@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
-import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, RublesInput, StatusBadge, Stepper, describedBy, rublesValue } from '../components';
+import { Button, Card, CityCombobox, ErrorBanner, Icon, PageHeader, PhoneInput, RublesInput, StatusBadge, Stepper, describedBy, phoneDigits, rublesValue } from '../components';
 import type { StatusTone } from '../components';
 import { copy } from '../copy';
 import { checkAccounts, checkSite, connectAccount, createBusiness, disconnectAccount, getAuthConfig, getBudgetHint, getCities, getCounters, getGoals,
@@ -86,7 +86,8 @@ export function SetupPage() {
   const [innTouched, setInnTouched] = useState(false);
   const innError = validInn(marking.inn) && marking.inn.length === (marking.subject_type === 'ooo' ? 10 : 12) ? '' : copy.launchFlow.innError(marking.subject_type);
   const showInnError = (innTouched && !savedMarking || !!marking.inn) && !!innError;
-  const keepMarking = !!savedMarking && !marking.inn && !marking.phone && marking.subject_type === savedMarking.subject_type && marking.name === savedMarking.name
+  // «+7 » без цифр — как пустое: тронутый фокусом телефон сохранённые реквизиты не перезаписывает.
+  const keepMarking = !!savedMarking && !marking.inn && !phoneDigits(marking.phone).length && marking.subject_type === savedMarking.subject_type && marking.name === savedMarking.name
     && (['direct', 'vk'] as const).every((platform) => marking.confirmed_in_platform[platform] === !!savedMarking.confirmed_in_platform[platform]);
   const current = Number(step ?? draft.maxStep);
   const direct = me?.accounts.find((account) => account.platform === 'direct' && account.status === 'ok');
@@ -274,7 +275,7 @@ export function SetupPage() {
         setInnTouched(true);
         if (innError) throw new FieldError('inn', innError);
         if (!marking.name.trim()) throw new FieldError('name', copy.setup.advertiser.nameError);
-        if (!/^\+?[\d ()-]{10,25}$/.test(marking.phone) || marking.phone.replace(/\D/g, '').length < 10) throw new FieldError('phone', copy.setup.advertiser.phoneError);
+        if (phoneDigits(marking.phone).length !== 10) throw new FieldError('phone', copy.setup.advertiser.phoneError);
       }
       if (!marking.confirmed_in_platform.direct || (vk && !marking.confirmed_in_platform.vk)) throw new FieldError('confirm', copy.setup.advertiser.confirmError);
       if (!keepMarking) await saveMarking(marking);
@@ -435,8 +436,8 @@ export function SetupPage() {
             onChange={(event) => setMarking((value) => ({ ...value, name: event.target.value }))} />
         </SetupField>
         <SetupField id="phone" label={copy.launchFlow.phone} error={errorFor('phone')}>
-          <input id="phone" type="tel" required={!savedMarking} placeholder="+7" value={marking.phone} aria-invalid={invalid(errorFor('phone'))} aria-describedby={describedBy('phone', false, errorFor('phone'))}
-            onChange={(event) => setMarking((value) => ({ ...value, phone: event.target.value }))} />
+          <PhoneInput id="phone" required={!savedMarking} placeholder="+7 (999) 123-45-67" value={marking.phone} aria-invalid={invalid(errorFor('phone'))} aria-describedby={describedBy('phone', false, errorFor('phone'))}
+            onChange={(phone) => setMarking((value) => ({ ...value, phone }))} />
         </SetupField>
         {savedMarking && <p className="field__hint">{copy.settingsScreen.markingStored(savedMarking.inn_masked, savedMarking.phone_masked)}</p>}
         <section className="setup__block" aria-labelledby="confirm-title">

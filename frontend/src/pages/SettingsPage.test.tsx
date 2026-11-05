@@ -64,7 +64,7 @@ it('после сохранения отправляет все поля и по
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   expect(await block.findByText('Данные сохранены: ИНН •••2259, телефон +7•••3344. Чтобы изменить, введите заново.')).toBeTruthy();
   expect(block.getByRole('status').textContent).toBe(copy.settingsScreen.markingSaved);
-  expect(saveMarking).toHaveBeenCalledWith({ subject_type: 'ip', inn: '500100732259', name: 'Иванов Иван', phone: '+7 900 000-33-44',
+  expect(saveMarking).toHaveBeenCalledWith({ subject_type: 'ip', inn: '500100732259', name: 'Иванов Иван', phone: '+7 (900) 000-33-44',
     confirmed_in_platform: { direct: true, vk: false } });
 });
 

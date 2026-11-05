@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Button, ConfirmDialog, ErrorBanner, Field, Icon, PageHeader, PanelCard, RublesInput, StatusBadge, describedBy, rublesValue } from '../components';
+import { Button, ConfirmDialog, ErrorBanner, Field, Icon, PageHeader, PanelCard, PhoneInput, RublesInput, StatusBadge, describedBy, phoneDigits, rublesValue } from '../components';
 import { formatMoney } from '../components/Money';
 import { copy } from '../copy';
 import { getAutopilotStatus } from '../api/screens';
@@ -203,7 +203,7 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   function submit() {
     setInnTouched(true);
     if (!innOk) { void section.run(() => Promise.reject(new Error(innError))); return; }
-    if (!marking.name.trim() || marking.phone.replace(/\D/g, '').length < 10) {
+    if (!marking.name.trim() || phoneDigits(marking.phone).length !== 10) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
     void section.run(async () => {
@@ -222,7 +222,7 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
             aria-describedby={describedBy('settings-inn', undefined, showInnError)} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></Field>
       </div>
       <Field id="settings-name" label={copy.launchFlow.fullName}><input id="settings-name" className="input" required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></Field>
-      <Field id="settings-phone" label={copy.launchFlow.phone}><input id="settings-phone" className="input" type="tel" required value={marking.phone} onChange={(event) => set({ phone: event.target.value })} /></Field>
+      <Field id="settings-phone" label={copy.launchFlow.phone}><PhoneInput id="settings-phone" className="input" required placeholder="+7 (999) 123-45-67" value={marking.phone} onChange={(phone) => set({ phone })} /></Field>
       <p className="notice">{copy.launchFlow.markingOverwrite}</p>
       {(['direct', 'vk'] as const).map((platform) => <label key={platform} className="check"><input type="checkbox" checked={marking.confirmed_in_platform[platform]}
         onChange={(event) => set({ confirmed_in_platform: { ...marking.confirmed_in_platform, [platform]: event.target.checked } })} />

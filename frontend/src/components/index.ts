@@ -14,6 +14,7 @@ export type { IconName } from './Icon';
 export { MetricTile } from './MetricTile';
 export { Money, formatMoney } from './Money';
 export { PageHeader } from './PageHeader';
+export { PhoneInput, phoneDigits } from './PhoneInput';
 export { Pill, PillSteps } from './Pill';
 export { PlatformBadge } from './PlatformBadge';
 export { RublesInput, rublesValue } from './RublesInput';

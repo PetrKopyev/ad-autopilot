@@ -139,7 +139,7 @@ it('409 на шаге маркировки показывает текст се�
   expect(screen.getByTestId('path').textContent).toBe('/setup/5');
   expect((screen.getByLabelText(copy.setup.advertiser.taxId) as HTMLInputElement).value).toBe('526317984689');
   expect((screen.getByLabelText(copy.launchFlow.fullName) as HTMLInputElement).value).toBe('ИП Иванов');
-  expect((screen.getByLabelText(copy.launchFlow.phone) as HTMLInputElement).value).toBe('+7 900 123-45-67');
+  expect((screen.getByLabelText(copy.launchFlow.phone) as HTMLInputElement).value).toBe('+7 (900) 123-45-67');
   expect((screen.getByRole('checkbox', { name: copy.launchFlow.confirmDirect }) as HTMLInputElement).checked).toBe(true);
 });
 
