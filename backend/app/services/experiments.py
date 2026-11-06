@@ -144,10 +144,13 @@ async def _create_experiment(
     if campaign.status != "active" or campaign.owner_paused or group.status != "active":
         return None
     siblings = repository.rows(AdGroup, business.id, campaign_id=campaign.id)
-    budget = int(
-        worker.metadata(business)
-        .get("group_limits", {})
-        .get(group.external_id, campaign.daily_limit_kop // len(siblings))
+    meta = worker.metadata(business)
+    # Доли групп в meta — веса, а не рубли: курс (рубли на единицу веса) шаг optimize записывает в meta.
+    weight = meta.get("group_limits", {}).get(group.external_id)
+    budget = (
+        int(weight * Decimal(meta.get("ruble_rates", {}).get(campaign.platform, 1)))
+        if weight is not None
+        else campaign.daily_limit_kop // len(siblings)
     )
     hypothesis = next_hypothesis(completed_hypotheses(worker, business, group.id), budget, experiment_settings())
     if hypothesis == "audience" and campaign.platform in missing_conversion_sources(business):

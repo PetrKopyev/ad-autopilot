@@ -14,7 +14,7 @@ from tests.services.test_onboarding import TODAY
 def client() -> Iterator[TestClient]:
     from app.api import plan
     from app.api.stats import get_today
-    from app.auth.sessions import SESSION_COOKIE, get_repository
+    from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE, get_repository
 
     case = world(None, mode="fake")
 
@@ -38,6 +38,8 @@ def client() -> Iterator[TestClient]:
     app.dependency_overrides[get_today] = lambda: TODAY
     with TestClient(app, base_url="https://testserver") as test_client:
         test_client.cookies.set(SESSION_COOKIE, "test-session")
+        test_client.cookies.set(CSRF_COOKIE, "test-csrf")
+        test_client.headers["X-CSRF-Token"] = "test-csrf"
         yield test_client
     module.clear()
 
@@ -46,10 +48,11 @@ def test_forecast_requires_login(client: TestClient) -> None:
     client.cookies.clear()
 
     assert client.get("/api/plan/forecast").status_code == 401
+    assert client.post("/api/plan/forecast").status_code == 401
 
 
 def test_forecast_format(client: TestClient) -> None:
-    response = client.get("/api/plan/forecast")
+    response = client.post("/api/plan/forecast")
 
     assert response.status_code == 200
     body = response.json()
@@ -76,6 +79,23 @@ def test_forecast_format(client: TestClient) -> None:
 
 
 def test_forecast_rate_limit(client: TestClient) -> None:
-    statuses = [client.get("/api/plan/forecast").status_code for _ in range(31)]
+    statuses = [client.post("/api/plan/forecast").status_code for _ in range(31)]
 
     assert statuses[:30] == [200] * 30 and statuses[30] == 429
+
+
+def test_forecast_get_only_reads_cache(client: TestClient) -> None:
+    """GET не считает прогноз: пока POST его не посчитал, ответ пустой; после — отдаёт готовое из кэша."""
+    assert client.get("/api/plan/forecast").status_code == 204
+    computed = client.post("/api/plan/forecast").json()
+
+    cached = client.get("/api/plan/forecast")
+
+    assert cached.status_code == 200 and cached.json() == computed
+
+
+def test_forecast_post_requires_csrf(client: TestClient) -> None:
+    client.headers.pop("X-CSRF-Token")
+
+    assert client.post("/api/plan/forecast").status_code == 403
+    assert client.get("/api/plan/forecast").status_code == 204

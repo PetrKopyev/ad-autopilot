@@ -151,7 +151,7 @@ def launch(client):
     assert response.status_code == 200, response.text
     assert client.get("/api/me").json()["accounts"][0]["status"] == "ok"
     assert client.put("/api/business/metrica", json={"counter_id": 12345, "lead_goal_ids": [1]}).status_code == 200
-    site = client.get("/api/business/site-check").json()
+    site = client.post("/api/business/site-check", params={"refresh": "false"}).json()
     assert site["status"] == "ready" and site["services_found"] > 0
     assert all(item["verified"] for item in site["description"].values())
     assert (
@@ -190,7 +190,7 @@ def test_demo_business_uses_demo_site_url_when_field_left_empty(demo):
     assert response.status_code == 200, response.text
     business = world.repository.business(world.business.id)
     assert business.site_url == "https://salon.example/" and business.city == "Москва"
-    site = client.get("/api/business/site-check").json()
+    site = client.post("/api/business/site-check", params={"refresh": "false"}).json()
     assert site["status"] == "ready" and site["services_found"] > 0
 
 

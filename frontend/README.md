@@ -12,4 +12,4 @@ npm test          # vitest
 npm run e2e       # Playwright против поднятого стенда, см. корневой README
 ```
 
-Тексты находятся в `src/copy.ts`, токены и адаптивные стили — в `src/styles.css`, общие компоненты — в `src/components/index.ts`. Запросы к API идут через `api<T>('/api/...')`: только на текущий сайт, с cookie и заголовком `X-CSRFToken` для изменяющих запросов. Стенд целиком (демо и боевой) описан в [корневом README](../README.md) и [docs/DEPLOY.md](../docs/DEPLOY.md).
+Тексты находятся в `src/copy.ts`, токены и адаптивные стили — в `src/styles.css`, общие компоненты — в `src/components/index.ts`. Запросы к API идут через `api<T>('/api/...')`: только на текущий сайт, с cookie и заголовком `X-CSRF-Token` для изменяющих запросов. Стенд целиком (демо и боевой) описан в [корневом README](../README.md) и [docs/DEPLOY.md](../docs/DEPLOY.md).

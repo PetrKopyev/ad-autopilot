@@ -335,7 +335,8 @@ class ForecastService:
     def demo(self) -> bool:
         return self.registry.mode == "fake"
 
-    async def forecast(self, business: Business, now: datetime, today: date) -> dict:
+    def prepare(self, business: Business) -> dict | tuple:
+        """Готовый ответ «недоступно» или вход прогноза: ключ кэша и всё, что нужно для расчёта."""
         plan = self.repository.latest_plan(business.id)
         if plan is None:
             return unavailable("Прогноз появится, когда будет готов план.", None)
@@ -364,6 +365,24 @@ class ForecastService:
         account = [info.status, info.token] if info else None
         inputs = [phrases, city, str(budget_rub), business.metrica_counter_id, goals, self.demo, account]
         key = sha256(json.dumps(inputs, ensure_ascii=False).encode()).hexdigest()
+        return key, vk, info, groups, phrases, city, budget_rub, budget_note
+
+    def cached(self, business: Business, now: datetime) -> dict | None:
+        """Только прочитать готовый прогноз из кэша: без заказов в Директе, без ИИ и без ожидания блокировки."""
+        prepared = self.prepare(business)
+        if isinstance(prepared, dict):
+            return prepared
+        key, vk = prepared[:2]
+        entry = FORECASTS.get(business.id)
+        if entry is None or entry.key != key or entry.expires <= now or entry.status == "pending":
+            return None
+        return entry.response | {"vk": vk}
+
+    async def forecast(self, business: Business, now: datetime, today: date) -> dict:
+        prepared = self.prepare(business)
+        if isinstance(prepared, dict):
+            return prepared
+        key, vk, info, groups, phrases, city, budget_rub, budget_note = prepared
         # Площадки и ИИ отвечают секундами: соединение с базой на это время возвращается в пул.
         self.repository.commit()
         lock = LOCKS.setdefault(business.id, asyncio.Lock())

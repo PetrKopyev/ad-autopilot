@@ -151,7 +151,7 @@ it('вход на шаг сайта берёт проверку из кэша, �
   fetchMock.mockImplementation(async (url, init) => {
     const check = new URL(String(url));
     return check.pathname === '/api/business/site-check'
-      ? new Response(JSON.stringify(site(init?.method === 'POST' ? found : description)), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      ? new Response(JSON.stringify(site(check.search === '?refresh=true' ? found : description)), { status: 200, headers: { 'Content-Type': 'application/json' } })
       : answer(url, init);
   });
   const checks = () => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === '/api/business/site-check')
@@ -159,12 +159,12 @@ it('вход на шаг сайта берёт проверку из кэша, �
   renderStep(3);
   const retry = await screen.findByRole('button', { name: copy.common.retry });
   await waitFor(() => expect(retry.hasAttribute('disabled')).toBe(false));
-  expect(checks()).toEqual(['GET']);
+  expect(checks()).toEqual(['POST ?refresh=false']);
   fireEvent.click(retry);
-  // Повтор перечитывает сайт и тратит лимит — POST с CSRF, обычный вход — GET из кэша.
-  await waitFor(() => expect(checks()).toEqual(['GET', 'POST']));
+  // Проверка читает сайт и тратит лимит — всегда POST с CSRF; обычный вход берёт кэш, повтор перечитывает сайт.
+  await waitFor(() => expect(checks()).toEqual(['POST ?refresh=false', 'POST ?refresh=true']));
   await waitFor(() => expect(retry.hasAttribute('disabled')).toBe(false));
-  expect(checks()).toEqual(['GET', 'POST']);
+  expect(checks()).toEqual(['POST ?refresh=false', 'POST ?refresh=true']);
   // Повтор заполнил пустую цену и не тронул услуги, которые уже были в форме.
   const stored = JSON.parse(sessionStorage.getItem('ad-autopilot-setup-draft')!).description;
   expect([stored.services.value, stored.prices.value]).toEqual(['Маникюр', 'Маникюр — 1 500 ₽']);
@@ -208,7 +208,7 @@ it('без черновика в вкладке шаги восстанавли�
   expect(((await screen.findByLabelText(copy.setup.draft.services)) as HTMLTextAreaElement).value).toBe('Маникюр');
   expect(screen.getByTestId('path').textContent).toBe('/setup/4');
   expect((screen.getByRole('checkbox', { name: copy.launchFlow.approved }) as HTMLInputElement).checked).toBe(true);
-  expect(calls()).not.toContain('GET /api/business/site-check');
+  expect(calls().filter((call) => call.includes('/api/business/site-check'))).toEqual([]);
   expect(JSON.parse(sessionStorage.getItem('ad-autopilot-setup-draft')!)).toMatchObject({ user: 1, counter: 12345, goals: [1], maxStep: 5 });
   fireEvent.click(screen.getByRole('link', { name: copy.common.back }));
   fireEvent.click(await screen.findByRole('link', { name: copy.common.back }));

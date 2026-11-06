@@ -13,3 +13,5 @@ dist/
 .tasks/
 !.env.demo.example
 *.egg-info/
+.claude/
+.hypothesis/

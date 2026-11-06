@@ -6,10 +6,12 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import DateTime, and_, cast, delete, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, distinct_on, insert
 from sqlalchemy.orm import aliased
 
+from app.auth.revoke import Revocation, revoke_tokens
 from app.auth.vk import RENEW_MARGIN
 from app.db.models import (
     Ad,
@@ -29,7 +31,7 @@ from app.db.models import (
 )
 from app.db.query import Window, condition, matches
 from app.demo_flags import demo_now
-from app.platforms.base import AdPlatform, ExternalRefs, Operation, lead_count
+from app.platforms.base import AdPlatform, AuthExpired, AuthSession, ExternalRefs, Operation, lead_count
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import (
     CLOSED_ACCOUNT,
@@ -54,6 +56,9 @@ HEARTBEAT_KEEP = timedelta(days=1)
 RUNS_KEEP = timedelta(days=90)
 # Прогон старше этого считается брошенным (процесс воркера умер), и слот можно занять снова.
 RUN_STALE = timedelta(minutes=30)
+# За столько до истечения токена Директа воркер продлевает его по refresh-токену.
+DIRECT_RENEW_MARGIN = timedelta(days=30)
+DIRECT_REAUTH_NOTICE_WITHIN = timedelta(days=7)
 INTERRUPTED = [{"reason_code": "JOB_INTERRUPTED"}]
 
 
@@ -128,12 +133,37 @@ class WorkerRepository(NoticesRepository, ChangesRepository):
             )
         )
 
+    def expiring_direct_accounts(self, now: datetime) -> list[PlatformAccount]:
+        """Кабинеты Директа с истекающим токеном: фоновый шаг воркера продлевает их по refresh-токену."""
+        return list(
+            self.db.scalars(
+                select(PlatformAccount).where(
+                    PlatformAccount.platform == "direct",
+                    PlatformAccount.status == "ok",
+                    PlatformAccount.expires_at.is_not(None),
+                    PlatformAccount.expires_at < now + DIRECT_RENEW_MARGIN,
+                )
+            )
+        )
+
     def save(self, *items) -> None:
         self.db.add_all(items)
         self.db.commit()
 
     def refresh(self, item) -> None:
         self.db.refresh(item)
+
+    def lock_account(self, account: PlatformAccount) -> PlatformAccount | None:
+        """Свежая строка кабинета под блокировкой: освобождается коммитом save или rollback."""
+        return self.db.scalar(
+            select(PlatformAccount)
+            .where(PlatformAccount.id == account.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def rollback(self) -> None:
+        self.db.rollback()
 
     def fresh_business_state(self, business_id: int) -> tuple[str, dict] | None:
         """Свежие (status, settings) напрямую из базы, минуя identity map: тик держит копию бизнеса
@@ -352,6 +382,16 @@ class MemoryWorkerRepository(WorkerRepository):
             and row.expires_at < now + RENEW_MARGIN
         ]
 
+    def expiring_direct_accounts(self, now: datetime) -> list[PlatformAccount]:
+        return [
+            row
+            for row in self.tables.get(PlatformAccount, [])
+            if row.platform == "direct"
+            and row.status == "ok"
+            and row.expires_at is not None
+            and row.expires_at < now + DIRECT_RENEW_MARGIN
+        ]
+
     def save(self, *items) -> None:
         for item in items:
             table = self.tables.setdefault(type(item), [])
@@ -369,6 +409,12 @@ class MemoryWorkerRepository(WorkerRepository):
         yield
 
     def refresh(self, item) -> None:
+        pass
+
+    def lock_account(self, account: PlatformAccount) -> PlatformAccount | None:
+        return account
+
+    def rollback(self) -> None:
         pass
 
     def fresh_business_state(self, business_id: int) -> tuple[str, dict]:
@@ -912,10 +958,76 @@ class Worker:
                     getattr(error, "status_code", None) or type(error).__name__,
                 )
 
+    async def renew_direct_tokens(self) -> None:
+        """Продление токенов Яндекс Директа на истечении по refresh-токену. Без шага кабинет после
+        истечения ушёл бы в needs_reauth. Отказ продления статус не меняет: токен ещё работает до
+        expires_at, а после него кабинет в needs_reauth переведёт обычный путь. Отказ одного кабинета
+        не останавливает остальные."""
+        from app.platforms.direct import DirectAdapter
+
+        for account in self.repository.expiring_direct_accounts(self.clock.now):
+            business_id = expires_at = None
+            try:
+                business_id, expires_at = account.business_id, account.expires_at
+                session = AuthSession(
+                    account.external_login or "",
+                    account.access_token_enc,
+                    account.refresh_token_enc,
+                    account.expires_at,
+                )
+                async with DirectAdapter(account.access_token_enc) as adapter:
+                    renewed = await adapter.refresh(session)
+                # Пока шёл запрос, владелец мог отключить кабинет: перечитываем строку под блокировкой, как VK.
+                locked = self.repository.lock_account(account)
+                if locked is None or locked.status != "ok" or locked.refresh_token_enc != session.refresh_token:
+                    self.repository.rollback()
+                    logger.warning("Token renewal skipped, account changed: platform=direct business=%s", business_id)
+                    try:
+                        async with httpx.AsyncClient() as http:
+                            await revoke_tokens(http, [Revocation("direct", renewed.access_token)])
+                    except Exception as revoke_error:
+                        logger.warning(
+                            "Token revoke failed: platform=direct business=%s code=%s",
+                            business_id,
+                            type(revoke_error).__name__,
+                        )
+                    continue
+                locked.access_token_enc = renewed.access_token
+                locked.refresh_token_enc = renewed.refresh_token
+                locked.expires_at = renewed.expires_at
+                self.repository.save(locked)
+            except Exception as error:
+                # Без отката сессия после сбоя записи осталась бы сломанной для всех бизнесов в run_due.
+                self.repository.rollback()
+                # Токен и refresh не затираем, статус не меняем: до expires_at кабинет ещё работает.
+                logger.warning(
+                    "Token renewal failed: platform=%s business=%s code=%s",
+                    "direct",
+                    business_id,
+                    getattr(error, "status_code", None) or type(error).__name__,
+                )
+                # Разовый сбой сети не повод тревожить владельца: пишем ему, когда Яндекс отказал или срок близко.
+                if business_id is None or not (
+                    isinstance(error, AuthExpired) or expires_at - self.clock.now < DIRECT_REAUTH_NOTICE_WITHIN
+                ):
+                    continue
+                business = self.repository.find(Business, id=business_id)
+                if business is None:
+                    continue
+                # Ключ с датой окончания токена: повторы тика не плодят уведомления (notify идемпотентен по ключу).
+                self.notice(
+                    business,
+                    "DIRECT_REAUTH",
+                    "Токен Яндекс Директа скоро истечёт и продлить его не удалось."
+                    " Переподключите Директ в разделе подключений.",
+                    key=f"direct_reauth:{business.id}:{expires_at.date().isoformat()}",
+                )
+
     async def run_due(self, skip: Callable[[Business], bool] | None = None) -> None:
         """Те же слоты расписания для APScheduler и виртуальных часов симулятора."""
         await self.run("heartbeat")
         await self.renew_vk_tokens()
+        await self.renew_direct_tokens()
         for business in self.repository.rows(Business):
             if not (skip and skip(business)):
                 await self.run_business_due(business.id)

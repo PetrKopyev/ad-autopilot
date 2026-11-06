@@ -106,6 +106,19 @@ async def test_daily_and_period_limits_are_respected(platform: AdapterHarness) -
     assert sum(row.cost_kop for row in rows) <= plan.period_cap_kop
 
 
+async def test_get_spend_today_counts_only_requested_campaigns(platform: AdapterHarness) -> None:
+    adapter = platform.adapter
+    refs = await adapter.create_campaign_tree(platform.plan)
+    other = await adapter.create_campaign_tree(replace(platform.plan, id=platform.plan.id + "-other"))
+    platform.advance(hours=2)
+    first = await adapter.get_spend_today(campaign_ids={refs.campaign_id})
+    second = await adapter.get_spend_today(campaign_ids={other.campaign_id})
+    assert first > 0 and second > 0
+    assert await adapter.get_spend_today(campaign_ids={"someone-else"}) == 0
+    both = await adapter.get_spend_today(campaign_ids={refs.campaign_id, other.campaign_id})
+    assert both == first + second
+
+
 @pytest.mark.parametrize(
     "status,error", [(401, AuthExpired), (429, RateLimited), (500, PlatformError), (503, PlatformError)]
 )

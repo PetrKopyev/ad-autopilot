@@ -244,6 +244,22 @@ async def test_proposals_follow_hypothesis_order_and_audience_budget(experiment_
     assert set(completed_hypotheses(worker, world.business, world.ads["borderline-1"].ad_group_id)) == set(completed)
 
 
+@pytest.mark.parametrize("rate,expected", [("1", None), ("3.5", "audience")])
+async def test_audience_budget_threshold_uses_rubles_from_current_rate(experiment_world, rate, expected):
+    """Доли групп в meta — веса: порог 700 ₽ проверяется по рублям (вес × курс площадки из шага optimize),
+    поэтому после роста бюджета проверка аудиторий включается, хотя вес остался прежним."""
+    world = experiment_world
+    for hypothesis in ("text", "image"):
+        running_experiment(world, hypothesis=hypothesis, status="concluded")
+    for target in world.repository.rows(Target):
+        target.value = f"{target.value} самара"
+    worker = world.worker(dry_run=True)
+    ad = control_snapshot(world)
+    worker.remember(world.business, group_limits={ad.group_id: 20_000}, ruble_rates={world.campaign.platform: rate})
+    proposal = await create_experiment(worker, world.business, ad, design())
+    assert (proposal.reason_params["hypothesis"] if proposal else None) == expected
+
+
 async def test_audience_hypothesis_not_offered_without_conversion_source(experiment_world):
     """Площадка без источника конверсий (VK без пикселя): обращений видно не будет, поэтому проверку
     аудиторий по цене обращения не предлагаем вовсе, а не запускаем тест на 14 дней с нулевыми обращениями."""

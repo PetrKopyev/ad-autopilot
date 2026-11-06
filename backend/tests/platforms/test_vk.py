@@ -225,7 +225,7 @@ async def test_package_without_candidates_is_honest_error(adapter: VkAdapter, ap
     api.get(f"{API}/ad_plans.json").respond(json={"count": 0, "items": []})
     api.post(f"{API}/urls.json").respond(json={"id": 7})
     packages_stub(api, [{"id": 3105, "name": "Сайт // Site conversions // oCPM", "flags": ["no_create_campaigns"]}])
-    with pytest.raises(PlatformError, match="VK_PACKAGE_ID"):
+    with pytest.raises(PlatformError, match="Цель ВКонтакте"):
         await adapter.create_campaign_tree(tree())
 
 
@@ -312,7 +312,7 @@ async def test_only_goal_requiring_packages_without_config_is_honest_error(adapt
     packages_stub(
         api, [{"id": 3229, "name": "or_tt_crossdevice_site_multiformat_all_ocpm_conversions", "status": "active"}]
     )
-    with pytest.raises(PlatformError, match="VK_PRICED_GOAL_SOURCE_ID"):
+    with pytest.raises(PlatformError, match="Цель ВКонтакте"):
         await adapter.create_campaign_tree(tree())
 
 
@@ -704,6 +704,7 @@ async def test_get_stats_converts_rubles_to_kopecks_and_maps_campaign(adapter: V
 async def test_get_stats_days_settled_by_direct_boundary(adapter: VkAdapter, api) -> None:
     """Граница устоявшихся дней совпадает с Директом и RULES.md: settled — не позже «сегодня минус 2»."""
     today = datetime.now(adapter._tz).date()
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 1, "items": [{"id": 10}]})
     api.get(f"{API}/statistics/ad_plans/day.json").respond(
         json={
             "items": [
@@ -726,6 +727,9 @@ async def test_get_stats_days_settled_by_direct_boundary(adapter: VkAdapter, api
 
 async def test_get_spend_today_sums_campaigns(adapter: VkAdapter, api) -> None:
     today = datetime.now(adapter._tz).date().isoformat()
+    api.get(f"{API}/ad_plans.json").respond(
+        json={"count": 2, "items": [{"id": 10}, {"id": 11}]}
+    )
     api.get(f"{API}/statistics/ad_plans/day.json").respond(
         json={
             "items": [
@@ -757,6 +761,147 @@ async def test_get_stats_counts_only_own_plans(adapter: VkAdapter, api) -> None:
     assert query["id"] == ["11"]
 
 
+async def test_get_stats_requests_ids_in_chunks_of_200(api) -> None:
+    """В statistics VK id обязателен и не более 200 на запрос: 450 планов — ровно 3 запроса (200+200+50),
+    результаты пачек сливаются в одну статистику."""
+    own = {str(id_) for id_ in range(1, 451)}
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+
+    def batch(first: int, last: int) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"id": id_, "rows": [{"date": today, "base": {"shows": 1, "clicks": 0, "spent": "0"}}]}
+                    for id_ in range(first, last + 1)
+                ]
+            },
+        )
+
+    route = api.get(f"{API}/statistics/ad_plans/day.json")
+    route.side_effect = [batch(1, 200), batch(201, 400), batch(401, 450)]
+    async with VkAdapter("tok", config=configuration(), href="https://shop.example/") as vk:
+        rows = await vk.get_stats(
+            date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids=own
+        )
+    assert route.call_count == 3
+    chunks = [parse_qs(call.request.url.query.decode())["id"][0].split(",") for call in route.calls]
+    assert [len(chunk) for chunk in chunks] == [200, 200, 50]
+    assert len(rows) == 450
+
+
+async def test_get_stats_priced_goal_counts_only_configured_goal(api) -> None:
+    """Цель пикселя задана: конверсии берутся из statistics/goals только по ней (source topmail + counter_id
+    + имя): чужие цели и счётчики не считаются, строка без записей по цели — 0, base.goals игнорируется."""
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {"id": 10, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "1.00", "goals": 9}}]},
+                {"id": 11, "rows": [{"date": today, "base": {"shows": 5, "clicks": 1, "spent": "1.00", "goals": 7}}]},
+            ]
+        }
+    )
+    api.get(f"{API}/statistics/goals/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {
+                    "id": 10,
+                    "rows": [
+                        {
+                            "date": today,
+                            "goals": [
+                                {"source": "topmail", "goal": "Заявка", "counter_id": 777, "count": 2},
+                                {"source": "topmail", "goal": "Другая цель", "counter_id": 777, "count": 4},
+                                {"source": "topmail", "goal": "Заявка", "counter_id": 888, "count": 8},
+                                {"source": "metrika", "goal": "Заявка", "counter_id": 777, "count": 16},
+                            ],
+                        }
+                    ],
+                },
+                {"id": 11, "rows": [{"date": today, "goals": []}]},
+            ]
+        }
+    )
+    async with VkAdapter(
+        "tok",
+        config=configuration(),
+        href="https://shop.example/",
+        priced_goal_source_id=777,
+        priced_goal_name="Заявка",
+    ) as vk:
+        rows = await vk.get_stats(
+            date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids={"10", "11"}
+        )
+    assert [row.conversions for row in rows] == [{"lead": 2}, {"lead": 0}]
+
+
+def goal_adapter() -> VkAdapter:
+    return VkAdapter(
+        "tok",
+        config=configuration(),
+        href="https://shop.example/",
+        priced_goal_source_id=777,
+        priced_goal_name="Заявка",
+    )
+
+
+def plan_stats(api, today: str) -> None:
+    base = {"shows": 5, "clicks": 1, "spent": "1.00", "goals": 9}
+    api.get(f"{API}/statistics/ad_plans/day.json").respond(
+        json={"items": [{"id": 10, "rows": [{"date": today, "base": base}]}]}
+    )
+
+
+@pytest.mark.parametrize("answer", [httpx.Response(500), httpx.Response(200, json={"items": [{"id": 10}]})])
+async def test_get_stats_goal_failure_keeps_spend_and_falls_back_to_base_goals(api, answer) -> None:
+    """Сбой или кривой ответ statistics/goals не роняет расход: конверсии берутся из base.goals."""
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    plan_stats(api, today)
+    api.get(f"{API}/statistics/goals/ad_plans/day.json").mock(return_value=answer)
+    async with goal_adapter() as vk:
+        rows = await vk.get_stats(
+            date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids={"10"}
+        )
+    assert [(row.cost_kop, row.conversions) for row in rows] == [(100, {"lead": 9})]
+
+
+async def test_get_stats_goal_counter_id_as_string(api) -> None:
+    """counter_id в ответе VK может прийти строкой: цель всё равно находится."""
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    plan_stats(api, today)
+    api.get(f"{API}/statistics/goals/ad_plans/day.json").respond(
+        json={
+            "items": [
+                {
+                    "id": 10,
+                    "rows": [
+                        {
+                            "date": today,
+                            "goals": [{"source": "topmail", "goal": "Заявка", "counter_id": "777", "count": 3}],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    async with goal_adapter() as vk:
+        rows = await vk.get_stats(
+            date.fromisoformat(today), date.fromisoformat(today), "campaign", campaign_ids={"10"}
+        )
+    assert [row.conversions for row in rows] == [{"lead": 3}]
+
+
+async def test_get_spend_today_does_not_request_goals(api) -> None:
+    """Страж бюджета читает только расход: statistics/goals не запрашивается."""
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    plan_stats(api, today)
+    goals = api.get(f"{API}/statistics/goals/ad_plans/day.json").respond(500)
+    async with goal_adapter() as vk:
+        assert await vk.get_spend_today(campaign_ids={"10"}) == 100
+    assert not goals.calls
+
+
 async def test_get_spend_today_counts_only_own_plans(adapter: VkAdapter, api) -> None:
     """«расход сегодня» считается только по нашим планам."""
     today = datetime.now(adapter._tz).date().isoformat()
@@ -772,6 +917,7 @@ async def test_get_spend_today_counts_only_own_plans(adapter: VkAdapter, api) ->
 
 
 async def test_get_stats_rejects_broken_answers(adapter: VkAdapter, api) -> None:
+    api.get(f"{API}/ad_plans.json").respond(json={"count": 1, "items": [{"id": 1}]})
     api.get(f"{API}/statistics/ad_plans/day.json").respond(json={"items": [{"id": 1, "rows": [{"date": "bad"}]}]})
     with pytest.raises(PlatformError):
         await adapter.get_stats(date(2026, 10, 1), date(2026, 10, 2), "campaign")

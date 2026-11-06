@@ -12,9 +12,16 @@ from cryptography.fernet import InvalidToken
 
 from app.content.images import run_decoding
 from app.db.models import Ad, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
-from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError, RateLimited
+from app.platforms.base import (
+    AwaitingModeration,
+    ExternalRefs,
+    ModerationInfo,
+    Operation,
+    PlatformError,
+    RateLimited,
+)
 from app.platforms.direct import DirectAdapter, weekly_limit
-from app.platforms.fake import FakeAdapter, VirtualClock
+from app.platforms.fake import FakeAdapter, VirtualClock, _Review
 from app.services import launch as launch_module
 from app.services import plan as plan_module
 from app.services.changes import ChangeConflict, load_operations
@@ -1917,9 +1924,9 @@ async def test_budget_guard_counts_spend_of_old_plan_campaign_turned_on_in_cabin
 
     world, old, current, worker = await replaced_plan(tmp_path)
     await turn_on_in_cabinet(world, old)
-    # Расход и вчера: сегодняшний излишек быстрого отчёта площадки и так относится к бизнесу целиком.
+    # Расход и вчера, и сегодня; часы стража и площадки показывают один момент (стражу уже прибавлены сутки).
     world.adapters["direct"].clock.advance(hours=30)
-    worker.clock.advance(hours=12)
+    worker.clock.advance(hours=6)
     _, lifetime = await read_spend(worker, world.business)
     assert lifetime[old.external_id] > 0
     await budget_guard(worker, world.business)
@@ -2499,6 +2506,8 @@ async def test_scale_leaves_donor_campaign_its_platform_minimum(tmp_path: Path, 
     scale = Decision(target, Action.SCALE, "SCALE_UP", entity="group", new_daily_limit=100_000, numbers=numbers)
     monkeypatch.setattr(optimize, "snapshot", AsyncMock(return_value=([], groups)))
     monkeypatch.setattr(optimize, "decide", lambda *args, **kwargs: [scale])
+    # Веса в этом тесте заданы сразу в рублях: курс площадки 1, проверяется только минимум донора.
+    monkeypatch.setattr(optimize, "ruble_rates", lambda *args: {"direct": 1})
     monkeypatch.setattr(launch_module, "sync_removed_services", AsyncMock())
     worker = recovery_worker(world, after=timedelta(days=2), dry_run=False)
     await optimize.optimize(worker, world.business)
@@ -2972,6 +2981,29 @@ def approve(world: World, *, rejected: str | None = None) -> None:
             ad.status = "active" if ad.status == "moderation" else ad.status
 
 
+def platform_review(adapter: FakeAdapter, ad: Ad, status: str, reason: str | None = None) -> None:
+    """Состояние объявления на площадке: ответ get_moderation и статус сущности (у Директа — Status)."""
+    if status == "pending":
+        # Исправление в кабинете отправило объявление на проверку заново: решение ещё не принято, и часы
+        # симулятора его не подтверждают.
+        adapter._reviews[ad.external_id] = _Review(
+            ModerationInfo(ad.external_id, "pending", None, adapter.clock.now),
+            adapter.clock.now + timedelta(days=1),
+            None,
+        )
+        adapter._states[ad.external_id] = replace(adapter._states[ad.external_id], status="moderation")
+    else:
+        review = adapter._reviews[ad.external_id]
+        adapter._reviews[ad.external_id] = replace(review, info=replace(review.info, status=status, reason=reason))
+        adapter._states[ad.external_id] = replace(adapter._states[ad.external_id], status=status)
+
+
+async def moderation_step(world: World, key: str, hours: float) -> None:
+    await recovery_worker(world, after=timedelta(hours=hours), dry_run=False).run(
+        "sync_moderation", world.business.id, key=key
+    )
+
+
 async def settle(world: World, hours: float = 2) -> Worker:
     from app.services.sync import settle_review
 
@@ -3067,6 +3099,71 @@ async def test_rejected_ad_does_not_hold_campaign_waiting(tmp_path: Path) -> Non
     platform = await states(world, campaign)
     assert platform[campaign.external_id].status == "active" and platform[first.external_id].status == "active"
     assert second.status == "rejected" and campaign.review_since is None
+
+
+async def test_owner_fixed_rejected_ads_in_cabinet_returns_review_and_enables_campaign(tmp_path: Path) -> None:
+    """Владелец исправил отклонённые объявления в кабинете площадки: объявления снова на проверке, ожидание
+    возвращается (sync_moderation), и после одобрения кампанию снова включает settle_review — иначе одобренная,
+    но выключенная (ACCEPTED/OFF) кампания без отметки осталась бы выключенной навсегда."""
+    adapter = AcceptedOff()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    first, second = ads_of(world)
+    adapter.accept()
+    for ad in (first, second):
+        platform_review(adapter, ad, "rejected", "Нарушение правил площадки.")
+    await moderation_step(world, "owner-fix-reject", hours=1)
+    assert campaign.review_since is None
+    assert [row.log[0]["reason_code"] for row in notices(world)] == [
+        "MODERATION_REJECTED",
+        "MODERATION_REJECTED",
+        "MODERATION_ALL_REJECTED",
+    ]
+    # Пока проверяющий не одобрил исправления, кампанию не включают: одобренного показа нет.
+    for ad in (first, second):
+        platform_review(adapter, ad, "pending")
+    await moderation_step(world, "owner-fix-resubmit", hours=2)
+    assert campaign.review_since is not None
+    assert await platform_status(world, campaign) == "paused_auto"
+    # Модератор одобрил исправленные объявления.
+    for ad in (first, second):
+        platform_review(adapter, ad, "approved")
+    await moderation_step(world, "owner-fix-approve", hours=3)
+    assert await platform_status(world, campaign) == "active"
+    assert campaign.review_since is None
+    assert not [row for row in world.repository.rows(ChangeLog) if row.actor == "external"]
+
+
+async def test_owner_fixed_rejected_ads_never_enables_owner_paused_campaign(tmp_path: Path) -> None:
+    """Остановленную владельцем кампанию исправление объявлений в кабинете не включает никогда: ожидание не
+    возвращается, и после одобрения модерацией кампания остаётся остановленной владельцем."""
+    from app.services.sync import sync_campaign_status
+
+    adapter = AcceptedOff()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    first, second = ads_of(world)
+    adapter.accept()
+    for ad in (first, second):
+        platform_review(adapter, ad, "rejected", "Нарушение правил площадки.")
+    await moderation_step(world, "owner-pause-reject", hours=1)
+    assert campaign.review_since is None
+    # Владелец остановил кампанию в кабинете, затем исправил там же оба объявления.
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="paused_owner")
+    await sync_campaign_status(recovery_worker(world, after=timedelta(hours=2), dry_run=False), world.business)
+    assert campaign.status == "paused_owner" and campaign.owner_paused
+    for ad in (first, second):
+        platform_review(adapter, ad, "pending")
+    await moderation_step(world, "owner-pause-fix", hours=3)
+    assert campaign.review_since is None
+    for ad in (first, second):
+        platform_review(adapter, ad, "approved")
+    await moderation_step(world, "owner-pause-approve", hours=4)
+    assert await platform_status(world, campaign) == "paused_owner"
+    assert campaign.review_since is None
+    assert not [row for row in campaigns(world) if row.status == "active" and row.id == campaign.id]
 
 
 async def test_all_ads_rejected_notifies_owner_instead_of_long_review(tmp_path: Path) -> None:
@@ -3411,9 +3508,11 @@ async def test_rebalance_pause_after_approval_before_enable_keeps_campaign_off(t
     assert not [row for row in settle_records(world) if row.kind == "resume"]
 
 
-async def test_rebalance_does_not_resume_settled_pause_of_campaign_with_nothing_to_show(tmp_path: Path) -> None:
-    """Паузу «показывать нечего» (NO_ACTIVE_ADS) черновику после проверки довёл шаг модерации: пересчёт лимитов судит
-    по исходной паузе и кампанию не включает — объявления включает владелец."""
+async def test_rebalance_resumes_settled_pause_of_campaign_with_nothing_to_show_when_ads_are_approved(
+    tmp_path: Path,
+) -> None:
+    """Паузу «показывать нечего» (NO_ACTIVE_ADS) черновику после проверки довёл шаг модерации: когда объявления
+    одобрены, пересчёт лимитов сам включает кампанию, которую выключил."""
     from app.services.optimize import NO_ACTIVE_ADS
 
     adapter = ReviewMinimum()
@@ -3440,7 +3539,7 @@ async def test_rebalance_does_not_resume_settled_pause_of_campaign_with_nothing_
     await recovery_worker(world, after=timedelta(hours=3), dry_run=False).run(
         "rebalance_budget", world.business.id, key="settled-rebalance"
     )
-    assert await platform_status(world, campaign) == "paused_auto"
+    assert await platform_status(world, campaign) == "active"
 
 
 class ReviewMinimumAdsOff(ReviewMinimum):
@@ -3807,6 +3906,39 @@ class AcceptedOffWithoutMoney(AcceptedOff):
         if self.accepted and operation.entity_type == "campaign" and operation.after == "active":
             return
         await super().apply(operation)
+
+
+class RefusedThenOffWithoutMoney(AcceptedOffWithoutMoney):
+    """Первое включение после проверки площадка отклоняет (лимит запросов), следующее принимает, не включая кампанию."""
+
+    refused = False
+
+    async def apply(self, operation) -> None:
+        if self.accepted and not self.refused and operation.entity_type == "campaign" and operation.after == "active":
+            self.refused = True
+            raise RateLimited()
+        await super().apply(operation)
+
+
+async def test_repeated_resume_failure_keeps_explanation_in_fresh_record(tmp_path: Path) -> None:
+    """Повторный провал доводки того же окна (после отказа площадки — приняла, но не включила) не дублирует запись
+    в журнале и не теряет пояснение: остаётся одна свежая запись с текстом о том, что площадка приняла включение,
+    но кампанию пока не показывает."""
+    from app.services.sync import REVIEW_RESUME_FAILED
+
+    adapter = RefusedThenOffWithoutMoney()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    adapter.accept()
+    approve(world)
+    await settle(world)
+    await settle(world, hours=3)
+    failures = [row for row in settle_records(world) if row.kind == "resume"]
+    assert len(failures) == 1
+    assert failures[0].reason_text == REVIEW_RESUME_FAILED
+    assert failures[0].status == "failed"
+    assert campaign.review_since is not None
 
 
 async def test_approved_campaign_left_off_by_platform_is_not_owner_pause(tmp_path: Path) -> None:

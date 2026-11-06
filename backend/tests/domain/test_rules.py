@@ -235,7 +235,7 @@ def test_anomaly_freezes_no_leads_price_and_scaling_but_keeps_ctr(make_ad, now):
     )
     groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(4)]
     ads = [replace(ad, id=str(i), group_id=str(i)) for i in range(4)]
-    result = decide(ads, groups, now, 10_000, frozen, free_daily_budget=10_000)
+    result = decide(ads, groups, now, 10_000, frozen, free_daily_budget={"direct": 10_000})
     assert [(item.action, item.reason_code) for item in result] == [(Action.NOTIFY, "ANOMALY")]
     low_ctr = make_ad(impressions=2_000, clicks=1, leads=0)
     assert classify(low_ctr, now, 10_000, Decimal("0.02"), price_frozen=True).reason_code == "PAUSE_LOW_CTR"
@@ -281,7 +281,7 @@ def test_scaling_uses_only_freed_budget_and_twenty_percent_steps(make_ad, now):
     ads = [make_ad(id=str(i), group_id=str(i), spend=1_000, leads=5) for i in range(3)]
     unfunded = decide(ads, groups, now, 10_000)
     assert [(item.action, item.reason_code) for item in unfunded] == [(Action.NOTIFY, "BUDGET_OPPORTUNITY")]
-    decisions = decide(ads, groups, now, 10_000, free_daily_budget=3_000)
+    decisions = decide(ads, groups, now, 10_000, free_daily_budget={"direct": 3_000})
     assert [item.new_daily_limit for item in decisions] == [12_000, 11_000]
     assert all(item.entity == "group" and item.action == Action.SCALE for item in decisions)
     assert sum(item.new_daily_limit - 10_000 for item in decisions) == 3_000
@@ -291,11 +291,30 @@ def test_scaling_thirty_percent_transfer_and_three_equal_shares(make_ad, now):
     groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(3)]
     ads = [make_ad(id=str(i), group_id=str(i), spend=1_000, leads=5) for i in range(3)]
     config = replace(DEFAULT_SETTINGS, scale_step=Decimal(100))
-    decisions = decide(ads, groups, now, 10_000, free_daily_budget=30_000, settings=config)
+    decisions = decide(ads, groups, now, 10_000, free_daily_budget={"direct": 30_000}, settings=config)
     assert sum(item.new_daily_limit - 10_000 for item in decisions) == 18_000
     capped = replace(config, max_equal_share_multiplier=Decimal("0.6"))
-    decisions = decide(ads, groups, now, 10_000, free_daily_budget=30_000, settings=capped)
+    decisions = decide(ads, groups, now, 10_000, free_daily_budget={"direct": 30_000}, settings=capped)
     assert all(item.new_daily_limit == 12_000 for item in decisions)
+
+
+def test_scaling_takes_freed_budget_of_the_same_platform_only(make_ad, now):
+    """Деньги берутся только у освободившихся групп той же площадки: остановленная группа VK не
+    кормит SCALE групп Директа, а освободившийся лимит Директа им доступен; подсказка
+    BUDGET_OPPORTUNITY при этом не ломается."""
+    groups = [
+        GroupSnapshot("a", "direct", 10_000),
+        GroupSnapshot("c", "direct", 10_000),
+        GroupSnapshot("vk-1", "vk", 10_000, active=False),
+    ]
+    ads = [
+        make_ad(id="a-1", group_id="a", spend=1_000, leads=5),
+        make_ad(id="c-1", group_id="c", spend=1_000, leads=5),
+    ]
+    vk_freed = decide(ads, groups, now, 10_000, free_daily_budget={"vk": 10_000})
+    assert [(item.action, item.reason_code) for item in vk_freed] == [(Action.NOTIFY, "BUDGET_OPPORTUNITY")]
+    direct_freed = decide(ads, groups, now, 10_000, free_daily_budget={"direct": 3_000})
+    assert [item.new_daily_limit for item in direct_freed] == [12_000, 11_000]
 
 
 @pytest.mark.parametrize("kwargs", [{"spend": 1.0}, {"clicks": 2, "impressions": 1}, {"leads": 2, "clicks": 1}])
@@ -325,7 +344,7 @@ def test_anomaly_is_derived_from_ads_if_business_history_is_not_supplied(make_ad
 def test_pauses_and_scales_share_a_single_change_limit(make_ad, now):
     groups = [GroupSnapshot(str(i), "direct", 10_000) for i in range(8)]
     ads = [make_ad(id=str(i), group_id=str(i), spend=1_000_000 if i < 4 else 1_000, leads=5) for i in range(8)]
-    result = decide(ads, groups, now, 10_000, free_daily_budget=10_000)
+    result = decide(ads, groups, now, 10_000, free_daily_budget={"direct": 10_000})
     changes = [item for item in result if item.action != Action.NOTIFY]
     assert len(changes) == 5
     assert sum(item.action == Action.PAUSE for item in changes) == 4

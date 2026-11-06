@@ -195,7 +195,9 @@ def evaluate_audience(
     a, b = control.leads * variant.spend, variant.leads * control.spend
     # У контроля ни одного обращения: относительной разницы нет (бесконечность не сохранить в JSON).
     lift = b / a - 1 if a else None
-    required_ratio = 1 + Decimal(str(settings.test_win_lift))
-    if p < settings.test_alpha and (b >= a * required_ratio or a >= b * required_ratio):
+    # Победа честно по цене обращения: вариант не дороже (1 - test_win_lift) × цены контроля,
+    # то есть b * (1 - win) >= a; зеркально для контроля. Без деления: граница 15% точная.
+    win = 1 - Decimal(str(settings.test_win_lift))
+    if p < settings.test_alpha and (b * win >= a or a * win >= b):
         return ExperimentResult(Verdict.VARIANT if b > a else Verdict.CONTROL, "EXPERIMENT_WIN", p, lift)
     return ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", p, lift)

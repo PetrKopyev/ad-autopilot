@@ -3,7 +3,8 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 
@@ -41,7 +42,7 @@ class BusinessIn(BaseModel):
     site_url: str = Field(max_length=500)
     city: str = Field(max_length=100)
     month_budget_kop: StrictInt
-    avg_check_kop: StrictInt | None = None
+    avg_check_kop: StrictInt | None = Field(default=None, gt=0, le=MAX_BUDGET_KOP)
 
 
 class DescriptionField(BaseModel):
@@ -131,27 +132,24 @@ def budget_hint(
 
 
 @router.get("/business/site-check")
-async def site_check(
-    request: Request,
-    session: Annotated[Session, Depends(current_session)],
-    business: CurrentBusiness,
-    service: Service,
-    today: Today,
-) -> dict:
-    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта.
-    return await check_site(request, session, business, service, today, refresh=False)
+async def site_check(business: CurrentBusiness, service: Service) -> Response:
+    # GET только читает сохранённую проверку; чтение сайта и расход ИИ — за POST с CSRF.
+    cached = service.cached_site_check(business.id, datetime.now(UTC))
+    return Response(status_code=204) if cached is None else JSONResponse(cached)
 
 
 @router.post("/business/site-check", dependencies=[Depends(require_csrf)])
-async def refresh_site_check(
+async def run_site_check(
     request: Request,
     session: Annotated[Session, Depends(current_session)],
     business: CurrentBusiness,
     service: Service,
     today: Today,
+    refresh: bool = True,
 ) -> dict:
-    # Кнопка повтора: сайт читается заново мимо кэша — это меняет описание и тратит лимит ИИ, поэтому POST с CSRF.
-    return await check_site(request, session, business, service, today, refresh=True)
+    # Шаг мастера запрашивает проверку при каждом входе: refresh=false берёт кэш, и лимит считает только настоящее
+    # чтение сайта. Кнопка повтора (по умолчанию) читает сайт заново мимо кэша.
+    return await check_site(request, session, business, service, today, refresh=refresh)
 
 
 async def check_site(
@@ -217,7 +215,7 @@ class BudgetIn(BaseModel):
 
 class SettingsIn(BaseModel):
     auto_continue: StrictBool
-    avg_check_kop: StrictInt | None = Field(default=None, gt=0)
+    avg_check_kop: StrictInt | None = Field(default=None, gt=0, le=MAX_BUDGET_KOP)
     # Цель VK кабинета (пиксель Top@Mail): id источника и имя цели. Не задано — не менять,
     # 0 — сбросить цель.
     vk_priced_goal_source_id: StrictInt | None = Field(default=None, ge=0)

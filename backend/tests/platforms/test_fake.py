@@ -367,7 +367,8 @@ async def test_assets_auth_marking_and_service_methods(tmp_path: Path) -> None:
     await adapter.set_marking({"subject_type": "ip", "name": "Демо"})
     assert adapter.marking_instruction() is None
     assert (await adapter.limits()).remaining_units is None
-    assert await adapter.min_budgets() == {"day": 0, "period": 0}
+    assert await adapter.min_budgets() == {"daily_limit_kop": 0, "weekly_limit_kop": 0}
+    assert await adapter.geo_targeting("Самара") == {"region_ids": [51]}
 
 
 async def test_state_and_refs_are_detached_snapshots() -> None:

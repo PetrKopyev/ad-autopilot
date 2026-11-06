@@ -195,6 +195,13 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                             if campaign.review_since is None:
                                 campaign.review_since = worker.clock.now
                                 worker.repository.save(campaign)
+                elif ad.status == "rejected":
+                    # Площадка снова проверяет отклонённое объявление: владелец исправил его в кабинете. Ожидание
+                    # возвращаем — иначе кампанию без отметки не сверяет settle_review, и она застрянет выключенной.
+                    ad.status = "moderation"
+                    if campaign.status == "active" and campaign.review_since is None:
+                        campaign.review_since = worker.clock.now
+                        worker.repository.save(campaign)
         finally:
             # Статусы и отметки модерации кампании — одним commit, в том числе когда кампания опрошена не до конца:
             # иначе save(run) после сбоя сохранил бы статус active без даты одобрения.
@@ -216,8 +223,9 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
     объявлений — наша цель, и после проверки площадка приводится к ней. Включаем одобренное, но выключенное (OFF) и
     отправляем на проверку черновики объявлений — только у работающего бизнеса без остановки и только в кампании, чья
     цель — работать; паузу, которую площадка не применила к черновику, доводим всегда. SUSPENDED при цели «работает» —
-    остановка в кабинете (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены объявления)
-    включаем снова, когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся;
+    остановка в кабинете (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены
+    объявления) и одобренную, но выключенную кампанию с исправленными в кабинете объявлениями включаем снова,
+    когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся;
     кампания, закончившаяся по дате окончания, ждёт продления (month_rollover). pauses_only — только кампании, чья
     цель — пауза: их страж бюджета доводит раз в 30 минут, не дожидаясь часового шага модерации."""
     pending = {change.platform for change in worker.repository.pending(business.id)}
@@ -267,7 +275,9 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
             elif target == "active" and state.status != "active":
                 if kind == "campaign" and rejected:
                     continue
-                if state.ended:
+                if state.ended or (kind == "campaign" and not approved):
+                    # Ни одного одобренного объявления (исправленные в кабинете снова на проверке): включать
+                    # нечего — ждём одобрения, иначе запись «включили рекламу» опережала бы саму рекламу.
                     waiting = True
                 else:
                     enables.append(Operation("set_status", kind, row.external_id, "status", state.status, "active"))
@@ -326,11 +336,11 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
             change = worker.repository.change_by_key(business.id, f"{worker.step_key}:{campaign.id}:{suffix}")
             if change is None or change.status != "failed":
                 continue
-            repeated = repeated_failure(worker, business, campaign, suffix, change)
-            if repeated:
-                # Страж бюджета и шаг модерации повторяют доводку каждые полчаса: свежего провала того же окна
-                # в журнале достаточно.
-                worker.repository.remove(change)
+            earlier = repeated_failure(worker, business, campaign, suffix, change)
+            if earlier is not None:
+                # Страж бюджета и шаг модерации повторяют доводку каждые полчаса: в журнале остаётся свежая
+                # запись того же окна с пояснением, прежний провал того же окна удаляем.
+                worker.repository.remove(earlier)
             service = change.evidence["_service"]
             if (
                 paused
@@ -345,9 +355,8 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
                 continue
             # Площадка приняла включение, а кампания осталась выключенной (State=OFF: например, на счёте нет денег).
             # Это не остановка владельцем: отметка остаётся, повтор не нужен — площадка включит кампанию сама.
-            if not repeated:
-                change.reason_text = REVIEW_RESUME_FAILED
-                worker.repository.save(change)
+            change.reason_text = REVIEW_RESUME_FAILED
+            worker.repository.save(change)
             worker.notice(
                 business,
                 "CAMPAIGN_OFF_BY_PLATFORM",
@@ -396,18 +405,22 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
 FAILURE_REPEAT = timedelta(hours=24)
 
 
-def repeated_failure(worker: Worker, business: Business, campaign: Campaign, suffix: str, change) -> bool:
-    """Такая же доводка того же окна проверки уже проваливалась за последние сутки."""
+def repeated_failure(worker: Worker, business: Business, campaign: Campaign, suffix: str, change):
+    """Прежний провал той же доводки того же окна проверки за последние сутки: его запись в журнале, если есть."""
     tail = f":{campaign.id}:{suffix}"
-    return any(
-        row.id != change.id and row.evidence.get("worker_key", "").endswith(tail)
-        for row in worker.repository.rows(
-            ChangeLog,
-            business.id,
-            status="failed",
-            reason_code=SETTLE,
-            created_at=Window(worker.clock.now - FAILURE_REPEAT),
-        )
+    return next(
+        (
+            row
+            for row in worker.repository.rows(
+                ChangeLog,
+                business.id,
+                status="failed",
+                reason_code=SETTLE,
+                created_at=Window(worker.clock.now - FAILURE_REPEAT),
+            )
+            if row.id != change.id and row.evidence.get("worker_key", "").endswith(tail)
+        ),
+        None,
     )
 
 

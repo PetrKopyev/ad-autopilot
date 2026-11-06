@@ -286,7 +286,7 @@ class DirectAdapter:
         code = error.get("error_code", error.get("Code"))
         if str(code) == "53":
             raise AuthExpired()
-        if str(code) in {"152", "506", "56"}:
+        if str(code) in {"52", "152", "506", "56"}:
             raise RateLimited()
         message = ": ".join(
             str(error[key]) for key in ("error_string", "error_detail", "Message", "Details") if error.get(key)
@@ -386,16 +386,20 @@ class DirectAdapter:
         return f"{self._config.app_base_url.rstrip('/')}/api/auth/yandex/callback"
 
     async def _oauth(self, params: dict, account_id: str = "") -> AuthSession:
+        body = {
+            **params,
+            "client_id": self._config.yandex_client_id,
+        }
         secret = self._config.yandex_client_secret
+        secret = secret.get_secret_value() if hasattr(secret, "get_secret_value") else secret
+        if secret:
+            # У PKCE-приложения секрета может не быть: пустой client_secret Яндекс отклоняет.
+            body["client_secret"] = secret
         try:
             async with self._semaphore:
                 response = await self._client.post(
                     TOKEN_URL,
-                    data={
-                        **params,
-                        "client_id": self._config.yandex_client_id,
-                        "client_secret": secret.get_secret_value() if hasattr(secret, "get_secret_value") else secret,
-                    },
+                    data=body,
                     timeout=self._timeout,
                     follow_redirects=False,
                 )
@@ -428,6 +432,8 @@ class DirectAdapter:
     async def refresh(self, account: AuthSession) -> AuthSession:
         if not account.refresh_token:
             raise AuthExpired()
+        # account_id берём из сессии и в whoami не ходим: Яндекс уже выдал новый токен, и сбой лишнего запроса
+        # потерял бы его до сохранения (заодно экономим Units).
         return await self._oauth(
             {"grant_type": "refresh_token", "refresh_token": account.refresh_token}, account.account_id
         )
@@ -946,7 +952,8 @@ class DirectAdapter:
                     key,
                     {
                         "SelectionCriteria": {"Ids": [id_]},
-                        "FieldNames": ["Id", "State"],
+                        # Status кампании нужен, чтобы отличить ожидание проверки (код 6000) от настоящего отказа.
+                        "FieldNames": ["Id", "State", "Status"] if op.entity_type == "campaign" else ["Id", "State"],
                     },
                 )
             if not items:
@@ -981,8 +988,13 @@ class DirectAdapter:
                 # Включение сущности, которая ещё на проверке (объявление после moderate ждёт модерации,
                 # кампания-черновик v501 — принятия её объявлений), отклоняется площадкой: это не провал
                 # изменения — запись остаётся pending, воркер доведёт сверкой.
+                # Код 6000 (неверный статус) Директ отдаёт и для объявления на модерации, и для кампании-черновика:
+                # по коду и статусу сущности это ожидание проверки, даже без слов про модерацию в тексте ошибки.
                 waiting = (
-                    op.entity_type == "ad"
+                    op.entity_type in {"ad", "campaign"}
+                    and str(getattr(error, "direct_code", None)) == "6000"
+                    and item.get("Status") in {"DRAFT", "MODERATION"}
+                    or op.entity_type == "ad"
                     and "модерац" in str(error).lower()
                     or op.entity_type == "campaign"
                     and "черновик" in str(error).lower()
@@ -1010,7 +1022,12 @@ class DirectAdapter:
                 current = self._ad_content(ads[0]["ResponsiveAd"])
                 updated = {key: current[key] for key in ("Titles", "Texts", "Href") if key in current}
                 # По доке API AdImageHashes — обычный массив строк, как в add (форма {Items: [...]} отклоняется).
-                updated[field] = [value] if value is not None else None
+                if value is None:
+                    updated[field] = None
+                else:
+                    # Меняем только первый элемент: второй заголовок и прочие тексты и картинки варианта сохраняются.
+                    values = list(current.get(field) or [])
+                    updated[field] = [value, *values[1:]]
                 content = {"ResponsiveAd": updated}
             await self._api("ads", "update", {"Ads": [{"Id": id_, **content}]})
         elif op.kind == "set_targeting":

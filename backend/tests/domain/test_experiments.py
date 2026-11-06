@@ -266,6 +266,37 @@ def test_audience_needs_enough_leads_and_a_real_price_gap(now):
     assert evaluate_audience(control, close, start, end).verdict == Verdict.NO_DIFFERENCE
 
 
+def priced_days(start, spend, leads, count=10):
+    return tuple(
+        DaySpend(start + timedelta(days=offset), spend, impressions=100_000, clicks=1_000, leads=leads)
+        for offset in range(count)
+    )
+
+
+@pytest.mark.parametrize(
+    "control_spend,variant_spend,expected",
+    [
+        (100_000, 85_000, Verdict.VARIANT),  # ровно 15% дешевле — граница включительна
+        (100_000, 85_100, Verdict.NO_DIFFERENCE),  # чуть слабее 15%
+        (100_000, 87_000, Verdict.NO_DIFFERENCE),  # 13%: старое правило (×1,15 к обращениям на рубль) пускало бы его
+        (85_000, 100_000, Verdict.CONTROL),  # симметрично для контроля
+        (85_100, 100_000, Verdict.NO_DIFFERENCE),
+    ],
+)
+def test_audience_win_threshold_is_honest_about_lead_price(now, control_spend, variant_spend, expected):
+    """Порог победы — по цене обращения: вариант выигрывает, только когда обращение у него дешевле
+    минимум на 15% (b * 0,85 >= a), а не на ~13%, как давало отношение обращений на рубль × 1,15."""
+    start = now.date() - timedelta(days=16)
+    end = start + timedelta(days=16)
+    # По 1000 обращений у каждой аудитории: разница значима во всех случаях (p < 0,05),
+    # вердикт решает только порог цены.
+    control = priced_days(start, control_spend, 100)
+    variant = priced_days(start, variant_spend, 100)
+    result = evaluate_audience(control, variant, start, end)
+    assert result.p_value < DEFAULT_SETTINGS.test_alpha
+    assert result.verdict == expected
+
+
 def test_audience_design_runs_the_full_period():
     design = design_experiment(0.05, 4000, 80_000, ("text", "image"))
     assert (design.hypothesis, design.estimated_days, design.accepted) == ("audience", 14, True)

@@ -20,6 +20,15 @@ def test_budget_must_be_whole_positive_kopecks(api, budget) -> None:
     assert context.world.business.month_budget_kop != budget
 
 
+@pytest.mark.parametrize("check", [0, -1, 1_000_000_001])
+def test_avg_check_must_be_positive_and_within_max_budget(api, check) -> None:
+    """Средний чек положителен и не больше максимального бюджета: та же граница, что проверяет мастер до сохранения."""
+    client, context = api
+    response = new_business(client, avg_check_kop=check)
+    assert response.status_code == 422
+    assert context.world.business.avg_check_kop != check
+
+
 def test_empty_site_is_rejected_outside_demo(api) -> None:
     """В демо пустое поле сайта получает адрес салона-примера; вне демо пустой сайт по-прежнему отклоняется."""
     client, context = api
@@ -130,13 +139,13 @@ def test_business_changes_need_login_and_csrf(api, method, path, body) -> None:
 
 def test_site_check_of_foreign_business_is_not_found(api) -> None:
     client, context = api
-    response = client.get("/api/business/site-check", params={"business_id": context.other.id})
+    response = client.post("/api/business/site-check", params={"business_id": context.other.id, "refresh": "false"})
     assert response.status_code == 404
-    assert client.get("/api/business/site-check").status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
 
 
 def test_site_check_rereads_site_only_by_post(api, monkeypatch) -> None:
-    """Повтор проверки перечитывает сайт и тратит лимит ИИ — только POST с CSRF, GET читает кэш."""
+    """Повтор проверки перечитывает сайт и тратит лимит ИИ — только POST с CSRF, GET читает кэш и сайт не трогает."""
     client, context = api
     calls = []
 
@@ -145,8 +154,9 @@ def test_site_check_rereads_site_only_by_post(api, monkeypatch) -> None:
         return {}
 
     monkeypatch.setattr(context.world.onboarding, "site_check", site_check)
-    assert client.get("/api/business/site-check", params={"refresh": "true"}).status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
     assert client.post("/api/business/site-check").status_code == 200
+    assert client.get("/api/business/site-check").status_code == 204
     assert calls == [False, True]
 
 
@@ -164,18 +174,18 @@ def test_site_check_is_rate_limited_per_user_and_ip(api, monkeypatch) -> None:
         return {}
 
     monkeypatch.setattr(context.world.onboarding, "site_check", site_check)
-    statuses = [client.get("/api/business/site-check").status_code for _ in range(6)]
+    statuses = [client.post("/api/business/site-check", params={"refresh": "false"}).status_code for _ in range(6)]
     assert statuses == [200] * 5 + [429] and len(calls) == 5
-    response = client.get("/api/business/site-check")
+    response = client.post("/api/business/site-check", params={"refresh": "false"})
     assert "Сайт проверяется слишком часто" in response.json()["detail"]
     client.cookies.set("__Host-session", "other-session")
-    assert client.get("/api/business/site-check").status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
     now[0] += 300
     client.cookies.set("__Host-session", "test-session")
-    assert client.get("/api/business/site-check").status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
     limits.site_check_limit.hits["ip:testclient"].extend([now[0]] * 20)
     client.cookies.set("__Host-session", "other-session")
-    assert client.get("/api/business/site-check").status_code == 429
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 429
 
 
 def test_description_save_is_rate_limited_and_too_many_services_are_refused(api) -> None:
@@ -204,7 +214,7 @@ def test_site_check_answered_from_cache_does_not_spend_the_limit(api, monkeypatc
         return await reader(url)
 
     monkeypatch.setattr(context.world.onboarding, "reader", counting)
-    statuses = [client.get("/api/business/site-check").status_code for _ in range(10)]
+    statuses = [client.post("/api/business/site-check", params={"refresh": "false"}).status_code for _ in range(10)]
     assert statuses == [200] * 10 and len(reads) <= 1
 
 
@@ -219,8 +229,8 @@ def test_site_check_retry_reads_site_again_and_spends_the_limit(api, monkeypatch
         return await reader(url)
 
     monkeypatch.setattr(context.world.onboarding, "reader", counting)
-    assert client.get("/api/business/site-check").status_code == 200
-    assert client.get("/api/business/site-check").status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
+    assert client.post("/api/business/site-check", params={"refresh": "false"}).status_code == 200
     assert len(reads) == 1
     assert client.post("/api/business/site-check").status_code == 200
     assert len(reads) == 2
@@ -239,7 +249,7 @@ def test_site_check_limit_is_per_ip_too(api, monkeypatch) -> None:
 
     monkeypatch.setattr(context.world.onboarding, "site_check", site_check)
     limits.site_check_limit.hits["ip:testclient"] = deque([limits.monotonic()] * 20)
-    response = client.get("/api/business/site-check")
+    response = client.post("/api/business/site-check", params={"refresh": "false"})
     assert response.status_code == 429 and int(response.headers["Retry-After"]) > 0
 
 
@@ -274,3 +284,22 @@ def test_after_launch_wizard_explains_metrica_and_settings_keep_saving_descripti
     assert context.world.adapters["direct"]._marking["inn"] == "7707083893"
     # Состояние передачи хранится в профиле: экраны настроек и главной читают его оттуда (шаг B1).
     assert context.world.repository.marking(business.id).transmission["vk"]["status"] == "marking_transmitted"
+
+
+def test_site_check_get_only_reads_cache(api, monkeypatch) -> None:
+    """GET не читает сайт и не тратит лимит: без сохранённой проверки ответ пустой, после POST — готовая проверка."""
+    client, context = api
+    reads = []
+    reader = context.world.onboarding.reader
+
+    async def counting(url):
+        reads.append(url)
+        return await reader(url)
+
+    monkeypatch.setattr(context.world.onboarding, "reader", counting)
+    assert client.get("/api/business/site-check").status_code == 204
+    assert reads == []
+    checked = client.post("/api/business/site-check", params={"refresh": "false"}).json()
+    cached = client.get("/api/business/site-check")
+    assert cached.status_code == 200 and cached.json() == checked
+    assert len(reads) == 1

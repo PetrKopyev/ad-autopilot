@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from dataclasses import asdict
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from math import ceil
@@ -135,6 +135,13 @@ async def snapshot(
         and (last := repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id))
         and last.reason_code == "ACCOUNT_REVOKE"
     }
+    # limits — веса, а не копейки: группе без записи даём средний вес группы той же площадки, иначе запасное
+    # значение в копейках смешалось бы с весами в ruble_rates.
+    known_weights: dict[str, list[int]] = {}
+    for item in groups:
+        owner = campaign_map.get(item.campaign_id)
+        if owner is not None and item.external_id in limits:
+            known_weights.setdefault(owner.platform, []).append(int(limits[item.external_id]))
     group_snapshots = []
     for group in groups:
         campaign = campaign_map.get(group.campaign_id)
@@ -142,7 +149,8 @@ async def snapshot(
         if group.external_id not in states or campaign is None or campaign.external_id not in states:
             continue
         siblings = [item for item in groups if item.campaign_id == campaign.id]
-        equal = campaign.daily_limit_kop // len(siblings)
+        weights = known_weights.get(campaign.platform)
+        equal = sum(weights) // len(weights) if weights else campaign.daily_limit_kop // len(siblings)
         group_snapshots.append(
             GroupSnapshot(
                 group.external_id,
@@ -187,12 +195,43 @@ def reference(worker: Worker, business: Business, ads: list[AdSnapshot]) -> int 
     return ref_cpl(business.avg_check_kop, ads, today(worker.clock), answers)
 
 
-def freed_daily_budget(groups: Sequence[GroupSnapshot]) -> int:
-    """Лимит, освободившийся полностью остановленными группами (RULES: деньги берутся из освободившегося).
-    Частично остановленная группа не донорит: лимит на площадках общий на группу, оставшиеся объявления
-    тратят его целиком — иначе после каждого A/B-теста группа с одним победителем «освобождала» бы
-    половину лимита и SCALE снимал бы деньги с работающей рекламы."""
-    return sum(group.daily_limit for group in groups if not group.active)
+def freed_daily_budget(groups: Sequence[GroupSnapshot]) -> dict[str, int]:
+    """Лимит, освободившийся полностью остановленными группами, по площадкам (RULES: деньги берутся
+    из освободившегося у той же площадки, между площадками не переходят). Частично остановленная
+    группа не донорит: лимит на площадках общий на группу, оставшиеся объявления тратят его
+    целиком — иначе после каждого A/B-теста группа с одним победителем «освобождала» бы половину
+    лимита и SCALE снимал бы деньги с работающей рекламы."""
+    freed: dict[str, int] = {}
+    for group in groups:
+        if not group.active:
+            freed[group.platform] = freed.get(group.platform, 0) + group.daily_limit
+    return freed
+
+
+def ruble_rates(
+    groups: Sequence[GroupSnapshot],
+    local_groups: Sequence[AdGroup],
+    campaigns: Sequence[Campaign],
+) -> dict[str, Decimal]:
+    """Рубли на единицу веса по площадкам. Доли групп (meta group_limits) хранятся как веса, а не
+    рубли: лимит кампании живёт с бюджетом, поэтому рубли переводятся от текущего дневного лимита
+    её кампании, а веса пересчитывать нельзя (откат сравнивает group_limits из evidence абсолютно)."""
+    campaign_map = {campaign.id: campaign for campaign in campaigns}
+    rates: dict[str, Decimal] = {}
+    for platform in {group.platform for group in groups}:
+        active = [group for group in groups if group.active and group.platform == platform]
+        weight = sum(Decimal(group.daily_limit) for group in active)
+        campaign_ids = {
+            next(item.campaign_id for item in local_groups if item.external_id == group.id) for group in active
+        }
+        total = sum(campaign_map[campaign_id].daily_limit_kop for campaign_id in campaign_ids)
+        rates[platform] = Decimal(total) / weight if weight > 0 and total > 0 else Decimal(1)
+    return rates
+
+
+def in_rubles(groups: Sequence[GroupSnapshot], rates: Mapping[str, Decimal]) -> list[GroupSnapshot]:
+    """Сырые веса групп в рубли по курсу площадки (ruble_rates)."""
+    return [replace(group, daily_limit=int(group.daily_limit * rates[group.platform])) for group in groups]
 
 
 def missing_conversion_sources(business: Business) -> set[str]:
@@ -218,6 +257,11 @@ async def optimize(worker: Worker, business: Business) -> None:
         return
     await sync_removed_services(worker, business)
     ads, groups = await snapshot(worker, business)
+    local_groups = worker.repository.rows(AdGroup, business.id)
+    raw = {group.id: group.daily_limit for group in groups}
+    rates = ruble_rates(groups, local_groups, worker.current_campaigns(business))
+    platform_by_id = {group.id: group.platform for group in groups}
+    groups = in_rubles(groups, rates)
     limits = {group.id: group.daily_limit for group in groups}
     # Освободившаяся доля остаётся доступной, но не доливается в пограничные объявления.
     free = freed_daily_budget(groups)
@@ -231,7 +275,6 @@ async def optimize(worker: Worker, business: Business) -> None:
         settings=get_domain_settings(),
     )
     campaigns = worker.campaigns(business)
-    local_groups = worker.repository.rows(AdGroup, business.id)
     testing = testing_groups(worker, business)
     ad_map = {ad.id: ad for ad in ads}
     lifetime = None
@@ -247,9 +290,12 @@ async def optimize(worker: Worker, business: Business) -> None:
             continue
         campaign = next(item for item in campaigns if item.id == group.campaign_id)
         if decision.action == Action.PAUSE:
-            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
-                decision.target_id
-            ]
+            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+            state = states.get(decision.target_id)
+            if state is None:
+                # Объявление удалили в кабинете между снимком и остановкой: пропускаем только его,
+                # остальные решения шага продолжаются.
+                continue
             await worker.apply(
                 business,
                 campaign,
@@ -263,16 +309,17 @@ async def optimize(worker: Worker, business: Business) -> None:
             before = limits.copy()
             scaled = limits.copy()
             increment = decision.new_daily_limit - limits[group_id]
-            # Сначала забираем средства у полностью остановленных групп; сумма лимитов не растёт. Частично
-            # остановленная группа не донорит: лимит общий на группу, работающие объявления тратят его
-            # целиком (иначе SCALE снимал бы деньги с группы победителя A/B). У группы из другой кампании
-            # берём только то, что выше минимума площадки для её кампании: иначе, когда группа снова
-            # заработает, её кампания встанет на паузу из-за минимума.
+            # Сначала забираем средства у полностью остановленных групп той же площадки; сумма
+            # лимитов не растёт. Частично остановленная группа не донорит: лимит общий на группу,
+            # работающие объявления тратят его целиком (иначе SCALE снимал бы деньги с группы
+            # победителя A/B). У группы из другой кампании берём только то, что выше минимума
+            # площадки для её кампании: иначе, когда группа снова заработает, её кампания встанет
+            # на паузу из-за минимума.
             for donor in groups:
                 donor_group = next(item for item in local_groups if item.external_id == donor.id)
                 if donor_group.id in testing or increment <= 0 or donor.id == group_id:
                     continue
-                if donor.active:
+                if donor.active or donor.platform != campaign.platform:
                     continue
                 spare = scaled[donor.id]
                 if donor_group.campaign_id != campaign.id:
@@ -315,6 +362,14 @@ async def optimize(worker: Worker, business: Business) -> None:
             if campaign.platform != "vk":
                 cap = spent + max(state.period_cap_kop - spent, 0) * share_after // share_before
                 budget_fields.insert(0, ("period_cap_kop", state.period_cap_kop, cap))
+            # В БД и evidence уходят сырые веса: рубли переводятся обратно по курсу площадки, а веса
+            # групп без изменений не трогаем — иначе округление дрейфовало бы их (откат сравнивает
+            # group_limits из evidence абсолютно).
+            changed = [key for key in scaled if scaled[key] != before[key]]
+            raw_after = {
+                key: raw[key] + round((scaled[key] - before[key]) / rates[platform_by_id[key]]) for key in changed
+            }
+            keep = {key for key in raw_after if raw_after[key] != raw[key]}
             await worker.apply(
                 business,
                 campaign,
@@ -331,15 +386,25 @@ async def optimize(worker: Worker, business: Business) -> None:
                 entity_id=group_id,
                 evidence={
                     "group_limits": {
-                        "before": {key: before[key] for key in scaled if scaled[key] != before[key]},
-                        "after": {key: scaled[key] for key in scaled if scaled[key] != before[key]},
+                        "before": {key: raw[key] for key in keep},
+                        "after": {key: raw_after[key] for key in keep},
                     }
                 },
             )
             if not worker.proposed(business):
                 limits = scaled
+                raw = raw | {key: raw_after[key] for key in keep}
+                # Лимиты кампании уже применены: сохраняем их в базе, как rebalance_budget, иначе до
+                # ближайшего пересчёта курс ruble_rates оставался бы прежним.
+                campaign.daily_limit_kop = daily
+                if campaign.platform != "vk":
+                    campaign.period_cap_kop = cap
+                worker.repository.save(campaign)
+    # Курс нужен проверке гипотез (services/experiments), у которой нет снимка площадок.
+    stored = {"ruble_rates": {platform: str(rate) for platform, rate in rates.items()}}
     if not worker.proposed(business):
-        worker.remember(business, group_limits=limits)
+        stored["group_limits"] = raw
+    worker.remember(business, **stored)
 
 
 async def below_platform_minimum(
@@ -571,10 +636,15 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 and last.kind == "pause"
                 and (last.actor == "system" or last.reason_code == "OWNER_STOP" and not meta.get("kill_switch"))
             )
-            # Возобновление касается кампаний из held (пауза по минимуму площадки) и остановленных с нулевым дневным
-            # лимитом: те в held не входят и прежним условием не возобновлялись никогда — новый месяц с деньгами их
-            # не спасал бы. Паузу «показывать нечего» не трогаем: объявления включает владелец.
-            zero_pause = not campaign.daily_limit_kop and last is not None and last.reason_text != NO_ACTIVE_ADS
+            # Возобновление касается кампаний из held (пауза по минимуму площадки) и остановленных пересчётом с нулевым
+            # дневным лимитом (нет бюджета или нечего показывать): те в held не входят и прежним условием не
+            # возобновлялись никогда. Паузу стража бюджета, месяца и kill_switch (другие reason_code) не трогаем.
+            zero_pause = (
+                not campaign.daily_limit_kop
+                and last is not None
+                and last.reason_code == "BUDGET_REBALANCE"
+                and not meta.get("kill_switch")
+            )
             resume = (
                 campaign.status == "paused_auto"
                 and not campaign.owner_paused
@@ -608,6 +678,8 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     reason_text=(
                         "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
                         if campaign.id in held
+                        else "Снова есть работающие объявления: пересчитали лимиты и возобновили кампанию."
+                        if last.reason_text == NO_ACTIVE_ADS
                         else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
                     )
                     if resume
@@ -743,6 +815,8 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
     if business.status != "running" or worker.metadata(business).get("kill_switch"):
         return
     ads, groups = await snapshot(worker, business)
+    rates = ruble_rates(groups, list(local_groups.values()), worker.current_campaigns(business))
+    groups = in_rubles(groups, rates)
     by_id = {ad.id: ad for ad in ads}
     local_ads = {ad.id: ad for ad in worker.repository.rows(Ad, business.id)}
     for experiment in running:

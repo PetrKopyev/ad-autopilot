@@ -222,7 +222,15 @@ async def test_protocol_headers_and_units(adapter, api):
 
 
 @pytest.mark.parametrize(
-    "code,error", [(53, AuthExpired), (152, RateLimited), (506, RateLimited), (56, RateLimited), (8000, PlatformError)]
+    "code,error",
+    [
+        (53, AuthExpired),
+        (52, RateLimited),
+        (152, RateLimited),
+        (506, RateLimited),
+        (56, RateLimited),
+        (8000, PlatformError),
+    ],
 )
 @pytest.mark.parametrize("object_error", [False, True])
 async def test_direct_errors(adapter, api, code, error, object_error):
@@ -745,6 +753,36 @@ async def test_apply_ad_updates(adapter, api, field, kind, value, expected):
     assert request_body(route) == {"method": "update", "params": {"Ads": [{"Id": 3, "ResponsiveAd": content}]}}
 
 
+@pytest.mark.parametrize(
+    "field,before,after,current,expected",
+    [
+        ("title", "Первый", "Новый", ["Первый", "Второй"], ["Новый", "Второй"]),
+        ("title", "Новый", "Первый", ["Первый", "Второй"], ["Первый", "Второй"]),
+        ("text", "Один", "Новый", ["Один", "Два"], ["Новый", "Два"]),
+        ("text", "Новый", "Один", ["Один", "Два"], ["Один", "Два"]),
+    ],
+)
+async def test_apply_ad_update_replaces_only_first_element(adapter, api, field, before, after, current, expected):
+    """Правка заголовка или текста меняет только первый элемент: остальные варианты объявления сохраняются,
+    откат (inverse) возвращает первый элемент."""
+    key = "Titles" if field == "title" else "Texts"
+    item_key = "Title" if field == "title" else "Text"
+    other = {"Titles": [{"Title": "Один"}, {"Title": "Два"}], "Texts": [{"Text": "Один"}, {"Text": "Два"}]}
+    other.pop(key)
+    content = {key: [{item_key: value} for value in current], **other, "Href": "https://salon.example"}
+
+    def respond(request):
+        method = json.loads(request.content)["method"]
+        data = {"Ads": [{"Id": 3, "ResponsiveAd": content}]} if method == "get" else {"UpdateResults": [{"Id": 3}]}
+        return httpx.Response(200, json={"result": data})
+
+    route = api.post(f"{V501}/ads").mock(side_effect=respond)
+    await adapter.apply(Operation("update_ad_text", "ad", "3", field, before, after))
+    sent = request_body(route)["params"]["Ads"][0]["ResponsiveAd"]
+    assert sent[key] == expected
+    assert sent["Titles" if key == "Texts" else "Texts"] == ["Один", "Два"]
+
+
 async def test_apply_targeting(adapter, api):
     route = result(api, "adgroups", UpdateResults=[{"Id": 2}])
     await adapter.apply(
@@ -1219,6 +1257,38 @@ async def test_auth_and_refresh(adapter, api):
         await adapter.refresh(AuthSession("1", "test-access"))
 
 
+async def test_refresh_does_not_call_whoami(adapter, api):
+    """Продление не ходит в clients.get: новый токен выдан Яндексом, и сбой лишнего запроса потерял бы его."""
+    api.post("https://oauth.yandex.ru/token").respond(
+        json={"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+    )
+    clients = api.post(f"{V501}/clients").respond(500)
+    refreshed = await adapter.refresh(AuthSession("77", "old-access", "old-refresh"))
+    assert refreshed.account_id == "77"
+    assert (refreshed.access_token, refreshed.refresh_token) == ("new-access", "new-refresh")
+    assert not clients.calls
+
+
+async def test_campaign_status_is_requested_so_error_6000_waits_for_moderation(adapter, api):
+    """Кампании читаются со Status: мок отдаёт его, только если он есть в FieldNames, иначе код 6000 был бы сбоем."""
+    adapter._marking_confirmed = True
+
+    def respond(request):
+        body = json.loads(request.content)
+        if body["method"] == "get":
+            item = {"Id": 1, "State": "OFF", "Status": "DRAFT"}
+            shown = {key: value for key, value in item.items() if key in body["params"]["FieldNames"]}
+            return httpx.Response(200, json={"result": {"Campaigns": [shown]}})
+        return httpx.Response(
+            200,
+            json={"result": {"ResumeResults": [{"Id": 1, "Errors": [{"Code": 6000, "Message": "Неверный статус"}]}]}},
+        )
+
+    api.post(f"{V501}/campaigns").mock(side_effect=respond)
+    with pytest.raises(AwaitingModeration):
+        await adapter.apply(Operation("set_status", "campaign", "1", "status", "paused_owner", "active"))
+
+
 async def test_client_ownership():
     async with httpx.AsyncClient() as client:
         async with DirectAdapter("test-only", config=configuration(), client=client):
@@ -1449,6 +1519,55 @@ async def test_draft_campaign_other_resume_error_is_a_real_failure(adapter, api)
     )
     with pytest.raises(PlatformError, match="Недостаточно прав"):
         await adapter.apply(Operation("set_status", "campaign", "1", "status", "paused_owner", "active"))
+
+
+@pytest.mark.parametrize(
+    "entity,service,key,item",
+    [
+        ("ad", "ads", "Ads", {"Id": 1, "State": "ON", "Status": "MODERATION"}),
+        ("campaign", "campaigns", "Campaigns", {"Id": 1, "State": "OFF", "Status": "DRAFT"}),
+    ],
+)
+async def test_resume_error_6000_waits_by_status_without_moderation_words(adapter, api, entity, service, key, item):
+    """Ошибка 6000 «Неверный статус» без слов про модерацию/черновик — ожидание проверки, если сущность
+    в статусе DRAFT/MODERATION: именно так Директ отклоняет включение объявления на модерации и кампании-черновика."""
+    adapter._marking_confirmed = True
+    route = api.post(f"{V501}/{service}").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {key: [item]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {"ResumeResults": [{"Id": 1, "Errors": [{"Code": 6000, "Message": "Неверный статус"}]}]}
+                },
+            ),
+        ]
+    )
+    with pytest.raises(AwaitingModeration):
+        await adapter.apply(Operation("set_status", entity, "1", "status", "paused_owner", "active"))
+    assert [json.loads(call.request.content)["method"] for call in route.calls] == ["get", "resume"]
+
+
+@pytest.mark.parametrize(
+    "entity,service,key",
+    [("ad", "ads", "Ads"), ("campaign", "campaigns", "Campaigns")],
+)
+async def test_resume_error_6000_with_accepted_status_is_a_real_failure(adapter, api, entity, service, key):
+    """Тот же код 6000 у сущности не в DRAFT/MODERATION (например ACCEPTED) — обычный сбой, а не ожидание."""
+    adapter._marking_confirmed = True
+    api.post(f"{V501}/{service}").mock(
+        side_effect=[
+            httpx.Response(200, json={"result": {key: [{"Id": 1, "State": "OFF", "Status": "ACCEPTED"}]}}),
+            httpx.Response(
+                200,
+                json={
+                    "result": {"ResumeResults": [{"Id": 1, "Errors": [{"Code": 6000, "Message": "Неверный статус"}]}]}
+                },
+            ),
+        ]
+    )
+    with pytest.raises(PlatformError, match="Неверный статус"):
+        await adapter.apply(Operation("set_status", entity, "1", "status", "paused_owner", "active"))
 
 
 async def test_create_tree_keeps_foreign_ad_awaiting_moderation(adapter, api, plan):

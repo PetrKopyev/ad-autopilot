@@ -611,6 +611,11 @@ def test_settings_values_are_saved(setup):
     assert world.business.avg_check_kop is None
     assert client.get("/api/business").json()["auto_continue"] is False
     assert client.put("/api/business/settings", json={"auto_continue": True, "avg_check_kop": -1}).status_code == 422
+    assert client.put("/api/business/settings", json={"auto_continue": True, "avg_check_kop": 0}).status_code == 422
+    assert (
+        client.put("/api/business/settings", json={"auto_continue": True, "avg_check_kop": 1_000_000_001}).status_code
+        == 422
+    )
 
 
 def test_vk_goal_can_be_set_and_reset(setup):

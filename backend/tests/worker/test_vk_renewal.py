@@ -72,7 +72,8 @@ async def test_renew_vk_tokens_skips_fresh_direct_and_timeless_accounts(monkeypa
             platform="direct",
             auth_mode="oauth",
             access_token_enc="direct-token",
-            expires_at=NOW - timedelta(seconds=1),
+            # Срок неизвестен: шаг продления Директа такие кабинеты не трогает, как и VK-шаг.
+            expires_at=None,
             status="ok",
         ),
     )

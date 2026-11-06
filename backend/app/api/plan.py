@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.types import Message
 
@@ -138,7 +138,14 @@ async def get_plan(business: CurrentBusiness, service: Plans, today: Today) -> d
         return await service.get_plan(business.id, datetime.now(UTC), today)
 
 
-@router.get("/forecast", dependencies=[Depends(forecast_limit)])
+@router.get("/forecast")
+async def cached_forecast(business: CurrentBusiness, service: Forecasts) -> Response:
+    # GET только читает готовый прогноз из кэша; заказ отчёта в Директе и расчёт — за POST с CSRF.
+    cached = service.cached(business, datetime.now(UTC))
+    return Response(status_code=204) if cached is None else JSONResponse(cached)
+
+
+@router.post("/forecast", dependencies=[Depends(forecast_limit), Depends(require_csrf)])
 async def forecast(business: CurrentBusiness, service: Forecasts, today: Today) -> dict:
     return await service.forecast(business, datetime.now(UTC), today)
 

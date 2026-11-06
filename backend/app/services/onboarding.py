@@ -750,6 +750,11 @@ class OnboardingService:
             raise ChangeConflict("Адрес сайта изменился во время проверки. Проверьте сайт ещё раз.")
         return business
 
+    def cached_site_check(self, business_id: int, now: datetime) -> dict | None:
+        business = self.current(business_id)
+        cached = self.cached_check(business, now, None)
+        return None if cached is None else self.check_view(business, cached)
+
     async def site_check(
         self,
         business_id: int,

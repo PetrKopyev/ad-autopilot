@@ -9,6 +9,7 @@ from heapq import heappop, heappush
 from math import isfinite
 from pathlib import Path
 from random import Random
+from typing import Any
 from urllib.parse import urlencode
 
 from app.platforms.base import (
@@ -560,10 +561,11 @@ class FakeAdapter:
     async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
         self._request()
         own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
+        # Ключ _spent_daily — (entity_id кампании, день): это тот же внешний id, что передают потребители.
         return sum(
             cost
-            for (ad_id, day), cost in self._spent_daily.items()
-            if day == today(self.clock) and (own is None or self._campaigns.get(ad_id) in own)
+            for (campaign_id, day), cost in self._spent_daily.items()
+            if day == today(self.clock) and (own is None or campaign_id in own)
         )
 
     async def get_balance_hint(self) -> int | None:
@@ -583,7 +585,7 @@ class FakeAdapter:
 
     async def min_budgets(self) -> dict[str, int]:
         self._request()
-        return {"day": 0, "period": 0}
+        return {"daily_limit_kop": 0, "weekly_limit_kop": 0}
 
-    async def geo_targeting(self, city: str) -> dict[str, str]:
-        return {"city": city}
+    async def geo_targeting(self, city: str) -> dict[str, Any]:
+        return {"region_ids": [51]}

@@ -106,9 +106,8 @@ export async function getBudgetHint(month_budget_kop: number, vk: boolean, signa
 }
 export async function checkSite(signal?: AbortSignal, refresh = false): Promise<SiteCheck> {
   if (mockEnabled) return (await import('./mocks')).mockSetupSite();
-  if (!refresh) return setupGet('/api/business/site-check', signal);
-  // Повтор перечитывает сайт и тратит лимит: изменение, а не чтение.
-  const result = await api<SiteCheck>('/api/business/site-check', { method: 'POST', signal });
+  // Проверка читает сайт и тратит лимит ИИ: изменение, а не чтение. Без refresh сервер берёт сохранённую проверку.
+  const result = await api<SiteCheck>(`/api/business/site-check?refresh=${refresh}`, { method: 'POST', signal });
   if (result === undefined) throw new ApiError(copy.errors.invalidResponse);
   return result;
 }

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import replace
@@ -27,6 +28,8 @@ from app.platforms.base import (
     StatRow,
 )
 from app.platforms.regions import AREAS, Region, RegionCache, find_region, not_found
+
+logger = logging.getLogger(__name__)
 
 # Все места, где документация VK неоднозначна, собраны здесь; сверять с живым кабинетом.
 API_FORMAT = {
@@ -59,8 +62,7 @@ PACKAGE_REJECT_TOKENS = {"carousel", "карусель", "пост", "post", "ma
 PACKAGE_GOAL_REQUIRED_HINT = "ocpm"
 PACKAGE_UNAVAILABLE = (
     "В кабинете VK Рекламы нет пакета, на котором API может создать кампанию сайта без цели пикселя. "
-    "Создайте пиксель VK (ads.vk.com → счётчик Top@Mail) и цель, задайте её в VK_PRICED_GOAL_SOURCE_ID "
-    "и VK_PRICED_GOAL_NAME — или укажите подходящий пакет в VK_PACKAGE_ID. Поддержка VK: ads_api@vk.team."
+    "Укажите пиксель и цель в Настройках → Цель ВКонтакте."
 )
 # Регионы VK со своими id (не Яндекса): GET /api/v2/regions.json, см. https://ads.vk.com/doc/api/object/Region
 RUSSIA = 188
@@ -68,6 +70,8 @@ RUSSIAN = {"Accept-Language": "ru-RU"}
 REGIONS = RegionCache()
 PATHS = {"campaign": "ad_plans", "group": "ad_groups", "ad": "banners"}
 STAT_PATHS = {"campaign": "ad_plans", "group": "ad_groups", "ad": "banners"}
+# Документация VK Ads: в statistics id объектов обязателен, в одном запросе — до 200 id.
+STAT_CHUNK = 200
 MODERATION = {"allowed": "approved", "banned": "rejected"}
 INDIVIDUAL_TYPES = {"individual", "self_employed", "physical"}
 LEGAL_MARKING = (
@@ -351,8 +355,10 @@ class VkAdapter(VkClient):
                 if plan is not None:
                     break
             if plan is None:
-                detail = f" Отказало: {'; '.join(refusals)}." if refusals else ""
-                raise PlatformError(f"{PACKAGE_UNAVAILABLE}{detail}")
+                # Сырые отказы площадки владельцу не показываем: только в журнал, сообщение — общее.
+                if refusals:
+                    logger.warning("VK Реклама не создала план: %s", "; ".join(refusals))
+                raise PlatformError(PACKAGE_UNAVAILABLE)
         refs = self._refs(plan_part, plan)
         self._trees[key] = refs
         return refs
@@ -750,27 +756,81 @@ class VkAdapter(VkClient):
         date_to: date,
         level: StatLevel = "ad",
         campaign_ids: Collection[str] | None = None,
+        *,
+        with_goals: bool = True,
     ) -> list[StatRow]:
         if level not in STAT_PATHS or date_from > date_to:
             raise ValueError("Некорректный уровень или интервал статистики.")
         # Кабинет может содержать чужую рекламу владельца: светим статистику только по своим планам.
-        # Для ad_plans id в запросе есть; для групп и баннеров id другого уровня — фильтруем ответ.
+        # Документация VK: id объектов в statistics обязателен, в одном запросе — до STAT_CHUNK id.
         own = None if campaign_ids is None else {str(id_) for id_ in campaign_ids}
         if own is not None and not own:
+            return []
+        parents = await self._parents(level)
+        if level == "campaign":
+            # Уровень campaign — сами планы: id из отбора, а без него — все планы кабинета.
+            ids = sorted(own) if own is not None else [
+                str(item["id"]) for item in await self._items("ad_plans", {"fields": "id"})
+            ]
+        else:
+            ids = sorted(parents) if own is None else sorted(
+                entity_id for entity_id, parent in parents.items() if parent in own
+            )
+        if not ids:
             return []
         params: dict[str, Any] = {
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
             "metrics": "base",
         }
-        if own is not None and level == "campaign":
-            params["id"] = ",".join(sorted(own))
+
+        async def stat_items(path: str) -> list[dict]:
+            items: list[dict] = []
+            for offset in range(0, len(ids), STAT_CHUNK):
+                data = await self._request(
+                    "GET", path, params={**params, "id": ",".join(ids[offset : offset + STAT_CHUNK])}
+                )
+                page_items = data.get("items")
+                if not isinstance(page_items, list) or any(not isinstance(item, dict) for item in page_items):
+                    raise ValueError
+                items += page_items
+            return items
+
         try:
-            parents = await self._parents(level)
-            data = await self._request("GET", f"statistics/{STAT_PATHS[level]}/day.json", params=params)
+            items = await stat_items(f"statistics/{STAT_PATHS[level]}/day.json")
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            raise invalid_response() from None
+        # Цель задана: base.goals — сумма по всем целям счётчика, конверсии берём из statistics/goals
+        # по выбранной цели (source topmail + counter_id + имя), теми же пачками id. Цели не нужны стражу бюджета
+        # и не должны ронять расход: при сбое откатываемся на base.goals.
+        priced_goal = self._priced_goal_body() if with_goals else None
+        goal_hits: dict[tuple[str, date], int] | None = None
+        if priced_goal is not None:
+            try:
+                goal_hits = {}
+                source_id, goal_name = str(priced_goal["source_id"]), priced_goal["name"]
+                for item in await stat_items(f"statistics/goals/{STAT_PATHS[level]}/day.json"):
+                    entity_id = str(_integer(item["id"]))
+                    for row in item["rows"]:
+                        day = date.fromisoformat(row["date"])
+                        goals = row.get("goals")
+                        if not isinstance(goals, list) or any(not isinstance(goal, dict) for goal in goals):
+                            raise ValueError
+                        goal_hits[(entity_id, day)] = sum(
+                            _integer(goal["count"])
+                            for goal in goals
+                            if goal.get("source") == "topmail"
+                            and str(goal.get("counter_id")) == source_id
+                            and goal.get("goal") == goal_name
+                        )
+            except Exception as error:
+                code = getattr(error, "status_code", None) or type(error).__name__
+                logger.warning("VK goal statistics failed: code=%s", code)
+                goal_hits = None
+        try:
             fetched_at = datetime.now(UTC)
             rows = []
-            for item in data["items"]:
+            for item in items:
                 entity_id = str(_integer(item["id"]))
                 for row in item["rows"]:
                     day = date.fromisoformat(row["date"])
@@ -794,7 +854,11 @@ class VkAdapter(VkClient):
                             # Суммы API при VK_AMOUNTS_INCLUDE_VAT=true — без НДС, а бюджет с НДС: приводим
                             # к общим единицам, иначе расход занижается на ставку НДС и бюджет превышается.
                             self._from_api(_kop(base["spent"])),
-                            {LEAD: _integer(base.get("goals", 0))},
+                            (
+                                {LEAD: goal_hits.get((entity_id, day), 0)}
+                                if goal_hits is not None
+                                else {LEAD: _integer(base.get("goals", 0))}
+                            ),
                             fetched_at,
                             # Как в Директе и в подписи интерфейса «последние 2 дня уточняются»:
                             # устоявшиеся дни заканчиваются позавчера, сегодня и вчера площадка ещё пересчитывает.
@@ -808,7 +872,8 @@ class VkAdapter(VkClient):
     async def get_spend_today(self, campaign_ids: Collection[str] | None = None) -> int:
         today = self._today()
         return sum(
-            row.cost_kop for row in await self.get_stats(today, today, "campaign", campaign_ids=campaign_ids)
+            row.cost_kop
+            for row in await self.get_stats(today, today, "campaign", campaign_ids=campaign_ids, with_goals=False)
         )
 
     async def get_balance_hint(self) -> int | None:

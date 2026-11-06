@@ -8,12 +8,12 @@ from integration.harness import BUDGET_KOP, make_world
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, WorkerRun
 from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget, stop_margin
-from app.platforms.base import Operation, PlatformError
+from app.platforms.base import Operation, PlatformError, StatRow
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import budget_guard, read_spend, stop_all
 from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
-from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
+from app.services.optimize import NO_ACTIVE_ADS, optimize, rebalance_budget, ruble_rates, snapshot
 from app.services.rollback import ConfirmationRequired, RollbackService
 from app.services.screens import ScreensService
 from app.worker.clock import today
@@ -105,6 +105,32 @@ async def test_guard_margin_counts_only_active_campaigns(monkeypatch):
     )
     await budget_guard(worker, world.business)
     assert world.business.status == "budget_stop"
+
+
+async def test_read_spend_counts_only_todays_report_rows(monkeypatch):
+    """Отчёт со вчерашней датой не считается сегодняшним расходом: весь расход быстрого endpoint идёт в расход
+    дня, а вчерашняя строка его не гасит — иначе протухший отчёт занижал бы сегодняшний расход до нуля."""
+    world = await make_world()
+    world.clock.advance(days=2)
+    worker = world.worker()
+    day = today(world.clock)
+    yesterday = StatRow(
+        world.refs.campaign_id,
+        world.refs.campaign_id,
+        day - timedelta(days=1),
+        "campaign",
+        0,
+        0,
+        7_000,
+        {},
+        worker.clock.now,
+        True,
+    )
+    monkeypatch.setattr(world.adapter, "get_stats", AsyncMock(return_value=[yesterday]))
+    monkeypatch.setattr(world.adapter, "get_spend_today", AsyncMock(return_value=3_000))
+    spent, lifetime = await read_spend(worker, world.business)
+    assert spent == {"direct": 10_000}
+    assert lifetime == {world.refs.campaign_id: 7_000}
 
 
 async def test_resume_margin_skips_owner_paused_but_keeps_system_paused() -> None:
@@ -438,6 +464,62 @@ async def test_partially_stopped_group_does_not_donate_to_scale():
     assert borderline_group.external_id in donors, "полностью остановленная группа донорит"
 
 
+async def test_pause_skips_ad_removed_from_platform_between_snapshot_and_apply(monkeypatch):
+    """Объявление, удалённое в кабинете между снимком и остановкой, не роняет шаг: пропускается
+    только оно, остановки остальных объявлений применяются."""
+    world = await make_world()
+    worker = world.worker()
+    # До первой паузы слабых объявлений: decide уже вынесет PAUSE, но сама остановка ещё не применена.
+    await world.advance(worker, hours=216)
+    removed = world.ads["weak-1"].external_id
+    original = world.adapter.get_state
+    calls = 0
+
+    async def get_state(refs):
+        nonlocal calls
+        calls += 1
+        states = await original(refs)
+        if calls > 1:
+            states = {key: state for key, state in states.items() if key != removed}
+        return states
+
+    monkeypatch.setattr(world.adapter, "get_state", get_state)
+    await optimize(worker, world.business)
+    assert not [change for change in world.changes(kind="pause") if change.entity_id == removed]
+    other = world.ads["weak-2"].external_id
+    assert [change for change in world.changes(kind="pause") if change.entity_id == other]
+    assert world.adapter._states[other].status == "paused_auto"
+
+
+async def test_scale_up_reason_uses_rubles_from_current_campaign_limit():
+    """Доли групп — веса, а не рубли: после утроения бюджета кампании следующая запись SCALE_UP
+    называет рубли от нового лимита (примерно втрое выше первой записи), а веса в meta
+    group_limits остаются прежними."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=13)
+    (first,) = world.changes(reason_code="SCALE_UP", status="applied")
+    # Бюджет вырос втрое — в базе и на площадке; веса групп в meta не менялись.
+    world.campaign.daily_limit_kop *= 3
+    world.repository.save(world.campaign)
+    state = world.adapter._states[world.refs.campaign_id]
+    world.adapter._states[world.refs.campaign_id] = replace(state, daily_limit_kop=state.daily_limit_kop * 3)
+    # Сырые веса и курс площадки до повторного optimize: записи SCALE_UP должны назвать рубли
+    # именно по этому курсу (limit в reason_params из decide, в рублях).
+    _, groups = await snapshot(worker, world.business)
+    raw = {group.id: group.daily_limit for group in groups}
+    rates = ruble_rates(groups, world.repository.rows(AdGroup), worker.current_campaigns(world.business))
+    world.clock.advance(days=4)
+    worker = world.worker()
+    await optimize(worker, world.business)
+    (fresh,) = [change for change in world.changes(reason_code="SCALE_UP", status="applied") if change.id != first.id]
+    assert fresh.reason_params["old_limit"] == int(raw[fresh.entity_id] * rates["direct"])
+    # Утроение бюджета видно в журнале; запас вверх — на шаг SCALE 20% и перенос веса от донора.
+    assert 3 * first.reason_params["old_limit"] <= fresh.reason_params["old_limit"] < 4 * first.reason_params[
+        "old_limit"
+    ]
+
+
 async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_budget_is_enough(monkeypatch):
     world = await make_world()
     world.clock.advance(days=2)
@@ -564,9 +646,9 @@ async def test_zero_limit_pause_does_not_resume_owner_paused_campaign():
     assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
 
 
-async def test_no_active_ads_pause_is_not_resumed_by_budget_rebalance():
-    """Граница Н-1: пауза «показывать нечего» нулевым лимитом не снимается пересчётом, даже когда бюджет есть,
-    а объявление снова включили: включение такой рекламы решает владелец."""
+async def test_no_active_ads_pause_is_resumed_when_ads_are_back():
+    """Пауза «показывать нечего» поставлена автопилотом: когда появилось работающее объявление и бюджет есть,
+    пересчёт сам включает кампанию."""
     world = await make_world()
     worker = world.worker()
     await world.advance(worker, days=2)
@@ -576,7 +658,7 @@ async def test_no_active_ads_pause_is_not_resumed_by_budget_rebalance():
     await rebalance_budget(worker, world.business)
     (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
     assert pause.reason_text == NO_ACTIVE_ADS and world.campaign.daily_limit_kop == 0
-    # Одно объявление снова включили: показывать есть что и бюджет есть, но кампанию автоматически не включаем.
+    # Одно объявление снова включили: показывать есть что и бюджет есть, автопилот включает свою кампанию.
     ad = ads[0]
     await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "paused_auto", "active"))
     ad.status = "active"
@@ -584,8 +666,66 @@ async def test_no_active_ads_pause_is_not_resumed_by_budget_rebalance():
     world.clock.advance(days=1)
     worker.step_key = "rebalance_budget:ad-is-back"
     await rebalance_budget(worker, world.business)
+    (resume,) = world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert "работающие объявления" in resume.reason_text
+    assert world.campaign.status == "active" and world.campaign.daily_limit_kop > 0
+
+
+async def test_no_active_ads_pause_is_not_resumed_under_kill_switch():
+    """Владелец остановил всю рекламу после паузы «показывать нечего»: пересчёт (в том числе при откате из истории)
+    кампанию не возобновляет."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    ads = world.repository.rows(Ad)
+    for ad in ads:
+        await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_auto"))
+    await rebalance_budget(worker, world.business)
+    ad = ads[0]
+    await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "paused_auto", "active"))
+    ad.status = "active"
+    world.repository.save(ad)
+    worker.remember(world.business, kill_switch=True)
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:kill-switch"
+    await rebalance_budget(worker, world.business, force=True)
     assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
     assert world.campaign.status == "paused_auto"
+
+
+async def test_zero_limit_pause_by_owner_is_not_resumed_by_budget_rebalance():
+    """Нулевой лимит у кампании, остановленной владельцем (не пересчётом), пересчёт не включает."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    await world.adapter.apply(
+        Operation("set_status", "campaign", world.campaign.external_id, "status", "active", "paused_owner")
+    )
+    world.campaign.status = "paused_owner"
+    world.campaign.owner_paused = True
+    world.campaign.daily_limit_kop = 0
+    world.repository.save(world.campaign)
+    world.clock.advance(days=1)
+    worker.step_key = "rebalance_budget:owner"
+    await rebalance_budget(worker, world.business)
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_owner"
+
+
+async def test_snapshot_group_without_stored_weight_gets_average_weight_not_kopecks():
+    """Запасное значение для группы без записи в group_limits — средний вес группы площадки, а не копейки."""
+    world = await make_world()
+    worker = world.worker()
+    await world.advance(worker, days=2)
+    _, groups = await snapshot(worker, world.business)
+    limits = world.worker().metadata(world.business)["group_limits"]
+    missing = groups[0].id
+    kept = {key: value for key, value in limits.items() if key != missing}
+    world.worker().remember(world.business, group_limits=kept)
+    _, groups = await snapshot(worker, world.business)
+    group = next(item for item in groups if item.id == missing)
+    assert group.daily_limit == sum(kept.values()) // len(kept)
+    assert group.daily_limit != world.campaign.daily_limit_kop // len(groups)
 
 
 async def test_zero_limit_resume_entry_is_protected_from_rollback():

@@ -1,9 +1,10 @@
 from collections import Counter
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from math import ceil
 from statistics import median
+from types import MappingProxyType
 
 from app.domain.settings import DEFAULT_SETTINGS, DomainSettings
 from app.domain.stats import wilson_interval
@@ -214,14 +215,16 @@ def decide(
     now: datetime,
     reference_cpl: int | None,
     business_days: Sequence[DaySpend] = (),
-    free_daily_budget: int = 0,
+    free_daily_budget: Mapping[str, int] = MappingProxyType({}),
     platforms_without_source: Collection[str] = (),
     settings: DomainSettings = DEFAULT_SETTINGS,
 ) -> tuple[Decision, ...]:
-    """free_daily_budget is unassigned capacity already released from platform caps.
+    """free_daily_budget — освободившийся лимит по площадкам: деньги берутся только у групп той же
+    площадки, поэтому общий предел переноса и «3 равные доли» считаются по каждой площадке отдельно.
     platforms_without_source — площадки без источника конверсий: для их объявлений «нет обращений»
     не применяется (иначе автопилот остановил бы всю рекламу VK без пикселя)."""
-    nonnegative_int(free_daily_budget, "free_daily_budget")
+    for platform, amount in free_daily_budget.items():
+        nonnegative_int(amount, f"free_daily_budget[{platform}]")
     no_source = set(platforms_without_source)
     group_map = {group.id: group for group in groups}
     if len(group_map) != len(groups) or len({ad.id for ad in ads}) != len(ads):
@@ -287,20 +290,30 @@ def decide(
         if last_ad:
             active_groups[ad.platform] -= 1
         changes += 1
-    total_daily = sum(group.daily_limit for group in groups if group.active) + free_daily_budget
-    available = min(free_daily_budget, int(total_daily * settings.max_budget_transfer))
-    group_count = sum(active_groups.values())
-    equal_share = total_daily // group_count if group_count else 0
+    total_daily = {
+        platform: sum(group.daily_limit for group in groups if group.active and group.platform == platform)
+        + free_daily_budget.get(platform, 0)
+        for platform in {group.platform for group in groups} | set(free_daily_budget)
+    }
+    available = {
+        platform: min(free_daily_budget.get(platform, 0), int(total_daily[platform] * settings.max_budget_transfer))
+        for platform in total_daily
+    }
+    # Доля площадки делится между её действующими группами: ровно на 3 такие доли группа не растёт.
+    equal_share = {
+        platform: total_daily[platform] // active_groups[platform] if active_groups[platform] else 0
+        for platform in total_daily
+    }
     for group_id in sorted(good_groups):
         group = group_map[group_id]
-        if changes >= settings.max_changes or available <= 0 or not active_ads[group_id]:
+        if changes >= settings.max_changes or available[group.platform] <= 0 or not active_ads[group_id]:
             continue
         if not can_change(group, now, settings):
             continue
         increment = min(
-            available,
+            available[group.platform],
             int(group.daily_limit * settings.scale_step),
-            max(0, int(equal_share * settings.max_equal_share_multiplier) - group.daily_limit),
+            max(0, int(equal_share[group.platform] * settings.max_equal_share_multiplier) - group.daily_limit),
         )
         if increment <= 0:
             continue
@@ -315,15 +328,17 @@ def decide(
                 {"old_limit": group.daily_limit, "new_limit": new_limit},
             )
         )
-        available -= increment
+        available[group.platform] -= increment
         changes += 1
     eligible_good = [
         group_map[group_id]
         for group_id in good_groups
         if active_ads[group_id] and can_change(group_map[group_id], now, settings)
     ]
-    budget_blocked = available == 0 or all(
-        group.daily_limit >= int(equal_share * settings.max_equal_share_multiplier) for group in eligible_good
+    budget_blocked = all(
+        available[group.platform] == 0
+        or group.daily_limit >= int(equal_share[group.platform] * settings.max_equal_share_multiplier)
+        for group in eligible_good
     )
     if (
         eligible_good

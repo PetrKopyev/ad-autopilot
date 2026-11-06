@@ -1,5 +1,6 @@
 import { mockEnabled } from './screens';
-import { setupGet } from './setup';
+import { api, ApiError } from './client';
+import { copy } from '../copy';
 
 export interface ForecastSource { what: string; source: string; url: string | null }
 /** Прогноз обращений по Директу. Пока он считается или недоступен, чисел нет — только explanation. */
@@ -13,5 +14,8 @@ export interface Forecast {
 }
 export async function getForecast(signal?: AbortSignal): Promise<Forecast> {
   if (mockEnabled) return (await import('./mocks')).mockForecast();
-  return setupGet('/api/plan/forecast', signal);
+  // Расчёт заказывает отчёт у площадки: изменение, а не чтение.
+  const result = await api<Forecast>('/api/plan/forecast', { method: 'POST', signal });
+  if (result === undefined) throw new ApiError(copy.errors.invalidResponse);
+  return result;
 }

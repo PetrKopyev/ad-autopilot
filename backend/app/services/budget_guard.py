@@ -84,9 +84,8 @@ async def read_spend(
                 continue
             lifetime[row.campaign_id] = lifetime.get(row.campaign_id, 0) + row.cost_kop
         total = sum(row.cost_kop for row in rows if row.date >= month and row.campaign_id in known)
-        # День площадки может не совпадать с московским: сравниваем с последней датой отчёта.
-        latest = max((row.date for row in rows if row.campaign_id in known), default=None)
-        stats_today = sum(row.cost_kop for row in rows if row.date == latest and row.campaign_id in known)
+        # Только строки за сегодня по часам воркера: вчерашняя дата отчёта — ещё не сегодняшний расход.
+        stats_today = sum(row.cost_kop for row in rows if row.date == day and row.campaign_id in known)
         # Быстрый endpoint иногда свежее отчёта. Излишек консервативно относится к этому бизнесу.
         spent[platform] = total + max(0, reported_today - stats_today)
     return spent, lifetime
