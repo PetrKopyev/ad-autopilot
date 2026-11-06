@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from dataclasses import asdict, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -179,6 +179,18 @@ def test_client_answer_date_is_taken_in_moscow() -> None:
     late = survey(date(2026, 10, 5), 5, datetime(2026, 10, 18, 22, tzinfo=UTC))
     assert aggregate_clients([], [late], date(2026, 10, 18), [1])["clients"] is None
     assert aggregate_clients([], [late], date(2026, 10, 19), [1])["clients"] == 5
+
+
+def test_unsettled_days_follow_settlement_days_setting(monkeypatch) -> None:
+    """Ревью 22be3cd: неустоявшиеся дни статистики считаются по settlement_days настроек, а не по зашитым 2 дням."""
+    from app.domain.settings import DEFAULT_SETTINGS
+
+    monkeypatch.setattr("app.services.stats.DEFAULT_SETTINGS", replace(DEFAULT_SETTINGS, settlement_days=3))
+    day = TODAY - timedelta(days=2)
+    assert aggregate([stats_row(date=day)], [1], TODAY)["incomplete_days"] == [day]
+    assert aggregate([stats_row(date=day - timedelta(days=1))], [1], TODAY)["incomplete_days"] == []
+    daily = aggregate_daily([], day - timedelta(days=1), day, [1], TODAY)
+    assert [item["is_incomplete"] for item in daily] == [False, True]
 
 
 def test_quiet_week_is_settled_and_was_not_asked_about() -> None:

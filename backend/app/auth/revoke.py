@@ -88,6 +88,15 @@ async def revoke_tokens(http: httpx.AsyncClient, revocations: list[Revocation], 
             )
 
 
+async def revoke_refused(http: httpx.AsyncClient, revocations: list[Revocation]) -> None:
+    """Отзыв токенов кабинета, который не подключили (OtherAccount): сбой отзыва любого рода не должен подменять
+    ответ «это другой кабинет» ошибкой сервера."""
+    try:
+        await revoke_tokens(http, revocations)
+    except Exception as error:
+        logger.warning("Token revocation of refused account failed: %s", type(error).__name__)
+
+
 def error_code(response: httpx.Response) -> str:
     """Только машинный код ошибки из ответа; описания и тела запросов в журнал не попадают."""
     try:

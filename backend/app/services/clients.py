@@ -27,11 +27,13 @@ class ClientsRepository(StatsRepository):
             )
         )
 
-    def unanswered_weeks(self, business_id: int) -> list[date]:
+    def unanswered_weeks(self, business_id: int, date_from: date, date_to: date) -> list[date]:
         return list(
             self.db.scalars(
                 select(LeadsSurvey.week_start).where(
-                    LeadsSurvey.business_id == business_id, LeadsSurvey.answered_at.is_(None)
+                    LeadsSurvey.business_id == business_id,
+                    LeadsSurvey.answered_at.is_(None),
+                    LeadsSurvey.week_start.between(date_from, date_to),
                 )
             )
         )
@@ -73,8 +75,9 @@ class ClientsService:
     def questions(self, business: Business, today: date) -> dict:
         business = self.repository.lock_business(business.id)
         last_week = today - timedelta(days=today.weekday(), weeks=1)
-        # Вопрос о прошлой неделе появляется, а у вопросов без ответа число обращений догоняет отчёты.
-        for week_start in sorted({last_week, *self.repository.unanswered_weeks(business.id)}):
+        # Вопрос о прошлой неделе появляется, а у вопросов без ответа в окне цены клиента число обращений догоняет
+        # отчёты: старые недели в цену уже не входят.
+        for week_start in sorted({last_week, *self.repository.unanswered_weeks(business.id, *client_window(today))}):
             rows = self.repository.rows(business.id, week_start, week_start + timedelta(days=6))
             leads = aggregate(rows, business.lead_goal_ids, today)["leads"]
             if leads:

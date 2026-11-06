@@ -34,19 +34,27 @@ class OtherAccount(HTTPException):
         super().__init__(409, OTHER_ACCOUNT)
 
 
+def account_login(platform: str, login: str) -> str:
+    """Логин кабинета для сохранения и сравнения: регистр и пробелы не важны, в Яндексе точка в логине — то же,
+    что дефис («Ivan.Petrov» и «ivan-petrov» — один кабинет)."""
+    login = login.strip().lower()
+    return login.replace(".", "-") if platform == "direct" else login
+
+
 def replaces_account(db: DBSession, account: PlatformAccount | None, login: str) -> bool:
     """Вход в другой кабинет площадки, когда у бизнеса уже есть наши кампании в прежнем, — даже отключённом: строку
     кабинета перезаписать нельзя, кампании прежнего остались бы в бизнесе без кабинета, и страж бюджета искал бы
-    их не там."""
+    их не там. Кампании в архиве не мешают: они не тратят и не останавливаются."""
     return (
         account is not None
-        and account.external_login != login
+        and account_login(account.platform, account.external_login or "") != account_login(account.platform, login)
         and db.scalar(
             select(Campaign.id)
             .where(
                 Campaign.business_id == account.business_id,
                 Campaign.platform == account.platform,
                 Campaign.external_id.is_not(None),
+                Campaign.status != "archived",
             )
             .limit(1)
         )
@@ -166,6 +174,16 @@ class AuthRepository:
         account.last_ok_at = datetime.now(UTC) if account.status == "ok" else None
         self.db.commit()
         return account
+
+    def shares_direct_login(self, login: str) -> bool:
+        """Подключён ли кабинет Директа с этим логином (к любому бизнесу): Яндекс при новом входе того же
+        пользователя часто отдаёт тот же токен, и его отзыв отключил бы и тот кабинет."""
+        logins = self.db.scalars(
+            select(PlatformAccount.external_login).where(
+                PlatformAccount.platform == "direct", PlatformAccount.status != "revoked"
+            )
+        )
+        return account_login("direct", login) in {account_login("direct", item or "") for item in logins}
 
     def has_business(self, user_id: int) -> bool:
         return self.db.scalar(select(Business.id).where(Business.user_id == user_id).limit(1)) is not None

@@ -8,7 +8,7 @@ from app.api.auth import Resumer, callback_error_page
 from app.api.limits import vk_key_limit, vk_start_limit
 from app.api.routing import ReleasingRoute
 from app.auth import vk
-from app.auth.revoke import Revocation, revoke_tokens
+from app.auth.revoke import Revocation, revoke_refused
 from app.auth.sessions import OtherAccount, Repository, current_session, current_user, require_csrf
 from app.db.models import Session, User
 from app.platforms.base import AuthExpired, AuthSession, PlatformError
@@ -77,7 +77,7 @@ async def drop_tokens(
         if auth_mode == "manual_key"
         else Revocation("vk", user_id=session.account_id)
     )
-    await revoke_tokens(request.app.state.http, [item])
+    await revoke_refused(request.app.state.http, [item])
 
 
 @router.get("/auth/vk/callback")

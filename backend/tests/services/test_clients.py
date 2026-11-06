@@ -81,6 +81,12 @@ def test_older_unanswered_question_catches_up_too(setup):
     repository.rows.side_effect = lambda business_id, date_from, date_to: rows.get(date_from, [])
     service.questions(business, TODAY)
     assert [call.args[:3] for call in repository.create_question.call_args_list] == [(1, old_week, 10), (1, WEEK, 10)]
+    # Только недели окна цены клиента: старые вопросы в цену уже не входят.
+    repository.unanswered_weeks.assert_called_once_with(1, date(2026, 9, 28), date(2026, 10, 25))
+    db = MagicMock()
+    ClientsRepository(db).unanswered_weeks(1, date(2026, 9, 28), date(2026, 10, 25))
+    sql = str(db.scalars.call_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "leads_survey.week_start BETWEEN" in sql
 
 
 def test_no_question_without_leads(setup):

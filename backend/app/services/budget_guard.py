@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import active_daily_limit, plan_budget
 from app.domain.budget import budget_guard as decide_guard
-from app.domain.explain import rubles
+from app.domain.explain import explain, rubles
 from app.platforms.base import Operation
 from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
 from app.worker.clock import today
@@ -96,12 +96,22 @@ async def stop_all(
                 state = states.get(campaign.external_id)
                 if state is None:
                     # Кампании нет в подключённом кабинете (удалена там или осталась в прежнем): остановить её
-                    # нечем, но это не повод бросать остановку остальных.
+                    # нечем, но это не повод бросать остановку остальных. Владельцу — одно уведомление на кампанию.
                     logger.warning(
                         "Кампания %s бизнеса %s не найдена на площадке %s при остановке",
                         campaign.id,
                         business.id,
                         campaign.platform,
+                    )
+                    worker.notice(
+                        business,
+                        "CAMPAIGN_NOT_FOUND",
+                        explain(
+                            "CAMPAIGN_NOT_FOUND",
+                            campaign=campaign.name,
+                            account=ACCOUNT_NAMES.get(campaign.platform, campaign.platform),
+                        ),
+                        key=f"campaign_not_found:{campaign.id}",
                     )
                     continue
                 if state.status in {"paused_auto", "paused_owner", "archived"}:

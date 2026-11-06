@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.limits import accounts_check_limit, demo_login_limit, yandex_start_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.auth import yandex
-from app.auth.revoke import Revocation, revoke_tokens
+from app.auth.revoke import Revocation, revoke_refused, revoke_tokens
 from app.auth.sessions import (
     CSRF_COOKIE,
     OAUTH_COOKIE,
@@ -382,8 +382,10 @@ async def _yandex_callback(
         try:
             account = repository.save_account(business_id, profile["login"], tokens)
         except OtherAccount:
-            # Кабинет не подключён: выданный для него токен нам не нужен.
-            await revoke_tokens(request.app.state.http, [Revocation("direct", tokens["access_token"])])
+            # Кабинет не подключён: выданный для него токен нам не нужен, если тем же логином не подключён
+            # кабинет другого бизнеса — Яндекс мог отдать тот же токен.
+            if not repository.shares_direct_login(profile["login"]):
+                await revoke_refused(request.app.state.http, [Revocation("direct", tokens["access_token"])])
             raise
         if account.status == "ok":
             resume(business_id, "direct")

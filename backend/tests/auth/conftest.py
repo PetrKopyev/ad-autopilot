@@ -21,7 +21,7 @@ def hash_token(token: str) -> str:
 
 
 def campaign_id(repository: "FakeRepository", statement) -> int | None:
-    """Ответ на replaces_account: есть ли у бизнеса кампания площадки, созданная в кабинете."""
+    """Ответ на replaces_account: есть ли у бизнеса кампания площадки, созданная в кабинете и не в архиве."""
     params = statement.compile().params
     return next(
         (
@@ -30,6 +30,7 @@ def campaign_id(repository: "FakeRepository", statement) -> int | None:
             if item.business_id == params["business_id_1"]
             and item.platform == params["platform_1"]
             and item.external_id is not None
+            and item.status != params["status_1"]
         ),
         None,
     )
@@ -154,6 +155,16 @@ class FakeRepository:
                     }
 
         return AuthRepository(FakeDB(self)).save_account(business_id, login, tokens)
+
+    def shares_direct_login(self, login: str) -> bool:
+        from app.auth.sessions import account_login
+
+        return any(
+            item.platform == "direct"
+            and item.status != "revoked"
+            and account_login("direct", item.external_login or "") == account_login("direct", login)
+            for item in self.accounts.values()
+        )
 
     def has_business(self, user_id: int) -> bool:
         return any(business.user_id == user_id for business in self.businesses.values())

@@ -45,9 +45,7 @@ class FakeDB:
         return [
             item
             for item in self.repository.accounts.values()
-            if (item.platform, item.auth_mode, item.external_login) == (
-                params["platform_1"], params["auth_mode_1"], params["external_login_1"]
-            )
+            if (item.platform, item.auth_mode) == (params["platform_1"], params["auth_mode_1"])
             and item.status != params["status_1"]
         ]
 
@@ -317,6 +315,21 @@ def test_refused_vk_account_keeps_tokens_shared_with_other_business(client, repo
     state = start(client)["state"]
     assert client.get("/api/auth/vk/callback", params={"state": state, "code": "code-1"}).status_code == 409
     assert revoke.call_count == 0
+
+
+def test_vk_revoke_failure_keeps_refusal_409(client, repository, vk_api) -> None:
+    """Ревью 22be3cd: сбой отзыва токенов отказанного кабинета VK любого рода — по-прежнему страница 409, не 500."""
+    revoke = vk_api.post(VK_REVOKE).mock(side_effect=RuntimeError("отзыв упал"))
+    sign_in(client, repository)
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "code-1"}).status_code == 303
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="vk", external_id="vk-1", status="active"))
+    vk_api.get(USER).respond(json={"id": 888, "username": "other"})
+    state = start(client)["state"]
+    response = client.get("/api/auth/vk/callback", params={"state": state, "code": "code-2"})
+    assert response.status_code == 409 and "подключите прежний кабинет" in response.text
+    assert key_request(client, repository).status_code == 409
+    assert revoke.call_count == 2
 
 
 def test_manual_key_requires_csrf_and_session(client, repository, vk_api) -> None:

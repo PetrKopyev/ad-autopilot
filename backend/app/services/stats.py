@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, BudgetLedger, Business, LeadsSurvey, StatsDaily
+from app.domain.settings import DEFAULT_SETTINGS
 from app.platforms.base import lead_count
 from app.worker.clock import MOSCOW
 
@@ -44,7 +45,7 @@ def aggregate(rows: Iterable[StatsRow], goal_ids: Sequence[int], today: date) ->
         impressions += row.impressions
         clicks += row.clicks
         leads += lead_count(row.conversions, goal_ids)
-        if not row.is_settled or row.date > today - timedelta(days=2):
+        if not row.is_settled or row.date > today - timedelta(days=DEFAULT_SETTINGS.settlement_days):
             incomplete_days.add(row.date)
         sources[row.platform] = max(sources.get(row.platform, row.fetched_at), row.fetched_at)
     return {
@@ -95,7 +96,7 @@ def aggregate_daily(
     for offset in range((date_to - date_from).days + 1):
         day = date_from + timedelta(days=offset)
         metrics = aggregate(groups[day], goal_ids, today)
-        if day > today - timedelta(days=2):
+        if day > today - timedelta(days=DEFAULT_SETTINGS.settlement_days):
             metrics.update(is_incomplete=True, incomplete_days=[day])
         result.append({"date": day, **metrics})
     return result
@@ -115,8 +116,6 @@ def aggregate_clients(
     «не знаю») неизвестна: её расход нельзя делить на клиентов отвеченных недель, она исключается (unknown_weeks).
     Тихой не считается неделя с неустоявшимися днями — обращения ещё досчитываются — и неделя, о которой спрашивали
     (обращения были по прежним целям). Пока нет ни одного ответа, клиентов не знаем (None)."""
-    from app.config import get_domain_settings
-
     date_from, date_to = client_window(as_of)
     surveys = [survey for survey in surveys if date_from <= survey.week_start <= date_to]
     answers = {
@@ -127,7 +126,7 @@ def aggregate_clients(
         and survey.answered_at.astimezone(MOSCOW).date() <= as_of
     }
     asked = {survey.week_start for survey in surveys if survey.leads_count}
-    settled_before = as_of - timedelta(days=get_domain_settings().settlement_days)
+    settled_before = as_of - timedelta(days=DEFAULT_SETTINGS.settlement_days)
     spend: dict[date, int] = defaultdict(int)
     leads: dict[date, int] = defaultdict(int)
     unsettled: set[date] = set()

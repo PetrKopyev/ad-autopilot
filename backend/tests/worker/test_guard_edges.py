@@ -104,6 +104,7 @@ async def test_stop_all_skips_campaign_missing_on_platform_and_stops_others() ->
         Campaign(
             business_id=1,
             platform="direct",
+            name="Автопилот: Маникюр — Самара",
             external_id="gone-in-other-account",
             status="active",
             owner_paused=False,
@@ -123,6 +124,26 @@ async def test_stop_all_skips_campaign_missing_on_platform_and_stops_others() ->
     assert status(world.adapter, world.refs.campaign_id) == "paused_auto"
     assert status(vk, campaign.external_id) == "paused_auto"
     assert world.business.status == "budget_stop"
+    # Владельцу — одно уведомление о кампании, сколько бы тиков страж её ни встречал.
+    for _ in range(2):
+        world.clock.advance(hours=0.5)
+        await stop_all(
+            world.business,
+            worker=worker,
+            budget_stop=True,
+            reason_code="BUDGET_STOP",
+            reason_params={"spent": BUDGET_KOP, "budget": BUDGET_KOP, "margin": 0},
+        )
+    (notice,) = [
+        row
+        for row in world.repository.rows(WorkerRun, kind="notification")
+        if row.log[0]["reason_code"] == "CAMPAIGN_NOT_FOUND"
+    ]
+    assert notice.log[0]["text"] == (
+        "Кампании «Автопилот: Маникюр — Самара» нет в подключённом кабинете Яндекс Директа, и остановить её мы не "
+        "можем. Проверьте кампанию «Автопилот: Маникюр — Самара» в кабинете площадки и остановите её там, если она "
+        "работает."
+    )
 
 
 async def test_vk_token_expiring_mid_tick_keeps_pending_until_reconnect() -> None:
