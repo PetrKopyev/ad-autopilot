@@ -38,7 +38,7 @@ class AccountInfo:
     goal_ids: tuple[int, ...] = ()
     goal_value_kop: int | None = None
     # Цель пикселя VK кабинета (business.settings["vk_priced_goal_source_id"]): у каждого кабинета своя,
-    # общий VK_PRICED_GOAL_SOURCE_ID — только fallback на весь сервис. Имя цели хранится там же (В6).
+    # общий VK_PRICED_GOAL_SOURCE_ID — только fallback на весь сервис. Имя цели хранится там же.
     vk_priced_goal_source_id: int | None = None
     vk_priced_goal_name: str | None = None
 

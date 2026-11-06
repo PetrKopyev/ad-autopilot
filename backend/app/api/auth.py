@@ -286,9 +286,9 @@ def yandex_start(
 
 async def verify_direct_account(access_token: str, login: str) -> str | None:
     """Проверка кабинета при подключении Директа. Возвращает текст отказа для агентских кабинетов
-    (В5) или None, если кабинет подходит — включая нештатные сбои whoami (сеть, 5xx Директа):
+    или None, если кабинет подходит — включая нештатные сбои whoami (сеть, 5xx Директа):
     подключение из-за них не обрываем, аккаунт сохраняется, диагностика повторится на экране
-    «Проверить подключения» с понятным текстом, а не JSON-ошибкой (В4 круга 4)."""
+    «Проверить подключения» с понятным текстом, а не JSON-ошибкой."""
     from app.platforms.base import PlatformError
     from app.platforms.direct import AGENCY_CABINETS_UNSUPPORTED, DirectAdapter
 
@@ -366,8 +366,8 @@ async def _yandex_callback(
         tokens = await yandex.exchange_code(code, oauth_state, business_id)
         profile = await yandex.get_profile(tokens["access_token"])
         if oauth_state.purpose == "direct":
-            # Агентские кабинеты не поддерживаются: отказ понятный и до сохранения аккаунта (В5).
-            # Прочие сбои whoami аккаунт не блокируют: сохраняем и до проверяем на экране подключений (В4).
+            # Агентские кабинеты не поддерживаются: отказ понятный и до сохранения аккаунта.
+            # Прочие сбои whoami аккаунт не блокируют: сохраняем и до проверяем на экране подключений.
             if rejection := await verify_direct_account(tokens["access_token"], profile["login"]):
                 raise HTTPException(400, rejection)
     except yandex.YandexError as failure:

@@ -196,7 +196,7 @@ def freed_daily_budget(groups: Sequence[GroupSnapshot]) -> int:
 
 
 def missing_conversion_sources(business: Business) -> set[str]:
-    """Площадки без источника конверсий: для них «нет обращений» не останавливает объявления (В1 круга 4).
+    """Площадки без источника конверсий: для них «нет обращений» не останавливает объявления.
     VK без пикселя (цель кабинета или общая VK_PRICED_GOAL_SOURCE_ID) всегда давала бы 0 обращений,
     Директ без счётчика и целей Метрики — то же."""
     from app.config import settings as config
@@ -708,7 +708,7 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
                     )
                 except (PlatformError, ChangeConflict):
                     # Площадка не приняла операцию (сеть, закрытый кабинет) или слот занят конфликтующим
-                    # изменением: вывод не фиксируем, повторим на следующем тике (В2 круга 3).
+                    # изменением: вывод не фиксируем, повторим на следующем тике.
                     continue
                 if change is None or change.status == "failed":
                     # Операция не прошла — оставляем проверку запущенной, тик повторит попытку.

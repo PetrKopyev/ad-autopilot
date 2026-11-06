@@ -195,11 +195,11 @@ class ScreensService:
             raise ChangeConflict(ADVANCING)
         # Блокировка занята шагом воркера — ждём её освобождения до 15 секунд (LIMITATIONS.md), остановку
         # выполняем только под блокировкой: иначе шаг воркера перепишет settings из своей копии business
-        # и нажатие «Остановить» пропадёт (В1 круга 8).
+        # и нажатие «Остановить» пропадёт.
         stack = ExitStack()
         try:
             # Перемотка демо, начавшаяся во время ожидания, отпускает блокировку не раньше конца перемотки:
-            # ждать её до конца срока бессмысленно — выходим сразу (мелочь 2 круга 10).
+            # ждать её до конца срока бессмысленно — выходим сразу.
             await wait_for_lock(stack, self.repository, business.id, PAUSE_LOCK_WAIT, advancing_aborts=True)
         except ChangeConflict as conflict:
             # Не дождались: если перемотка демо началась во время ожидания — отвечаем про перемотку.
@@ -687,7 +687,7 @@ class ScreensService:
             business.auto_continue = auto_continue
             business.avg_check_kop = avg_check_kop
             # Цель VK кабинета: None — не менять, 0 — сбросить (без id имя не имеет смысла). Стратегия
-            # оплаты за конверсию будет опираться на неё (В8).
+            # оплаты за конверсию будет опираться на неё.
             if vk_priced_goal_source_id == 0:
                 settings = {
                     key: value

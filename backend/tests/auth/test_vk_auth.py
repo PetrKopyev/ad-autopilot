@@ -270,7 +270,7 @@ VK_REVOKE = "https://ads.vk.com/api/v2/oauth2/token/delete.json"
 
 
 def test_other_vk_account_does_not_replace_account_with_our_campaigns(client, repository, vk_api) -> None:
-    """Важно 4 круга 13 и ревью: вход в другой кабинет VK, когда у бизнеса есть наши кампании в прежнем, — отказ,
+    """Вход в другой кабинет VK, когда у бизнеса есть наши кампании в прежнем, — отказ,
     даже если прежний отключён; строка кабинета не меняется, токены другого кабинета отзываются. Колбэк отвечает
     страницей, а не JSON. Тот же кабинет подключается заново как раньше."""
     revoke = vk_api.post(VK_REVOKE).respond(204)
@@ -318,7 +318,7 @@ def test_refused_vk_account_keeps_tokens_shared_with_other_business(client, repo
 
 
 def test_vk_revoke_failure_keeps_refusal_409(client, repository, vk_api) -> None:
-    """Ревью 22be3cd: сбой отзыва токенов отказанного кабинета VK любого рода — по-прежнему страница 409, не 500."""
+    """Сбой отзыва токенов отказанного кабинета VK любого рода — по-прежнему страница 409, не 500."""
     revoke = vk_api.post(VK_REVOKE).mock(side_effect=RuntimeError("отзыв упал"))
     sign_in(client, repository)
     state = start(client)["state"]

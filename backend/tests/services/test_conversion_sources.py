@@ -1,4 +1,4 @@
-"""Заметки 1–2 круга 5: missing_conversion_sources и опорная цена без расхода площадок без источника."""
+"""missing_conversion_sources и опорная цена без расхода площадок без источника."""
 
 from types import SimpleNamespace
 

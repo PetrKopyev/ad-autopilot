@@ -300,7 +300,7 @@ async def test_second_launch_is_noop(tmp_path: Path) -> None:
 
 
 async def test_create_failure_of_one_platform_launches_the_rest(tmp_path: Path) -> None:
-    """В3: сбой создания на одной площадке не роняет запуск целиком: Директ создан, активирован и работает,
+    """Сбой создания на одной площадке не роняет запуск целиком: Директ создан, активирован и работает,
     отказавшая площадка зафиксирована честной записью — владельцу не нужно ничего перезапускать вручную."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
@@ -332,7 +332,7 @@ async def test_create_failure_of_one_platform_launches_the_rest(tmp_path: Path) 
 
 
 async def test_failed_platform_can_be_retried_without_touching_launched_one(tmp_path: Path) -> None:
-    """В3: повторный запуск после частичного доводит только отказавшую площадку: Директ не пересоздаётся,
+    """Повторный запуск после частичного доводит только отказавшую площадку: Директ не пересоздаётся,
     пометка о неудаче снимается."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
@@ -351,7 +351,7 @@ async def test_failed_platform_can_be_retried_without_touching_launched_one(tmp_
 
 
 async def test_activation_failure_of_platform_keeps_launched_ones(tmp_path: Path) -> None:
-    """В3: площадка, которая не включила рекламу, не гасит остальные: её кампания остаётся созданной,
+    """Площадка, которая не включила рекламу, не гасит остальные: её кампания остаётся созданной,
     но выключенной и ничего не тратит, а запущенные площадки работают."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
@@ -371,7 +371,7 @@ async def test_activation_failure_of_platform_keeps_launched_ones(tmp_path: Path
 
 
 async def test_failed_platform_activation_is_retried_after_fix(tmp_path: Path) -> None:
-    """В3: после починки площадки повтор запуска включает и её — на кампаниях той же попытки."""
+    """После починки площадки повтор запуска включает и её — на кампаниях той же попытки."""
     adapters = {"direct": FakeAdapter(), "vk": FailingActivation()}
     world, plan = await ready(tmp_path, adapters=adapters)
     await launch(world, plan)
@@ -397,7 +397,7 @@ class FailingSecondCreate(FakeAdapter):
 
 
 async def test_partially_created_platform_is_not_activated_and_retry_completes(tmp_path: Path) -> None:
-    """В3-2: транзиентный сбой на второй кампании многоуслугового Директа. Созданная кампания площадки
+    """Транзиентный сбой на второй кампании многоуслугового Директа. Созданная кампания площадки
     не включается (журнал не утверждает «не создала рекламу», пока её кампания стоит), запись честна,
     повтор доводит Директ на сохранённых кампаниях, работающую ВКонтакте не трогает."""
     services = ["Маникюр", "Педикюр", "Наращивание ресниц"]
@@ -446,7 +446,7 @@ async def test_partially_created_platform_is_not_activated_and_retry_completes(t
 
 
 async def test_retry_after_owner_stop_requires_resume_first(tmp_path: Path) -> None:
-    """В5 круга 7: повтор запуска после «Остановить всю рекламу» не снимает паузу сам и не ставит бизнесу
+    """Повтор запуска после «Остановить всю рекламу» не снимает паузу сам и не ставит бизнесу
     running с зажатым kill_switch: сначала «Продолжить», потом повтор."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
@@ -462,7 +462,7 @@ async def test_retry_after_owner_stop_requires_resume_first(tmp_path: Path) -> N
 
 
 async def test_retry_keeps_started_on_within_month(tmp_path: Path) -> None:
-    """К2: повтор частичного запуска не сдвигает started_on на сегодня. Иначе разрешённый расход месяца
+    """Повтор частичного запуска не сдвигает started_on на сегодня. Иначе разрешённый расход месяца
     считается от повтора, остаток против полного расхода почти нулевой, кампании встают без дневного
     бюджета, а страж бюджета после перезапуска ложно останавливает рекламу."""
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
@@ -490,7 +490,7 @@ async def test_retry_keeps_started_on_within_month(tmp_path: Path) -> None:
 
 
 async def test_retry_limits_follow_plan_shares_and_month_spend(tmp_path: Path) -> None:
-    """К3: повтор считает лимиты от всех площадок плана и остатка месяца, а не как будто площадка одна:
+    """Повтор считает лимиты от всех площадок плана и остатка месяца, а не как будто площадка одна:
     иначе новая кампания получает дневной лимит всего бюджета, а площадки вместе держат ~170% бюджета."""
     from app.config import get_domain_settings
     from app.domain.budget import campaign_limits, plan_budget
@@ -558,7 +558,7 @@ async def test_all_platforms_failed_launch_stops_everything_and_can_be_repeated(
 
 
 async def test_launch_record_is_not_reverted_by_journal(tmp_path: Path) -> None:
-    """В3 круга 7 и Важно 1 круга 13: запись запуска Директа отдельной отменой не откатывается — бизнес остался бы
+    """Запись запуска Директа отдельной отменой не откатывается — бизнес остался бы
     «работает» при остановленных кампаниях; останавливают рекламу на главной. Информационная запись об отказавшей
     площадке тоже не откатывается: операций нет."""
     from app.services.rollback import TURN_ON, RollbackService, can_revert
@@ -2544,7 +2544,7 @@ def thursday_layout_plan(campaigns: dict[str, int] | None = None) -> tuple[Plan,
 
 @pytest.mark.parametrize("campaigns", [{}, {"direct:1": 7}], ids=["nothing_staged", "staged_not_created"])
 def test_retry_on_sunday_lays_out_campaigns_again_instead_of_thursday_layout(campaigns) -> None:
-    """Важно 3 круга 13: 40 000 ₽, три услуги — в четверг три кампании, запуск упал до создания на площадке (строка
+    """40 000 ₽, три услуги — в четверг три кампании, запуск упал до создания на площадке (строка
     кампании могла остаться заведённой). Повтор в воскресенье не берёт раскладку четверга (по 316 ₽ на кампанию —
     ниже минимума Директа 366 ₽), а раскладывает заново."""
     plan, limits = thursday_layout_plan(campaigns)
@@ -2583,7 +2583,7 @@ class FailingWeeklyMinimum(WeeklyMinimum):
 
 
 async def test_retry_of_failed_direct_on_sunday_lays_out_campaigns_again(tmp_path: Path) -> None:
-    """Важно 3 круга 13 через запуск: при 40 000 ₽ VK выключен, в четверг Директ отказал на первой из трёх кампаний
+    """Через запуск: при 40 000 ₽ VK выключен, в четверг Директ отказал на первой из трёх кампаний
     (её строка заведена, на площадке её нет). Повтор в воскресенье раскладывает услуги заново: одна кампания
     с лимитом не ниже минимума Директа."""
     adapters = {"direct": FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"]), "vk": FakeAdapter()}
@@ -2888,7 +2888,7 @@ class AcceptedOffRefusesSuspend(DraftRefusesSuspend, AcceptedOff):
 
 
 async def test_interrupted_new_month_pass_still_resumes_budget_stopped_campaign(tmp_path: Path, monkeypatch) -> None:
-    """Важно 4 круга 12: проход нового месяца прервался на возобновлении — повтор помнит остановку по бюджету и
+    """Проход нового месяца прервался на возобновлении — повтор помнит остановку по бюджету и
     возобновляет кампанию, хотя статус бизнеса уже running."""
     from app.services.budget_guard import stop_all
 
@@ -2930,7 +2930,7 @@ class ExtendingFake(FakeAdapter):
 
 
 async def test_rebalance_conflict_of_one_campaign_does_not_stop_the_rest(tmp_path: Path, monkeypatch) -> None:
-    """Важно 5 круга 12: площадка не подтвердила изменение одной кампании — пересчёт остальных и продление дат
+    """Площадка не подтвердила изменение одной кампании — пересчёт остальных и продление дат
     идут, а шаг всё равно провалится и повторится."""
     from app.services.optimize import rebalance_budget
 
@@ -3070,7 +3070,7 @@ async def test_rejected_ad_does_not_hold_campaign_waiting(tmp_path: Path) -> Non
 
 
 async def test_all_ads_rejected_notifies_owner_instead_of_long_review(tmp_path: Path) -> None:
-    """Важно 3 ревью a57adf1: все объявления кампании отклонены — черновик не примут никогда: владелец сразу
+    """Все объявления кампании отклонены — черновик не примут никогда: владелец сразу
     получает уведомление об этом, а не «долгая проверка» через 5 дней. Одобренную, но выключенную кампанию не
     включаем: показывать нечего, и запись «включили рекламу» ввела бы владельца в заблуждение."""
     adapter = AcceptedOff()
@@ -3088,7 +3088,7 @@ async def test_all_ads_rejected_notifies_owner_instead_of_long_review(tmp_path: 
 
 
 async def test_all_ads_rejected_in_draft_campaign_ends_review(tmp_path: Path) -> None:
-    """Мелочь 6 круга 14: площадка отклонила все объявления кампании-черновика — черновик так и останется на проверке,
+    """Площадка отклонила все объявления кампании-черновика — черновик так и останется на проверке,
     но ждать нечего: отметка проверки снимается (иначе кампанию не сверял бы sync_campaign_status), владелец получает
     одно уведомление об отказе, кампания остаётся как есть."""
     world, plan = await ready_with_services(
@@ -3105,7 +3105,7 @@ async def test_all_ads_rejected_in_draft_campaign_ends_review(tmp_path: Path) ->
 
 
 async def test_rebalance_pause_of_rejected_draft_does_not_restart_review(tmp_path: Path) -> None:
-    """Мелочь 6 круга 14: черновик, все объявления которого отклонены, снят с проверки; пересчёт лимитов ставит его на
+    """Черновик, все объявления которого отклонены, снят с проверки; пересчёт лимитов ставит его на
     паузу «показывать нечего», которую площадка черновику не применяет. Отметка проверки не возвращается: пересчёт не
     держит под кампанию бюджет, а уведомление об отказе не повторяется."""
     from app.services.optimize import NO_ACTIVE_ADS
@@ -3159,7 +3159,7 @@ async def test_stop_during_review_keeps_campaign_off_after_approval_and_continue
 
 
 async def test_continue_does_not_undo_settled_pause_of_removed_service(tmp_path: Path) -> None:
-    """Мелочь 6 ревью a57adf1: паузу, доведённую шагом модерации, «Продолжить» снимает по причине исходной паузы —
+    """Паузу, доведённую шагом модерации, «Продолжить» снимает по причине исходной паузы —
     кампанию услуги, убранной во время проверки, не включает."""
     from app.services.budget_guard import stop_all
     from app.services.screens import ScreensService
@@ -3234,7 +3234,7 @@ async def test_stop_after_approval_before_enable_changes_target_to_pause(tmp_pat
 
 
 async def test_service_removed_after_approval_before_enable_keeps_campaign_off(tmp_path: Path) -> None:
-    """Важно 1 круга 14: услугу убрали, когда площадка уже одобрила и выключила её кампанию, а шаг модерации ещё не
+    """Услугу убрали, когда площадка уже одобрила и выключила её кампанию, а шаг модерации ещё не
     включил: цель — пауза владельца, и шаг модерации кампанию не включает."""
     adapter = AcceptedOff()
     world, plan = await ready_with_services(
@@ -3392,7 +3392,7 @@ async def test_rebalance_pause_during_review_is_not_undone_by_approval(tmp_path:
 
 
 async def test_rebalance_pause_after_approval_before_enable_keeps_campaign_off(tmp_path: Path) -> None:
-    """Важно 1 круга 14: площадка уже одобрила и выключила кампанию (ACCEPTED/OFF), шаг модерации её ещё не включил,
+    """Площадка уже одобрила и выключила кампанию (ACCEPTED/OFF), шаг модерации её ещё не включил,
     а пересчёт лимитов останавливает её (остатка меньше минимума площадки): цель становится паузой, и шаг модерации
     кампанию не включает."""
     adapter = ReviewMinimum()
@@ -3454,7 +3454,7 @@ class ReviewMinimumAdsOff(ReviewMinimum):
 
 
 async def test_approved_ads_of_paused_campaign_stay_off_and_review_ends(tmp_path: Path) -> None:
-    """Важно 2 ревью a57adf1: у кампании, чья цель — пауза, выключенные после проверки объявления — норма: шаг
+    """У кампании, чья цель — пауза, выключенные после проверки объявления — норма: шаг
     модерации их не включает и не ждёт, отметка проверки снимается."""
     adapter = ReviewMinimumAdsOff()
     world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
@@ -3612,7 +3612,7 @@ def not_found(world: World) -> list[WorkerRun]:
 
 
 async def test_continue_skips_campaign_deleted_in_cabinet(tmp_path: Path) -> None:
-    """Важно круга 14: кампанию удалили в кабинете, пока реклама стояла: «Продолжить» не падает, включает остальные,
+    """Кампанию удалили в кабинете, пока реклама стояла: «Продолжить» не падает, включает остальные,
     владелец получает одно уведомление, а удалённая кампания не держит кнопку «Продолжить» у работающей рекламы."""
     from app.services.budget_guard import stop_all
     from app.services.screens import ScreensService
@@ -3635,7 +3635,7 @@ async def test_continue_skips_campaign_deleted_in_cabinet(tmp_path: Path) -> Non
 
 
 async def test_stop_platform_counts_campaign_deleted_in_cabinet_as_stopped(tmp_path: Path) -> None:
-    """Важно круга 15: удалённая в кабинете кампания не делает отзыв кабинета неудачным: тратить ей нечем."""
+    """Удалённая в кабинете кампания не делает отзыв кабинета неудачным: тратить ей нечем."""
     from time import monotonic
 
     from app.services.budget_guard import stop_platform
@@ -3657,7 +3657,7 @@ async def test_stop_platform_counts_campaign_deleted_in_cabinet_as_stopped(tmp_p
 
 
 async def test_campaign_returned_to_cabinet_can_be_continued_again(tmp_path: Path) -> None:
-    """Важно круга 15: кампания пропала в кабинете, затем вернулась и стоит остановленной нами: она выходит из
+    """Кампания пропала в кабинете, затем вернулась и стоит остановленной нами: она выходит из
     missing_campaigns, кнопка «Продолжить» снова есть и включает её."""
     from app.services.budget_guard import campaign_state, stop_all
     from app.services.screens import ScreensService
@@ -3684,7 +3684,7 @@ async def test_campaign_returned_to_cabinet_can_be_continued_again(tmp_path: Pat
 
 
 async def test_month_rollover_and_rebalance_skip_campaign_deleted_in_cabinet(tmp_path: Path) -> None:
-    """Важно круга 14: удалённая в кабинете кампания не роняет шаги воркера каждый тик: новый месяц возобновляет
+    """Удалённая в кабинете кампания не роняет шаги воркера каждый тик: новый месяц возобновляет
     остальные, пересчёт лимитов и сверка статусов идут дальше, уведомление одно."""
     from app.services.budget_guard import stop_all
     from app.services.month import month_rollover
@@ -3726,7 +3726,7 @@ class DraftAd(SlowModeration):
 
 
 async def test_settle_that_only_sends_draft_to_review_says_so_and_is_written_once(tmp_path: Path) -> None:
-    """B круга 14: шаг модерации отправил черновик объявления на проверку — запись не «включили рекламу», а честно
+    """Шаг модерации отправил черновик объявления на проверку — запись не «включили рекламу», а честно
     «отправили на проверку»; повтор шага в том же окне проверки вторую запись не пишет."""
     from app.services.sync import REVIEW_SENT
 
@@ -3744,7 +3744,7 @@ async def test_settle_that_only_sends_draft_to_review_says_so_and_is_written_onc
 
 
 async def test_owner_pause_from_cabinet_survives_conflict_of_next_settle_record(tmp_path: Path, monkeypatch) -> None:
-    """C круга 14: пауза в кабинете записана (EXTERNAL_PAUSE), а следующая запись шага модерации упала в конфликт:
+    """Пауза в кабинете записана (EXTERNAL_PAUSE), а следующая запись шага модерации упала в конфликт:
     отметка «остановил владелец» уже сохранена."""
     adapter = AcceptedOff()
     world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
@@ -3780,7 +3780,7 @@ async def test_owner_pause_from_cabinet_survives_conflict_of_next_settle_record(
 
 
 async def test_continue_with_campaigns_stopped_in_cabinet_explains_why(tmp_path: Path) -> None:
-    """E круга 14: «Продолжить» не включило ни одной кампании — все остановлены в кабинете площадки: владелец видит,
+    """«Продолжить» не включило ни одной кампании — все остановлены в кабинете площадки: владелец видит,
     почему, а не молчаливый ответ."""
     from app.services.budget_guard import stop_all
     from app.services.screens import ScreensService

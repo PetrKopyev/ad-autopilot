@@ -272,7 +272,7 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             await stop_all(business, worker=worker, **pending_stop)
         except ChangeConflict:
             # Остановка не подтверждена (площадка занята или недоступна): расход всё равно читаем,
-            # остановку доведёт следующий тик — pending_stop остаётся (В1 круга 7: страж не должен
+            # остановку доведёт следующий тик — pending_stop остаётся (страж не должен
             # падать раньше, чем прочитает расход).
             pass
     month = today(worker.clock).replace(day=1)

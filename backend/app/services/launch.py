@@ -355,7 +355,7 @@ class LaunchService:
         проходят тот же путь — создание (с переиспользованием кампаний попытки) и включение. Ошибки этих
         площадок снова фиксируются честно, запись о неудаче плана не пишется: реклама на остальных работает."""
         if (business.settings.get("_worker") or {}).get("kill_switch"):
-            # В5 круга 7: повтор не снимает «Остановить всю рекламу» сам — иначе бизнес получал running
+            # повтор не снимает «Остановить всю рекламу» сам — иначе бизнес получал running
             # с зажатым kill_switch: «Продолжить» отвечало «уже работает», а автопилот был выключен.
             raise LaunchBlocked(
                 ["Реклама остановлена вами. Сначала нажмите «Продолжить рекламу» на главной, потом повторите запуск."]
@@ -490,7 +490,7 @@ class LaunchService:
                 adapters[platform] = self.resolve_adapter(business.id, platform)
                 minimum = minimums[platform] = await adapters[platform].min_budgets()
                 if platform == "direct":
-                    # Агентские кабинеты не поддерживаются: понятный отказ до создания кампаний (В5).
+                    # Агентские кабинеты не поддерживаются: понятный отказ до создания кампаний.
                     await adapters[platform].whoami()
             except CLOSED_ACCOUNT as error:
                 raise closed_account(platform, error) from error

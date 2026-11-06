@@ -127,7 +127,7 @@ def differences(
         after = op.after
         if op.field == "creative" and isinstance(after, dict) and "title2" not in after:
             # Записи add_ad до появления title2 (миграция 0006) не содержат ключа: сравниваем как None,
-            # иначе каждый откат старой записи просил бы подтверждение (мелочь круга 3).
+            # иначе каждый откат старой записи просил бы подтверждение.
             after = after | {"title2": None}
         if state is None or state.entity_type != op.entity_type or getattr(state, op.field) != after:
             current = getattr(state, op.field) if state is not None and state.entity_type == op.entity_type else None
@@ -538,7 +538,7 @@ async def budget_operations(repository, business, adapter, refs, operations, now
         row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date >= week
     )
     # Сегодняшний расход отдельно: недельный лимит считает остаток дня, а не полный дневной лимит сверх
-    # уже потраченного (мелочь 1 круга 7 — иначе сегодня учитывался дважды).
+    # уже потраченного (иначе сегодня учитывался дважды).
     context["spent_today_kop"] = sum(
         row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date == day
     )

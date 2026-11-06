@@ -114,7 +114,7 @@ def test_foreign_ad(setup):
 
 
 async def test_pause_waits_for_busy_business_then_asks_to_retry(monkeypatch):
-    """В1 круга 8: пока бизнес занят шагом воркера, кнопка «Остановить всю рекламу» ждёт блокировку
+    """Пока бизнес занят шагом воркера, кнопка «Остановить всю рекламу» ждёт блокировку
     ограниченное время и, не дождавшись, отвечает честным 409 — ничего не записав: иначе намерение
     стиралось бы шагом воркера из его старой копии business."""
     from app.services import screens as screens_module
@@ -135,7 +135,7 @@ async def test_pause_waits_for_busy_business_then_asks_to_retry(monkeypatch):
 
 
 async def test_pause_during_demo_advance_reports_advancing(monkeypatch):
-    """Мелочь 2 кругов 9–10: перемотка демо, начавшаяся во время ожидания блокировки, отвечает
+    """Перемотка демо, начавшаяся во время ожидания блокировки, отвечает
     текстом про перемотку сразу, а не дожидается конца срока ожидания."""
     from contextlib import contextmanager
     from time import monotonic
@@ -614,7 +614,7 @@ def test_settings_values_are_saved(setup):
 
 
 def test_vk_goal_can_be_set_and_reset(setup):
-    """В6: цель VK сохраняется вместе с именем; source_id=0 сбрасывает оба ключа."""
+    """Цель VK сохраняется вместе с именем; source_id=0 сбрасывает оба ключа."""
     client, world = setup
     saved = client.put(
         "/api/business/settings",

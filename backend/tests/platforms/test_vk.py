@@ -342,7 +342,7 @@ async def test_priced_goal_absent_without_config(adapter: VkAdapter, api) -> Non
 
 
 async def test_priced_goal_per_account_overrides_service_config(api) -> None:
-    """В8: цель уровня кабинета (у каждого кабинета VK — своя цель пикселя) важнее общей настройки сервиса:
+    """Цель уровня кабинета (у каждого кабинета VK — своя цель пикселя) важнее общей настройки сервиса:
     без этого второй пользователь сервиса получал бы чужую цель и не смог бы запустить рекламу."""
     config = configuration()
     config.vk_priced_goal_source_id = 777
@@ -355,7 +355,7 @@ async def test_priced_goal_per_account_overrides_service_config(api) -> None:
 
 
 async def test_cpc_refusal_of_priced_goal_tries_next_package_then_without_goal(api) -> None:
-    """В8: отказ пакета из-за priced_goal не обрывает перебор кандидатов: сначала ищем пакет, который примет
+    """Отказ пакета из-за priced_goal не обрывает перебор кандидатов: сначала ищем пакет, который примет
     цель, и только если никто не принял — создаём без цели с честной ошибкой, если и так никто."""
     config = configuration()
     config.vk_priced_goal_source_id = 777
@@ -409,7 +409,7 @@ async def test_get_state_restores_gross_limits_when_vat_configured(api) -> None:
 
 
 async def test_get_stats_and_balance_gross_up_when_vat_configured(api) -> None:
-    """В5: расход и баланс при VK_AMOUNTS_INCLUDE_VAT=true приводятся к суммам с НДС, как бюджет: иначе
+    """Расход и баланс при VK_AMOUNTS_INCLUDE_VAT=true приводятся к суммам с НДС, как бюджет: иначе
     расход занижался на ставку НДС и страж бюджета срабатывал позже превышения."""
     today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
     api.get(f"{API}/statistics/ad_plans/day.json").respond(
@@ -509,7 +509,7 @@ async def test_create_tree_is_idempotent_by_name_suffix(adapter: VkAdapter, api)
     refs = await adapter.create_campaign_tree(tree())
     assert refs.campaign_id == "10" and refs.ads == {"a1": "30"}
     assert not create.called
-    # Повтор переиспользует план и переносит пересчитанный дневной лимит на площадку (К3).
+    # Повтор переиспользует план и переносит пересчитанный дневной лимит на площадку.
     assert update.called
     assert json.loads(update.calls[0].request.content)["budget_limit_day"] == "150.50"
     params = parse_qs(api.calls[0].request.url.query.decode())
@@ -738,7 +738,7 @@ async def test_get_spend_today_sums_campaigns(adapter: VkAdapter, api) -> None:
 
 
 async def test_get_stats_counts_only_own_plans(adapter: VkAdapter, api) -> None:
-    """К1: статистика запрашивается по id наших планов — чужой расход кабинета не попадает в ответ."""
+    """Статистика запрашивается по id наших планов — чужой расход кабинета не попадает в ответ."""
     today = datetime.now(adapter._tz).date().isoformat()
     route = api.get(f"{API}/statistics/ad_plans/day.json").respond(
         json={
@@ -758,7 +758,7 @@ async def test_get_stats_counts_only_own_plans(adapter: VkAdapter, api) -> None:
 
 
 async def test_get_spend_today_counts_only_own_plans(adapter: VkAdapter, api) -> None:
-    """К1: «расход сегодня» считается только по нашим планам."""
+    """«расход сегодня» считается только по нашим планам."""
     today = datetime.now(adapter._tz).date().isoformat()
     api.get(f"{API}/statistics/ad_plans/day.json").respond(
         json={
@@ -945,7 +945,7 @@ async def test_add_group_posts_group_into_existing_plan_and_is_idempotent(adapte
 
 
 async def test_add_group_uses_package_of_plan_groups_not_first_candidate(adapter: VkAdapter, api) -> None:
-    """В9: пакет новой группы читается из групп плана, а не из первого кандидата списка: после пересоздания
+    """Пакет новой группы читается из групп плана, а не из первого кандидата списка: после пересоздания
     адаптера (токен живёт сутки) первым кандидатом может оказаться отказавший пакет, не тот, на котором
     создан план."""
     group = tree().groups[0]
@@ -964,7 +964,7 @@ async def test_add_group_uses_package_of_plan_groups_not_first_candidate(adapter
 
 
 async def test_cabinet_priced_goal_name_overrides_config(api) -> None:
-    """В6: имя цели кабинета (business.settings) важнее общего VK_PRICED_GOAL_NAME: на VK уходит
+    """Имя цели кабинета (business.settings) важнее общего VK_PRICED_GOAL_NAME: на VK уходит
     кабинетное имя и кабинетный source_id, а не значения из конфига сервиса."""
     config = configuration()
     config.vk_priced_goal_source_id = 777
@@ -983,7 +983,7 @@ async def test_cabinet_priced_goal_name_overrides_config(api) -> None:
 
 
 async def test_add_group_without_goal_when_plan_lived_without_it(api) -> None:
-    """В7: план создан без цели (второй круг перебора пакетов) — новая группа создаётся без priced_goal,
+    """План создан без цели (второй круг перебора пакетов) — новая группа создаётся без priced_goal,
     иначе пакет, не принявший цель в плане, отверг бы и всю группу."""
     config = configuration()
     config.vk_priced_goal_source_id = 777
@@ -1023,7 +1023,7 @@ async def test_add_group_without_goal_when_plan_lived_without_it(api) -> None:
 
 
 async def test_add_group_retries_without_goal_when_package_rejects_it(api) -> None:
-    """В7: план создан раньше этой памяти — add_group шлёт цель, при отказе повторяет без неё,
+    """План создан раньше этой памяти — add_group шлёт цель, при отказе повторяет без неё,
     как перебор пакетов при создании плана."""
     config = configuration()
     config.vk_priced_goal_source_id = 777
@@ -1053,7 +1053,7 @@ async def test_add_group_retries_without_goal_when_package_rejects_it(api) -> No
 
 
 async def test_add_group_does_not_retry_without_goal_on_unrelated_error(api) -> None:
-    """В3 круга 4: повтор без цели — только когда отказ о priced_goal. Любая другая ошибка
+    """Повтор без цели — только когда отказ о priced_goal. Любая другая ошибка
     (валидатор по другому полю) обрывается сразу: повтор дублировал запрос и маскировал причину."""
     config = configuration()
     config.vk_priced_goal_source_id = 777

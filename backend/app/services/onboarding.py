@@ -63,9 +63,9 @@ MAX_SERVICES = 200
 # Сервисная advisory lock резервирования трат на ИИ: короткие операции (SUM + INSERT), одна на всех,
 # чтобы параллельные запросы не проходили проверку лимита одновременно.
 AI_SPEND_LOCK_KEY = 727_000_001
-# Сколько резерв (final=false) ждёт ответа ИИ: старше — фиксируется по оценке, деньги могли уйти (В4).
+# Сколько резерв (final=false) ждёт ответа ИИ: старше — фиксируется по оценке, деньги могли уйти.
 AI_RESERVATION_TTL = timedelta(minutes=15)
-# Сколько храним итоговые траты на ИИ: недельный пул смотрит 7 дней назад, запас на окно свипера (В9).
+# Сколько храним итоговые траты на ИИ: недельный пул смотрит 7 дней назад, запас на окно свипера.
 AI_LEDGER_KEEP_DAYS = 14
 QUESTIONS = {
     "services": "Какие услуги вы оказываете?",
@@ -260,7 +260,7 @@ class SpendLLM:
             raise
         except BaseException:
             # Отмена задачи или неожиданный сбой: ответа не получили — резерв снимаем, чтобы строка
-            # с final=false не висела в пуле владельца и суточном потолке навсегда (В4 круга 3).
+            # с final=false не висела в пуле владельца и суточном потолке навсегда.
             self.repository.release_ai(reservation)
             raise
         self.repository.settle_ai(reservation, result.cost_kop if isinstance(result, CompletionResult) else 0)
@@ -311,7 +311,7 @@ class OnboardingRepository(ChangesRepository):
     def owner_key(self, business: Business) -> str | None:
         """Ключ владельца для учёта трат на ИИ: HMAC от yandex_uid. Персональный идентификатор в базе не храним;
         после удаления аккаунта и повторного входа тем же Яндекс ID ключ тот же — лимит не обнуляется.
-        HMAC, а не голый sha256 (В9): идентификатор Яндекса из малого числового диапазона восстанавливается
+        HMAC, а не голый sha256: идентификатор Яндекса из малого числового диапазона восстанавливается
         перебором; ключ отдельный от SECRET_KEY, чтобы его ротация не обнуляла пулы."""
         if business.user_id is None:
             return None
@@ -370,7 +370,7 @@ class OnboardingRepository(ChangesRepository):
             return None
         error_type = ArtBudgetExceeded if kind == "art" else YandexGPTError
         with self.ai_lock():
-            # Под тем же локом — чтобы открытые резервы не копились после отмен задач (В4).
+            # Под тем же локом — чтобы открытые резервы не копились после отмен задач.
             self.sweep_ai_reservations(datetime.now(MOSCOW))
             self._ai_pool_room(owner, estimate_kop, error_type)
             row = AiSpendLedger(owner_key=owner, business_id=business_id, kind=kind, cost_kop=estimate_kop)
@@ -399,7 +399,7 @@ class OnboardingRepository(ChangesRepository):
 
     def art_reservation(self, business_id: int) -> Callable[[], Awaitable[int | None]]:
         """Хук ArtBudget: резерв цены картинки до генерации. Возвращает id строки ledger
-        (final=false); закрытие — через settle_ai по успеху или release_ai при явном отказе (В3)."""
+        (final=false); закрытие — через settle_ai по успеху или release_ai при явном отказе."""
 
         async def reserve() -> int | None:
             return self.reserve_ai(business_id, "art", ART_COST_KOP)
@@ -407,7 +407,7 @@ class OnboardingRepository(ChangesRepository):
         return reserve
 
     def sweep_ai_reservations(self, now: datetime) -> None:
-        """Закрывает просроченные резервы и подчищает старые строки (В4/В9).
+        """Закрывает просроченные резервы и подчищает старые строки.
 
         Строки final=false старше TTL фиксируются по оценке — запрос мог уйти и списать деньги после
         отмены задачи или потери ответа. Итоговые траты старше хранения удаляются: лимиты смотрят

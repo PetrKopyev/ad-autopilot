@@ -153,7 +153,7 @@ def test_experiment_copy_is_derived_from_the_winning_arm():
 
 
 def test_no_difference_verdict_shows_impressions_clicks_and_rates_of_both_arms():
-    """В3: «разницы нет» — самый частый исход, по RULES в тексте обе стороны с цифрами."""
+    """«разницы нет» — самый частый исход, по RULES в тексте обе стороны с цифрами."""
     result = ExperimentResult(Verdict.NO_DIFFERENCE, "EXPERIMENT_NO_DIFF", 0.4, 0.1)
     a, b = Metrics(10_000, 11_400, 137, 10), Metrics(10_300, 11_900, 152, 12)
     text = explain_experiment(result, a, b)

@@ -287,7 +287,7 @@ async def test_awaiting_moderation_does_not_stop_remaining_operations(repository
 
 
 async def test_enabling_campaign_keeps_rejected_ad_rejected(repository, tree, monkeypatch):
-    """F круга 14: включение применено, а объявление площадка отклонила: локально оно остаётся отклонённым, не
+    """Включение применено, а объявление площадка отклонила: локально оно остаётся отклонённым, не
     «работает» — его переписывает сверка модерации."""
     adapter, refs = tree
     campaign, ad = local_tree(repository, refs, campaign="paused_auto", ad="rejected")
@@ -385,7 +385,7 @@ def test_status_under_review_is_not_a_mismatch():
 
 
 def test_pause_of_unknown_review_status_is_a_mismatch():
-    """Мелочь 6 ревью a57adf1: паузу «ещё проверяет» только черновик или модерация; pending у паузы — расхождение,
+    """Паузу «ещё проверяет» только черновик или модерация; pending у паузы — расхождение,
     включение в pending по-прежнему ждёт проверки."""
     states = {"5": EntityState("5", "campaign", None, "Кампания", "pending")}
     assert differences([Operation("set_status", "campaign", "5", "status", "active", "paused_auto")], states)
@@ -393,7 +393,7 @@ def test_pause_of_unknown_review_status_is_a_mismatch():
 
 
 def test_platform_pause_without_author_matches_any_expected_pause():
-    """Важно 5 ревью a57adf1: остановка одобренной, но выключенной кампании (OFF → paused_auto) при ожидаемой паузе
+    """Остановка одобренной, но выключенной кампании (OFF → paused_auto) при ожидаемой паузе
     владельца не расхождение — при любой паузе кампания не крутится. Включение по-прежнему сверяется."""
     states = {
         "6": EntityState("6", "campaign", None, "Кампания", "paused_auto"),

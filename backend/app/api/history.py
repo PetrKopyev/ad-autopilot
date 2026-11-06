@@ -136,7 +136,7 @@ async def revert(
             # Откат SCALE вернул лимиты групп (Н7): переносим их в лимиты кампаний пересчётом
             # при текущем бюджете — иначе на площадке остались бы устаревшие абсолютные значения.
             # Пересчёт только при работающей рекламе: force идёт мимо стража business.status/kill_switch
-            # и возобновил бы кампании, которые «Остановить всю рекламу» пропустила (К1 круга 3).
+            # и возобновил бы кампании, которые «Остановить всю рекламу» пропустила.
             business = repository.business(original.business_id)
             meta = business.settings.get("_worker", {})
             if change.status == "applied" and business.status == "running" and not meta.get("kill_switch"):
@@ -150,7 +150,7 @@ async def revert(
                 try:
                     await rebalance_budget(worker, business, force=True)
                 except (ChangeConflict, PlatformError):
-                    # Откат уже применён: сбой пересчёта не должен выглядеть как сбой отката (В1).
+                    # Откат уже применён: сбой пересчёта не должен выглядеть как сбой отката.
                     # Лимиты кампаний досчитает штатный тик воркера.
                     logger.warning("Пересчёт лимитов кампаний после отката SCALE не выполнен", exc_info=True)
     except ConfirmationRequired as error:

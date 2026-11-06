@@ -184,7 +184,7 @@ async def test_expired_dry_run_experiments_are_idempotent_across_ticks_and_can_l
     world = await make_world()
     first = running_experiment(world)
     second = running_experiment(world)
-    # За день после срока (14-й день — ещё вывод по данным, см. К4).
+    # За день после срока (14-й день — ещё вывод по данным).
     world.clock.advance(days=15)
     monkeypatch.setattr("app.services.optimize.snapshot", AsyncMock(return_value=([], [])))
     for _ in range(3):
@@ -242,7 +242,7 @@ def test_media_directory_has_local_default_and_uses_config(monkeypatch, tmp_path
 
 
 async def test_guard_with_full_reserve_does_not_crash_on_zero_division(monkeypatch):
-    """В4: резерв 100% — вырожденный, но валидный конфиг; страж считает верхнюю границу сверки
+    """Резерв 100% — вырожденный, но валидный конфиг; страж считает верхнюю границу сверки
     с нулевым резервом и не падает на обращении доли (1 - 1 = 0)."""
     from app.config import Settings, get_domain_settings
 

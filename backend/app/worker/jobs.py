@@ -820,7 +820,7 @@ class Worker:
         if business.status not in {"running", "budget_stop", "paused"}:
             return
         with self.repository.business_lock(business.id), self.business_clock(business):
-            # В1 кругов 9–10: бизнес могли загрузить в начале тика (identity map держит копию весь тик),
+            # бизнес могли загрузить в начале тика (identity map держит копию весь тик),
             # а пока шли шаги, владелец нажал «Остановить»/«Продолжить» или отменил запись об остановке.
             # Если свежая строка отличается от копии, перечитываем объект под блокировкой: иначе remember
             # шага вернул бы старые kill_switch/pending_stop поверх свежей записи. Перемотка демо коммитит

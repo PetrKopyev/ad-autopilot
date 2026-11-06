@@ -67,7 +67,7 @@ class CampaignTreeSpec:
     @property
     def idempotency_key(self) -> str:
         # Ключ содержит идентификатор установки: без него новая база приняла бы кампании ap-<id> от
-        # прежних прогонов того же кабинета за свои и переписала бы их (мелочь 2 круга 7). Хеш SECRET_KEY
+        # прежних прогонов того же кабинета за свои и переписала бы их. Хеш SECRET_KEY
         # стабилен для установки и меняется при смене секрета (см. DEPLOY.md про SECRET_KEY).
         return f"ap-{installation_key()}-{self.id}"
 
@@ -205,7 +205,7 @@ class EntityState:
     image_ref: str | None = None
     targeting: dict[str, Any] = field(default_factory=dict)
     # Кампания закончилась по дате окончания (Direct State=ENDED): не пауза владельца, месячный переход
-    # продлевает дату и возобновляет кампанию (В4 круга 7).
+    # продлевает дату и возобновляет кампанию.
     ended: bool = False
 
     def __post_init__(self) -> None:

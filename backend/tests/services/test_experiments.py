@@ -362,7 +362,7 @@ async def test_tick_expired_test_waits_when_business_is_not_running(experiment_w
 
 
 async def test_tick_on_deadline_day_evaluates_data_before_expiry(experiment_world):
-    """К4: в день срока проверки тик сначала выносит вывод по данным, а не закрывает её «срок истёк»:
+    """В день срока проверки тик сначала выносит вывод по данным, а не закрывает её «срок истёк»:
     срок сравнивается по дате, как в domain/evaluate_experiment, а не по времени старта — иначе тик
     позже часа старта в последний день закрывал бы проверку без вывода."""
     world = experiment_world
@@ -396,7 +396,7 @@ async def test_tick_on_deadline_day_evaluates_data_before_expiry(experiment_worl
 
 
 async def test_verdict_does_not_stop_last_working_ad_of_group(experiment_world):
-    """Мелочь 6 круга 13: победителя с тех пор остановили — проигравший остаётся последним работающим объявлением
+    """Победителя с тех пор остановили — проигравший остаётся последним работающим объявлением
     группы, вывод его не останавливает (иначе встала бы вся группа), но проверку закрывает."""
     world = experiment_world
     experiment = running_experiment(world)
@@ -433,7 +433,7 @@ async def test_verdict_does_not_stop_last_working_ad_of_group(experiment_world):
 
 
 async def test_tick_expired_test_stops_variant_like_no_difference_verdict(experiment_world):
-    """К4: после срока проверку закрывает «срок истёк» с остановкой варианта: остаётся прежний вариант,
+    """После срока проверку закрывает «срок истёк» с остановкой варианта: остаётся прежний вариант,
     как при любом другом исходе без победителя (RULES)."""
     world = experiment_world
     experiment = running_experiment(world)
@@ -449,7 +449,7 @@ async def test_tick_expired_test_stops_variant_like_no_difference_verdict(experi
 
 
 async def test_tick_expired_test_survives_apply_conflict(experiment_world, monkeypatch):
-    """В2: конфликт слота изменений (параллельный тик) при закрытии просроченной проверки не роняет
+    """Конфликт слота изменений (параллельный тик) при закрытии просроченной проверки не роняет
     весь тик и не закрывает проверку без вывода — попытка повторится на следующем тике."""
     world = experiment_world
     experiment = running_experiment(world)

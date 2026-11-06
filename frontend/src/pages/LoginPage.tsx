@@ -17,7 +17,7 @@ export function LoginPage() {
   const stopResult = (useLocation().state as { stopResult?: StopResult } | null)?.stopResult;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  // null — конфиг входа ещё не прочитан: кнопку демо не показываем, но и молчать не оставляем (З1 круга 3).
+  // null — конфиг входа ещё не прочитан: кнопку демо не показываем, но и молчать не оставляем.
   const [demo, setDemo] = useState<boolean | null>(null);
   const [configFailed, setConfigFailed] = useState(false);
   const [agreed, setAgreed] = useState(false);

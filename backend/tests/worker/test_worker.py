@@ -362,7 +362,7 @@ async def test_month_stop_record_names_the_reason() -> None:
 
 
 async def test_month_stop_during_owner_pause_names_owner_pause() -> None:
-    """D круга 14: реклама на паузе владельца, а продолжение выключено: запись месячной остановки называет паузу
+    """Реклама на паузе владельца, а продолжение выключено: запись месячной остановки называет паузу
     владельца — реклама стояла бы и с включённым продолжением."""
     from dataclasses import replace
 

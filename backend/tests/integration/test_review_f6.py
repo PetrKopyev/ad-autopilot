@@ -36,7 +36,7 @@ async def test_experiment_starts_after_eight_days_of_scheduler_ticks(tmp_path, m
 async def test_expired_experiment_closes_before_platform_reads_or_cooldown(monkeypatch, status):
     world = await make_world()
     experiment = running_experiment(world)
-    # За день после срока (14-й день — ещё вывод по данным, см. К4).
+    # За день после срока (14-й день — ещё вывод по данным).
     world.clock.advance(days=15)
     world.business.status = status
     world.ads["borderline-2"].status = "paused_owner"
@@ -283,7 +283,7 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
 
 
 async def test_rewritten_ad_returns_campaign_to_review(monkeypatch):
-    """Мелочь 6 круга 14: отметку проверки кампании, все объявления которой отклонены, шаг модерации снимает;
+    """Отметку проверки кампании, все объявления которой отклонены, шаг модерации снимает;
     исправленное объявление снова на проверке — отметка возвращается, и после одобрения его включит settle_review."""
     from dataclasses import replace
 

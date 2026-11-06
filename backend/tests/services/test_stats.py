@@ -182,7 +182,7 @@ def test_client_answer_date_is_taken_in_moscow() -> None:
 
 
 def test_unsettled_days_follow_settlement_days_setting(monkeypatch) -> None:
-    """Ревью 22be3cd: неустоявшиеся дни статистики считаются по settlement_days настроек, а не по зашитым 2 дням."""
+    """Неустоявшиеся дни статистики считаются по settlement_days настроек, а не по зашитым 2 дням."""
     from app.domain.settings import DEFAULT_SETTINGS
 
     monkeypatch.setattr("app.services.stats.DEFAULT_SETTINGS", replace(DEFAULT_SETTINGS, settlement_days=3))
@@ -194,7 +194,7 @@ def test_unsettled_days_follow_settlement_days_setting(monkeypatch) -> None:
 
 
 def test_quiet_week_is_settled_and_was_not_asked_about() -> None:
-    """Ревью круга 13: тихая неделя (без обращений, расход входит в цену) — только устоявшаяся и без вопроса.
+    """Тихая неделя (без обращений, расход входит в цену) — только устоявшаяся и без вопроса.
     Неделя с неустоявшимися днями ещё досчитывает обращения, а вопрос с обращениями значит, что они были по
     прежним целям, — такие недели неизвестны, а не «0 клиентов»."""
     as_of = date(2026, 10, 27)

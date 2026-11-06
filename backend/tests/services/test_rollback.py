@@ -228,7 +228,7 @@ async def test_scale_rollback_restores_group_limits_and_leaves_campaign_limits_t
 
 
 async def test_failed_scale_rollback_does_not_restore_group_limits(repository, tree, monkeypatch):
-    """В2 круга 4: площадка не приняла откат изменения по группе с group_limits (failed) — локальные
+    """Площадка не приняла откат изменения по группе с group_limits (failed) — локальные
     лимиты групп не возвращаем: «откатано» на словах, а пересчёт из несостоявшегося отката ушёл бы
     в неверный бюджет. Inverse здесь — включение остановленного объявления (default-операция applied)."""
     adapter, refs = tree
@@ -253,7 +253,7 @@ async def test_failed_scale_rollback_does_not_restore_group_limits(repository, t
 
 
 async def test_pending_scale_rollback_does_not_restore_group_limits(repository, tree, monkeypatch):
-    """В2 круга 4: откат остался pending (площадка не ответила, прошёл ли он) — лимиты групп не трогаем,
+    """Откат остался pending (площадка не ответила, прошёл ли он) — лимиты групп не трогаем,
     восстановление только после applied (штатно pending досчитывает сверка воркера)."""
     adapter, refs = tree
     group_id = refs.groups["group"]
@@ -849,7 +849,7 @@ async def test_launch_info_record_without_operations_is_not_revertable(client, r
     ],
 )
 async def test_turning_ads_on_is_not_reverted_by_journal(client, repository, tree, kind, reason_code):
-    """Важно 1 круга 13: откат запуска или возобновления остановил бы кампании при бизнесе «работает», и
+    """Откат запуска или возобновления остановил бы кампании при бизнесе «работает», и
     «Продолжить» их не включило бы. Кнопки нет, сервер отвечает 409 с подсказкой про «Остановить»;
     прочие откатываемые записи — как раньше."""
     http, resolver, _ = client

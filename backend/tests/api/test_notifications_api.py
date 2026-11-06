@@ -97,7 +97,7 @@ def test_interrupted_launch_is_shown_as_danger(setup):
     ],
 )
 def test_review_notices_reach_owner(setup, code, title, level):
-    """Важно 3 ревью a57adf1: о затянувшейся проверке и об отказе всем объявлениям кампании владелец узнаёт."""
+    """О затянувшейся проверке и об отказе всем объявлениям кампании владелец узнаёт."""
     client, repository = setup
     repository.save(notice(1, code, "Проверьте объявления в кабинете площадки."))
     (item,) = client.get("/api/notifications").json()

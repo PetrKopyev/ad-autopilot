@@ -63,7 +63,7 @@ def test_question_uses_previous_week_and_selected_goals(setup):
 
 
 def test_unanswered_question_catches_up_with_late_leads():
-    """Мелочь 5 круга 13: обращения недели досчитались после вопроса — пока ответа нет, число обращений в вопросе
+    """Обращения недели досчитались после вопроса — пока ответа нет, число обращений в вопросе
     обновляется, и ответ «12 клиентов из 12» не получает 422; отвеченный вопрос не меняется."""
     db = MagicMock()
     ClientsRepository(db).create_question(1, WEEK, 12, datetime(2026, 10, 26, tzinfo=UTC))
@@ -73,7 +73,7 @@ def test_unanswered_question_catches_up_with_late_leads():
 
 
 def test_older_unanswered_question_catches_up_too(setup):
-    """Ревью круга 13: число обращений догоняет отчёты у каждого вопроса без ответа, а не только у прошлой недели."""
+    """Число обращений догоняет отчёты у каждого вопроса без ответа, а не только у прошлой недели."""
     service, repository, business, _ = setup
     old_week = date(2026, 10, 5)
     repository.unanswered_weeks.return_value = [old_week]
@@ -154,7 +154,7 @@ def test_price_excludes_old_weeks_and_unanswered_week(setup):
 
 
 def test_weeks_without_leads_count_their_spend_on_both_screens(setup):
-    """Важно 2 круга 13: 4 недели по 5 000 ₽, в трёх обращений нет, в четвёртой 2 обращения и 1 клиент —
+    """4 недели по 5 000 ₽, в трёх обращений нет, в четвёртой 2 обращения и 1 клиент —
     клиент стоил 20 000 ₽, и «Клиенты», и «Статистика» показывают одно и то же."""
     service, repository, business, question = setup
     base = repository.rows.return_value[0]

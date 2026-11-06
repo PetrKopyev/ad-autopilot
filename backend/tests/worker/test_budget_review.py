@@ -659,7 +659,7 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
         == 30_000
     )
     # Расход 100 ₽ уже сегодня: потолок недели — 200 ₽ (один день по 200 ₽), сегодняшний расход не
-    # прибавляем сверху дважды (мелочь 1 круга 7). 200 ₽ — ниже минимума 300 ₽.
+    # прибавляем сверху дважды. 200 ₽ — ниже минимума 300 ₽.
     adapter.get_stats = AsyncMock(
         return_value=[StatRow("1", "1", date(2026, 11, 30), "campaign", 1, 1, 10_000, {}, now, False)]
     )

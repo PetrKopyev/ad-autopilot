@@ -136,7 +136,7 @@ def test_site_check_of_foreign_business_is_not_found(api) -> None:
 
 
 def test_site_check_rereads_site_only_by_post(api, monkeypatch) -> None:
-    """G круга 14: повтор проверки перечитывает сайт и тратит лимит ИИ — только POST с CSRF, GET читает кэш."""
+    """Повтор проверки перечитывает сайт и тратит лимит ИИ — только POST с CSRF, GET читает кэш."""
     client, context = api
     calls = []
 

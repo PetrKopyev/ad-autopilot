@@ -305,7 +305,7 @@ def mock_yandex() -> Iterator[respx.MockRouter]:
                 "default_email": "owner@example.test",
             }
         )
-        # Проверка кабинета при подключении Директа (В5): самостоятельный клиент, не агентский.
+        # Проверка кабинета при подключении Директа: самостоятельный клиент, не агентский.
         router.post("https://api.direct.yandex.com/json/v5/clients").respond(
             json={"result": {"Clients": [{"ClientId": 1, "Login": "owner", "ClientInfo": "Кабинет"}]}}
         )

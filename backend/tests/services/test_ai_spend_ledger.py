@@ -1,4 +1,4 @@
-"""В11: учёт трат на ИИ идёт по ai_spend_ledger — таблице без внешних ключей.
+"""Учёт трат на ИИ идёт по ai_spend_ledger — таблице без внешних ключей.
 
 Недельный пул владельца и суточный потолок считаются по хэшу yandex_uid, а не по id пользователя
 или JOIN с бизнесами: удаление бизнеса или аккаунта не обнуляет лимит, иначе трату оператору
@@ -107,7 +107,7 @@ async def test_owner_ai_limit_survives_account_deletion(monkeypatch):
 
 @pytest.mark.db
 async def test_history_and_get_owned_are_scoped_to_owner_on_postgresql(monkeypatch):
-    """В12: на настоящей Postgres чужая история и чужая запись изменения недоступны (IDOR):
+    """На настоящей Postgres чужая история и чужая запись изменения недоступны (IDOR):
     фильтр владельца выполняется в SQL, а не в памяти."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     if not database_url:
@@ -189,7 +189,7 @@ async def test_history_and_get_owned_are_scoped_to_owner_on_postgresql(monkeypat
 
 @pytest.mark.db
 async def test_sweep_finalizes_stale_open_reservations(monkeypatch):
-    """В4: резерв (final=false) старше TTL фиксируется по оценке — запрос мог уйти и списать деньги
+    """Резерв (final=false) старше TTL фиксируется по оценке — запрос мог уйти и списать деньги
     после отмены задачи; свежий резерв не трогаем. Свипер работает под локом reserve_ai."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     if not database_url:
@@ -254,7 +254,7 @@ async def test_sweep_finalizes_stale_open_reservations(monkeypatch):
 
 @pytest.mark.db
 async def test_owner_key_is_hmac_with_dedicated_secret(monkeypatch):
-    """В9: псевдоним владельца — HMAC с AI_OWNER_KEY_SECRET, а не голый sha256 от yandex_uid:
+    """Псевдоним владельца — HMAC с AI_OWNER_KEY_SECRET, а не голый sha256 от yandex_uid:
     идентификатор Яндекса из малого числового диапазона восстанавливался бы перебором."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     if not database_url:

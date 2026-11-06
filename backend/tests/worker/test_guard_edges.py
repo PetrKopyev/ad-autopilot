@@ -90,7 +90,7 @@ async def test_stop_all_with_platform_refusal_stops_others_and_retries_next_tick
 
 
 async def test_stop_all_skips_campaign_missing_on_platform_and_stops_others() -> None:
-    """Ревью круга 13: кампании нет в подключённом кабинете (осталась в прежнем или удалена там; Директ тогда
+    """Кампании нет в подключённом кабинете (осталась в прежнем или удалена там; Директ тогда
     отвечает без неё) — остановка на ней не зацикливается: остальные кампании остановлены, бизнес в budget_stop,
     а не «не все площадки подтвердили» на каждом тике."""
     world = await make_world()
@@ -195,7 +195,7 @@ async def test_spend_equal_to_budget_stops_and_is_recorded(monkeypatch) -> None:
 
 
 async def test_budget_stop_is_notified_once_not_every_guard_tick(monkeypatch) -> None:
-    """Мелочь 7 круга 13: после остановки по бюджету страж каждые 30 минут видит тот же перерасход — уведомление
+    """После остановки по бюджету страж каждые 30 минут видит тот же перерасход — уведомление
     об остановке одно, а не новое на каждом шаге."""
     world = await make_world()
     monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": BUDGET_KOP}, {})))
@@ -213,7 +213,7 @@ async def test_budget_stop_is_notified_once_not_every_guard_tick(monkeypatch) ->
 
 
 async def test_reverting_owner_stop_resumes_business() -> None:
-    """Мелочь 3 круга 7: отмена «Остановить всю рекламу» из истории возвращает бизнес в работу — кампании
+    """Отмена «Остановить всю рекламу» из истории возвращает бизнес в работу — кампании
     включены, а kill_switch и пауза не остаются: иначе главная показывала «на паузе», хотя расход идёт."""
     from app.services.rollback import RollbackService
 
@@ -232,7 +232,7 @@ async def test_reverting_owner_stop_resumes_business() -> None:
 
 
 async def test_guard_survives_unconfirmed_pending_stop(monkeypatch) -> None:
-    """В1 круга 7: страж бюджета не падает, пока остановка из pending_stop не подтверждена площадкой:
+    """Страж бюджета не падает, пока остановка из pending_stop не подтверждена площадкой:
     расход читается, pending_stop остаётся до следующего тика."""
     world = await make_world()
     worker = world.worker()
@@ -248,7 +248,7 @@ async def test_guard_survives_unconfirmed_pending_stop(monkeypatch) -> None:
 
 
 async def test_new_month_resumes_campaign_ended_by_finish_date(monkeypatch) -> None:
-    """В4 круга 7: кампания с State=ENDED (конец по дате окончания) на переходе месяца возобновляется,
+    """Кампания с State=ENDED (конец по дате окончания) на переходе месяца возобновляется,
     а не числится паузой владельца, которую month_rollover пропустил бы."""
     world = await make_world()
     worker = world.worker()
@@ -278,7 +278,7 @@ async def test_new_month_resumes_campaign_ended_by_finish_date(monkeypatch) -> N
 
 @pytest.mark.parametrize("hold", ["owner_paused", "below_minimum"])
 async def test_new_month_only_extends_campaign_held_by_owner_or_minimum(monkeypatch, hold) -> None:
-    """В2 круга 8 + мелочь 3 круга 9: кампания, которую владелец остановил сам (owner_paused) или которая
+    """Кампания, которую владелец остановил сам (owner_paused) или которая
     на паузе по минимуму площадки (below_minimum), и которая дошла до ENDED к концу месяца, на переходе
     месяца только продлевается, но не включается — включение решает владелец или пересчёт лимитов."""
     world = await make_world()

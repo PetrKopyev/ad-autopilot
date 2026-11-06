@@ -1597,7 +1597,7 @@ async def test_ai_spend_limit_stops_paid_calls(tmp_path: Path) -> None:
 
 
 async def test_ai_reservation_released_on_llm_cancellation(world: World) -> None:
-    """В4: отмена задачи (CancelledError и прочие не-YandexGPTError) снимает резерв: строка ledger
+    """Отмена задачи (CancelledError и прочие не-YandexGPTError) снимает резерв: строка ledger
     с final=false не остаётся в пуле владельца и суточном потолке навсегда."""
     released: list[int | None] = []
     world.repository.release_ai = released.append
@@ -1617,7 +1617,7 @@ async def test_ai_reservation_released_on_llm_cancellation(world: World) -> None
 
 
 async def test_ai_reservation_released_on_art_rejection(world: World) -> None:
-    """В3: отказ генерации снимает резерв в общем пуле; успех фиксирует трату."""
+    """Отказ генерации снимает резерв в общем пуле; успех фиксирует трату."""
     released: list[int | None] = []
     settled: list[tuple[int | None, int]] = []
     world.repository.reserve_ai = lambda business_id, kind, estimate_kop: 7
@@ -1634,7 +1634,7 @@ async def test_ai_reservation_released_on_art_rejection(world: World) -> None:
 
 
 async def test_ai_weekly_limit_tracks_owner_across_businesses(world: World) -> None:
-    """В11: недельный пул ИИ — на владельца (yandex_uid), а не на бизнес: удаление бизнеса или аккаунта
+    """Недельный пул ИИ — на владельца (yandex_uid), а не на бизнес: удаление бизнеса или аккаунта
     не даёт нового лимита, иначе трату оператору можно было бы сжигать бесконечно."""
     other = Business(user_id=world.business.user_id, site_url=SITE, city="Самара", month_budget_kop=BUDGET_KOP)
     world.repository.add(other)
@@ -1646,7 +1646,7 @@ async def test_ai_weekly_limit_tracks_owner_across_businesses(world: World) -> N
 
 
 async def test_ai_daily_service_cap_stops_every_business(world: World) -> None:
-    """В11: суточный потолок на весь сервис ограничивает любой бизнес поверх лимитов владельца."""
+    """Суточный потолок на весь сервис ограничивает любой бизнес поверх лимитов владельца."""
     spend(world, 900, NOW)
     limits = AiLimits(LIMITS.onboarding_kop, LIMITS.weekly_kop, daily_cap_kop=1000)
     budget = ai_budget(world.repository, world.business, limits, TODAY)

@@ -751,7 +751,7 @@ def test_notices_without_target_are_grouped_by_text_not_merged(repository) -> No
 def test_remember_copies_caller_dicts(repository) -> None:
     """remember копирует значения: иначе словарь вызывающего (approvals в цикле sync_moderation)
     оставался бы в settings по ссылке, его мутации после commit меняли бы объект без записи —
-    объект расходился с базой, а refresh в перемотке усиливал расхождение (e2e-флак круга 10)."""
+    объект расходился с базой, а refresh в перемотке усиливал расхождение."""
     world = tree(repository)
     worker = Worker(repository, lambda *_: None, clock=VirtualClock(NOW))
     approvals = {"direct:a-1": NOW.isoformat()}

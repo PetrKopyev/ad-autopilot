@@ -218,8 +218,8 @@ class BudgetIn(BaseModel):
 class SettingsIn(BaseModel):
     auto_continue: StrictBool
     avg_check_kop: StrictInt | None = Field(default=None, gt=0)
-    # Цель VK кабинета (пиксель Top@Mail): id источника и имя цели. Не задано — не менять (В8),
-    # 0 — сбросить цель (В6).
+    # Цель VK кабинета (пиксель Top@Mail): id источника и имя цели. Не задано — не менять,
+    # 0 — сбросить цель.
     vk_priced_goal_source_id: StrictInt | None = Field(default=None, ge=0)
     vk_priced_goal_name: str = Field(default="", max_length=200)
 

@@ -262,7 +262,7 @@ def finish_revert(repository: ChangesRepository, revert: ChangeLog, now: datetim
     if original.reason_code == "OWNER_STOP":
         # Отмена «Остановить всю рекламу»: кампании вернули к прежним статусам, и бизнес тоже возвращаем
         # в работу — иначе расход шёл бы при выключенном автопилоте, а главная показывала «на паузе»
-        # (мелочь 3 круга 7).
+        #.
         business = repository.business(revert.business_id)
         meta = dict(business.settings.get("_worker", {}))
         meta.pop("kill_switch", None)
@@ -433,7 +433,7 @@ class RollbackService:
                 # Возвращаем лимиты групп: rebalance_budget(force=True), который вызывает конечная точка,
                 # перенесёт их в лимиты кампаний при текущем бюджете. Только применённый откат: при
                 # pending (запись на площадке не подтверждена) или failed (площадка не приняла) локальные
-                # лимиты не трогаем — «откатано» на словах, а деньги фактически пересчитаны бы не были (В2 круга 4).
+                # лимиты не трогаем — «откатано» на словах, а деньги фактически пересчитаны бы не были.
                 business = self.repository.business(business_id)
                 meta = business.settings.get("_worker", {})
                 restored = dict(meta.get("group_limits", {})) | dict(group_limits["before"])

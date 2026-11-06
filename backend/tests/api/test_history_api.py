@@ -1,8 +1,8 @@
-"""К1/В1 круга 3: после отката SCALE пересчёт лимитов кампаний идёт только при работающей рекламе.
+"""После отката SCALE пересчёт лимитов кампаний идёт только при работающей рекламе.
 
-К1: force-rebalance обходит страж business.status/kill_switch и возобновлял кампании, которые
+Force-rebalance обходит страж business.status/kill_switch и возобновлял кампании, которые
 «Остановить всю рекламу» пропустила (например стоявшие на паузе по минимуму площадки).
-В1: сбой пересчёта не должен превращаться в ошибку отката — откат к этому моменту уже применён.
+Сбой пересчёта не должен превращаться в ошибку отката — откат к этому моменту уже применён.
 """
 
 import asyncio
@@ -122,7 +122,7 @@ def test_rebalance_after_scale_revert_skipped_when_advertising_stopped(api) -> N
     context.world.business.settings = {"_worker": meta | {"kill_switch": True}}
     response = client.post(f"/api/history/{change.id}/revert")
     assert response.status_code == 200, response.text
-    assert context.calls == [], "пересчёт при остановленной рекламе возобновил бы кампании (К1)"
+    assert context.calls == [], "пересчёт при остановленной рекламе возобновил бы кампании"
 
 
 def test_rebalance_after_scale_revert_runs_when_advertising_active(api) -> None:
@@ -149,7 +149,7 @@ def test_rebalance_failure_does_not_fail_applied_revert(api, monkeypatch) -> Non
 
 
 def test_failed_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
-    """В2 круга 4: площадка не приняла откат SCALE (failed) — пересчёта лимитов кампаний нет:
+    """Площадка не приняла откат SCALE (failed) — пересчёта лимитов кампаний нет:
     лимиты групп не возвращены, а force-rebalance пересчитал бы бюджет из несостоявшегося отката.
     В записи SCALE — также операция паузы объявления: её inverse (включение) площадка «не принимает»."""
     client, context = api
@@ -177,11 +177,11 @@ def test_failed_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
     assert reverted and reverted[0].status == "failed"
     group_id = change.entity_id
     assert context.world.business.settings["_worker"]["group_limits"] == {group_id: 7_000}
-    assert context.calls == [], "пересчёт после failed-отката ушёл бы в несостоявшийся откат (В2)"
+    assert context.calls == [], "пересчёт после failed-отката ушёл бы в несостоявшийся откат"
 
 
 def test_pending_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
-    """В2 круга 4: откат остался pending (площадка не ответила, прошёл ли он) — пересчёта нет: до applied записи
+    """Откат остался pending (площадка не ответила, прошёл ли он) — пересчёта нет: до applied записи
     на площадке не подтверждена, лимиты групп в business не возвращены."""
     client, context = api
     change = scale_change(context.world)

@@ -1,4 +1,4 @@
-"""Бэкфилл ai_spend_ledger из llm_calls/art_calls и индекс created_at (В10 круга 3).
+"""Бэкфилл ai_spend_ledger из llm_calls/art_calls и индекс created_at.
 
 До ledger лимиты считались по llm_calls/art_calls, которые удаляются каскадом с бизнесом:
 без переноса пулы владельцев и суточный потолок начинались бы с нуля, и обход лимита

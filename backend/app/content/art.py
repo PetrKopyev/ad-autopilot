@@ -29,7 +29,7 @@ class ArtBudgetExceeded(ArtError):
 class ArtBudget:
     limit_kop: int
     spent_kop: int = 0
-    # Резерв в общем пуле владельца до генерации (В11): закрывает гонку параллельных запросов.
+    # Резерв в общем пуле владельца до генерации: закрывает гонку параллельных запросов.
     # on_reserve возвращает токен резерва (id строки ledger с final=false); on_settle фиксирует трату,
     # on_release снимает резерв. Ставит сервисный слой; бросает ArtBudgetExceeded при переполнении пула.
     on_reserve: Callable[[], Awaitable[Any]] | None = None
@@ -45,7 +45,7 @@ class ArtBudget:
 
     async def reserve(self) -> Any:
         # Сначала локальная проверка: если она не пройдена, резерв в общем пуле ещё не создан —
-        # удалять нечего, и строка ledger не зависает (В3 круга 3).
+        # удалять нечего, и строка ledger не зависает.
         async with self._lock:
             if self.spent_kop + ART_COST_KOP > self.limit_kop:
                 raise ArtBudgetExceeded("YandexART budget exhausted")
@@ -160,12 +160,12 @@ class YandexArt:
         except asyncio.CancelledError:
             call.status = "unknown"
             call.rejection_reason = "cancelled"
-            # Резерв не снимаем: запрос мог уйти и списать деньги. Просроченный резерв закроет свипер (В4).
+            # Резерв не снимаем: запрос мог уйти и списать деньги. Просроченный резерв закроет свипер.
             raise
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, binascii.Error) as exc:
             call.status = "unknown"
             call.rejection_reason = type(exc).__name__
-            # Деньги могли уйти (запрос ушёл, ответ потерян): резерв остаётся открытым для свипера (В3/В4).
+            # Деньги могли уйти (запрос ушёл, ответ потерян): резерв остаётся открытым для свипера.
             raise ArtError("YandexART request failed; paid requests are not replayed") from None
         finally:
             await self.record_call(call)

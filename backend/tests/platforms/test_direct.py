@@ -361,7 +361,7 @@ async def test_create_tree_requests_and_idempotency(adapter, api, plan):
             {"phrase": "104"},
             first.budget_context,
         )
-    # Свежий адаптера повтора перечитывает кампанию и переносит пересчитанный лимит на площадку (К3):
+    # Свежий адаптера повтора перечитывает кампанию и переносит пересчитанный лимит на площадку:
     # campaigns.get + один campaigns/update, новых созданий нет.
     update = next((w for w in server.writes if w[0] == "campaigns" and w[1] == "update"), None)
     assert update is not None and update[2]["Campaigns"][0]["Id"] == 101
@@ -482,7 +482,7 @@ async def test_recovers_partial_tree_and_concurrent_creation(adapter, api, plan)
 
 
 async def test_create_tree_ignores_campaigns_of_other_installations(adapter, api, plan):
-    """Мелочь 2 круга 7: ключ идемпотентности содержит идентификатор установки — кампания ap-salon от
+    """Ключ идемпотентности содержит идентификатор установки — кампания ap-salon от
     прежних баз и прогонов того же кабинета не принимается за свою (иначе новая база переписала бы ей
     стратегию и архивировала её объявления)."""
     server = DirectServer()
@@ -597,7 +597,7 @@ async def test_weekly_limit_respects_month_and_period(adapter, today, expected):
 
 
 def test_context_weekly_counts_today_spend_once(adapter):
-    """Мелочь 1 круга 7: сегодняшний расход уже входит в потраченное за неделю, поэтому полный дневной
+    """Сегодняшний расход уже входит в потраченное за неделю, поэтому полный дневной
     лимит за сегодня не прибавляем сверху — иначе недельный лимит в день пересчёта завышен ровно на
     сегодняшний расход, и кэп недели разрешает больше месячного остатка."""
     days = (budget_end(TODAY) - TODAY).days + 1
@@ -629,7 +629,7 @@ async def test_conversion_strategy(adapter, api, plan):
 
 
 async def test_priority_goals_value_excludes_vat(api):
-    """Мелочь 4 круга 7: ценность ключевой цели — сумма API, уходит без НДС, как и лимиты стратегии."""
+    """Ценность ключевой цели — сумма API, уходит без НДС, как и лимиты стратегии."""
     async with DirectAdapter(
         "test-only",
         config=configuration(direct_amounts_include_vat=False),
@@ -928,7 +928,7 @@ def tsv_campaigns(rows: list[tuple[str, str, str]]) -> str:
 
 
 async def test_live_report_filters_by_own_campaigns(adapter, api):
-    """К1: вне песочницы отчёт строится только по кампаниям бизнеса — чужой расход кабинета не засчитывается."""
+    """Вне песочницы отчёт строится только по кампаниям бизнеса — чужой расход кабинета не засчитывается."""
     route = api.post(f"{V5}/reports").respond(
         text=tsv_campaigns([("2026-10-23", "1", "3000000"), ("2026-10-23", "9", "7000000")])
     )
@@ -940,7 +940,7 @@ async def test_live_report_filters_by_own_campaigns(adapter, api):
 
 
 async def test_spend_today_counts_only_own_campaigns(adapter, api):
-    """К1: «расход сегодня» считается только по кампаниям бизнеса, иначе чужие траты режут наши лимиты."""
+    """«расход сегодня» считается только по кампаниям бизнеса, иначе чужие траты режут наши лимиты."""
     api.post(f"{V5}/reports").respond(
         text=tsv_campaigns([(TODAY.isoformat(), "1", "3000000"), (TODAY.isoformat(), "9", "7000000")])
     )
@@ -1379,7 +1379,7 @@ def test_status_prefers_moderation_status_over_state(item, expected):
 
 @pytest.mark.parametrize("moderation_status", ["MODERATION", "REJECTED", "DRAFT"])
 def test_campaign_pause_during_moderation_reads_as_pause(moderation_status):
-    """В1 круга 7: остановленная кампания со статусом модерации — это пауза, а не «на проверке», иначе
+    """Остановленная кампания со статусом модерации — это пауза, а не «на проверке», иначе
     сверка остановки проваливалась бы до конца модерации, а страж бюджета падал на каждом ходу."""
     assert _status({"State": "SUSPENDED", "Status": moderation_status}, campaign=True) == "paused_owner"
 
@@ -1393,7 +1393,7 @@ def test_accepted_off_ad_is_not_owner_pause():
 
 
 def test_ended_campaign_is_not_owner_pause():
-    """В4 круга 7: ENDED — конец по дате окончания, а не пауза владельца: месячный переход продлит и
+    """ENDED — конец по дате окончания, а не пауза владельца: месячный переход продлит и
     возобновит кампанию, а не пропустит её как остановленную владельцем."""
     assert _status({"State": "ENDED", "Status": "ACCEPTED"}, campaign=True) == "paused_auto"
 
@@ -1832,7 +1832,7 @@ async def test_add_group_into_running_campaign_is_idempotent(adapter, api, plan)
 
 
 async def test_campaign_off_maps_to_auto_pause_in_apply(adapter, api, plan):
-    """В10: State=OFF кампании (пустой счёт, лимит площадки) читается как paused_auto и в apply, не
+    """State=OFF кампании (пустой счёт, лимит площадки) читается как paused_auto и в apply, не
     только в get_state: операция-пауза на уже остановленной площадкой кампании не дёргает API,
     а запись изменения видит статус автопилота, а не «прежний» paused_owner."""
     server = DirectServer()
@@ -1851,7 +1851,7 @@ async def test_campaign_off_maps_to_auto_pause_in_apply(adapter, api, plan):
     "after,writes", [("paused_owner", []), ("paused_auto", []), ("archived", [("ads", "archive")])]
 )
 async def test_off_ad_is_already_paused(adapter, api, plan, after, writes):
-    """Важно 4 ревью a57adf1: объявление State=OFF (paused_auto) уже не показывается — пауза владельца не шлёт
+    """Объявление State=OFF (paused_auto) уже не показывается — пауза владельца не шлёт
     ads.suspend, архив идёт без suspend."""
     server = DirectServer()
     api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
@@ -1864,7 +1864,7 @@ async def test_off_ad_is_already_paused(adapter, api, plan, after, writes):
 
 
 async def test_whoami_rejects_agency_account_with_clear_message(adapter, api):
-    """В6: агентский кабинет при подключении даёт понятную ошибку, а не загадочный отказ API."""
+    """Агентский кабинет при подключении даёт понятную ошибку, а не загадочный отказ API."""
     result(api, "clients", Clients=[{"ClientId": 7, "Login": "agency", "ClientInfo": "Агентство", "Type": "AGENCY"}])
     with pytest.raises(PlatformError, match="Агентские кабинеты не поддерживаются"):
         await adapter.whoami()

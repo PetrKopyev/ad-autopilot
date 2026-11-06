@@ -71,7 +71,7 @@ def test_borderline_selection_is_frozen_by_business_anomaly(make_ad, now):
 
 
 def test_borderline_selection_skips_platforms_without_conversion_source(make_ad, now):
-    """В1 круга 6: VK без пикселя (0 обращений, расход выше порога пограничного) не становится
+    """VK без пикселя (0 обращений, расход выше порога пограничного) не становится
     «пограничным» по выдуманной цене обращения на опоре Директа — под него открывался бы CTR-тест."""
     vk = make_ad(id="vk-1", platform="vk", leads=0)
     assert select_borderline([vk], now, 10_000) == (vk,)

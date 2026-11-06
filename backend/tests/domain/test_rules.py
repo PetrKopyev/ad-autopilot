@@ -101,7 +101,7 @@ def test_no_leads_hard_stop_boundary_even_during_warmup(make_ad, now, clicks, ha
 
 
 def test_no_leads_does_not_apply_without_conversion_source(make_ad, now):
-    """В1 круга 4: у площадки без источника конверсий (пиксель VK, цели Метрики) обращения неизвестны,
+    """У площадки без источника конверсий (пиксель VK, цели Метрики) обращения неизвестны,
     поэтому «нет обращений» и «слишком дорого» её не останавливают — иначе автопилот гасил бы всю
     рекламу VK после 80 кликов."""
     ad = make_ad(clicks=100, leads=0, spend=1_000_000)

@@ -189,7 +189,7 @@ def test_agency_direct_account_is_rejected_before_saving(
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """В5: агентский кабинет отклоняется при подключении — с понятной ошибкой и без сохранения аккаунта."""
+    """Агентский кабинет отклоняется при подключении — с понятной ошибкой и без сохранения аккаунта."""
     login(client, repository)
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "agency"})
     mock_yandex.post("https://api.direct.yandex.com/json/v5/clients").respond(
@@ -207,7 +207,7 @@ def test_direct_account_survives_whoami_outage(
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """В4 круга 4: сбой whoami, не про агентство (Директ вернул 503), подключение не обрывает:
+    """Сбой whoami, не про агентство (Директ вернул 503), подключение не обрывает:
     аккаунт сохраняется и владелец попадает на шаг подключений, где проверка повторится понятным
     текстом, а не JSON-ошибкой."""
     login(client, repository)
@@ -307,7 +307,7 @@ def test_other_direct_account_does_not_replace_account_with_our_campaigns(
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """Важно 4 круга 13 и ревью: вход в другой кабинет Директа, когда у бизнеса есть наши кампании в прежнем, —
+    """Вход в другой кабинет Директа, когда у бизнеса есть наши кампании в прежнем, —
     отказ страницей, даже если прежний отключён (иначе его кампании остались бы в бизнесе без кабинета); строка
     кабинета не меняется, токен другого кабинета отзывается. Тот же логин подключается как раньше."""
     login(client, repository)
@@ -336,7 +336,7 @@ def test_same_direct_login_in_other_spelling_is_same_account(
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """Ревью 22be3cd: логин Яндекса хранится как есть, а сравнивается без регистра и пробелов, точка — то же,
+    """Логин Яндекса хранится как есть, а сравнивается без регистра и пробелов, точка — то же,
     что дефис: «Ivan.Petrov» и «ivan-petrov» — один кабинет, подключается заново. Кампании в архиве другой
     кабинет не блокируют."""
     login(client, repository)
@@ -358,7 +358,7 @@ def test_refused_direct_token_is_kept_when_login_serves_other_business_and_revok
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """Ревью 22be3cd: Яндекс при новом входе того же пользователя часто отдаёт тот же токен — если этот логин
+    """Яндекс при новом входе того же пользователя часто отдаёт тот же токен — если этот логин
     подключён к другому бизнесу, отказ токен не отзывает. Сбой отзыва любого рода не превращает 409 в 500."""
     login(client, repository)
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})

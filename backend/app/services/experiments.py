@@ -152,7 +152,7 @@ async def _create_experiment(
     hypothesis = next_hypothesis(completed_hypotheses(worker, business, group.id), budget, experiment_settings())
     if hypothesis == "audience" and campaign.platform in missing_conversion_sources(business):
         # Аудитории сравниваются по цене обращения: на площадке без источника конверсий она всегда была бы
-        # бесконечной, тест занял бы группу на весь срок и выдал бы ложный «вердикт» (В1 круга 5).
+        # бесконечной, тест занял бы группу на весь срок и выдал бы ложный «вердикт».
         return None
     if hypothesis is None or not 0 < design.daily_budget <= int(budget * DEFAULT_SETTINGS.test_budget_share):
         return None

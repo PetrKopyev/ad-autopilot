@@ -1,4 +1,4 @@
-"""В1 круга 10: шаг воркера со старой копией бизнеса не отменяет действия владельца.
+"""Шаг воркера со старой копией бизнеса не отменяет действия владельца.
 
 Тик грузит бизнесы в начале (identity map держит копию весь тик — по слабым ссылкам,
 поэтому список надо держать, как run_due). Пока шли шаги, владелец мог нажать
@@ -143,7 +143,7 @@ async def test_unconfirmed_stop_between_load_and_step_is_not_undone(db_session):
 
 
 async def test_campaign_rows_fresh_after_owner_resume(db_session):
-    """Проверочный вопрос В1: после «Продолжить» кампании тика не остаются старыми копиями —
+    """После «Продолжить» кампании тика не остаются старыми копиями —
     шаг перерасчёта видит свежий статус и не пишет ложный EXTERNAL_RESUME с frozen_until."""
     engine = db_session.get_bind().engine
     business_id = committed_world(engine)

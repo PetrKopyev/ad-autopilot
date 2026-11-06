@@ -156,7 +156,7 @@ def classify(
 ) -> Assessment:
     """conversion_source — False, если у площадки объявления нет источника конверсий (пиксель VK, цели
     Метрики): обращения по ней неизвестны, и правило «нет обращений» не останавливало бы каждое
-    объявление после no_leads_clicks кликов (В1 круга 4)."""
+    объявление после no_leads_clicks кликов."""
     metrics = total_metrics(settled_days(ad.days, now.date(), settings))
     if reference_cpl is not None:
         nonnegative_int(reference_cpl, "reference_cpl")
@@ -187,7 +187,7 @@ def classify(
     if not conversion_source:
         # Площадка без источника конверсий (пиксель VK, цели Метрики): по обращениям и цене обращения
         # её судить нечем — «нет обращений» и «слишком дорого» остановили бы всю рекламу после пары дней
-        # (В1 круга 4). Остаются CTR и «не показывается», решения по цене — как при price_frozen.
+        #. Остаются CTR и «не показывается», решения по цене — как при price_frozen.
         return Assessment(Classification.INSUFFICIENT, metrics)
     if age < timedelta(days=settings.warmup_days):
         return Assessment(Classification.INSUFFICIENT, metrics)
@@ -220,7 +220,7 @@ def decide(
 ) -> tuple[Decision, ...]:
     """free_daily_budget is unassigned capacity already released from platform caps.
     platforms_without_source — площадки без источника конверсий: для их объявлений «нет обращений»
-    не применяется (иначе автопилот остановил бы всю рекламу VK без пикселя, В1 круга 4)."""
+    не применяется (иначе автопилот остановил бы всю рекламу VK без пикселя)."""
     nonnegative_int(free_daily_budget, "free_daily_budget")
     no_source = set(platforms_without_source)
     group_map = {group.id: group for group in groups}
