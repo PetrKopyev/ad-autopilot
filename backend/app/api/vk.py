@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, SecretStr
 
-from app.api.auth import Resumer
+from app.api.auth import Resumer, callback_error_page
 from app.api.limits import vk_key_limit, vk_start_limit
 from app.api.routing import ReleasingRoute
 from app.auth import vk
-from app.auth.sessions import Repository, current_session, current_user, require_csrf
+from app.auth.revoke import Revocation, revoke_tokens
+from app.auth.sessions import OtherAccount, Repository, current_session, current_user, require_csrf
 from app.db.models import Session, User
-from app.platforms.base import AuthExpired, PlatformError
+from app.platforms.base import AuthExpired, AuthSession, PlatformError
 
 router = APIRouter(prefix="/api", route_class=ReleasingRoute)
 
@@ -59,8 +60,29 @@ def vk_start(
     return RedirectResponse(url, status_code=303, headers={"Cache-Control": "no-store"})
 
 
+async def drop_tokens(
+    request: Request,
+    accounts: vk.VkAccountRepository,
+    session: AuthSession,
+    auth_mode: str,
+    client_id: str = "",
+    client_secret: str = "",
+) -> None:
+    """Кабинет не подключён (OtherAccount): выданные для него токены нам не нужны. VK снимает все токены
+    пользователя у client_id, поэтому, если тем же доступом подключён другой бизнес, отзыв не делаем."""
+    if accounts.shares_access(session.account_id, auth_mode, client_id):
+        return
+    item = (
+        Revocation("vk", client_id=client_id, client_secret=client_secret)
+        if auth_mode == "manual_key"
+        else Revocation("vk", user_id=session.account_id)
+    )
+    await revoke_tokens(request.app.state.http, [item])
+
+
 @router.get("/auth/vk/callback")
 async def vk_callback(
+    request: Request,
     repository: Repository,
     accounts: Accounts,
     resume: Resumer,
@@ -68,6 +90,23 @@ async def vk_callback(
     state: Annotated[str, Query(min_length=1, max_length=1024)],
     code: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
     error: Annotated[str | None, Query(max_length=256)] = None,
+) -> Response:
+    """Сюда браузер приходит переходом от VK: ошибка показывается страницей с понятным текстом, как у Яндекса."""
+    try:
+        return await _vk_callback(request, repository, accounts, resume, session, state, code, error)
+    except HTTPException as failure:
+        return callback_error_page(failure.status_code, str(failure.detail))
+
+
+async def _vk_callback(
+    request: Request,
+    repository: Repository,
+    accounts: vk.VkAccountRepository,
+    resume: Resumer,
+    session: Session,
+    state: str,
+    code: str | None,
+    error: str | None,
 ) -> Response:
     oauth_state = repository.get_state(state)
     if oauth_state is None or oauth_state.user_id != session.user_id:
@@ -90,13 +129,18 @@ async def vk_callback(
         raise HTTPException(400, "VK не подтвердил вход. Попробуйте подключить кабинет заново.") from None
     except PlatformError as failure:
         raise HTTPException(400, str(failure)) from None
-    accounts.save(business_id, accounts.lock_account(business_id), tokens, auth_mode="oauth")
+    try:
+        accounts.save(business_id, accounts.lock_account(business_id), tokens, auth_mode="oauth")
+    except OtherAccount:
+        await drop_tokens(request, accounts, tokens, "oauth")
+        raise
     resume(business_id, "vk")
     return _redirect()
 
 
 @router.post("/accounts/vk/key", dependencies=[Depends(vk_key_limit), Depends(require_csrf)])
 async def vk_key(
+    request: Request,
     body: VkKey,
     user: Annotated[User, Depends(current_user)],
     repository: Repository,
@@ -116,14 +160,18 @@ async def vk_key(
         raise HTTPException(400, "VK не принял ключ. Проверьте client_id и client_secret.") from None
     except PlatformError as failure:
         raise HTTPException(400, str(failure)) from None
-    account = accounts.save(
-        business.id,
-        accounts.lock_account(business.id),
-        tokens,
-        auth_mode="manual_key",
-        client_id=client_id,
-        client_secret=client_secret,
-    )
+    try:
+        account = accounts.save(
+            business.id,
+            accounts.lock_account(business.id),
+            tokens,
+            auth_mode="manual_key",
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    except OtherAccount:
+        await drop_tokens(request, accounts, tokens, "manual_key", client_id, client_secret)
+        raise
     resume(business.id, "vk")
     return {
         "id": account.id,

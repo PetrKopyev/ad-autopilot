@@ -307,25 +307,28 @@ def test_other_direct_account_does_not_replace_account_with_our_campaigns(
     repository: FakeRepository,
     mock_yandex: respx.MockRouter,
 ) -> None:
-    """Важно 4 круга 13: вход в другой кабинет Директа, пока в прежнем наши кампании, не перезаписывает строку
-    кабинета — понятный отказ; тот же логин подключается заново как раньше, после отключения прежнего — и другой."""
+    """Важно 4 круга 13 и ревью: вход в другой кабинет Директа, когда у бизнеса есть наши кампании в прежнем, —
+    отказ страницей, даже если прежний отключён (иначе его кампании остались бы в бизнесе без кабинета); строка
+    кабинета не меняется, токен другого кабинета отзывается. Тот же логин подключается как раньше."""
     login(client, repository)
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
     assert callback(client, start(client, "direct")["state"]).status_code == 303
     repository.campaigns.append(Campaign(id=1, business_id=1, platform="direct", external_id="701"))
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
     mock_yandex.post("https://oauth.yandex.ru/token").respond(json={"access_token": "other"})
-    response = callback(client, start(client, "direct")["state"], "other-code")
-    assert response.status_code == 409 and "отключите прежний кабинет" in response.text
-    account = repository.accounts[1]
-    assert (account.external_login, account.access_token_enc) == ("advertiser", "test-access")
+    for status in ("ok", "revoked"):
+        repository.accounts[1].status = status
+        response = callback(client, start(client, "direct")["state"], f"other-code-{status}")
+        assert response.status_code == 409 and "text/html" in response.headers["content-type"]
+        assert "подключите прежний кабинет" in response.text and "<style>" not in response.text
+        assert repository.accounts[1].external_login == "advertiser"
+        assert b"access_token=other" in mock_yandex.routes["revoke"].calls.last.request.content
+    assert mock_yandex.routes["revoke"].call_count == 2
+    repository.accounts[1].status = "ok"
     mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
     assert callback(client, start(client, "direct")["state"], "same-code").status_code == 303
     assert repository.accounts[1].access_token_enc == "other"
-    repository.accounts[1].status = "revoked"
-    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
-    assert callback(client, start(client, "direct")["state"], "after-code").status_code == 303
-    assert repository.accounts[1].external_login == "other-advertiser"
+    assert mock_yandex.routes["revoke"].call_count == 2
 
 
 def test_disconnect_requires_csrf_and_ownership(

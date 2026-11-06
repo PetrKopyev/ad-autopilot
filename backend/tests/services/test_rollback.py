@@ -826,7 +826,14 @@ async def test_launch_info_record_without_operations_is_not_revertable(client, r
 
 @pytest.mark.parametrize(
     "kind,reason_code",
-    [("launch", "LAUNCH"), ("resume", "OWNER_RESUME"), ("resume", "BUDGET_RESUME"), ("resume", "MONTH_RESUME")],
+    [
+        ("launch", "LAUNCH"),
+        ("resume", "OWNER_RESUME"),
+        ("resume", "BUDGET_RESUME"),
+        ("resume", "MONTH_RESUME"),
+        ("resume", "MODERATION_RESUME"),
+        ("resume", "SERVICE_RETURNED"),
+    ],
 )
 async def test_turning_ads_on_is_not_reverted_by_journal(client, repository, tree, kind, reason_code):
     """Важно 1 круга 13: откат запуска или возобновления остановил бы кампании при бизнесе «работает», и
@@ -849,10 +856,24 @@ async def test_turning_ads_on_is_not_reverted_by_journal(client, repository, tre
     repository.history.return_value = ([ad, turned_on], 2)
     repository.get_owned.return_value = turned_on
     resolver.return_value = adapter
-    assert [item["can_revert"] for item in http.get("/api/history").json()["items"]] == [True, False]
+    items = http.get("/api/history").json()["items"]
+    assert [(item["can_revert"], item["turns_on"]) for item in items] == [(True, False), (False, True)]
     response = http.post(f"/api/history/{turned_on.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
     assert response.status_code == 409 and response.json()["detail"] == TURN_ON
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
+
+
+async def test_service_returned_to_ads_reverts_as_usual(client, repository, tree):
+    """Возврат услуги, включивший только объявления, — не включение рекламы: отменяется как обычно."""
+    http, _, _ = client
+    adapter, refs = tree
+    start = Operation("set_status", "ad", refs.ads["control"], "status", "paused_owner", "active")
+    returned = await applied(
+        repository, adapter, refs, operations=[start], kind="resume", reason_code="SERVICE_RETURNED"
+    )
+    repository.history.return_value = ([returned], 1)
+    (item,) = http.get("/api/history").json()["items"]
+    assert (item["can_revert"], item["turns_on"]) == (True, False)
 
 
 @pytest.mark.parametrize(

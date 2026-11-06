@@ -181,6 +181,25 @@ def test_client_answer_date_is_taken_in_moscow() -> None:
     assert aggregate_clients([], [late], date(2026, 10, 19), [1])["clients"] == 5
 
 
+def test_quiet_week_is_settled_and_was_not_asked_about() -> None:
+    """Ревью круга 13: тихая неделя (без обращений, расход входит в цену) — только устоявшаяся и без вопроса.
+    Неделя с неустоявшимися днями ещё досчитывает обращения, а вопрос с обращениями значит, что они были по
+    прежним целям, — такие недели неизвестны, а не «0 клиентов»."""
+    as_of = date(2026, 10, 27)
+    answered = survey(date(2026, 10, 5), 1)
+    asked = LeadsSurvey(business_id=1, week_start=date(2026, 9, 28), leads_count=3, clients_count=None)
+    rows = [
+        stats_row(date=date(2026, 10, 5), cost_kop=500_000, conversions={"1": 2}),
+        stats_row(date=date(2026, 9, 28), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 12), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 19), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 24), cost_kop=500_000, conversions={}, is_settled=False),
+    ]
+    result = aggregate_clients(rows, [answered, asked], as_of, [1])
+    assert (result["answered_weeks"], result["quiet_weeks"], result["unknown_weeks"]) == (1, 1, 2)
+    assert result["cost_kop"] == 1_000_000 and result["cost_per_client_kop"] == 1_000_000
+
+
 def test_month_budget_uses_snapshots_without_double_counting(rows: list[StatsRow]) -> None:
     ledger = [
         BudgetLedger(month=date(2026, 10, 1), platform="direct", spent_kop=5000, spent_at=FETCHED_AT),

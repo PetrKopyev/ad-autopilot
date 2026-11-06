@@ -65,7 +65,7 @@ export function ClientsPage() {
     {questions.data && !(items.length === 0 && prelaunch) && <>
       <div className="metric-tiles clients-tiles">
         <MetricTile label={labels.costPerClient} value={cost === null ? '—' : formatMoney(cost)}
-          hint={cost === null ? labels.costPerClientEmpty : copy.home.clientsHint(window!.answered_weeks, window!.answered_weeks + window!.unknown_weeks)} />
+          hint={cost === null ? labels.costPerClientEmpty : copy.home.clientsHint(window!)} />
         <MetricTile label={labels.openCount} value={open.length.toLocaleString('ru-RU')} hint={labels.openCountHint} />
       </div>
       <PanelCard title={labels.open} titleId="clients-open" flush>

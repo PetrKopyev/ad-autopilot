@@ -27,6 +27,15 @@ class ClientsRepository(StatsRepository):
             )
         )
 
+    def unanswered_weeks(self, business_id: int) -> list[date]:
+        return list(
+            self.db.scalars(
+                select(LeadsSurvey.week_start).where(
+                    LeadsSurvey.business_id == business_id, LeadsSurvey.answered_at.is_(None)
+                )
+            )
+        )
+
     def create_question(self, business_id: int, week_start: date, leads: int, now: datetime) -> None:
         # Обращения недели досчитываются после вопроса: пока ответа нет, число в вопросе догоняет отчёты,
         # иначе ответ «клиентов больше, чем было обращений в вопросе» отклонялся бы.
@@ -63,11 +72,13 @@ class ClientsService:
 
     def questions(self, business: Business, today: date) -> dict:
         business = self.repository.lock_business(business.id)
-        week_start = today - timedelta(days=today.weekday(), weeks=1)
-        rows = self.repository.rows(business.id, week_start, week_start + timedelta(days=6))
-        leads = aggregate(rows, business.lead_goal_ids, today)["leads"]
-        if leads:
-            self.repository.create_question(business.id, week_start, leads, datetime.now(UTC))
+        last_week = today - timedelta(days=today.weekday(), weeks=1)
+        # Вопрос о прошлой неделе появляется, а у вопросов без ответа число обращений догоняет отчёты.
+        for week_start in sorted({last_week, *self.repository.unanswered_weeks(business.id)}):
+            rows = self.repository.rows(business.id, week_start, week_start + timedelta(days=6))
+            leads = aggregate(rows, business.lead_goal_ids, today)["leads"]
+            if leads:
+                self.repository.create_question(business.id, week_start, leads, datetime.now(UTC))
         questions = self.repository.questions(business.id)
         metrics = self.metrics(business, questions, today)
         self.repository.save()

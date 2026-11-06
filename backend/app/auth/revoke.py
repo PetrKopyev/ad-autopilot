@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.auth.vk import API_URL, account_credentials
+from app.auth.vk import API_URL, account_credentials, key_client_id
 from app.db.models import PlatformAccount
 from app.platforms.base import AuthExpired
 
@@ -39,13 +39,6 @@ def revocation(account: PlatformAccount) -> Revocation | None:
     except AuthExpired:
         return None
     return Revocation("vk", client_id=credentials["client_id"], client_secret=credentials["client_secret"])
-
-
-def key_client_id(account: PlatformAccount) -> str | None:
-    try:
-        return account_credentials(account)[1].get("client_id")
-    except AuthExpired:
-        return None
 
 
 def same_vk_access(account: PlatformAccount, other: PlatformAccount) -> bool:

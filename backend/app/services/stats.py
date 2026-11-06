@@ -110,28 +110,36 @@ def client_window(as_of: date) -> tuple[date, date]:
 def aggregate_clients(
     rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], as_of: date, goal_ids: Sequence[int]
 ) -> dict:
-    """Цена клиента за окно client_window — одна на «Клиентах» и «Статистике». Неделя без обращений известна точно:
-    клиентов 0, её расход входит в цену. Неделя с обращениями без ответа (или с ответом «не знаю») неизвестна:
-    её расход нельзя делить на клиентов отвеченных недель, она исключается и показывается в unknown_weeks. Пока нет
-    ни одного ответа, клиентов не знаем (None)."""
+    """Цена клиента за окно client_window — одна на «Клиентах» и «Статистике». Тихая неделя — без обращений,
+    известна точно: клиентов 0, её расход входит в цену (quiet_weeks). Неделя с обращениями без ответа (или с ответом
+    «не знаю») неизвестна: её расход нельзя делить на клиентов отвеченных недель, она исключается (unknown_weeks).
+    Тихой не считается неделя с неустоявшимися днями — обращения ещё досчитываются — и неделя, о которой спрашивали
+    (обращения были по прежним целям). Пока нет ни одного ответа, клиентов не знаем (None)."""
+    from app.config import get_domain_settings
+
     date_from, date_to = client_window(as_of)
+    surveys = [survey for survey in surveys if date_from <= survey.week_start <= date_to]
     answers = {
         survey.week_start: survey.clients_count
         for survey in surveys
-        if date_from <= survey.week_start <= date_to
-        and survey.answered_at is not None
+        if survey.answered_at is not None
         and survey.clients_count is not None
         and survey.answered_at.astimezone(MOSCOW).date() <= as_of
     }
+    asked = {survey.week_start for survey in surveys if survey.leads_count}
+    settled_before = as_of - timedelta(days=get_domain_settings().settlement_days)
     spend: dict[date, int] = defaultdict(int)
     leads: dict[date, int] = defaultdict(int)
+    unsettled: set[date] = set()
     for row in rows:
         if date_from <= row.date <= date_to:
             week = row.date - timedelta(days=row.date.weekday())
             spend[week] += row.cost_kop
             leads[week] += lead_count(row.conversions, goal_ids)
-    quiet = {week for week in spend if not leads[week] and week not in answers}
-    unknown = {week for week in leads if leads[week] and week not in answers}
+            if not row.is_settled or row.date > settled_before:
+                unsettled.add(week)
+    unknown = {week for week in spend.keys() | asked if leads[week] or week in asked | unsettled} - answers.keys()
+    quiet = spend.keys() - answers.keys() - unknown
     cost_kop = sum(spend[week] for week in answers.keys() | quiet)
     clients = sum(answers.values()) if answers else None
     return {
@@ -141,6 +149,7 @@ def aggregate_clients(
         "cost_kop": cost_kop,
         "cost_per_client_kop": money_per(cost_kop, clients) if clients is not None else None,
         "answered_weeks": len(answers),
+        "quiet_weeks": len(quiet),
         "unknown_weeks": len(unknown),
     }
 

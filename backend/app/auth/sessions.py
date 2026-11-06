@@ -24,17 +24,22 @@ DISCONNECTED_PENDING = (
 )
 
 OTHER_ACCOUNT = (
-    "Это другой кабинет, а реклама идёт в прежнем. Сначала отключите прежний кабинет в «Настройках» — реклама в нём "
-    "будет остановлена, — потом подключите новый."
+    "Этот бизнес уже вёл рекламу в другом кабинете площадки — подключите прежний кабинет. Чтобы перейти в другой, "
+    "удалите данные кнопкой «Удалить мои данные» в «Настройках» и начните заново."
 )
 
 
+class OtherAccount(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(409, OTHER_ACCOUNT)
+
+
 def replaces_account(db: DBSession, account: PlatformAccount | None, login: str) -> bool:
-    """Вход в другой кабинет площадки, пока прежний подключён и в нём наши кампании: строку кабинета перезаписать
-    нельзя — кампании прежнего остались бы без управления и без остановки по бюджету."""
+    """Вход в другой кабинет площадки, когда у бизнеса уже есть наши кампании в прежнем, — даже отключённом: строку
+    кабинета перезаписать нельзя, кампании прежнего остались бы в бизнесе без кабинета, и страж бюджета искал бы
+    их не там."""
     return (
         account is not None
-        and account.status != "revoked"
         and account.external_login != login
         and db.scalar(
             select(Campaign.id)
@@ -144,7 +149,7 @@ class AuthRepository:
         )
         if replaces_account(self.db, account, login):
             self.db.rollback()
-            raise HTTPException(409, OTHER_ACCOUNT)
+            raise OtherAccount
         if account is None:
             account = PlatformAccount(business_id=business_id, platform="direct", auth_mode="oauth")
             self.db.add(account)

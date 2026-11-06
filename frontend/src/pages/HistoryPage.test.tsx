@@ -18,7 +18,7 @@ function entry(id: number, kind: HistoryEntry['kind']): HistoryEntry {
   return {
     id, business_id: 1, created_at: '2026-10-20T10:00:00+03:00', actor: 'owner', kind, platform: 'direct',
     entity_type: 'campaign', entity_id: '1', reason_code: null, reason_text: `Запись ${id}`, evidence: {}, status: 'applied',
-    reverts_id: null, can_revert: true, revert_warning: null,
+    reverts_id: null, can_revert: true, revert_warning: null, turns_on: false,
   };
 }
 function serve(items: HistoryEntry[]) {
@@ -100,8 +100,10 @@ it('запись об отмене изменения объясняет, что
 });
 
 it('запуск и возобновление без кнопки отмены, с подсказкой, как остановить рекламу', async () => {
-  serve([{ ...entry(1, 'launch'), can_revert: false, reason_code: 'LAUNCH' },
-    { ...entry(2, 'resume'), can_revert: false, reason_code: 'OWNER_RESUME' }, entry(3, 'budget')]);
+  // Какая запись включает рекламу, решает сервер (turns_on): своего списка кодов у фронта нет.
+  serve([{ ...entry(1, 'launch'), can_revert: false, reason_code: 'LAUNCH', turns_on: true },
+    { ...entry(2, 'resume'), can_revert: false, reason_code: 'MODERATION_RESUME', turns_on: true },
+    { ...entry(4, 'resume'), can_revert: false, reason_code: 'SERVICE_RETURNED' }, entry(3, 'budget')]);
   render(<HistoryPage />);
   await screen.findByText('Запись 1');
   expect(screen.getAllByText(labels.noRevertTurnOn)).toHaveLength(2);

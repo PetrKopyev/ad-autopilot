@@ -2804,21 +2804,23 @@ THURSDAY, SUNDAY = date(2026, 1, 1), date(2026, 1, 4)
 DIRECT_MINIMUM = {"weekly_limit_kop": 36_600}
 
 
-def thursday_layout_plan(campaigns: dict[str, int]) -> tuple[Plan, dict]:
+def thursday_layout_plan(campaigns: dict[str, int] | None = None) -> tuple[Plan, dict]:
     groups = [{"id": index, "platform": "direct", "service": f"Услуга {index}"} for index in (1, 2, 3)]
     batches = {f"direct:{index}": [index] for index in (1, 2, 3)}
     plan = Plan(
         business_id=1,
         status="failed",
-        payload={"groups": groups, "launch": {"campaigns": campaigns, "batches": batches}},
+        payload={"groups": groups, "launch": {"campaigns": campaigns or {}, "batches": batches}},
     )
     return plan, budget_limits(Business(city="Самара", month_budget_kop=4_000_000), ["direct"], SUNDAY)
 
 
-def test_retry_on_sunday_lays_out_campaigns_again_instead_of_thursday_layout() -> None:
-    """Важно 3 круга 13: 40 000 ₽, три услуги — в четверг три кампании, запуск упал до создания. Повтор в воскресенье
-    не берёт раскладку четверга (по 316 ₽ на кампанию — ниже минимума Директа 366 ₽), а раскладывает заново."""
-    plan, limits = thursday_layout_plan({})
+@pytest.mark.parametrize("campaigns", [{}, {"direct:1": 7}], ids=["nothing_staged", "staged_not_created"])
+def test_retry_on_sunday_lays_out_campaigns_again_instead_of_thursday_layout(campaigns) -> None:
+    """Важно 3 круга 13: 40 000 ₽, три услуги — в четверг три кампании, запуск упал до создания на площадке (строка
+    кампании могла остаться заведённой). Повтор в воскресенье не берёт раскладку четверга (по 316 ₽ на кампанию —
+    ниже минимума Директа 366 ₽), а раскладывает заново."""
+    plan, limits = thursday_layout_plan(campaigns)
     units = plan_module.campaign_units(plan, ["direct"], limits, {"direct": DIRECT_MINIMUM}, SUNDAY)
     assert {key: [group["id"] for group in groups] for key, (groups, _) in units.items()} == {"direct:1": [1, 2, 3]}
     _, part = units["direct:1"]
@@ -2827,10 +2829,10 @@ def test_retry_on_sunday_lays_out_campaigns_again_instead_of_thursday_layout() -
 
 
 def test_retry_keeps_created_campaign_and_names_minimum_of_each_campaign() -> None:
-    """Кампания, заведённая в четверг, сохраняет свою услугу; остальные раскладываются заново, а если лимит
-    какой-то кампании ниже минимума Директа — понятная причина до создания кампаний."""
+    """Кампания, созданная на площадке в четверг, сохраняет свою услугу; остальные раскладываются заново, а если
+    лимит какой-то кампании ниже минимума Директа — понятная причина до создания кампаний."""
     plan, limits = thursday_layout_plan({"direct:1": 7})
-    units = plan_module.campaign_units(plan, ["direct"], limits, {"direct": DIRECT_MINIMUM}, SUNDAY)
+    units = plan_module.campaign_units(plan, ["direct"], limits, {"direct": DIRECT_MINIMUM}, SUNDAY, {"direct:1"})
     assert {key: [group["id"] for group in groups] for key, (groups, _) in units.items()} == {
         "direct:1": [1],
         "direct:2": [2, 3],
@@ -2840,19 +2842,23 @@ def test_retry_keeps_created_campaign_and_names_minimum_of_each_campaign() -> No
 
 
 class FailingWeeklyMinimum(WeeklyMinimum):
+    """Директ с минимумом 366 ₽ в неделю, который создаёт первые created кампаний и отказывает на следующих."""
+
     fail = True
+    created = 0
     trees = 0
 
     async def create_campaign_tree(self, plan_part):
         self.trees += 1
-        if self.fail:
+        if self.fail and self.trees > self.created:
             raise PlatformError("Директ временно недоступен.", status_code=503)
         return await super().create_campaign_tree(plan_part)
 
 
-async def test_retry_of_failed_direct_on_sunday_checks_minimum_of_each_campaign(tmp_path: Path) -> None:
-    """Важно 3 круга 13 через запуск: при 40 000 ₽ VK выключен, в четверг Директ отказал на первой из трёх кампаний.
-    Повтор в воскресенье не создаёт кампаний с лимитом ниже минимума Директа — понятный отказ до создания."""
+async def test_retry_of_failed_direct_on_sunday_lays_out_campaigns_again(tmp_path: Path) -> None:
+    """Важно 3 круга 13 через запуск: при 40 000 ₽ VK выключен, в четверг Директ отказал на первой из трёх кампаний
+    (её строка заведена, на площадке её нет). Повтор в воскресенье раскладывает услуги заново: одна кампания
+    с лимитом не ниже минимума Директа."""
     adapters = {"direct": FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"]), "vk": FakeAdapter()}
     world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"], adapters=adapters)
     world.business.month_budget_kop = 4_000_000
@@ -2861,28 +2867,31 @@ async def test_retry_of_failed_direct_on_sunday_checks_minimum_of_each_campaign(
         await world.launches.launch(world.business.id, plan["id"], False, NOW, THURSDAY)
     stored = world.repository.latest_plan(world.business.id).payload["launch"]
     assert sorted(key for key in stored["batches"] if key.startswith("direct:")) == ["direct:1", "direct:2", "direct:3"]
+    assert list(stored["campaigns"]) == ["direct:1"]
     adapters["direct"].fail = False
-    trees = adapters["direct"].trees
-    sunday = NOW + timedelta(days=3)
-    with pytest.raises(LaunchBlocked, match="366 ₽"):
-        await world.launches.launch(world.business.id, plan["id"], False, sunday, SUNDAY)
-    assert adapters["direct"].trees == trees
-    assert not any(item.external_id for item in campaigns(world) if item.platform == "direct")
+    result = await world.launches.launch(world.business.id, plan["id"], False, NOW + timedelta(days=3), SUNDAY)
+    assert result["status"] == "launched"
+    (direct,) = [item for item in campaigns(world) if item.external_id]
+    assert len(world.repository.tree_rows(direct.id)[0]) == 3
+    assert weekly_limit(direct.daily_limit_kop, direct.period_cap_kop, SUNDAY) >= DIRECT_MINIMUM["weekly_limit_kop"]
 
 
 async def test_retry_of_partial_launch_on_sunday_checks_minimum_of_each_campaign(tmp_path: Path) -> None:
-    """То же в повторе площадки частичного запуска (retry_platforms): VK работает, Директ в четверг отказал;
-    в воскресенье кампании Директа не создаются с лимитом ниже минимума, VK не тронут."""
-    adapters = {"direct": FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"]), "vk": FakeAdapter()}
+    """То же в повторе площадки частичного запуска (retry_platforms): VK работает, Директ в четверг создал первую
+    кампанию и отказал на второй. В воскресенье созданная кампания сохраняется, и лимиты не набирают минимума
+    Директа — понятный отказ до создания кампаний, VK не тронут."""
+    direct = FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"])
+    direct.created = 1
+    adapters = {"direct": direct, "vk": FakeAdapter()}
     world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"], adapters=adapters)
     plan = await world.plans.get_plan(world.business.id, NOW, THURSDAY)
     result = await world.launches.launch(world.business.id, plan["id"], False, NOW, THURSDAY)
     assert set(result["platform_errors"]) == {"direct"}
-    adapters["direct"].fail = False
-    trees = adapters["direct"].trees
+    direct.fail = False
+    trees = direct.trees
     with pytest.raises(LaunchBlocked, match="366 ₽"):
         await world.launches.launch(world.business.id, plan["id"], False, NOW + timedelta(days=3), SUNDAY)
-    assert adapters["direct"].trees == trees
+    assert direct.trees == trees
     vk = next(item for item in campaigns(world) if item.platform == "vk")
     assert (await states(world, vk))[vk.external_id].status == "active"
 

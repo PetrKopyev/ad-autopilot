@@ -89,6 +89,42 @@ async def test_stop_all_with_platform_refusal_stops_others_and_retries_next_tick
     assert worker.metadata(world.business)["pending_stop"] is None
 
 
+async def test_stop_all_skips_campaign_missing_on_platform_and_stops_others() -> None:
+    """Ревью круга 13: кампании нет в подключённом кабинете (осталась в прежнем или удалена там; Директ тогда
+    отвечает без неё) — остановка на ней не зацикливается: остальные кампании остановлены, бизнес в budget_stop,
+    а не «не все площадки подтвердили» на каждом тике."""
+    world = await make_world()
+    get_state = world.adapter.get_state
+
+    async def without_gone(refs):
+        return {} if refs.campaign_id == "gone-in-other-account" else await get_state(refs)
+
+    world.adapter.get_state = without_gone
+    world.repository.save(
+        Campaign(
+            business_id=1,
+            platform="direct",
+            external_id="gone-in-other-account",
+            status="active",
+            owner_paused=False,
+            daily_limit_kop=100_000,
+            period_cap_kop=3_000_000,
+        )
+    )
+    vk, campaign = await with_vk(world)
+    worker = worker_for(world, vk)
+    await stop_all(
+        world.business,
+        worker=worker,
+        budget_stop=True,
+        reason_code="BUDGET_STOP",
+        reason_params={"spent": BUDGET_KOP, "budget": BUDGET_KOP, "margin": 0},
+    )
+    assert status(world.adapter, world.refs.campaign_id) == "paused_auto"
+    assert status(vk, campaign.external_id) == "paused_auto"
+    assert world.business.status == "budget_stop"
+
+
 async def test_vk_token_expiring_mid_tick_keeps_pending_until_reconnect() -> None:
     world = await make_world()
     vk, campaign = await with_vk(world)

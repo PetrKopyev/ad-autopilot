@@ -12,7 +12,7 @@ from app.platforms.base import PlatformError
 from app.platforms.fake import VirtualClock
 from app.services.changes import AdapterResolver, ChangeConflict, ChangesRepository, ServerBusy
 from app.services.optimize import rebalance_budget
-from app.services.rollback import ConfirmationRequired, RollbackService, can_revert, superseded
+from app.services.rollback import ConfirmationRequired, RollbackService, can_revert, superseded, turns_on
 from app.worker.clock import SystemClock
 from app.worker.jobs import Worker
 
@@ -65,6 +65,8 @@ def history_item(change: ChangeLog, business=None, reverts=(), replaced=(), camp
         "error": metadata.get("error"),
         "reverts_id": change.reverts_id,
         "can_revert": can_revert(change, business, reverts=reverts, replaced=replaced, overridden=overridden),
+        # Включение рекламы не отменяется из журнала: фронт показывает вместо кнопки, как остановить рекламу.
+        "turns_on": turns_on(change),
         "revert_warning": "Созданное объявление будет остановлено и убрано в архив."
         if any(not op.get("invertible", True) for op in change.operations)
         else None,

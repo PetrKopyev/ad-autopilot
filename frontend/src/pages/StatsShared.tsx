@@ -40,7 +40,7 @@ export function ClientsSummary({ summary }: { summary: Summary }) {
         <div><dt>{copy.home.clients}</dt><dd className="mono">{window.clients.toLocaleString('ru-RU')}</dd></div>
         <div><dt>{copy.home.clientPrice}</dt><dd className="mono"><NullableMoney value={window.cost_per_client_kop} /></dd></div>
       </dl>}
-      <p className="muted">{copy.screens.answeredWeeks(window.answered_weeks, window.unknown_weeks)}</p>
+      <p className="muted">{copy.screens.answeredWeeks(window)}</p>
     </div>
   </PanelCard>;
 }

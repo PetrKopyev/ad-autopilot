@@ -25,6 +25,9 @@ export interface ClientsWindow extends Period {
   cost_kop: number;
   cost_per_client_kop: number | null;
   answered_weeks: number;
+  /** Недели без обращений: клиентов 0, расход входит в цену. */
+  quiet_weeks: number;
+  /** Недели с обращениями без ответа: в цену не входят. */
   unknown_weeks: number;
 }
 export interface Budget {

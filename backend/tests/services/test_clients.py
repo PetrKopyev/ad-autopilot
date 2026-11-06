@@ -34,6 +34,7 @@ def setup():
     repository = MagicMock()
     repository.lock_business.return_value = business
     repository.questions.return_value = [question]
+    repository.unanswered_weeks.return_value = []
     repository.rows.return_value = [
         StatsRow(
             business_id=1,
@@ -69,6 +70,17 @@ def test_unanswered_question_catches_up_with_late_leads():
     sql = str(db.execute.call_args.args[0].compile(dialect=postgresql.dialect()))
     assert "ON CONFLICT (business_id, week_start) DO UPDATE SET leads_count" in sql
     assert "WHERE leads_survey.answered_at IS NULL" in sql
+
+
+def test_older_unanswered_question_catches_up_too(setup):
+    """Ревью круга 13: число обращений догоняет отчёты у каждого вопроса без ответа, а не только у прошлой недели."""
+    service, repository, business, _ = setup
+    old_week = date(2026, 10, 5)
+    repository.unanswered_weeks.return_value = [old_week]
+    rows = {WEEK: repository.rows.return_value, old_week: [replace(repository.rows.return_value[0], date=old_week)]}
+    repository.rows.side_effect = lambda business_id, date_from, date_to: rows.get(date_from, [])
+    service.questions(business, TODAY)
+    assert [call.args[:3] for call in repository.create_question.call_args_list] == [(1, old_week, 10), (1, WEEK, 10)]
 
 
 def test_no_question_without_leads(setup):

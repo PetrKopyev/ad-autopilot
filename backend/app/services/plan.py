@@ -5,7 +5,7 @@ import logging
 import re
 import secrets
 import shutil
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime
@@ -288,23 +288,23 @@ def campaign_units(
     limits: dict[str, PlatformLimit],
     minimums: dict[str, dict[str, int]],
     today: date,
+    created: Collection[str] = (),
 ) -> dict[str, tuple[list[dict], PlatformLimit]]:
     """Кампании запуска: ключ, группы плана и лимиты. VK — одна кампания на площадку; Директ — «direct:номер» по
-    кампании на услугу (direct_batches). Повтор запуска сохраняет кампании, заведённые прошлой попыткой
-    (launch.campaigns: их строки и дерево на площадке уже есть), а остальные услуги раскладывает заново — по
+    кампании на услугу (direct_batches). Повтор запуска сохраняет кампании, созданные на площадке прошлой попыткой
+    (created — ключи launch.campaigns с external_id), а остальные услуги раскладывает заново — по
     сегодняшним лимиту и дню недели: раскладка четверга в воскресенье дала бы кампаниям лимит ниже минимума Директа.
     Запуск, начатый до кампаний по услугам, и план до групп по услугам (у групп нет service) — одна кампания
     «direct». Минимум каждой кампании сверяет запуск (services.launch.units_below_minimum)."""
     launch = plan.payload.get("launch", {})
-    known = launch.get("campaigns", {})
-    saved = launch.get("batches") or ({"direct": []} if "direct" in known else {})
+    saved = launch.get("batches") or ({"direct": []} if "direct" in launch.get("campaigns", {}) else {})
     units = {}
     for platform in platforms:
         groups = [group for group in plan.payload["groups"] if group["platform"] == platform]
         if platform != "direct" or "direct" in saved or any("service" not in group for group in groups):
             units[platform] = (groups, limits[platform])
             continue
-        kept = {key: saved[key] for key in sorted(saved) if campaign_platform(key) == "direct" and key in known}
+        kept = {key: saved[key] for key in sorted(saved) if campaign_platform(key) == "direct" and key in created}
         taken = {str(id_) for ids in kept.values() for id_ in ids}
         fresh = direct_batches(
             [group for group in groups if str(group["id"]) not in taken],

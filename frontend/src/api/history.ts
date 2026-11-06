@@ -13,6 +13,8 @@ export interface HistoryEntry {
   reason_code: string | null;
   reason_text: string; evidence: Record<string, unknown>; status: 'proposed' | 'pending' | 'applied' | 'failed' | 'reverted';
   reverts_id: number | null; can_revert: boolean; revert_warning: string | null;
+  /** Включение рекламы: из журнала не отменяется, рекламу останавливают на главной (список кодов — на сервере). */
+  turns_on: boolean;
 }
 export interface HistoryPage { items: HistoryEntry[]; total: number; page: number; page_size: number }
 export interface HistoryFilter { platform: '' | 'direct' | 'vk'; actor: '' | HistoryEntry['actor'] }
@@ -35,14 +37,12 @@ export async function revertChange(id: number): Promise<HistoryEntry> {
 const labels = copy.historyScreen;
 // Коды системных записей про бюджет: откат любой из них дал бы выйти за бюджет месяца.
 const budgetProtectionCodes = new Set(['BUDGET_REBALANCE', 'BUDGET_STOP', 'SPEND_MISMATCH', 'MONTH_STOP', 'BUDGET_UPDATE_FAILED', 'LAUNCH_INTERRUPTED']);
-// Запуск и возобновления не отменяются записью журнала: рекламу останавливают на главной.
-const turnOnCodes = new Set(['LAUNCH', 'OWNER_RESUME', 'BUDGET_RESUME', 'MONTH_RESUME']);
 /** Почему запись нельзя отменить: короткое пояснение вместо просто отсутствия кнопки; null — пояснения нет. */
 export function noRevertHint(entry: HistoryEntry): string | null {
   if (entry.can_revert) return null;
   if (entry.kind === 'revert') return labels.noRevertRevert;
   if (entry.reason_code && budgetProtectionCodes.has(entry.reason_code)) return labels.noRevertBudget;
-  if (entry.reason_code && turnOnCodes.has(entry.reason_code)) return labels.noRevertTurnOn;
+  if (entry.turns_on) return labels.noRevertTurnOn;
   return null;
 }
 // Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».

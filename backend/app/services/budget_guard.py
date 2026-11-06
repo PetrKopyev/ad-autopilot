@@ -93,7 +93,17 @@ async def stop_all(
         for campaign in worker.campaigns(business):
             try:
                 states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-                state = states[campaign.external_id]
+                state = states.get(campaign.external_id)
+                if state is None:
+                    # Кампании нет в подключённом кабинете (удалена там или осталась в прежнем): остановить её
+                    # нечем, но это не повод бросать остановку остальных.
+                    logger.warning(
+                        "Кампания %s бизнеса %s не найдена на площадке %s при остановке",
+                        campaign.id,
+                        business.id,
+                        campaign.platform,
+                    )
+                    continue
                 if state.status in {"paused_auto", "paused_owner", "archived"}:
                     continue
                 if actor == "owner":

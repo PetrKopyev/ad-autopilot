@@ -62,7 +62,7 @@ export function mockSummary(period: Period): Summary {
   const clients = clientResults(period);
   const window = clientResults({ from: isoDate(start), to: isoDate(end) });
   return { business_id: 1, ...period, ...totals(period), ...(live() ? {} : { sources: [] }), clients: clients.clients, cost_per_client_kop: clients.cost_per_client_kop,
-    clients_window: { from: isoDate(start), to: isoDate(end), ...window, unknown_weeks: 4 - window.answered_weeks },
+    clients_window: { from: isoDate(start), to: isoDate(end), ...window },
     budget: { month: month.from, budget_kop: budget, spent_kop: spent + fresh, reported_kop: spent, remaining_kop: Math.max(0, budget - spent - fresh),
       days_remaining: new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate() - today.getDate() + 1,
       platforms: live() ? [{ platform: 'direct', spent_kop: spent + fresh, source: 'budget_ledger', spent_at: timestamp }] : [] },
@@ -291,11 +291,11 @@ const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toIS
 const historyEntries: HistoryEntry[] = [
   { id: 3, business_id: 1, created_at: hoursAgo(2), actor: 'autopilot', kind: 'pause', platform: 'direct', entity_type: 'ad', entity_id: '1',
     reason_code: 'PAUSE_TOO_EXPENSIVE', reason_text: 'Объявление потратило втрое больше обычного и не принесло ни одного обращения.',
-    evidence: { cost_kop: 450000, leads: 0, clicks: 120 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
+    evidence: { cost_kop: 450000, leads: 0, clicks: 120 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null, turns_on: false },
   { id: 2, business_id: 1, created_at: hoursAgo(30), actor: 'owner', kind: 'budget', platform: null, entity_type: 'business', entity_id: '1',
-    reason_code: null, reason_text: 'Вы увеличили бюджет на месяц.', evidence: { budget_kop: 3000000 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null },
+    reason_code: null, reason_text: 'Вы увеличили бюджет на месяц.', evidence: { budget_kop: 3000000 }, status: 'applied', reverts_id: null, can_revert: true, revert_warning: null, turns_on: false },
   { id: 1, business_id: 1, created_at: hoursAgo(55), actor: 'external', kind: 'text', platform: 'vk', entity_type: 'ad', entity_id: '2',
-    reason_code: null, reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null },
+    reason_code: null, reason_text: 'Площадка изменила текст объявления после проверки.', evidence: {}, status: 'applied', reverts_id: null, can_revert: false, revert_warning: null, turns_on: false },
 ];
 export function mockHistoryPage(filter: HistoryFilter, pageSize: number): HistoryPage {
   const items = !live() ? [] : historyEntries.filter((item) => (!filter.platform || item.platform === filter.platform)
@@ -305,7 +305,7 @@ export function mockHistoryPage(filter: HistoryFilter, pageSize: number): Histor
 function record(kind: 'pause' | 'resume', entity_type: string, entity_id: string, reason_text: string) {
   historyEntries.unshift({ id: historyEntries[0].id + 1, business_id: 1, created_at: new Date().toISOString(), actor: 'owner', kind,
     platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_code: kind === 'resume' && entity_type === 'business' ? 'OWNER_RESUME' : null, reason_text, evidence: {}, status: 'applied', reverts_id: null,
-    can_revert: kind === 'pause' && entity_type === 'business', revert_warning: null });
+    can_revert: kind === 'pause' && entity_type === 'business', revert_warning: null, turns_on: kind === 'resume' && entity_type === 'business' });
 }
 export function mockRevert(id: number): HistoryEntry {
   const original = historyEntries.find((item) => item.id === id);
@@ -313,7 +313,7 @@ export function mockRevert(id: number): HistoryEntry {
   if (original.kind === 'pause' && original.entity_type === 'business') resumeAll();
   original.status = 'reverted'; original.can_revert = false;
   const entry: HistoryEntry = { ...original, id: historyEntries[0].id + 1, created_at: new Date().toISOString(), actor: 'owner', kind: 'revert',
-    reason_code: null, reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false };
+    reason_code: null, reason_text: 'Вы отменили изменение.', evidence: {}, status: 'applied', reverts_id: id, can_revert: false, turns_on: false };
   historyEntries.unshift(entry); return structuredClone(entry);
 }
 const weekStart = (weeksAgo: number) => { const day = new Date(); day.setDate(day.getDate() - ((day.getDay() + 6) % 7) - 7 * weeksAgo); return isoDate(day); };
@@ -323,13 +323,18 @@ const questions: ClientQuestion[] = [
   { id: weekStart(2), week_start: weekStart(2), week_end: weekEnd(weekStart(2)), leads_count: 11, clients_count: 4, asked_at: timestamp, answered_at: timestamp },
   { id: weekStart(3), week_start: weekStart(3), week_end: weekEnd(weekStart(3)), leads_count: 6, clients_count: null, asked_at: timestamp, answered_at: timestamp },
 ];
+// Тихая неделя демо (без обращений, без вопроса): её расход входит в цену клиента, как на сервере.
+const quietWeekCost = 300000;
 function clientResults(period?: Period) {
-  const answered = questions.filter((item) => item.answered_at && item.clients_count !== null
-    && (!period || item.week_start >= period.from && item.week_end <= period.to));
-  const cost = answered.reduce((sum, item) => sum + item.leads_count * 90000, 0);
+  const asked = questions.filter((item) => !period || item.week_start >= period.from && item.week_end <= period.to);
+  const answered = asked.filter((item) => item.answered_at && item.clients_count !== null);
+  const weeks = period ? Math.floor(((Date.parse(period.to) - Date.parse(period.from)) / 86400000 + 1) / 7) : 4;
+  const quiet = Math.max(0, weeks - asked.length);
+  const cost = answered.reduce((sum, item) => sum + item.leads_count * 90000, 0) + quiet * quietWeekCost;
   const clients = answered.reduce((sum, item) => sum + (item.clients_count ?? 0), 0);
   return { clients: answered.length ? clients : null, cost_kop: cost,
-    cost_per_client_kop: clients ? Math.round(cost / clients) : null, answered_weeks: answered.length };
+    cost_per_client_kop: answered.length && clients ? Math.round(cost / clients) : null,
+    answered_weeks: answered.length, quiet_weeks: quiet, unknown_weeks: asked.length - answered.length };
 }
 export function mockClientQuestions(): ClientQuestions {
   return { items: live() ? structuredClone(questions) : [], cost_per_client_kop: clientResults().cost_per_client_kop };
