@@ -4003,3 +4003,11 @@ async def test_failed_draft_pause_is_logged_once_per_review_window(tmp_path: Pat
     await settle(world, hours=2)
     assert [(row.kind, row.status) for row in settle_records(world)] == [("pause", "failed")]
     assert campaign.review_since is not None
+
+
+async def test_launch_leaves_every_ad_awaiting_review(tmp_path: Path) -> None:
+    """После запуска все объявления ждут проверки площадки (moderation), даже если тестовая площадка уже показывает их
+    включёнными: одобрение узнаёт только сверка модерации, и главная до неё пишет «Площадка проверяет объявления»."""
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",))
+    await launch(world, plan)
+    assert ads_of(world) and {ad.status for ad in ads_of(world)} == {"moderation"}

@@ -904,7 +904,9 @@ class LaunchService:
             for row in groups:
                 row.status = "active"
             for ad in ads:
-                if ad.status not in {"active", "rejected"}:
+                # Локальный active — цель строки, а не решение площадки: одобренным остаётся только то, что сверка
+                # модерации уже прочитала одобренным.
+                if ad.status != "rejected" and ad.moderation_status != "approved":
                     ad.status = "moderation"
         for platform in platforms:
             self.repository.save_ledger(
