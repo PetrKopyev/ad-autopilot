@@ -18,6 +18,8 @@ NOTICES = {
     "BUDGET_STOP": ("Реклама остановлена: бюджет месяца почти израсходован", "danger"),
     "SPEND_MISMATCH": ("Площадка показывает больший расход, чем мы ждали", "danger"),
     "MODERATION_REJECTED": ("Площадка не пропустила объявление", "warning"),
+    "MODERATION_ALL_REJECTED": ("Кампания не показывается: все объявления отклонены", "danger"),
+    "MODERATION_LONG": ("Площадка долго проверяет объявления", "warning"),
     "ANOMALY": ("Перестали приходить обращения", "warning"),
     "NOT_SHOWING": ("Объявление не показывается", "warning"),
     "CAMPAIGN_EXTEND_FAILED": ("Не получилось продлить кампанию в Директе", "warning"),

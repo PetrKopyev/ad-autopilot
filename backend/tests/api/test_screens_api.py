@@ -283,6 +283,7 @@ def test_status_contract_heartbeat_and_platform_error(setup):
         "status",
         "last_check_at",
         "auto_continue",
+        "resume_pending",
         "needs_attention",
         "has_plan",
         "first_decisions",

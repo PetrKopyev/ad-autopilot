@@ -156,6 +156,27 @@ def test_last_status_change_skips_operations_without_field(repository) -> None:
     assert repository.last_status_change(world.business.id, "direct", "ad", "a-1") is status
 
 
+def test_last_status_change_answers_settled_pause_with_original_one(repository) -> None:
+    """Паузу, доведённую шагом модерации, last_status_change пропускает: «почему остановлено» отвечает исходная
+    запись. Включение тем же шагом — обычная запись."""
+    world = tree(repository)
+
+    def status(entity_id: str, after: str) -> dict:
+        return {"entity_type": "ad", "entity_id": entity_id, "field": "status", "before": "draft", "after": after}
+
+    original = change(world.business, reason_code="SERVICE_REMOVED", operations=[status("a-1", "paused_owner")])
+    repository.save(original)
+    settled = change(
+        world.business,
+        reason_code="MODERATION_SETTLE",
+        kind="resume",
+        operations=[status("a-1", "paused_owner"), status("a-2", "active")],
+    )
+    repository.save(settled)
+    assert repository.last_status_change(world.business.id, "direct", "ad", "a-1") is original
+    assert repository.last_status_change(world.business.id, "direct", "ad", "a-2") is settled
+
+
 def test_latest_run_breaks_ties_by_id_and_last_check_ignores_other_businesses(repository) -> None:
     world, other = tree(repository), tree(repository)
     first, second = run(world.business.id), run(world.business.id)

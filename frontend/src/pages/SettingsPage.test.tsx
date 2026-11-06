@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getBusiness, pauseAutopilot, saveBudget, saveBusinessSettings, saveVkGoal } from '../api/settings';
+import { getBusiness, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings, saveVkGoal } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { connectAccount, disconnectAccount, getAuthConfig, saveDescription, saveMarking } from '../api/setup';
 import type { Account } from '../api/setup';
@@ -205,6 +205,17 @@ it('остановка в настройках — та же остановка 
   fireEvent.click(screen.getByRole('button', { name: copy.screens.confirmStop }));
   await vi.waitFor(() => expect(pauseAutopilot).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+});
+
+it('«Продолжить» включил не все кампании: в настройках кнопка «Продолжить» есть и у работающей рекламы', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValueOnce({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true, resume_pending: true });
+  vi.mocked(resumeAutopilot).mockReset().mockResolvedValue(null);
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  expect(await screen.findByText(copy.home.resumeLeft)).toBeTruthy();
+  expect(screen.getByRole('button', { name: copy.home.stopAll })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: copy.home.resumeAll }));
+  await vi.waitFor(() => expect(resumeAutopilot).toHaveBeenCalledTimes(1));
 });
 
 it('бюджет: копейки через точку, сумма больше предела — ошибка у поля; подпись до сохранения говорит «после сохранения»', async () => {

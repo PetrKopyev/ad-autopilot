@@ -48,6 +48,7 @@ def test_requests_sent_before_setup_answer_without_business(client) -> None:
         "status": "no_business",
         "last_check_at": None,
         "auto_continue": False,
+        "resume_pending": False,
         "needs_attention": [],
         "has_plan": False,
     }

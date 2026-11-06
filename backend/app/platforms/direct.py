@@ -959,7 +959,15 @@ class DirectAdapter:
             current_status = _status(item, campaign=op.entity_type == "campaign")
             if current_status == "archived" and op.after != "archived":
                 await self._api(services[op.entity_type], "unarchive", {"SelectionCriteria": {"Ids": [id_]}})
-            elif current_status == op.after or current_status == "paused_owner" and op.after == "paused_auto":
+            elif (
+                current_status == op.after
+                or current_status == "paused_owner"
+                and op.after == "paused_auto"
+                # Выключенное объявление (OFF) уже не показывается: suspend ему не нужен.
+                or op.entity_type == "ad"
+                and current_status == "paused_auto"
+                and op.after == "paused_owner"
+            ):
                 if not (op.entity_type == "ad" and op.after == "active" and item.get("Status") == "DRAFT"):
                     return
             if op.entity_type == "ad" and op.after == "active" and item.get("Status") == "DRAFT":

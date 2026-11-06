@@ -1847,6 +1847,22 @@ async def test_campaign_off_maps_to_auto_pause_in_apply(adapter, api, plan):
     assert server.rows["campaigns"][0]["State"] == "OFF"
 
 
+@pytest.mark.parametrize(
+    "after,writes", [("paused_owner", []), ("paused_auto", []), ("archived", [("ads", "archive")])]
+)
+async def test_off_ad_is_already_paused(adapter, api, plan, after, writes):
+    """Важно 4 ревью a57adf1: объявление State=OFF (paused_auto) уже не показывается — пауза владельца не шлёт
+    ads.suspend, архив идёт без suspend."""
+    server = DirectServer()
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    ad = next(row for row in server.rows["ads"] if str(row["Id"]) == refs.ads["ad"])
+    ad["State"], ad["Status"] = "OFF", "ACCEPTED"
+    before = len(server.writes)
+    await adapter.apply(Operation("set_status", "ad", refs.ads["ad"], "status", "paused_auto", after))
+    assert [write[:2] for write in server.writes[before:]] == writes
+
+
 async def test_whoami_rejects_agency_account_with_clear_message(adapter, api):
     """В6: агентский кабинет при подключении даёт понятную ошибку, а не загадочный отказ API."""
     result(api, "clients", Clients=[{"ClientId": 7, "Login": "agency", "ClientInfo": "Агентство", "Type": "AGENCY"}])

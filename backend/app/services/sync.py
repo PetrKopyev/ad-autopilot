@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
 from app.db.query import Window
 from app.platforms.base import Operation
-from app.services.changes import CLOSED_ACCOUNT, REVIEW, ChangeConflict
+from app.services.changes import CLOSED_ACCOUNT, REVIEW, SETTLE, ChangeConflict
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -209,13 +209,13 @@ PAUSED = {"paused_auto", "paused_owner"}
 
 
 async def settle_review(worker: Worker, business: Business) -> None:
-    """Единственный владелец состояния «площадка ещё проверяет» (Campaign.review_since): локальный статус кампании и
-    её объявлений — наша цель, и после проверки площадка приводится к ней. Включаем одобренное, но выключенное
-    (OFF) и отправляем на проверку черновики объявлений — только у работающего бизнеса без остановки; паузу, которую
-    площадка не применила к черновику, доводим всегда. SUSPENDED при цели «работает» — остановка в кабинете
-    (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены объявления) включаем снова,
-    когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся; кампания,
-    закончившаяся по дате окончания, ждёт продления (month_rollover)."""
+    """Единственный владелец состояния «площадка ещё проверяет» (Campaign.review_since): локальный статус кампании и её
+    объявлений — наша цель, и после проверки площадка приводится к ней. Включаем одобренное, но выключенное (OFF) и
+    отправляем на проверку черновики объявлений — только у работающего бизнеса без остановки и только в кампании, чья
+    цель — работать; паузу, которую площадка не применила к черновику, доводим всегда. SUSPENDED при цели «работает» —
+    остановка в кабинете (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены объявления)
+    включаем снова, когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся;
+    кампания, закончившаяся по дате окончания, ждёт продления (month_rollover)."""
     pending = {change.platform for change in worker.repository.pending(business.id)}
     for campaign in worker.campaigns(business):
         if campaign.review_since is None or campaign.platform in pending:
@@ -227,10 +227,11 @@ async def settle_review(worker: Worker, business: Business) -> None:
             states = await adapter.get_state(refs)
         except CLOSED_ACCOUNT:
             continue
+        # У остановленной кампании выключенные объявления — норма: их не включаем и не ждём.
         rows = [("campaign", campaign)] + [
             ("ad", entities[("ad", external_id)])
             for external_id in refs.ads.values()
-            if ("ad", external_id) in entities
+            if ("ad", external_id) in entities and campaign.status == "active"
         ]
         approved = any(row.moderation_status == "approved" for kind, row in rows if kind == "ad")
         reviewing, waiting = set(), False
@@ -282,7 +283,7 @@ async def settle_review(worker: Worker, business: Business) -> None:
                     pauses + enables,
                     actor="system",
                     kind="pause" if paused else "resume",
-                    reason_code="MODERATION_SETTLE",
+                    reason_code=SETTLE,
                     reason_text=REVIEW_PAUSED if paused else REVIEW_RESUMED,
                     suffix=f"review:{worker.clock.now.isoformat()}",
                     force=True,
@@ -291,12 +292,25 @@ async def settle_review(worker: Worker, business: Business) -> None:
             continue
         if change is not None and not change.evidence["_service"].get("review"):
             reviewing -= {op.entity_id for op in enables}
-        if reviewing and campaign.status == "active" and campaign.review_since + REVIEW_NOTICE_AFTER < worker.clock.now:
+        ads = [row for kind, row in rows if kind == "ad"]
+        if ads and all(row.status == "rejected" for row in ads):
+            # Черновик без одобренных объявлений площадка не примет никогда: это не долгая проверка.
+            worker.notice(
+                business,
+                "MODERATION_ALL_REJECTED",
+                f"Площадка отклонила все объявления кампании «{campaign.name}», поэтому она не показывается. "
+                "Причины — в уведомлениях об объявлениях: исправьте объявления в кабинете площадки.",
+                key=f"rejected:{campaign.review_since.isoformat()}",
+                target_id=campaign.id,
+            )
+        elif (
+            reviewing and campaign.status == "active" and campaign.review_since + REVIEW_NOTICE_AFTER < worker.clock.now
+        ):
             worker.notice(
                 business,
                 "MODERATION_LONG",
                 f"Площадка больше {REVIEW_NOTICE_AFTER.days} дней проверяет объявления кампании «{campaign.name}». "
-                "Загляните в кабинет площадки: возможно, модератор ждёт ответа.",
+                "Проверьте объявления в кабинете площадки: возможно, модератор ждёт ответа или исправлений.",
                 key=f"review:{campaign.review_since.isoformat()}",
                 target_id=campaign.id,
             )

@@ -105,6 +105,17 @@ it('объясняет, почему реклама не включилась п
   expect(await screen.findByText(warning)).toBeTruthy();
 });
 
+it('«Продолжить» включил не все кампании: у работающей рекламы кнопка остаётся рядом с «Остановить», с пояснением', async () => {
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true, resume_pending: true });
+  vi.mocked(resumeAutopilot).mockResolvedValue(null);
+  await show(0, 0);
+  expect(await screen.findByText(copy.home.resumeLeft)).toBeTruthy();
+  expect(screen.getByRole('button', { name: copy.home.stopAll })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: copy.home.resumeAll }));
+  fireEvent.click(screen.getByRole('button', { name: copy.home.resumeYes }));
+  await vi.waitFor(() => expect(resumeAutopilot).toHaveBeenCalledTimes(1));
+});
+
 it('пишет, когда будут первые решения автопилота, пока реклама работает', async () => {
   const line = 'Первые решения автопилота — примерно через 7 дней. Срок зависит от бюджета.';
   vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: null, auto_continue: true, needs_attention: [], has_plan: true, first_decisions: line });

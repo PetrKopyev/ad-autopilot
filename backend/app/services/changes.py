@@ -39,6 +39,20 @@ PENDING = "Площадка ещё не подтвердила предыдущ�
 # неизвестный статус. Статус такой сущности площадка подтвердит после проверки: изменение, упёршееся в проверку,
 # применено, а локальная цель доводится шагом синхронизации (sync.settle_review).
 REVIEW = frozenset({"pending", "moderation", "draft"})
+PAUSES = frozenset({"paused_auto", "paused_owner"})
+
+
+# Паузу, которую площадка не применила к черновику, после проверки доводит шаг модерации (sync.settle_review): это не
+# новая остановка, а исходная, и «почему остановлено» отвечает запись до неё.
+SETTLE = "MODERATION_SETTLE"
+
+
+def settled_pause(change, entity_type: str, entity_id: str) -> bool:
+    return change.reason_code == SETTLE and any(
+        (op.get("entity_type"), op.get("entity_id"), op.get("field")) == (entity_type, entity_id, "status")
+        and op.get("after") in PAUSES
+        for op in change.operations
+    )
 
 
 class ChangeConflict(ValueError):
@@ -79,10 +93,11 @@ def differences(
             and state is not None
             and state.entity_type == op.entity_type
             and op.field == "status"
-            and op.after == "paused_auto"
-            and state.status == "paused_owner"
+            and op.after in PAUSES
+            and state.status in PAUSES
         ):
-            # API площадок возвращает одну паузу без автора; автора хранит наш журнал.
+            # API площадок возвращает паузу без автора, а одобренную, но выключенную кампанию Директ показывает как
+            # OFF: при любой паузе кампания не крутится, автора хранит наш журнал.
             continue
         after = op.after
         if op.field == "creative" and isinstance(after, dict) and "title2" not in after:
@@ -137,7 +152,9 @@ def in_review(op: Operation, state: EntityState | None) -> bool:
         and state.entity_type == op.entity_type
         and op.entity_type in {"ad", "campaign"}
         and op.field == "status"
-        and state.status in REVIEW
+        # Остановку площадка «ещё проверяет» только у черновика и объявления на модерации: pending у паузы —
+        # расхождение.
+        and state.status in ({"draft", "moderation"} if op.after in PAUSES else REVIEW)
     )
 
 

@@ -89,6 +89,21 @@ def test_interrupted_launch_is_shown_as_danger(setup):
     assert item["text"] == "Запуск рекламы не завершился. Всё остановили."
 
 
+@pytest.mark.parametrize(
+    "code,title,level",
+    [
+        ("MODERATION_LONG", "Площадка долго проверяет объявления", "warning"),
+        ("MODERATION_ALL_REJECTED", "Кампания не показывается: все объявления отклонены", "danger"),
+    ],
+)
+def test_review_notices_reach_owner(setup, code, title, level):
+    """Важно 3 ревью a57adf1: о затянувшейся проверке и об отказе всем объявлениям кампании владелец узнаёт."""
+    client, repository = setup
+    repository.save(notice(1, code, "Проверьте объявления в кабинете площадки."))
+    (item,) = client.get("/api/notifications").json()
+    assert (item["kind"], item["title"], item["level"]) == (code, title, level)
+
+
 def test_returns_at_most_twenty(setup):
     client, repository = setup
     repository.save(

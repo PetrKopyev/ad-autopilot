@@ -330,9 +330,10 @@ export function HomePage() {
     <PageHeader title={copy.home.title} description={copy.screens.intro} actions={prelaunch ? <PrelaunchLink hasPlan={prelaunch.hasPlan} />
       : (status || autopilot.error) && <>
       {/* Одно действие — одна кнопка: «Остановить» и «Пауза» рядом делали одно и то же. */}
-      {status?.status === 'paused'
-        ? <Button icon="play" onClick={() => { setResumeError(''); setAskingResume(true); }} disabled={resuming}>{resuming ? copy.home.resumingAll : copy.home.resumeAll}</Button>
-        : <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped}>{copy.home.stopAll}</Button>}
+      {/* «Продолжить» включил не все кампании: кнопка остаётся рядом с «Остановить», пока включать есть что. */}
+      {(status?.status === 'paused' || status?.resume_pending)
+        && <Button icon="play" onClick={() => { setResumeError(''); setAskingResume(true); }} disabled={resuming}>{resuming ? copy.home.resumingAll : copy.home.resumeAll}</Button>}
+      {status?.status !== 'paused' && <Button variant="danger" icon="stop" onClick={askStop} disabled={stopping || stopped}>{copy.home.stopAll}</Button>}
     </>} />
     <DemoNotice />
     <DemoPanel changed={reloadAll} />
@@ -352,7 +353,8 @@ export function HomePage() {
     {stale && <ErrorBanner message={copy.screens.heartbeatStale} />}
     {stopped && <p role="status" className="notice">{copy.screens.stopped}</p>}
     {resumeError && <ErrorBanner message={resumeError} onDismiss={() => setResumeError('')} />}
-    {resumeWarning && <div className="notice" role="status"><p>{resumeWarning}</p></div>}
+    {resumeWarning ? <div className="notice" role="status"><p>{resumeWarning}</p></div>
+      : status?.resume_pending && <div className="notice" role="status"><p>{copy.home.resumeLeft}</p></div>}
     {board.loading && <div className="metric-tiles" aria-hidden="true">{[0, 1, 2, 3].map((index) => <div key={index} className={`metric-tile${index === 0 ? ' metric-tile--wide' : ''}`}>
       <span className="skeleton home-skeleton" /></div>)}</div>}
     {board.loading && <p className="loading visually-hidden" role="status">{copy.screens.loading}</p>}

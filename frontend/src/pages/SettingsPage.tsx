@@ -317,11 +317,12 @@ function AutopilotBlock({ status }: { status: StatusResource }) {
     {status.loading && <p className="loading" role="status">{copy.screens.loading}</p>}
     {status.error && <ErrorBanner message={status.error} onRetry={status.reload} />}
     {state && <p className="settings-hint">{state === 'draft' ? copy.screens.draft : state === 'budget_stop' ? (status.data?.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused) : paused ? labels.autopilotPaused : labels.autopilotRunning}</p>}
-    {state && state !== 'draft' && <div className="actions">{paused
-      ? <Button icon="play" onClick={resume} disabled={section.busy}>{copy.home.resumeAll}</Button>
-      : <Button variant="danger" icon="stop" onClick={() => { section.clear(); setAsking(true); }} disabled={section.busy}>{copy.home.stopAll}</Button>}</div>}
+    {state && state !== 'draft' && <div className="actions">
+      {(paused || status.data?.resume_pending) && <Button icon="play" onClick={resume} disabled={section.busy}>{copy.home.resumeAll}</Button>}
+      {!paused && <Button variant="danger" icon="stop" onClick={() => { section.clear(); setAsking(true); }} disabled={section.busy}>{copy.home.stopAll}</Button>}</div>}
     {!asking && <Status section={section} />}
-    {warning && <div className="notice" role="status"><p>{warning}</p></div>}
+    {warning ? <div className="notice" role="status"><p>{warning}</p></div>
+      : status.data?.resume_pending && <div className="notice" role="status"><p>{copy.home.resumeLeft}</p></div>}
     <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}
       busy={section.busy} error={asking ? section.error : undefined} onConfirm={pause} onClose={() => { section.clear(); setAsking(false); }}><p>{copy.screens.stopDescription}</p></ConfirmDialog>
   </Block>;

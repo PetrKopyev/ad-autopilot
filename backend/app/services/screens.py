@@ -134,6 +134,8 @@ class ScreensService:
             "status": status,
             "last_check_at": last_check,
             "auto_continue": business.auto_continue,
+            # «Продолжить» включил не все кампании: кнопка остаётся и у работающей рекламы.
+            "resume_pending": status == "running" and self.resume_left(business, {row.id for row in revoked}),
             "needs_attention": attention,
             # План собран (plan_ready) или уже запущен: до запуска экраны ведут в план, а не в мастер.
             "has_plan": business.status != "draft",
@@ -250,96 +252,85 @@ class ScreensService:
                 "Рекламу можно возобновить с 1 числа или увеличить бюджет."
             )
 
-    async def undo_resume(self, business: Business, campaigns: list[Campaign]) -> None:
-        try:
-            for campaign in campaigns:
-                state = (
-                    await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
-                        self.worker.refs(campaign)
-                    )
-                )[campaign.external_id]
-                await self.worker.apply(
-                    business,
-                    campaign,
-                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_owner")],
-                    actor="owner",
-                    kind="pause",
-                    reason_code="OWNER_STOP",
-                    reason_text="Рекламу не удалось включить целиком: эту кампанию остановили снова.",
-                    suffix="resume-undo",
-                )
-        except Exception:
-            # Площадка не подтвердила остановку: её доводит страж бюджета (pending_stop), как прерванную остановку.
-            self.worker.remember(
-                business,
-                pending_stop={"reason_code": "OWNER_STOP", "reason_params": {}, "budget_stop": False, "actor": "owner"},
-            )
+    def stopped_by_us(self, business: Business, campaign: Campaign, stopped: set[int]) -> bool:
+        """Остановка, которую снимает «Продолжить»: кнопкой «Остановить», защитой бюджета или перед отключением
+        кабинета."""
+        # Паузу, доведённую шагом модерации, last_status_change пропускает: снимаем её, только если снимаем исходную.
+        last = self.repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id)
+        if last is None:
+            return False
+        reason, actor = last.reason_code, last.actor
+        return (
+            campaign.id in stopped
+            and reason == "OWNER_STOP"
+            and actor == "owner"
+            or campaign.status == "paused_auto"
+            and actor == "system"
+            and reason in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
+            # Кампанию остановили перед отключением кабинета; кабинет снова подключён — включаем.
+            or reason == "ACCOUNT_REVOKE"
+        )
+
+    def resumable(self, business: Business, revoked: set[int]) -> list[Campaign]:
+        held = set(self.worker.metadata(business).get("below_minimum", []))
+        return [
+            campaign
+            for campaign in self.worker.current_campaigns(business)
+            if not campaign.owner_paused
+            and campaign.daily_limit_kop
+            and campaign.id not in held
+            and campaign.platform_account_id not in revoked
+        ]
+
+    def resume_left(self, business: Business, revoked: set[int]) -> bool:
+        """У работающей рекламы остались кампании, которые «Продолжить» не включил. Включение, которого площадка ещё
+        не подтвердила, доводит сверка: включать его снова не нужно."""
+        stopped = set(self.worker.metadata(business).get("kill_switch_campaigns", []))
+        pending = {change.platform for change in self.repository.pending(business.id)}
+        return any(
+            campaign.status != "active"
+            and campaign.platform not in pending
+            and self.stopped_by_us(business, campaign, stopped)
+            for campaign in self.resumable(business, revoked)
+        )
 
     async def resume(self, business: Business) -> dict:
+        """«Продолжить» идемпотентно: кампания, которую площадка не включила, остаётся со своей паузой и причиной, а
+        повторное нажатие — и у работающей рекламы — включает оставшиеся."""
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
-            if business.status == "running":
-                raise ChangeConflict("Реклама уже работает")
-            if business.status not in {"paused", "budget_stop"}:
+            if business.status not in {"running", "paused", "budget_stop"}:
                 raise ChangeConflict("Сначала запустите рекламу")
             accounts = self.repository.rows(PlatformAccount, business.id)
             revoked = {row.id for row in accounts if row.status == "revoked"}
+            if business.status == "running" and not self.resume_left(business, revoked):
+                raise ChangeConflict("Реклама уже работает")
             if len(revoked) == len(accounts):
                 raise ChangeConflict(
                     "Кабинеты площадок отключены. Подключите кабинет в настройках, и реклама снова сможет работать."
                 )
             await self.check_remaining(business)
-            meta = self.worker.metadata(business)
-            if meta.get("pending_stop"):
+            if self.worker.metadata(business).get("pending_stop"):
                 raise ChangeConflict("Площадки ещё подтверждают остановку. Повторите попытку после проверки.")
             await rebalance_budget(self.worker, business, force=True)
-            stopped = set(meta.get("kill_switch_campaigns", []))
-            held = set(self.worker.metadata(business).get("below_minimum", []))
             active = False
-            enabled = []
-            campaigns = self.worker.current_campaigns(business)
-            try:
-                for campaign in campaigns:
-                    if (
-                        campaign.owner_paused
-                        or not campaign.daily_limit_kop
-                        or campaign.id in held
-                        or campaign.platform_account_id in revoked
-                    ):
-                        continue
-                    last = self.repository.last_status_change(
-                        business.id, campaign.platform, "campaign", campaign.external_id
+            stopped = set(self.worker.metadata(business).get("kill_switch_campaigns", []))
+            failed, failure = [], None
+            for campaign in self.resumable(business, revoked):
+                state = (
+                    await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
+                        self.worker.refs(campaign)
                     )
-                    state = (
-                        await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
-                            self.worker.refs(campaign)
-                        )
-                    )[campaign.external_id]
-                    if state.status == "active":
-                        active = True
-                        continue
-                    owner_stop = (
-                        campaign.id in stopped
-                        and last is not None
-                        and last.reason_code == "OWNER_STOP"
-                        and last.actor == "owner"
-                    )
-                    protection_stop = (
-                        campaign.status == "paused_auto"
-                        and last is not None
-                        and last.actor == "system"
-                        and last.reason_code in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
-                    )
-                    # Кампанию остановили перед отключением кабинета; кабинет снова подключён — включаем.
-                    revoke_stop = last is not None and last.reason_code == "ACCOUNT_REVOKE"
-                    # Паузу, которую площадка не применила к черновику, после проверки довёл шаг модерации: это та же
-                    # наша остановка.
-                    review_stop = last is not None and last.reason_code == "MODERATION_SETTLE" and last.kind == "pause"
-                    stopped_by_us = owner_stop or protection_stop or revoke_stop or review_stop
-                    # Кампанию, остановленную, пока площадка её проверяла, включаем так же: включение дождётся
-                    # одобрения.
-                    if not stopped_by_us or state.status not in {"paused_owner", "paused_auto", *REVIEW}:
-                        continue
+                )[campaign.external_id]
+                if state.status == "active":
+                    active = True
+                    continue
+                # Кампанию, остановленную, пока площадка её проверяла, включаем так же: включение дождётся одобрения.
+                if state.status not in {"paused_owner", "paused_auto", *REVIEW} or not self.stopped_by_us(
+                    business, campaign, stopped
+                ):
+                    continue
+                try:
                     await self.worker.apply(
                         business,
                         campaign,
@@ -350,19 +341,24 @@ class ScreensService:
                         reason_text="Вы возобновили рекламу после остановки.",
                         suffix="resume",
                     )
-                    enabled.append(campaign)
-                    active = True
-            except Exception:
-                # «Продолжить» включает всё или ничего: включённые до сбоя кампании останавливаем снова, и бизнес
-                # остаётся на паузе — повторное нажатие включит все. Иначе они работали бы при бизнесе на паузе:
-                # без присмотра стража, а после одобрения проверки — не включились бы.
-                await self.undo_resume(business, enabled)
-                raise
+                except ChangeConflict as conflict:
+                    change = self.repository.change_by_key(business.id, f"{self.worker.step_key}:{campaign.id}:resume")
+                    # Площадка не ответила, прошло ли включение: его доводит сверка, реклама уже работает.
+                    if change is None or change.status != "pending":
+                        failed.append(campaign.id)
+                        failure = failure or conflict
+                        continue
+                active = True
             if active:
                 business.status = "running"
-                self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
+                self.worker.remember(business, kill_switch=False, kill_switch_campaigns=sorted(stopped & set(failed)))
+            elif failure is not None:
+                raise failure
+            held = set(self.worker.metadata(business).get("below_minimum", []))
         warning = None
-        if not active and any(campaign.id in held for campaign in campaigns):
+        if failed:
+            warning = "Часть кампаний не включилась. Нажмите «Продолжить» ещё раз."
+        elif not active and any(campaign.id in held for campaign in self.worker.current_campaigns(business)):
             warning = (
                 "Реклама не включилась: при текущем бюджете площадкам не хватает минимума. "
                 "Увеличьте бюджет в настройках."

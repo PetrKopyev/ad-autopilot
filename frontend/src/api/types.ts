@@ -65,6 +65,8 @@ export interface AutopilotStatus {
   first_decisions?: string | null;
   /** Маркировка рекламодателя; null — данные ещё не сохраняли. */
   marking?: MarkingStatus | null;
+  /** Реклама работает, но «Продолжить» включил не все кампании: кнопка нужна и у работающей рекламы. */
+  resume_pending?: boolean;
 }
 export type AdStatus = 'draft' | 'moderation' | 'active' | 'paused_auto' | 'paused_owner' | 'rejected' | 'archived';
 export interface Ad {

@@ -366,6 +366,30 @@ def test_status_under_review_is_not_a_mismatch():
     assert differences([Operation("set_status", "campaign", "4", "status", "paused_owner", "active")], states)
 
 
+def test_pause_of_unknown_review_status_is_a_mismatch():
+    """Мелочь 6 ревью a57adf1: паузу «ещё проверяет» только черновик или модерация; pending у паузы — расхождение,
+    включение в pending по-прежнему ждёт проверки."""
+    states = {"5": EntityState("5", "campaign", None, "Кампания", "pending")}
+    assert differences([Operation("set_status", "campaign", "5", "status", "active", "paused_auto")], states)
+    assert differences([Operation("set_status", "campaign", "5", "status", "paused_auto", "active")], states) == []
+
+
+def test_platform_pause_without_author_matches_any_expected_pause():
+    """Важно 5 ревью a57adf1: остановка одобренной, но выключенной кампании (OFF → paused_auto) при ожидаемой паузе
+    владельца не расхождение — при любой паузе кампания не крутится. Включение по-прежнему сверяется."""
+    states = {
+        "6": EntityState("6", "campaign", None, "Кампания", "paused_auto"),
+        "7": EntityState("7", "campaign", None, "Кампания", "paused_owner"),
+    }
+    for entity_id in ("6", "7"):
+        for after in ("paused_owner", "paused_auto"):
+            operation = [Operation("set_status", "campaign", entity_id, "status", "active", after)]
+            assert differences(operation, states, platform_pauses=True) == []
+    assert differences([Operation("set_status", "campaign", "6", "status", "active", "paused_owner")], states)
+    enable = [Operation("set_status", "campaign", "6", "status", "paused_auto", "active")]
+    assert differences(enable, states, platform_pauses=True)
+
+
 def test_differences_tolerates_vat_rounding_kopeck_on_limits():
     """Пересчёт НДС лимита VK теряет копейку на округлении рублёвой строки API: копейка не расхождение,
     больше копейки — уже расхождение."""

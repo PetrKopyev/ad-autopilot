@@ -380,17 +380,41 @@ MODERATION_PENDING = "Площадка ещё проверяет объявле�
 
 
 @pytest.mark.db
-def test_moderation_wait_records_become_review_state_and_downgrade_restores_them(test_settings) -> None:
+@pytest.mark.parametrize(
+    "case,campaign_after,ad_after",
+    [
+        ("running", "active", "moderation"),
+        ("stopped", "paused_auto", "moderation"),
+        ("owner", "paused_owner", "paused_owner"),
+        ("missing", "paused_auto", "paused_auto"),
+        ("changed", "active", "moderation"),
+    ],
+)
+def test_moderation_wait_records_become_review_state_and_downgrade_restores_them(
+    test_settings, case, campaign_after, ad_after
+) -> None:
     """0009: включение, ждавшее проверки pending-записью (три записи LAUNCH на проде), становится применённым, а его
-    кампания — «ждёт одобрения» (review_since); объявления остаются на проверке. Откат возвращает pending-запись и
-    прежние статусы; обычная pending-запись (неизвестный исход) миграцию не касается."""
+    кампания — «ждёт одобрения» (review_since — время записи); выключенные объявления — на проверке. Кампания
+    остановленного бизнеса — на паузе, остановленная владельцем и его объявления — как были; запись ненайденной
+    кампании остаётся pending. Откат возвращает pending-запись и прежние статусы, если их с тех пор не меняли; обычная
+    pending-запись (неизвестный исход) миграцию не касается."""
     with scratch_schema() as (connection, config):
         command.upgrade(config, "0002_autopilot_additions")
         ids = seed_0002(connection)
         command.upgrade(config, "0008_campaign_review_since")
-        connection.execute(text("UPDATE businesses SET status = 'running'"))
-        connection.execute(text("UPDATE ads SET status = 'moderation'"))
-        since = "2026-11-03T10:00:00+00:00"
+        settings = {"_worker": {"kill_switch": True}} if case == "stopped" else {}
+        connection.execute(
+            text("UPDATE businesses SET status = :status, settings = CAST(:settings AS jsonb)"),
+            {"status": "paused" if case == "stopped" else "running", "settings": json.dumps(settings)},
+        )
+        connection.execute(
+            text("UPDATE campaigns SET status = :status"),
+            {"status": "paused_owner" if case == "owner" else "paused_auto"},
+        )
+        connection.execute(
+            text("UPDATE ads SET status = :status"), {"status": "paused_owner" if case == "owner" else "paused_auto"}
+        )
+        created = datetime(2026, 11, 3, 9, tzinfo=UTC)
         operations = [
             {
                 "kind": "set_status",
@@ -402,7 +426,7 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
             }
             for entity, external in (("ad", "a-1"), ("campaign", "c-1"))
         ]
-        refs = {"campaign_id": "c-1", "groups": {}, "ads": {}, "targets": {}}
+        refs = {"campaign_id": "c-404" if case == "missing" else "c-1", "groups": {}, "ads": {}, "targets": {}}
         record = {
             "business_id": ids["business"],
             "actor": "owner",
@@ -414,16 +438,10 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
             "reason_code": "LAUNCH",
             "reason_text": "Запустили рекламу.",
             "status": "pending",
+            "created_at": created,
         }
-        waiting = insert(
-            connection,
-            "change_log",
-            **record,
-            evidence={
-                "plan_id": 1,
-                "_service": {"refs": refs, "dry_run": False, "error": MODERATION_PENDING, "awaiting_since": since},
-            },
-        )
+        awaiting = {"refs": refs, "dry_run": False, "error": MODERATION_PENDING, "awaiting_since": "2026-11-03T10:00Z"}
+        waiting = insert(connection, "change_log", **record, evidence={"plan_id": 1, "_service": awaiting})
         unknown = insert(
             connection, "change_log", **record, evidence={"_service": {"refs": refs, "dry_run": False, "error": None}}
         )
@@ -434,33 +452,36 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
                 text("SELECT id, status FROM change_log WHERE id IN (:a, :b)"), {"a": waiting, "b": unknown}
             ).all()
         )
-        assert rows == {waiting: "applied", unknown: "pending"}
+        assert rows == {waiting: "pending" if case == "missing" else "applied", unknown: "pending"}
         service = connection.execute(
             text("SELECT evidence -> '_service' FROM change_log WHERE id = :id"), {"id": waiting}
         ).scalar()
-        assert service["error"] is None and service["review"] == ["a-1", "c-1"] and service["differences"] == []
         campaign = connection.execute(
             text("SELECT status, review_since FROM campaigns WHERE id = :id"), {"id": ids["campaign"]}
         ).one()
-        assert campaign.status == "active" and campaign.review_since == datetime.fromisoformat(since)
-        assert connection.execute(text("SELECT status FROM ads WHERE id = :id"), {"id": ids["ad"]}).scalar() == (
-            "moderation"
-        )
+        ad = connection.execute(text("SELECT status FROM ads WHERE id = :id"), {"id": ids["ad"]}).scalar()
+        assert (campaign.status, ad) == (campaign_after, ad_after)
+        if case == "missing":
+            assert service == awaiting and campaign.review_since is None
+        else:
+            assert service["error"] is None and service["review"] == ["a-1", "c-1"] and service["differences"] == []
+            assert campaign.review_since == created
+        if case == "changed":
+            # Воркер довёл кампанию после выкладки: откат её не трогает.
+            connection.execute(text("UPDATE campaigns SET status = 'paused_owner'"))
 
         command.downgrade(config, "0008_campaign_review_since")
         restored = connection.execute(
             text("SELECT status, evidence -> '_service' AS service FROM change_log WHERE id = :id"), {"id": waiting}
         ).one()
-        assert restored.status == "pending"
-        assert restored.service == {
-            "refs": refs,
-            "dry_run": False,
-            "error": MODERATION_PENDING,
-            "awaiting_since": since,
-        }
+        assert restored.status == "pending" and restored.service == awaiting
+        expected = {"owner": "paused_owner", "changed": "paused_owner"}.get(case, "paused_auto")
         assert connection.execute(
             text("SELECT status, review_since FROM campaigns WHERE id = :id"), {"id": ids["campaign"]}
-        ).one() == ("active", None)
+        ).one() == (expected, None)
+        assert connection.execute(text("SELECT status FROM ads WHERE id = :id"), {"id": ids["ad"]}).scalar() == (
+            "paused_owner" if case == "owner" else "paused_auto"
+        )
         command.upgrade(config, "head")
         assert_matches_metadata(connection)
 

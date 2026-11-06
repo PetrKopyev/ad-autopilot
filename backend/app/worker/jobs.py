@@ -33,11 +33,14 @@ from app.platforms.base import AdPlatform, ExternalRefs, Operation, lead_count
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import (
     CLOSED_ACCOUNT,
+    PAUSES,
     PENDING,
+    SETTLE,
     ChangeConflict,
     ChangesRepository,
     ChangesService,
     replaced_campaigns,
+    settled_pause,
 )
 from app.services.onboarding import DRAFT_STATUSES
 from app.worker.clock import MOSCOW, Clock, SystemClock, today
@@ -236,7 +239,8 @@ class WorkerRepository(NoticesRepository, ChangesRepository):
         )
 
     def last_status_change(self, business_id: int, platform: str, entity_type: str, entity_id: str) -> ChangeLog | None:
-        """Последнее применённое изменение статуса объекта; поиск по операциям идёт в JSONB, а не в Python."""
+        """Последнее применённое изменение статуса объекта, кроме паузы, доведённой шагом модерации (settled_pause);
+        поиск по операциям идёт в JSONB, а не в Python."""
         operation = {"entity_type": entity_type, "entity_id": entity_id, "field": "status"}
         return self.db.scalar(
             select(ChangeLog)
@@ -245,6 +249,10 @@ class WorkerRepository(NoticesRepository, ChangesRepository):
                 ChangeLog.platform == platform,
                 ChangeLog.status == "applied",
                 ChangeLog.operations.contains([operation]),
+                or_(
+                    ChangeLog.reason_code.is_distinct_from(SETTLE),
+                    ~or_(*(ChangeLog.operations.contains([operation | {"after": after}]) for after in PAUSES)),
+                ),
             )
             .order_by(ChangeLog.id.desc())
             .limit(1)
@@ -496,6 +504,7 @@ class MemoryWorkerRepository(WorkerRepository):
                     (op.get("entity_type"), op.get("entity_id"), op.get("field")) == (entity_type, entity_id, "status")
                     for op in row.operations
                 )
+                and not settled_pause(row, entity_type, entity_id)
             ),
             key=lambda row: row.id,
             default=None,

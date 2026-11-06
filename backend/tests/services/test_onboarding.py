@@ -40,7 +40,7 @@ from app.db.query import matches
 from app.platforms.base import PlatformError
 from app.platforms.fake import FakeAdapter
 from app.platforms.metrica import FakeMetrica, MetricaCounter, MetricaGoal
-from app.services.changes import ChangeConflict, replaced_campaigns
+from app.services.changes import ChangeConflict, replaced_campaigns, settled_pause
 from app.services.launch import LaunchRepository, LaunchService
 from app.services.onboarding import (
     LOCK_WAITERS,
@@ -196,6 +196,7 @@ class MemoryRepository(LaunchRepository):
                     (op.get("entity_type"), op.get("entity_id"), op.get("field")) == (entity_type, entity_id, "status")
                     for op in row.operations
                 )
+                and not settled_pause(row, entity_type, entity_id)
             ),
             key=lambda row: row.id,
             default=None,

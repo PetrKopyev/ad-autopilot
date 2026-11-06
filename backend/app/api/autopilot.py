@@ -39,6 +39,7 @@ NO_BUSINESS = {
     "status": "no_business",
     "last_check_at": None,
     "auto_continue": False,
+    "resume_pending": False,
     "needs_attention": [],
     "has_plan": False,
 }
