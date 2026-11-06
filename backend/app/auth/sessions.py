@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
 from app.auth.revoke import Revocation, revocation, same_vk_access
-from app.db.models import Business, ChangeLog, OAuthState, PlatformAccount, Session, User
+from app.db.models import Business, Campaign, ChangeLog, OAuthState, PlatformAccount, Session, User
 
 SESSION_COOKIE = "__Host-session"
 CSRF_COOKIE = "__Host-csrf"
@@ -22,6 +22,31 @@ STATE_TTL = timedelta(minutes=10)
 DISCONNECTED_PENDING = (
     "Кабинет отключили до ответа площадки: применилось ли изменение, неизвестно. Проверьте в кабинете площадки."
 )
+
+OTHER_ACCOUNT = (
+    "Это другой кабинет, а реклама идёт в прежнем. Сначала отключите прежний кабинет в «Настройках» — реклама в нём "
+    "будет остановлена, — потом подключите новый."
+)
+
+
+def replaces_account(db: DBSession, account: PlatformAccount | None, login: str) -> bool:
+    """Вход в другой кабинет площадки, пока прежний подключён и в нём наши кампании: строку кабинета перезаписать
+    нельзя — кампании прежнего остались бы без управления и без остановки по бюджету."""
+    return (
+        account is not None
+        and account.status != "revoked"
+        and account.external_login != login
+        and db.scalar(
+            select(Campaign.id)
+            .where(
+                Campaign.business_id == account.business_id,
+                Campaign.platform == account.platform,
+                Campaign.external_id.is_not(None),
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 def hash_session_id(token: str) -> str:
@@ -117,6 +142,9 @@ class AuthRepository:
                 PlatformAccount.business_id == business_id, PlatformAccount.platform == "direct"
             )
         )
+        if replaces_account(self.db, account, login):
+            self.db.rollback()
+            raise HTTPException(409, OTHER_ACCOUNT)
         if account is None:
             account = PlatformAccount(business_id=business_id, platform="direct", auth_mode="oauth")
             self.db.add(account)

@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.db.models import Business, OAuthState, PlatformAccount
@@ -400,6 +401,11 @@ class VkAccountRepository:
         client_id: str = "",
         client_secret: str = "",
     ) -> PlatformAccount:
+        from app.auth.sessions import OTHER_ACCOUNT, replaces_account
+
+        if replaces_account(self.db, account, session.account_id):
+            self.db.rollback()
+            raise HTTPException(409, OTHER_ACCOUNT)
         if account is None:
             account = PlatformAccount(business_id=business_id, platform="vk")
             self.db.add(account)

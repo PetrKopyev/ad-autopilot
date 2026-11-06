@@ -35,11 +35,14 @@ export async function revertChange(id: number): Promise<HistoryEntry> {
 const labels = copy.historyScreen;
 // Коды системных записей про бюджет: откат любой из них дал бы выйти за бюджет месяца.
 const budgetProtectionCodes = new Set(['BUDGET_REBALANCE', 'BUDGET_STOP', 'SPEND_MISMATCH', 'MONTH_STOP', 'BUDGET_UPDATE_FAILED', 'LAUNCH_INTERRUPTED']);
+// Запуск и возобновления не отменяются записью журнала: рекламу останавливают на главной.
+const turnOnCodes = new Set(['LAUNCH', 'OWNER_RESUME', 'BUDGET_RESUME', 'MONTH_RESUME']);
 /** Почему запись нельзя отменить: короткое пояснение вместо просто отсутствия кнопки; null — пояснения нет. */
 export function noRevertHint(entry: HistoryEntry): string | null {
   if (entry.can_revert) return null;
   if (entry.kind === 'revert') return labels.noRevertRevert;
   if (entry.reason_code && budgetProtectionCodes.has(entry.reason_code)) return labels.noRevertBudget;
+  if (entry.reason_code && turnOnCodes.has(entry.reason_code)) return labels.noRevertTurnOn;
   return null;
 }
 // Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».

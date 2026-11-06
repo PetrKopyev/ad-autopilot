@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.dialects.postgresql import dialect
 
-from app.db.models import Business, OAuthState, PlatformAccount, Session, User
+from app.db.models import Business, Campaign, OAuthState, PlatformAccount, Session, User
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -20,6 +20,21 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def campaign_id(repository: "FakeRepository", statement) -> int | None:
+    """Ответ на replaces_account: есть ли у бизнеса кампания площадки, созданная в кабинете."""
+    params = statement.compile().params
+    return next(
+        (
+            item.id
+            for item in repository.campaigns
+            if item.business_id == params["business_id_1"]
+            and item.platform == params["platform_1"]
+            and item.external_id is not None
+        ),
+        None,
+    )
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
@@ -27,6 +42,8 @@ class FakeRepository:
         self.users: dict[int, User] = {}
         self.businesses: dict[int, Business] = {}
         self.accounts: dict[int, PlatformAccount] = {}
+        # Кампании бизнесов с external_id — по ним видно, что в подключённом кабинете идёт наша реклама.
+        self.campaigns: list[Campaign] = []
         self.used_codes: set[str] = set()
         self.stored_tokens: dict[int, dict[str, str | None]] = {}
         # Остановка рекламы перед отзывом: (user_id, account_id, токен кабинета в момент остановки).
@@ -118,11 +135,16 @@ class FakeRepository:
                 )
 
             def scalar(self, statement):
+                if statement.column_descriptions[0]["entity"] is Campaign:
+                    return campaign_id(self.repository, statement)
                 return next(self.reads)
 
             def add(self, account: PlatformAccount) -> None:
                 account.id = len(self.repository.accounts) + 1
                 self.repository.accounts[account.id] = account
+
+            def rollback(self) -> None:
+                pass
 
             def commit(self) -> None:
                 for account in self.repository.accounts.values():

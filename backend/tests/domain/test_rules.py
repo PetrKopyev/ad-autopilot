@@ -10,7 +10,6 @@ from app.domain.rules import (
     can_change,
     can_reconsider,
     classify,
-    client_cac,
     client_conversion,
     decide,
     first_decision_days,
@@ -69,19 +68,9 @@ def test_few_ads_without_check_use_average_lead_price_once_three_leads(make_ad, 
     assert {(item.target_id, item.reason_code) for item in decisions} >= {("dear", "PAUSE_TOO_EXPENSIVE")}
 
 
-def test_client_cost_uses_last_four_weeks_and_unknown_is_not_zero(now):
-    today = now.date()
-    answers = (
-        ClientAnswer(today - timedelta(weeks=4), 100, 100, 1_000_000),
-        ClientAnswer(today - timedelta(days=27), 10, 2, 10_000),
-        ClientAnswer(today, 10, 3, 20_000),
-        ClientAnswer(today + timedelta(days=1), 100, 100, 1_000_000),
-    )
-    assert client_cac(answers, today) == 6_000
-    assert client_cac(answers + (ClientAnswer(today, 1, None, 100),), today) is None
-    assert client_cac((ClientAnswer(today, 10, 0),), today) is None
+def test_client_answer_cannot_exceed_leads(now):
     with pytest.raises(ValueError):
-        ClientAnswer(today, 1, 2)
+        ClientAnswer(now.date(), 1, 2)
 
 
 @pytest.mark.parametrize("clicks,expected", [(39, Classification.INSUFFICIENT), (40, Classification.BORDERLINE)])

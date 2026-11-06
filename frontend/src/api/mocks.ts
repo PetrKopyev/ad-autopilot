@@ -304,7 +304,7 @@ export function mockHistoryPage(filter: HistoryFilter, pageSize: number): Histor
 }
 function record(kind: 'pause' | 'resume', entity_type: string, entity_id: string, reason_text: string) {
   historyEntries.unshift({ id: historyEntries[0].id + 1, business_id: 1, created_at: new Date().toISOString(), actor: 'owner', kind,
-    platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_code: null, reason_text, evidence: {}, status: 'applied', reverts_id: null,
+    platform: entity_type === 'ad' ? 'direct' : null, entity_type, entity_id, reason_code: kind === 'resume' && entity_type === 'business' ? 'OWNER_RESUME' : null, reason_text, evidence: {}, status: 'applied', reverts_id: null,
     can_revert: kind === 'pause' && entity_type === 'business', revert_warning: null });
 }
 export function mockRevert(id: number): HistoryEntry {

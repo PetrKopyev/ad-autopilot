@@ -147,6 +147,18 @@ def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], 
     return None
 
 
+def units_below_minimum(
+    units: dict[str, tuple[list[dict], PlatformLimit]], minimums: dict[str, dict[str, int]], today: date
+) -> str | None:
+    """Почему площадка не примет лимит одной из кампаний запуска: у Директа лимит площадки делится между
+    кампаниями по услугам, и check_platforms, сверяющий лимит всей площадки, этого не видит."""
+    for key, (_, limit) in units.items():
+        platform = campaign_platform(key)
+        if reason := below_minimum(platform, limit, minimums[platform], today):
+            return reason
+    return None
+
+
 def campaign_name(business: Business, key: str, groups: list[dict]) -> str:
     services = [group["service"] for group in groups if group.get("service")]
     if ":" not in key or not services:
@@ -288,12 +300,14 @@ class LaunchService:
                     raise LaunchBlocked(reasons)
                 limits = budget_limits(business, platforms, today, self.domain)
                 adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
+                units = campaign_units(plan, platforms, limits, minimums, today)
+                if reason := units_below_minimum(units, minimums, today):
+                    raise LaunchBlocked([reason])
             except LaunchBlocked:
                 # Повтора не будет: созданное прошлой попыткой останавливается сейчас, а не ждёт воркера.
                 if unsettled:
                     await self.stop_failed(plan, plan.payload["launch"].get("reason"), self.adapters(plan), now)
                 raise
-            units = campaign_units(plan, platforms, limits, minimums, today)
             self.save_launch(
                 plan,
                 started_at=now.isoformat(),
@@ -377,7 +391,20 @@ class LaunchService:
         limits = self.retry_limits(business, plan, today)
         adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
         units = campaign_units(plan, platforms, limits, minimums, today)
-        self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
+        if reason := units_below_minimum(units, minimums, today):
+            raise LaunchBlocked([reason])
+        self.save_launch(
+            plan,
+            started_at=now.isoformat(),
+            error=None,
+            reason=None,
+            batches={
+                key: ids
+                for key, ids in plan.payload["launch"].get("batches", {}).items()
+                if campaign_platform(key) not in platforms
+            }
+            | {key: [group["id"] for group in groups] for key, (groups, _) in units.items()},
+        )
         try:
             created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
             failures, awaiting = await self.activate(

@@ -232,6 +232,8 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
     from app.config import get_domain_settings
 
     domain = get_domain_settings()
+    # После остановки страж каждые 30 минут видит тот же перерасход: уведомляем один раз — когда остановил.
+    already_stopped = business.status == "budget_stop"
     pending_stop = worker.metadata(business).get("pending_stop")
     if pending_stop:
         try:
@@ -305,7 +307,8 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             budget_stop=True,
             reason_params={"spent": result.spent, "budget": business.month_budget_kop, "margin": result.stop_margin},
         )
-        worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
+        if not already_stopped:
+            worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
     elif business.status == "running":
         await balance_notice(worker, business)
 

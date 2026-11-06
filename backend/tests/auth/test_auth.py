@@ -9,7 +9,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from app.db.models import Business, PlatformAccount, User
+from app.db.models import Business, Campaign, PlatformAccount, User
 from app.services.changes import ChangeConflict, ServerBusy
 
 from .conftest import FakeRepository, hash_token
@@ -300,6 +300,32 @@ def test_partial_permissions_require_reauth_and_reconnect_updates_account(
         (repository.accounts[1].business_id, "direct")
     ]
     assert repository.accounts[1].refresh_token_enc is None
+
+
+def test_other_direct_account_does_not_replace_account_with_our_campaigns(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """Важно 4 круга 13: вход в другой кабинет Директа, пока в прежнем наши кампании, не перезаписывает строку
+    кабинета — понятный отказ; тот же логин подключается заново как раньше, после отключения прежнего — и другой."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="direct", external_id="701"))
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
+    mock_yandex.post("https://oauth.yandex.ru/token").respond(json={"access_token": "other"})
+    response = callback(client, start(client, "direct")["state"], "other-code")
+    assert response.status_code == 409 and "отключите прежний кабинет" in response.text
+    account = repository.accounts[1]
+    assert (account.external_login, account.access_token_enc) == ("advertiser", "test-access")
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    assert callback(client, start(client, "direct")["state"], "same-code").status_code == 303
+    assert repository.accounts[1].access_token_enc == "other"
+    repository.accounts[1].status = "revoked"
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
+    assert callback(client, start(client, "direct")["state"], "after-code").status_code == 303
+    assert repository.accounts[1].external_login == "other-advertiser"
 
 
 def test_disconnect_requires_csrf_and_ownership(

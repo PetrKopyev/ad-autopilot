@@ -545,6 +545,7 @@ export const copy = {
     why: 'Почему',
     noRevertBudget: 'Это защита бюджета, отменить нельзя.',
     noRevertRevert: 'Это отмена изменения, откатить её нельзя.',
+    noRevertTurnOn: 'Это включение рекламы, отдельно его не отменить. Остановить рекламу можно кнопкой «Остановить» на главной.',
     today: (date: string) => `Сегодня, ${date}`,
     yesterday: (date: string) => `Вчера, ${date}`,
     count: (count: number) => `${count} ${plural(count, 'запись', 'записи', 'записей')}`,

@@ -107,7 +107,13 @@ def client_window(as_of: date) -> tuple[date, date]:
     return week_start - timedelta(weeks=4), week_start - timedelta(days=1)
 
 
-def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], as_of: date) -> dict:
+def aggregate_clients(
+    rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], as_of: date, goal_ids: Sequence[int]
+) -> dict:
+    """Цена клиента за окно client_window — одна на «Клиентах» и «Статистике». Неделя без обращений известна точно:
+    клиентов 0, её расход входит в цену. Неделя с обращениями без ответа (или с ответом «не знаю») неизвестна:
+    её расход нельзя делить на клиентов отвеченных недель, она исключается и показывается в unknown_weeks. Пока нет
+    ни одного ответа, клиентов не знаем (None)."""
     date_from, date_to = client_window(as_of)
     answers = {
         survey.week_start: survey.clients_count
@@ -117,12 +123,16 @@ def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], 
         and survey.clients_count is not None
         and survey.answered_at.astimezone(MOSCOW).date() <= as_of
     }
-    # Расход неизвестных недель нельзя делить на клиентов из отвеченных недель.
-    cost_kop = sum(
-        row.cost_kop
-        for row in rows
-        if date_from <= row.date <= date_to and row.date - timedelta(days=row.date.weekday()) in answers
-    )
+    spend: dict[date, int] = defaultdict(int)
+    leads: dict[date, int] = defaultdict(int)
+    for row in rows:
+        if date_from <= row.date <= date_to:
+            week = row.date - timedelta(days=row.date.weekday())
+            spend[week] += row.cost_kop
+            leads[week] += lead_count(row.conversions, goal_ids)
+    quiet = {week for week in spend if not leads[week] and week not in answers}
+    unknown = {week for week in leads if leads[week] and week not in answers}
+    cost_kop = sum(spend[week] for week in answers.keys() | quiet)
     clients = sum(answers.values()) if answers else None
     return {
         "from": date_from,
@@ -131,7 +141,7 @@ def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], 
         "cost_kop": cost_kop,
         "cost_per_client_kop": money_per(cost_kop, clients) if clients is not None else None,
         "answered_weeks": len(answers),
-        "unknown_weeks": 4 - len(answers),
+        "unknown_weeks": len(unknown),
     }
 
 
@@ -235,6 +245,7 @@ class StatsService:
             self.repository.rows(business.id, clients_from, clients_to),
             self.repository.surveys(business.id, clients_from, clients_to),
             as_of,
+            business.lead_goal_ids,
         )
         metrics.update(clients=clients["clients"], cost_per_client_kop=clients["cost_per_client_kop"])
         budget = aggregate_budget(

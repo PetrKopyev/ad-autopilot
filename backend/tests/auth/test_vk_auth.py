@@ -12,10 +12,10 @@ from pydantic import SecretStr
 from sqlalchemy.dialects.postgresql import dialect
 
 from app.auth import vk
-from app.db.models import Business, PlatformAccount, User
+from app.db.models import Business, Campaign, PlatformAccount, User
 from app.platforms.base import AuthExpired, AuthSession
 
-from .conftest import FakeRepository, hash_token
+from .conftest import FakeRepository, campaign_id, hash_token
 
 TOKEN = "https://ads.vk.com/api/v2/oauth2/token.json"
 USER = "https://ads.vk.com/api/v2/user.json"
@@ -32,11 +32,16 @@ class FakeDB:
         )
 
     def scalar(self, statement):
+        if statement.column_descriptions[0]["entity"] is Campaign:
+            return campaign_id(self.repository, statement)
         return next(self.reads)
 
     def add(self, account: PlatformAccount) -> None:
         account.id = len(self.repository.accounts) + 1
         self.repository.accounts[account.id] = account
+
+    def rollback(self) -> None:
+        pass
 
     def commit(self) -> None:
         for account in self.repository.accounts.values():
@@ -250,6 +255,33 @@ def test_reconnect_updates_same_account(client, repository, vk_api) -> None:
         assert client.get("/api/auth/vk/callback", params={"state": state, "code": f"code-{access}"}).status_code == 303
     assert list(repository.accounts) == [1] and repository.accounts[1].access_token_enc == "second"
     assert repository.resumes == [(repository.accounts[1].business_id, "vk")] * 2
+
+
+def test_other_vk_account_does_not_replace_account_with_our_campaigns(client, repository, vk_api) -> None:
+    """Важно 4 круга 13: вход в другой кабинет VK, пока в прежнем наши кампании, не перезаписывает строку кабинета —
+    понятный отказ; тот же кабинет подключается заново как раньше, после отключения прежнего — и другой."""
+    sign_in(client, repository)
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "code-1"}).status_code == 303
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="vk", external_id="vk-1"))
+    vk_api.get(USER).respond(json={"id": 888, "username": "other"})
+    vk_api.post(TOKEN).respond(json=token_reply(access="other"))
+    state = start(client)["state"]
+    response = client.get("/api/auth/vk/callback", params={"state": state, "code": "code-2"})
+    assert response.status_code == 409 and "другой кабинет" in response.json()["detail"]
+    response = key_request(client, repository)
+    assert response.status_code == 409 and "отключите прежний" in response.json()["detail"]
+    account = repository.accounts[1]
+    assert (account.external_login, account.access_token_enc) == ("777", "vk-access")
+    vk_api.get(USER).respond(json={"id": 777, "username": "vk-owner"})
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "code-3"}).status_code == 303
+    assert repository.accounts[1].access_token_enc == "other"
+    repository.accounts[1].status = "revoked"
+    vk_api.get(USER).respond(json={"id": 888, "username": "other"})
+    state = start(client)["state"]
+    assert client.get("/api/auth/vk/callback", params={"state": state, "code": "code-4"}).status_code == 303
+    assert repository.accounts[1].external_login == "888"
 
 
 def test_manual_key_requires_csrf_and_session(client, repository, vk_api) -> None:

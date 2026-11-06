@@ -5,10 +5,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.db.models import Business, LeadsSurvey
-from app.domain.rules import client_cac, client_conversion, ref_cpl
+from app.domain.rules import client_conversion
 from app.domain.types import ClientAnswer
 from app.services.onboarding import NotFound
-from app.services.stats import StatsRepository, aggregate, client_window
+from app.services.stats import StatsRepository, aggregate, aggregate_clients, client_window
 
 
 class ClientsRepository(StatsRepository):
@@ -28,10 +28,16 @@ class ClientsRepository(StatsRepository):
         )
 
     def create_question(self, business_id: int, week_start: date, leads: int, now: datetime) -> None:
+        # Обращения недели досчитываются после вопроса: пока ответа нет, число в вопросе догоняет отчёты,
+        # иначе ответ «клиентов больше, чем было обращений в вопросе» отклонялся бы.
         self.db.execute(
             insert(LeadsSurvey)
             .values(business_id=business_id, week_start=week_start, leads_count=leads, asked_at=now)
-            .on_conflict_do_nothing(index_elements=[LeadsSurvey.business_id, LeadsSurvey.week_start])
+            .on_conflict_do_update(
+                index_elements=[LeadsSurvey.business_id, LeadsSurvey.week_start],
+                set_={"leads_count": leads},
+                where=LeadsSurvey.answered_at.is_(None),
+            )
         )
 
     def save(self) -> None:
@@ -86,16 +92,11 @@ class ClientsService:
     def metrics(self, business: Business, questions: list[LeadsSurvey], today: date) -> dict:
         date_from, date_to = client_window(today)
         rows = self.repository.rows(business.id, date_from, date_to)
-        spend: dict[date, int] = {}
-        for row in rows:
-            week = row.date - timedelta(days=row.date.weekday())
-            spend[week] = spend.get(week, 0) + row.cost_kop
         answers = [
             ClientAnswer(
                 week_end=item.week_start + timedelta(days=6),
                 leads=item.leads_count,
                 clients=item.clients_count if item.answered_at is not None else None,
-                spend=spend.get(item.week_start, 0),
             )
             for item in questions
             if item.week_start + timedelta(days=6) <= today
@@ -103,8 +104,9 @@ class ClientsService:
         business.lead_to_client_rate = client_conversion(answers)
         return {
             "lead_to_client_rate": business.lead_to_client_rate,
-            "cost_per_client_kop": client_cac(answers, date_to),
-            "ref_cpl_kop": ref_cpl(business.avg_check_kop, (), today, answers),
+            "cost_per_client_kop": aggregate_clients(rows, questions, today, business.lead_goal_ids)[
+                "cost_per_client_kop"
+            ],
             "from": date_from,
             "to": date_to,
         }

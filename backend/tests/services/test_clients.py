@@ -1,16 +1,30 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.db.models import Business, LeadsSurvey
-from app.services.clients import ClientsService
+from app.services.clients import ClientsRepository, ClientsService
 from app.services.onboarding import NotFound
-from app.services.stats import StatsRow
+from app.services.stats import StatsRow, aggregate_clients
 
 TODAY = date(2026, 10, 26)
 WEEK = date(2026, 10, 19)
+
+
+class AnsweredToday(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 10, 26, 9, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def answered_today(monkeypatch):
+    # Цена клиента учитывает только ответы, данные не позже дня расчёта (aggregate_clients).
+    monkeypatch.setattr("app.services.clients.datetime", AnsweredToday)
 
 
 @pytest.fixture
@@ -47,6 +61,16 @@ def test_question_uses_previous_week_and_selected_goals(setup):
     assert business.lead_to_client_rate == Decimal("0.3")
 
 
+def test_unanswered_question_catches_up_with_late_leads():
+    """Мелочь 5 круга 13: обращения недели досчитались после вопроса — пока ответа нет, число обращений в вопросе
+    обновляется, и ответ «12 клиентов из 12» не получает 422; отвеченный вопрос не меняется."""
+    db = MagicMock()
+    ClientsRepository(db).create_question(1, WEEK, 12, datetime(2026, 10, 26, tzinfo=UTC))
+    sql = str(db.execute.call_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "ON CONFLICT (business_id, week_start) DO UPDATE SET leads_count" in sql
+    assert "WHERE leads_survey.answered_at IS NULL" in sql
+
+
 def test_no_question_without_leads(setup):
     service, repository, business, _ = setup
     repository.rows.return_value = []
@@ -68,7 +92,8 @@ def test_answer_overwrites_and_updates_rate_and_reference(setup):
     result = service.answer(business, WEEK, 2, TODAY)
     assert result["cost_per_client_kop"] == 5000
     assert business.lead_to_client_rate == Decimal("0.25")
-    assert result["ref_cpl_kop"] == 750
+    # Опорную цену считает автопилот по объявлениям (optimize.reference); экрану «Клиенты» она не нужна.
+    assert "ref_cpl_kop" not in result
     result = service.answer(business, WEEK, 10, TODAY)
     assert question.clients_count == 10
     assert result["cost_per_client_kop"] == 1000
@@ -93,7 +118,7 @@ def test_other_business_question_is_not_found(setup):
     repository.save.assert_not_called()
 
 
-def test_price_excludes_old_weeks_and_unknown_week_blocks_price(setup):
+def test_price_excludes_old_weeks_and_unanswered_week(setup):
     service, repository, business, question = setup
     old = LeadsSurvey(
         business_id=1,
@@ -104,14 +129,27 @@ def test_price_excludes_old_weeks_and_unknown_week_blocks_price(setup):
     )
     repository.questions.return_value = [question, old]
     assert service.answer(business, WEEK, 2, TODAY)["cost_per_client_kop"] == 5000
-    repository.questions.return_value.append(
-        LeadsSurvey(
-            business_id=1,
-            week_start=date(2026, 10, 12),
-            leads_count=5,
-        )
-    )
-    assert service.answer(business, WEEK, 2, TODAY)["cost_per_client_kop"] is None
+    repository.questions.return_value.append(LeadsSurvey(business_id=1, week_start=date(2026, 10, 12), leads_count=5))
+    repository.rows.return_value.append(replace(repository.rows.return_value[0], date=date(2026, 10, 12)))
+    # Неделя с обращениями без ответа не делит свой расход на чужих клиентов: она исключена, как на «Статистике».
+    assert service.answer(business, WEEK, 2, TODAY)["cost_per_client_kop"] == 5000
+
+
+def test_weeks_without_leads_count_their_spend_on_both_screens(setup):
+    """Важно 2 круга 13: 4 недели по 5 000 ₽, в трёх обращений нет, в четвёртой 2 обращения и 1 клиент —
+    клиент стоил 20 000 ₽, и «Клиенты», и «Статистика» показывают одно и то же."""
+    service, repository, business, question = setup
+    base = repository.rows.return_value[0]
+    weeks = [date(2026, 9, 28), date(2026, 10, 5), date(2026, 10, 12), WEEK]
+    rows = [
+        replace(base, date=week, cost_kop=500_000, conversions={"1": 2} if week == WEEK else {}) for week in weeks
+    ]
+    repository.rows.return_value = rows
+    question.leads_count = 2
+    assert service.answer(business, WEEK, 1, TODAY)["cost_per_client_kop"] == 2_000_000
+    window = aggregate_clients(rows, [question], TODAY, business.lead_goal_ids)
+    assert (window["clients"], window["cost_kop"], window["cost_per_client_kop"]) == (1, 2_000_000, 2_000_000)
+    assert (window["answered_weeks"], window["unknown_weeks"]) == (1, 0)
 
 
 def test_api_requires_owner_and_csrf(setup, monkeypatch):

@@ -6,7 +6,7 @@ import pytest
 from cryptography.fernet import InvalidToken
 from integration.harness import BUDGET_KOP, make_world
 
-from app.db.models import BudgetLedger, Campaign, ChangeLog
+from app.db.models import BudgetLedger, Campaign, ChangeLog, WorkerRun
 from app.domain.budget import stop_margin
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.fake import FakeAdapter
@@ -135,6 +135,24 @@ async def test_spend_equal_to_budget_stops_and_is_recorded(monkeypatch) -> None:
     ledger = world.ledger()[0]
     assert ledger.spent_kop == BUDGET_KOP and ledger.hard_stop_at == world.clock.now
     assert world.changes(reason_code="BUDGET_STOP", status="applied")
+
+
+async def test_budget_stop_is_notified_once_not_every_guard_tick(monkeypatch) -> None:
+    """Мелочь 7 круга 13: после остановки по бюджету страж каждые 30 минут видит тот же перерасход — уведомление
+    об остановке одно, а не новое на каждом шаге."""
+    world = await make_world()
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": BUDGET_KOP}, {})))
+    worker = world.worker()
+    for _ in range(3):
+        await worker.run("budget_guard", 1)
+        world.clock.advance(hours=0.5)
+    assert world.business.status == "budget_stop"
+    notices = [
+        row
+        for row in world.repository.rows(WorkerRun, kind="notification")
+        if row.log[0]["reason_code"] == "BUDGET_STOP"
+    ]
+    assert len(notices) == 1
 
 
 async def test_reverting_owner_stop_resumes_business() -> None:

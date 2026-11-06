@@ -592,10 +592,11 @@ async def test_all_platforms_failed_launch_stops_everything_and_can_be_repeated(
     assert statuses == {"direct": "active", "vk": "active"}
 
 
-async def test_launch_record_of_launched_platform_can_be_reverted(tmp_path: Path) -> None:
-    """В3: после частичного запуска запись запуска Директа откатывается как обычно (реклама останавливается),
-    а информационная запись об отказавшей площадке — нет: операций и откатывать нечего."""
-    from app.services.rollback import RollbackService, can_revert
+async def test_launch_record_is_not_reverted_by_journal(tmp_path: Path) -> None:
+    """В3 круга 7 и Важно 1 круга 13: запись запуска Директа отдельной отменой не откатывается — бизнес остался бы
+    «работает» при остановленных кампаниях; останавливают рекламу на главной. Информационная запись об отказавшей
+    площадке тоже не откатывается: операций нет."""
+    from app.services.rollback import TURN_ON, RollbackService, can_revert
 
     adapters = {"direct": FakeAdapter(), "vk": FailingCreate()}
     world, plan = await ready(tmp_path, adapters=adapters)
@@ -604,15 +605,15 @@ async def test_launch_record_of_launched_platform_can_be_reverted(tmp_path: Path
     launches = [row for row in world.repository.rows(ChangeLog, kind="launch") if row.business_id == world.business.id]
     direct_launch = next(row for row in launches if row.platform == "direct" and row.status == "applied")
     failed_record = next(row for row in launches if row.reason_code == "LAUNCH_PLATFORM_FAILED")
-    assert can_revert(direct_launch, world.business)
+    assert not can_revert(direct_launch, world.business)
     assert not can_revert(failed_record, world.business)
     rollback = RollbackService(recovery_worker(world).repository, dry_run=False)
-    revert = await rollback.revert(
-        direct_launch.id, business_id=world.business.id, adapter=world.adapters["direct"], now=NOW
-    )
-    assert revert.status == "applied"
+    with pytest.raises(ChangeConflict, match=TURN_ON):
+        await rollback.revert(
+            direct_launch.id, business_id=world.business.id, adapter=world.adapters["direct"], now=NOW
+        )
     direct = next(item for item in campaigns(world) if item.platform == "direct")
-    assert (await states(world, direct))[direct.external_id].status == "paused_auto"
+    assert (await states(world, direct))[direct.external_id].status == "active"
 
 
 async def test_moderation_waiting_launch_finishes_and_is_brought_home_by_reconcile(tmp_path: Path) -> None:
@@ -2797,6 +2798,93 @@ def test_launch_started_before_campaigns_per_service_keeps_one_direct_campaign()
     limit = budget_limits(Business(city="Самара", month_budget_kop=BUDGET_KOP), ["direct"], TODAY)
     units = plan_module.campaign_units(plan, ["direct"], limit, {"direct": {}}, TODAY)
     assert list(units) == ["direct"] and [group["id"] for group in units["direct"][0]] == [1, 2]
+
+
+THURSDAY, SUNDAY = date(2026, 1, 1), date(2026, 1, 4)
+DIRECT_MINIMUM = {"weekly_limit_kop": 36_600}
+
+
+def thursday_layout_plan(campaigns: dict[str, int]) -> tuple[Plan, dict]:
+    groups = [{"id": index, "platform": "direct", "service": f"Услуга {index}"} for index in (1, 2, 3)]
+    batches = {f"direct:{index}": [index] for index in (1, 2, 3)}
+    plan = Plan(
+        business_id=1,
+        status="failed",
+        payload={"groups": groups, "launch": {"campaigns": campaigns, "batches": batches}},
+    )
+    return plan, budget_limits(Business(city="Самара", month_budget_kop=4_000_000), ["direct"], SUNDAY)
+
+
+def test_retry_on_sunday_lays_out_campaigns_again_instead_of_thursday_layout() -> None:
+    """Важно 3 круга 13: 40 000 ₽, три услуги — в четверг три кампании, запуск упал до создания. Повтор в воскресенье
+    не берёт раскладку четверга (по 316 ₽ на кампанию — ниже минимума Директа 366 ₽), а раскладывает заново."""
+    plan, limits = thursday_layout_plan({})
+    units = plan_module.campaign_units(plan, ["direct"], limits, {"direct": DIRECT_MINIMUM}, SUNDAY)
+    assert {key: [group["id"] for group in groups] for key, (groups, _) in units.items()} == {"direct:1": [1, 2, 3]}
+    _, part = units["direct:1"]
+    assert weekly_limit(part.daily_limit, part.remaining_cap, SUNDAY) >= DIRECT_MINIMUM["weekly_limit_kop"]
+    assert launch_module.units_below_minimum(units, {"direct": DIRECT_MINIMUM}, SUNDAY) is None
+
+
+def test_retry_keeps_created_campaign_and_names_minimum_of_each_campaign() -> None:
+    """Кампания, заведённая в четверг, сохраняет свою услугу; остальные раскладываются заново, а если лимит
+    какой-то кампании ниже минимума Директа — понятная причина до создания кампаний."""
+    plan, limits = thursday_layout_plan({"direct:1": 7})
+    units = plan_module.campaign_units(plan, ["direct"], limits, {"direct": DIRECT_MINIMUM}, SUNDAY)
+    assert {key: [group["id"] for group in groups] for key, (groups, _) in units.items()} == {
+        "direct:1": [1],
+        "direct:2": [2, 3],
+    }
+    reason = launch_module.units_below_minimum(units, {"direct": DIRECT_MINIMUM}, SUNDAY)
+    assert "366 ₽" in reason and "с понедельника" in reason
+
+
+class FailingWeeklyMinimum(WeeklyMinimum):
+    fail = True
+    trees = 0
+
+    async def create_campaign_tree(self, plan_part):
+        self.trees += 1
+        if self.fail:
+            raise PlatformError("Директ временно недоступен.", status_code=503)
+        return await super().create_campaign_tree(plan_part)
+
+
+async def test_retry_of_failed_direct_on_sunday_checks_minimum_of_each_campaign(tmp_path: Path) -> None:
+    """Важно 3 круга 13 через запуск: при 40 000 ₽ VK выключен, в четверг Директ отказал на первой из трёх кампаний.
+    Повтор в воскресенье не создаёт кампаний с лимитом ниже минимума Директа — понятный отказ до создания."""
+    adapters = {"direct": FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"]), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"], adapters=adapters)
+    world.business.month_budget_kop = 4_000_000
+    plan = await world.plans.get_plan(world.business.id, NOW, THURSDAY)
+    with pytest.raises(LaunchFailed):
+        await world.launches.launch(world.business.id, plan["id"], False, NOW, THURSDAY)
+    stored = world.repository.latest_plan(world.business.id).payload["launch"]
+    assert sorted(key for key in stored["batches"] if key.startswith("direct:")) == ["direct:1", "direct:2", "direct:3"]
+    adapters["direct"].fail = False
+    trees = adapters["direct"].trees
+    sunday = NOW + timedelta(days=3)
+    with pytest.raises(LaunchBlocked, match="366 ₽"):
+        await world.launches.launch(world.business.id, plan["id"], False, sunday, SUNDAY)
+    assert adapters["direct"].trees == trees
+    assert not any(item.external_id for item in campaigns(world) if item.platform == "direct")
+
+
+async def test_retry_of_partial_launch_on_sunday_checks_minimum_of_each_campaign(tmp_path: Path) -> None:
+    """То же в повторе площадки частичного запуска (retry_platforms): VK работает, Директ в четверг отказал;
+    в воскресенье кампании Директа не создаются с лимитом ниже минимума, VK не тронут."""
+    adapters = {"direct": FailingWeeklyMinimum(DIRECT_MINIMUM["weekly_limit_kop"]), "vk": FakeAdapter()}
+    world, plan = await ready_with_services(tmp_path, ["Маникюр", "Педикюр", "Наращивание ресниц"], adapters=adapters)
+    plan = await world.plans.get_plan(world.business.id, NOW, THURSDAY)
+    result = await world.launches.launch(world.business.id, plan["id"], False, NOW, THURSDAY)
+    assert set(result["platform_errors"]) == {"direct"}
+    adapters["direct"].fail = False
+    trees = adapters["direct"].trees
+    with pytest.raises(LaunchBlocked, match="366 ₽"):
+        await world.launches.launch(world.business.id, plan["id"], False, NOW + timedelta(days=3), SUNDAY)
+    assert adapters["direct"].trees == trees
+    vk = next(item for item in campaigns(world) if item.platform == "vk")
+    assert (await states(world, vk))[vk.external_id].status == "active"
 
 
 async def test_direct_groups_get_negative_phrases_without_words_of_their_own_service(tmp_path: Path) -> None:

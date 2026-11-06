@@ -28,6 +28,7 @@ from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
 from app.services.rollback import (
     NOTHING_TO_REVERT,
+    TURN_ON,
     ConfirmationRequired,
     RollbackService,
     can_revert,
@@ -821,6 +822,37 @@ async def test_launch_info_record_without_operations_is_not_revertable(client, r
     assert http.get("/api/history").json()["items"][0]["can_revert"] is False
     response = http.post("/api/history/5/revert", headers={"X-CSRF-Token": "test-csrf"})
     assert response.status_code == 409 and response.json()["detail"] == NOTHING_TO_REVERT
+
+
+@pytest.mark.parametrize(
+    "kind,reason_code",
+    [("launch", "LAUNCH"), ("resume", "OWNER_RESUME"), ("resume", "BUDGET_RESUME"), ("resume", "MONTH_RESUME")],
+)
+async def test_turning_ads_on_is_not_reverted_by_journal(client, repository, tree, kind, reason_code):
+    """Важно 1 круга 13: откат запуска или возобновления остановил бы кампании при бизнесе «работает», и
+    «Продолжить» их не включило бы. Кнопки нет, сервер отвечает 409 с подсказкой про «Остановить»;
+    прочие откатываемые записи — как раньше."""
+    http, resolver, _ = client
+    adapter, refs = tree
+    await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto"))
+    start = Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")
+    turned_on = await applied(
+        repository,
+        adapter,
+        refs,
+        operations=[start],
+        kind=kind,
+        reason_code=reason_code,
+        reason_params={"budget": 4_000_000},
+    )
+    ad = await applied(repository, adapter, refs)
+    repository.history.return_value = ([ad, turned_on], 2)
+    repository.get_owned.return_value = turned_on
+    resolver.return_value = adapter
+    assert [item["can_revert"] for item in http.get("/api/history").json()["items"]] == [True, False]
+    response = http.post(f"/api/history/{turned_on.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 409 and response.json()["detail"] == TURN_ON
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
 
 
 @pytest.mark.parametrize(

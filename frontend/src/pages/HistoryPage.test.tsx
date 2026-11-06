@@ -99,6 +99,15 @@ it('запись об отмене изменения объясняет, что
   expect(screen.queryByText(labels.noRevertBudget)).toBeNull();
 });
 
+it('запуск и возобновление без кнопки отмены, с подсказкой, как остановить рекламу', async () => {
+  serve([{ ...entry(1, 'launch'), can_revert: false, reason_code: 'LAUNCH' },
+    { ...entry(2, 'resume'), can_revert: false, reason_code: 'OWNER_RESUME' }, entry(3, 'budget')]);
+  render(<HistoryPage />);
+  await screen.findByText('Запись 1');
+  expect(screen.getAllByText(labels.noRevertTurnOn)).toHaveLength(2);
+  expect(screen.getAllByRole('button', { name: copy.history.undo })).toHaveLength(1);
+});
+
 it('пояснение не мешает отмене: кнопка у откатываемой записи, пояснение — только у защищённой', async () => {
   serve([entry(1, 'budget'), { ...entry(2, 'pause'), actor: 'system', can_revert: false, reason_code: 'BUDGET_STOP' }]);
   render(<HistoryPage />);

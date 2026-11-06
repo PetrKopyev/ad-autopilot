@@ -150,7 +150,7 @@ def test_clients_use_only_answered_weeks_and_matching_cost() -> None:
         survey(TODAY, 10),
     ]
     rows = [stats_row(date=item.week_start) for item in surveys]
-    result = aggregate_clients(rows, surveys, TODAY)
+    result = aggregate_clients(rows, surveys, TODAY, [1, 2])
     assert result["clients"] == 5
     assert result["cost_kop"] == 3003
     assert result["cost_per_client_kop"] == 601
@@ -164,21 +164,21 @@ def test_clients_use_only_answered_weeks_and_matching_cost() -> None:
 def test_unknown_clients_differ_from_zero(
     clients: int | None, answered_at: datetime | None, expected: int | None
 ) -> None:
-    result = aggregate_clients([], [survey(date(2026, 10, 19), clients, answered_at)], TODAY)
+    result = aggregate_clients([], [survey(date(2026, 10, 19), clients, answered_at)], TODAY, [1])
     assert result["clients"] == expected
     assert result["cost_per_client_kop"] is None
 
 
 def test_historical_clients_ignore_later_answers() -> None:
-    result = aggregate_clients([], [survey(date(2026, 10, 12), 5)], date(2026, 10, 19))
+    result = aggregate_clients([], [survey(date(2026, 10, 12), 5)], date(2026, 10, 19), [1])
     assert result["clients"] is None
 
 
 def test_client_answer_date_is_taken_in_moscow() -> None:
     # 22:00 UTC 18 октября — уже 19 октября по Москве: на 18-е ответа ещё не было.
     late = survey(date(2026, 10, 5), 5, datetime(2026, 10, 18, 22, tzinfo=UTC))
-    assert aggregate_clients([], [late], date(2026, 10, 18))["clients"] is None
-    assert aggregate_clients([], [late], date(2026, 10, 19))["clients"] == 5
+    assert aggregate_clients([], [late], date(2026, 10, 18), [1])["clients"] is None
+    assert aggregate_clients([], [late], date(2026, 10, 19), [1])["clients"] == 5
 
 
 def test_month_budget_uses_snapshots_without_double_counting(rows: list[StatsRow]) -> None:

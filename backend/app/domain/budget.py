@@ -267,13 +267,20 @@ def split_campaign_limits(limit: PlatformLimit, batches: Sequence[Sequence[str]]
 
 
 def campaign_batches(
-    limit: PlatformLimit, groups: Sequence[str], fits: Callable[[PlatformLimit], bool]
+    limit: PlatformLimit,
+    groups: Sequence[str],
+    fits: Callable[[PlatformLimit], bool],
+    kept: Sequence[Sequence[str]] = (),
 ) -> list[list[str]]:
     """Группы площадки по кампаниям: кампания на группу, если лимит площадки даёт каждой не меньше её минимума
-    (fits), иначе кампаний меньше и группы раскладываются по ним по кругу. Одна кампания — все группы вместе."""
-    for count in range(len(groups), 1, -1):
+    (fits), иначе кампаний меньше и группы раскладываются по ним по кругу. Одна кампания — все группы вместе.
+    kept — кампании, уже заведённые прошлой попыткой запуска: их состав не меняется, но лимит площадки они делят
+    с новыми, и минимум проверяется у всех."""
+    if kept and not groups:
+        return []
+    for count in range(len(groups), 0 if kept else 1, -1):
         batches = [list(groups[index::count]) for index in range(count)]
-        if all(fits(part) for part in split_campaign_limits(limit, batches)):
+        if all(fits(part) for part in split_campaign_limits(limit, [*kept, *batches])):
             return batches
     return [list(groups)]
 

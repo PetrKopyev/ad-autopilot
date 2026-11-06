@@ -63,6 +63,11 @@ SUPERSEDED = "Статус этой рекламы с тех пор уже ме�
 
 NOTHING_TO_REVERT = "Эта запись информационная: она ничего не меняла, откатывать нечего."
 
+# Запуск и возобновления включают рекламу вместе с бизнесом: откат одной записи остановил бы кампании, а бизнес
+# остался бы «работает», и «Продолжить» их уже не включило бы. Остановить рекламу можно на главной.
+TURNS_ON = {"LAUNCH", "OWNER_RESUME", "BUDGET_RESUME", "MONTH_RESUME"}
+TURN_ON = "Это включение рекламы, отдельно его не отменить. Остановить рекламу можно кнопкой «Остановить» на главной."
+
 
 def reverts_by_experiment(change: ChangeLog) -> bool:
     """Записи проверок объявлений откатываются по связанному эксперименту, а не по собственным операциям:
@@ -126,6 +131,7 @@ def can_revert(
         and change.kind != "revert"
         # Записи о маркировке информационные: операций нет, откатывать нечего.
         and change.kind != "marking"
+        and change.reason_code not in TURNS_ON
         # Информационные записи без операций (например, о пересозданном содержимом кабинета) не откатываются:
         # обратных операций не существует, и откат упал бы с ошибкой. Исключение — записи проверок объявлений.
         and (bool(change.operations) or reverts_by_experiment(change))
@@ -272,6 +278,8 @@ class RollbackService:
                     raise ChangeConflict(NOTHING_TO_REVERT)
                 if budget_protection(original, business):
                     raise ChangeConflict("Это защита бюджета, отменить нельзя.")
+                if original.reason_code in TURNS_ON:
+                    raise ChangeConflict(TURN_ON)
                 if turns_on_replaced(original, replaced):
                     raise ChangeConflict(REPLACED)
                 if original.id in overridden:

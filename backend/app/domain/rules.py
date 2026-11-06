@@ -55,15 +55,6 @@ def client_conversion(answers: Sequence[ClientAnswer], settings: DomainSettings 
     )
 
 
-def client_cac(answers: Sequence[ClientAnswer], today: date, settings: DomainSettings = DEFAULT_SETTINGS) -> int | None:
-    start = today - timedelta(weeks=settings.client_window_weeks)
-    window = [answer for answer in answers if start < answer.week_end <= today]
-    if not window or any(answer.clients is None for answer in window):
-        return None
-    clients = sum(answer.clients for answer in window)
-    return sum(answer.spend for answer in window) // clients if clients else None
-
-
 def market_cpl(ads: Sequence[AdSnapshot], today: date, settings: DomainSettings = DEFAULT_SETTINGS) -> int | None:
     """Цена обращения, с которой объявления сравниваются между собой: медиана по объявлениям с обращениями."""
     totals = [total_metrics(settled_days(ad.days, today, settings)) for ad in ads]
