@@ -328,15 +328,11 @@ def callback_error_page(status: int, message: str) -> HTMLResponse:
     )
 
 
+# Без встроенного <style>: CSP (default-src 'self') его режет, страница — простая разметка.
 CALLBACK_ERROR_PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Вход не удался — Автопилот рекламы</title>
-<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#eef1f2;
-font-family:system-ui,-apple-system,sans-serif;color:#10222a}main{background:#fff;border-radius:16px;padding:32px;
-max-width:440px;margin:16px}h1{font-size:22px;margin:0 0 12px}p{margin:0 0 24px;line-height:1.5}
-a{display:inline-block;background:#10222a;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;
-font-weight:600}</style></head>
-<body><main><h1>Вход не удался</h1><p>{message}</p><a href="/">Войти заново</a></main></body></html>"""
+<title>Вход не удался — Автопилот рекламы</title></head>
+<body><main><h1>Вход не удался</h1><p>{message}</p><p><a href="/">Войти заново</a></p></main></body></html>"""
 
 
 async def _yandex_callback(

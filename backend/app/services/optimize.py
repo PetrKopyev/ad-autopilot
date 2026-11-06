@@ -41,7 +41,7 @@ from app.domain.types import (
 )
 from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import closed_platforms, read_spend
-from app.services.changes import ChangeConflict, budget_operations
+from app.services.changes import REVIEW, ChangeConflict, budget_operations
 from app.services.experiments import completed_hypotheses, experiment_settings, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
@@ -434,7 +434,20 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         for platform in platforms
     }
     local_groups = worker.repository.rows(AdGroup, business.id)
-    live = {group.id for group in groups if group.active}
+    # Кампания, которую площадка ещё проверяет, считается работающей, как в snapshot — и остановленная нами: лимиты по
+    # плану готовы к одобрению и к «Продолжить», а остаток бюджета не раздаётся другим кампаниям, которые потом
+    # вместе с ней превысили бы его.
+    stopped = set(meta.get("kill_switch_campaigns", []))
+    reviewing = {
+        item.id
+        for item in campaigns
+        if item.review_since is not None
+        and not item.owner_paused
+        and (item.status in {"active", "paused_auto"} or item.id in stopped)
+    }
+    live = {group.id for group in groups if group.active} | {
+        group.external_id for group in local_groups if group.campaign_id in reviewing and group.status == "active"
+    }
     funded = {group.campaign_id for group in local_groups if group.external_id in live}
     # Перенос между площадками не опускает ни одну кампанию площадки ниже её минимума.
     floors = share_floors(
@@ -451,6 +464,23 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     plan = budget_plan(shares)
     group_limits = {group.id: group.daily_limit for group in groups}
     held = set(meta.get("below_minimum", []))
+    # Изменение, которое площадка не подтвердила, не обрывает пересчёт остальных кампаний и продление дат: шаг
+    # провалится в конце и повторится.
+    conflict = None
+
+    async def extend(campaign: Campaign) -> None:
+        adapter = worker.resolve_adapter(business.id, campaign.platform)
+        if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
+            try:
+                await adapter.extend_end_date(campaign.external_id)
+            except PlatformError:
+                worker.notice(
+                    business,
+                    "CAMPAIGN_EXTEND_FAILED",
+                    "Не удалось продлить кампанию в Директе. Повторим при следующем пересчёте лимитов.",
+                    target_id=campaign.external_id,
+                )
+
     # Неиспользуемый вес остаётся у остановленных групп: его получают только хорошие через decide().
     for limit in plan.limits:
         platform_groups = [group for group in groups if group.platform == limit.platform]
@@ -462,8 +492,10 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         for campaign in campaigns:
             if campaign.platform != limit.platform or campaign.platform in closed:
                 continue
+            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+            state = states[campaign.external_id]
             own = {group.external_id for group in local_groups if group.campaign_id == campaign.id}
-            active = {group.id for group in platform_groups if group.id in own and group.active}
+            active = {group.id for group in platform_groups if group.id in own and group.id in live}
             desired_daily = sum(daily[group_id] for group_id in active)
             desired_daily, total_cap = campaign_limits(
                 desired_daily,
@@ -471,8 +503,6 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 day,
                 lifetime.get(campaign.external_id, 0),
             )
-            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-            state = states[campaign.external_id]
             # VK не хранит лимит периода: операцию не создаём (None из get_state дал бы операцию с пустым before),
             # внутренний total_cap продолжает считаться для минимума площадки и учёта.
             budget_fields = [("daily_limit_kop", state.daily_limit_kop, desired_daily)]
@@ -493,25 +523,34 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             if not desired_daily or minimum:
                 if campaign.frozen_until is not None and campaign.frozen_until > worker.clock.now:
                     continue
-                await worker.apply(
-                    business,
-                    campaign,
-                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto")]
-                    if state.status == "active"
-                    else [],
-                    reason_code="BUDGET_REBALANCE",
-                    kind="pause",
-                    actor="system",
-                    reason_text=NO_ACTIVE_ADS
-                    if not active
-                    else "Доступного дневного бюджета нет: кампанию остановили."
-                    if not desired_daily
-                    else f"До конца недели остаток бюджета меньше минимума площадки ({rubles(minimum)} ₽): "
-                    "кампанию остановили. Возобновим, когда бюджета снова хватит."
-                    if campaign.platform == "direct"
-                    else f"Дневной бюджет кампании меньше минимума площадки ({rubles(minimum)} ₽ в день): "
-                    "кампанию остановили. Возобновим, когда бюджета снова хватит.",
-                )
+                try:
+                    await worker.apply(
+                        business,
+                        campaign,
+                        [
+                            Operation(
+                                "set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto"
+                            )
+                        ]
+                        if state.status in {"active", *REVIEW}
+                        else [],
+                        reason_code="BUDGET_REBALANCE",
+                        kind="pause",
+                        actor="system",
+                        reason_text=NO_ACTIVE_ADS
+                        if not active
+                        else "Доступного дневного бюджета нет: кампанию остановили."
+                        if not desired_daily
+                        else f"До конца недели остаток бюджета меньше минимума площадки ({rubles(minimum)} ₽): "
+                        "кампанию остановили. Возобновим, когда бюджета снова хватит."
+                        if campaign.platform == "direct"
+                        else f"Дневной бюджет кампании меньше минимума площадки ({rubles(minimum)} ₽ в день): "
+                        "кампанию остановили. Возобновим, когда бюджета снова хватит.",
+                    )
+                except ChangeConflict as error:
+                    conflict = error
+                    await extend(campaign)
+                    continue
                 if minimum:
                     held.add(campaign.id)
                 else:
@@ -533,7 +572,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
             resume = (
                 campaign.status == "paused_auto"
                 and not campaign.owner_paused
-                and state.status in {"paused_auto", "paused_owner"}
+                and state.status in {"paused_auto", "paused_owner", *REVIEW}
                 and stopped_by_service
                 and (campaign.id in held or zero_pause)
             )
@@ -552,36 +591,31 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 operations.append(
                     Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")
                 )
-            await worker.apply(
-                business,
-                campaign,
-                operations,
-                reason_code="BUDGET_REBALANCE",
-                kind="resume" if resume else "budget",
-                actor="system",
-                reason_text=(
-                    "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
-                    if campaign.id in held
-                    else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+            try:
+                await worker.apply(
+                    business,
+                    campaign,
+                    operations,
+                    reason_code="BUDGET_REBALANCE",
+                    kind="resume" if resume else "budget",
+                    actor="system",
+                    reason_text=(
+                        "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
+                        if campaign.id in held
+                        else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+                    )
+                    if resume
+                    else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
                 )
-                if resume
-                else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
-            )
+            except ChangeConflict as error:
+                conflict = error
+                await extend(campaign)
+                continue
             held.discard(campaign.id)
             # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
             campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
             worker.repository.save(campaign)
-            adapter = worker.resolve_adapter(business.id, campaign.platform)
-            if campaign.platform == "direct" and hasattr(adapter, "extend_end_date"):
-                try:
-                    await adapter.extend_end_date(campaign.external_id)
-                except PlatformError:
-                    worker.notice(
-                        business,
-                        "CAMPAIGN_EXTEND_FAILED",
-                        "Не удалось продлить кампанию в Директе. Повторим при следующем пересчёте лимитов.",
-                        target_id=campaign.external_id,
-                    )
+            await extend(campaign)
         ledger = worker.repository.find(BudgetLedger, business_id=business.id, platform=limit.platform, month=month)
         ledger = ledger or BudgetLedger(business_id=business.id, platform=limit.platform, month=month, spent_kop=0)
         ledger.allocated_kop = plan.authorized * int(shares[limit.platform] * 1_000_000) // 1_000_000
@@ -599,6 +633,8 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         group_limits=group_limits,
         below_minimum=sorted(held),
     )
+    if conflict is not None:
+        raise conflict
     return minimums
 
 

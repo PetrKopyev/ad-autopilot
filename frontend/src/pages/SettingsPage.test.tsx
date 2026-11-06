@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { MemoryRouter } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { copy } from '../copy';
-import { getBusiness, pauseAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
+import { getBusiness, pauseAutopilot, saveBudget, saveBusinessSettings, saveVkGoal } from '../api/settings';
 import type { BusinessSettings } from '../api/settings';
 import { connectAccount, disconnectAccount, getAuthConfig, saveDescription, saveMarking } from '../api/setup';
 import type { Account } from '../api/setup';
@@ -11,7 +11,7 @@ import { getAutopilotStatus } from '../api/screens';
 import { SettingsPage } from './SettingsPage';
 
 vi.mock('../api/settings', async (original) => ({ ...await original<typeof import('../api/settings')>(), getBusiness: vi.fn(),
-  saveBudget: vi.fn(), saveBusinessSettings: vi.fn(), pauseAutopilot: vi.fn(), resumeAutopilot: vi.fn() }));
+  saveBudget: vi.fn(), saveBusinessSettings: vi.fn(), saveVkGoal: vi.fn(), pauseAutopilot: vi.fn(), resumeAutopilot: vi.fn() }));
 vi.mock('../api/setup', async (original) => ({ ...await original<typeof import('../api/setup')>(), saveMarking: vi.fn(), saveDescription: vi.fn(),
   connectAccount: vi.fn(), disconnectAccount: vi.fn(), getAuthConfig: vi.fn(async () => ({ demo: false, vk_oauth: false })),
   getGoals: async () => ({ items: [{ id: 1, name: 'Заявка' }, { id: 2, name: 'Звонок' }] }) }));
@@ -20,7 +20,7 @@ vi.mock('../api/screens', () => ({ mockEnabled: false,
 let mockAccounts: Account[] = [];
 vi.mock('../api/session', () => ({ useSession: () => ({ data: { id: 1, login: 'owner', email: null, accounts: mockAccounts }, reload: () => {} }) }));
 
-afterEach(() => { cleanup(); mockAccounts = []; vi.mocked(getBusiness).mockReset(); vi.mocked(saveMarking).mockReset(); vi.mocked(disconnectAccount).mockReset(); vi.mocked(connectAccount).mockReset(); });
+afterEach(() => { cleanup(); mockAccounts = []; vi.mocked(getBusiness).mockReset(); vi.mocked(saveMarking).mockReset(); vi.mocked(disconnectAccount).mockReset(); vi.mocked(connectAccount).mockReset(); vi.mocked(saveVkGoal).mockReset(); });
 
 const business: BusinessSettings = { id: 1, site_url: 'https://example.ru', city: 'Москва', month_budget_kop: 3000000, avg_check_kop: null,
   auto_continue: true, description: null, marking: { subject_type: 'ip', inn: '', name: 'Иванов Иван', phone: '', confirmed_in_platform: { direct: true },
@@ -317,4 +317,46 @@ it('в демо после правки описания подсказывае�
   await act(async () => {});
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   expect(await block.findByText(copy.settingsScreen.savedLaunchedDemo)).toBeTruthy();
+});
+
+async function vkGoal(settings: BusinessSettings = business) {
+  vi.mocked(getBusiness).mockResolvedValue(settings);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  const heading = await screen.findByRole('heading', { name: copy.settingsScreen.vkGoal });
+  return within(heading.closest('form') as HTMLElement);
+}
+
+it('цель ВКонтакте видна только при подключённом кабинете VK', async () => {
+  mockAccounts = [direct];
+  vi.mocked(getBusiness).mockResolvedValue(business);
+  render(<MemoryRouter><SettingsPage /></MemoryRouter>);
+  await screen.findByRole('heading', { name: copy.settings.accounts });
+  expect(screen.queryByRole('heading', { name: copy.settingsScreen.vkGoal })).toBeNull();
+});
+
+it('цель ВКонтакте: отправляет номер пикселя и название и показывает сохранённое', async () => {
+  mockAccounts = [direct, { ...direct, id: 6, platform: 'vk' }];
+  vi.mocked(saveVkGoal).mockResolvedValue({ ...business, vk_priced_goal_source_id: 4242, vk_priced_goal_name: 'Запись онлайн' });
+  const block = await vkGoal();
+  expect(block.getByText(copy.settingsScreen.vkGoalNone)).toBeTruthy();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(block.getByText(copy.settingsScreen.vkGoalPixelError)).toBeTruthy();
+  expect(saveVkGoal).not.toHaveBeenCalled();
+  fireEvent.change(block.getByRole('textbox', { name: copy.settingsScreen.vkGoalPixel }), { target: { value: '4242' } });
+  fireEvent.change(block.getByRole('textbox', { name: copy.settingsScreen.vkGoalName }), { target: { value: ' Запись онлайн ' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText(copy.settingsScreen.vkGoalLine(4242, 'Запись онлайн'))).toBeTruthy();
+  expect(saveVkGoal).toHaveBeenCalledWith(4242, 'Запись онлайн');
+  expect(block.getByRole('status').textContent).toBe(copy.settingsScreen.vkGoalSaved);
+});
+
+it('цель ВКонтакте: сохранённая видна сразу, «Убрать цель» отправляет 0', async () => {
+  mockAccounts = [direct, { ...direct, id: 6, platform: 'vk' }];
+  vi.mocked(saveVkGoal).mockResolvedValue({ ...business, vk_priced_goal_source_id: null, vk_priced_goal_name: null });
+  const block = await vkGoal({ ...business, vk_priced_goal_source_id: 77, vk_priced_goal_name: 'Заявка' });
+  expect(block.getByText(copy.settingsScreen.vkGoalLine(77, 'Заявка'))).toBeTruthy();
+  expect((block.getByRole('textbox', { name: copy.settingsScreen.vkGoalPixel }) as HTMLInputElement).value).toBe('77');
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.vkGoalRemove }));
+  expect(await block.findByText(copy.settingsScreen.vkGoalNone)).toBeTruthy();
+  expect(saveVkGoal).toHaveBeenCalledWith(0, '');
 });

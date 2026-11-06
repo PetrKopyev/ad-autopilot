@@ -17,7 +17,6 @@ from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, Experiment
 from app.platforms.base import (
     AdGroupSpec,
     AdSpec,
-    AwaitingModeration,
     CampaignTreeSpec,
     Operation,
     PlatformError,
@@ -252,8 +251,8 @@ async def test_failed_scale_rollback_does_not_restore_group_limits(repository, t
 
 
 async def test_pending_scale_rollback_does_not_restore_group_limits(repository, tree, monkeypatch):
-    """В2 круга 4: откат остался pending (площадка ещё проверяет включение объявления) — лимиты групп
-    не трогаем, восстановление только после applied (штатно pending досчитывает сверка воркера)."""
+    """В2 круга 4: откат остался pending (площадка не ответила, прошёл ли он) — лимиты групп не трогаем,
+    восстановление только после applied (штатно pending досчитывает сверка воркера)."""
     adapter, refs = tree
     group_id = refs.groups["group"]
     repository.business.return_value.settings = {"_worker": {"group_limits": {group_id: 7_000}}}
@@ -268,7 +267,20 @@ async def test_pending_scale_rollback_does_not_restore_group_limits(repository, 
         reason_params={"group": "Группа", "campaign": "Откат", "old_limit": 50, "new_limit": 70},
         evidence={"group_limits": {"before": {group_id: 5_000}, "after": {group_id: 7_000}}},
     )
-    monkeypatch.setattr(adapter, "apply", AsyncMock(side_effect=AwaitingModeration(refs.ads["control"])))
+    apply, get_state = adapter.apply, adapter.get_state
+    sent = []
+
+    async def silent_after_apply(tree_refs):
+        if sent:
+            raise PlatformError("Площадка не ответила.")
+        return await get_state(tree_refs)
+
+    async def remember(operation):
+        sent.append(operation)
+        await apply(operation)
+
+    monkeypatch.setattr(adapter, "apply", remember)
+    monkeypatch.setattr(adapter, "get_state", silent_after_apply)
     revert = await RollbackService(repository, dry_run=False).revert(original.id, business_id=1, adapter=adapter)
     assert revert.status == "pending"
     limits = repository.business.return_value.settings["_worker"]["group_limits"]

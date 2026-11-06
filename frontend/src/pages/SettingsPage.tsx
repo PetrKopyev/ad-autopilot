@@ -8,7 +8,7 @@ import { getAutopilotStatus } from '../api/screens';
 import { connectAccount, disconnectAccount, getGoals, moneyError, rublesToKopecks, saveDescription, saveMarking, tooMuchMoney, validInn } from '../api/setup';
 import type { Description, DescriptionKey, Marking, StopResult } from '../api/setup';
 import { useSession } from '../api/session';
-import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings } from '../api/settings';
+import { deleteMyData, getBusiness, maskMarking, pauseAutopilot, resumeAutopilot, saveBudget, saveBusinessSettings, saveVkGoal } from '../api/settings';
 import type { BusinessSettings, StoredMarking } from '../api/settings';
 import type { AutopilotStatus } from '../api/types';
 import { useDemo } from '../api/useDemo';
@@ -141,6 +141,49 @@ function MetricaRow({ business, draft }: { business: BusinessSettings; draft: bo
   </li>;
 }
 
+/** Цель пикселя кабинета VK: по ней автопилот считает обращения из ВКонтакте. Список целей сервер не отдаёт —
+ * номер пикселя и название цели вводят из кабинета VK Рекламы. */
+function VkGoalRow({ business }: { business: BusinessSettings }) {
+  const section = useSection();
+  const [saved, setSaved] = useState({ pixel: business.vk_priced_goal_source_id ?? null, name: business.vk_priced_goal_name ?? '' });
+  const [pixel, setPixel] = useState(saved.pixel ? String(saved.pixel) : '');
+  const [name, setName] = useState(saved.name);
+  const [touched, setTouched] = useState(false);
+  const pixelValid = /^[1-9]\d{0,14}$/.test(pixel);
+  const pixelError = touched && !pixelValid ? labels.vkGoalPixelError : undefined;
+  const nameError = touched && !name.trim() ? labels.vkGoalNameError : undefined;
+  function save(sourceId: number, goal: string, message: string) {
+    void section.run(async () => {
+      const result = await saveVkGoal(sourceId, goal);
+      const stored = { pixel: result.vk_priced_goal_source_id ?? null, name: result.vk_priced_goal_name ?? '' };
+      setSaved(stored); setPixel(stored.pixel ? String(stored.pixel) : ''); setName(stored.name); setTouched(false);
+    }, message);
+  }
+  function submit() {
+    setTouched(true);
+    if (!pixelValid || !name.trim()) return;
+    save(Number(pixel), name.trim(), labels.vkGoalSaved);
+  }
+  return <form className="page-stack" aria-labelledby="settings-vk-goal-title" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    <h4 id="settings-vk-goal-title">{labels.vkGoal}</h4>
+    <p className="field__hint">{labels.vkGoalHint}</p>
+    <p className="settings-account__line">{saved.pixel ? labels.vkGoalLine(saved.pixel, saved.name) : labels.vkGoalNone}</p>
+    <div className="settings-pair">
+      <Field id="settings-vk-pixel" label={labels.vkGoalPixel} hint={labels.vkGoalPixelHint} error={pixelError}>
+        <input id="settings-vk-pixel" className="input mono" inputMode="numeric" maxLength={15} value={pixel} aria-invalid={!!pixelError}
+          aria-describedby={describedBy('settings-vk-pixel', labels.vkGoalPixelHint, pixelError)} onChange={(event) => setPixel(event.target.value.trim())} /></Field>
+      <Field id="settings-vk-goal" label={labels.vkGoalName} hint={labels.vkGoalNameHint} error={nameError}>
+        <input id="settings-vk-goal" className="input" maxLength={200} value={name} aria-invalid={!!nameError}
+          aria-describedby={describedBy('settings-vk-goal', labels.vkGoalNameHint, nameError)} onChange={(event) => setName(event.target.value)} /></Field>
+    </div>
+    <Status section={section} />
+    <div className="actions">
+      <Button type="submit" disabled={section.busy}>{section.busy ? labels.saving : labels.save}</Button>
+      {saved.pixel && <Button variant="secondary" disabled={section.busy} onClick={() => save(0, '', labels.vkGoalRemoved)}>{labels.vkGoalRemove}</Button>}
+    </div>
+  </form>;
+}
+
 function AccountsBlock({ business, status }: { business: BusinessSettings; status: StatusResource }) {
   const section = useSection();
   const session = useSession();
@@ -171,7 +214,8 @@ function AccountsBlock({ business, status }: { business: BusinessSettings; statu
             : (off || !demo) && <Button variant="secondary" disabled={section.busy} onClick={() => { setStopResult(undefined); void section.run(async () => { await connectAccount(platform.id, account?.business_id); session.reload(); status.reload(); }); }}>{connectLabel}</Button>}
           {account && !off && <Button variant="secondary" disabled={section.busy}
             onClick={() => { setStopResult(undefined); section.clear(); setLeaving({ id: account.id, name: platform.name }); }}>{copy.settings.disconnect}</Button>}
-        </div></li>;
+        </div>
+        {platform.id === 'vk' && !off && <VkGoalRow business={business} />}</li>;
     })}
       {status.data && <MetricaRow business={business} draft={status.data.status === 'draft'} />}</ul>}
     <ConfirmDialog open={!!leaving} title={copy.settings.disconnectTitle(leaving?.name ?? '')} confirm={copy.settings.disconnectYes} confirming={copy.settings.disconnecting}

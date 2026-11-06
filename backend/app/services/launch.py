@@ -45,7 +45,6 @@ from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import STOPPED
 from app.services.changes import (
     CLOSED_ACCOUNT,
-    MODERATION_PENDING,
     AdapterResolver,
     ChangeConflict,
     ChangesService,
@@ -85,8 +84,7 @@ RUNNING = "Запуск уже идёт. Подождите минуту и об
 SILENT = "Площадка «{}» не отвечает. Повторите запуск через несколько минут."
 MODERATION_WAIT = (
     "Площадка «{}» проверяет объявления: реклама включится автоматически, как только проверка закончит, — "
-    "нажимать «Запустить рекламу» снова не нужно. Если включение не завершится само, причину объяснит запись "
-    "в журнале изменений."
+    "нажимать «Запустить рекламу» снова не нужно. Если проверка затянется, мы сообщим."
 )
 PLATFORM_CREATE_FAILED = "Площадка «{}» не создала рекламу: {}"
 PLATFORM_PARTIALLY_CREATED = (
@@ -99,33 +97,6 @@ CLOSED = "Кабинет площадки не подключён или тре�
 INTERRUPTED_STOP = (
     "Запуск рекламы прервался, и за этой кампанией никто не следил. Остановили её, чтобы она не тратила бюджет."
 )
-LAUNCH_CANCELLED = "Запуск рекламы не удался, включение отменено: повторный запуск включает кампанию заново."
-
-
-def awaiting_launch_enable(plan: Plan, change: ChangeLog) -> bool:
-    """Ожидающее проверки включение кампании этим планом, чья попытка уже закончилась: запись проваленного
-    запуска. Включение ещё не прошло и применится, как только площадка одобрит объявления, — за провалившимся
-    запуском никто не следит, и сверка не должна доводить такое включение, иначе она включит остановленную
-    кампанию, и та будет тратить бюджет. Записи с неизвестным исходом (площадка молчала) не трогаем:
-    их исход обязана выяснить сверка."""
-    return (
-        change.reason_code == "LAUNCH"
-        and change.evidence.get("plan_id") == plan.id
-        and (change.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
-        and plan.status != "launched"
-        and not launch_unsettled(plan)
-    )
-
-
-def cancel_launch_change(changes: ChangesService, change: ChangeLog) -> None:
-    """Ожидающее включение отменяется записью «отменено» с понятной причиной: не applied — иначе журнал
-    утверждал бы, что реклама запущена, — и не pending — иначе сверка применила бы включение позже."""
-    change.status = "reverted"
-    change.reason_text = f"{change.reason_text} {LAUNCH_CANCELLED}"
-    changes._metadata(change, error=None)
-    changes.repository.save(change)
-
-
 def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], today: date) -> str | None:
     """Почему площадка не примет лимиты кампании; None — примет.
 
@@ -318,8 +289,8 @@ class LaunchService:
             # Изоляция площадок: сбой одной не роняет остальные — она фиксируется честной записью, а запуск
             # доводится до конца на площадках, которые не отказали.
             self.save_platform_failures(business, plan, failures)
-            # Площадка, которая осталась ждать проверки объявлений, — не неудача: включение доведёт сверка,
-            # владельцу нажимать кнопку снова не нужно.
+            # Площадка, которая проверяет объявления, — не неудача: включение применено, после одобрения рекламу
+            # включит шаг модерации (sync.settle_review), владельцу нажимать кнопку снова не нужно.
             self.save_launch(
                 plan,
                 awaiting_moderation=sorted(
@@ -450,14 +421,9 @@ class LaunchService:
         """Включение, оборванное посреди (упал процесс, площадка не ответила, включилась ли кампания), оставляет
         изменение pending, и до сверки новое включение той же площадки запрещено. Под блокировкой запуска сверяем его
         сразу, а не ждём воркера. Площадка не ответила и сейчас — запуск откладывается, план остаётся как был.
-        Площадки не из плана запуск не включает: их изменения сверит воркер. Ожидающее включение от попытки,
-        которая уже провалилась и остановила созданное, запуск отменяет, а не ждёт: повтор включит кампанию
-        заново, а сверка старой записи после одобрения площадкой включила бы остановленную кампанию без присмотра."""
+        Площадки не из плана запуск не включает: их изменения сверит воркер."""
         for change in self.repository.pending(plan.business_id):
             if change.platform not in plan.payload["platforms"]:
-                continue
-            if awaiting_launch_enable(plan, change):
-                cancel_launch_change(self.changes, change)
                 continue
             self.repository.commit()
             try:
@@ -466,9 +432,6 @@ class LaunchService:
                 raise closed_account(change.platform, error) from error
             await self.changes._reconcile(change, adapter, now=now)
             if change.status == "pending":
-                if change.evidence["_service"].get("error") == MODERATION_PENDING:
-                    # Площадка ещё проверяет объявления: включение доведёт сверка, повтор запуска пока рано.
-                    raise LaunchBlocked([MODERATION_PENDING])
                 raise LaunchBlocked([SILENT.format(TITLES[change.platform])])
 
     def adapters(self, plan: Plan) -> dict[str, AdPlatform]:
@@ -783,13 +746,12 @@ class LaunchService:
         now: datetime,
         skip: set[str],
     ) -> tuple[dict[str, str], dict[str, str]]:
-        """Включение созданного: возвращает причины площадок, которые рекламу не включили, и площадки, чьё
-        включение осталось ждать проверки объявлений (не ошибка: сверка доведёт его сама, как в демо).
-        Запуск доводит до конца остальные. Платформы из skip (сбой создания) не включаются целиком: уже
-        созданное ими остаётся остановленным, пока повтор не доведёт площадку. Включение каждой кампании — своей
-        записью: ждущая проверки запись LAUNCH этого плана (skip_pending_plan) следующую кампанию не блокирует,
-        иначе плану из нескольких кампаний площадки не запуститься никогда. Запись, оставшаяся pending
-        по неизвестной причине (площадка молчит), прерывает запуск: её доведёт сверка, повтор продолжит."""
+        """Включение созданного: возвращает причины площадок, которые рекламу не включили, и площадки, чьи
+        объявления площадка ещё проверяет (не ошибка: включение применено, после одобрения цель доводит
+        sync.settle_review). Запуск доводит до конца остальные. Платформы из skip (сбой создания) не включаются
+        целиком: уже созданное ими остаётся остановленным, пока повтор не доведёт площадку. Включение каждой
+        кампании — своей записью. Запись, оставшаяся pending (площадка молчит), прерывает запуск: её доведёт
+        сверка, повтор продолжит."""
         # Блокировку бизнеса уже держит запуск: изменение применяется под ней, а не берёт её второй раз.
         failures = {}
         awaiting = {}
@@ -819,36 +781,19 @@ class LaunchService:
                 entity_type="campaign",
                 entity_id=refs.campaign_id,
                 now=now,
-                skip_pending_plan=plan.id,
             )
             if change.status == "pending":
-                if change.evidence["_service"].get("error") == MODERATION_PENDING:
-                    awaiting[platform] = MODERATION_WAIT.format(TITLES[platform])
-                    continue
                 raise PlatformError(f"Площадка «{TITLES[platform]}» не ответила, включилась ли реклама.")
             if change.status != "applied":
                 detail = change.evidence["_service"].get("error")
                 failures[platform] = f"Площадка «{TITLES[platform]}» не включила рекламу. {detail or ''}".strip()
+            elif change.evidence["_service"].get("review"):
+                awaiting[platform] = MODERATION_WAIT.format(TITLES[platform])
         return failures, awaiting
-
-    def cancel_pending_launches(self, plan: Plan) -> None:
-        """Запуск, который не удался, отменяет свои включения, оставшиеся ждать проверки объявлений: эти
-        включения ещё не прошли и применятся, как только площадка одобрит, — а кампании уже остановлены и за
-        ними никто не следит. Сверка такую запись пропустила бы, и она включила бы кампанию проваленного
-        запуска: трата бюджета без присмотра. Записи с неизвестным исходом (площадка молчала) остаются
-        pending: их исход обязана выяснить сверка до повторного включения."""
-        for change in self.repository.pending(plan.business_id):
-            if (
-                change.reason_code == "LAUNCH"
-                and change.evidence.get("plan_id") == plan.id
-                and (change.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
-            ):
-                cancel_launch_change(self.changes, change)
 
     async def stop_failed(self, plan: Plan, reason: str | None, adapters: dict[str, AdPlatform], now: datetime) -> None:
         """Останавливает созданное неудавшимся запуском и записывает неудачу; reason — её причина, None — запуск
         прервался."""
-        self.cancel_pending_launches(plan)
         if await self.stop_created(plan, adapters):
             self.save_launch(plan, "failed", error=failed_launch(reason), reason=reason, started_at=None)
             # Созданное остановлено: прежнее «не удалось остановить» уже неправда.
@@ -999,20 +944,6 @@ async def recover_launch(worker: Worker, business: Business) -> None:
     остановка применяется, только если площадка показывает кампанию включённой."""
     # Включение, оборванное посреди, оставило изменение pending: сверка узнаёт, включилась ли кампания. Оно остаётся и
     # после запуска, который упал и сам остановил созданное, и до сверки запрещает повтор включения на той площадке.
-    # Ожидания же проверки уже провалившихся запусков отменяем до сверки: их включение ещё не прошло и применится,
-    # как только площадка одобрит объявления, — а созданное остановлено и за ним никто не следит.
-    plans = {plan.id: plan for plan in worker.repository.rows(Plan, business.id)}
-    for change in worker.repository.pending(business.id):
-        plan = plans.get(change.evidence.get("plan_id"))
-        if plan is None or change.reason_code != "LAUNCH":
-            continue
-        if awaiting_launch_enable(plan, change):
-            cancel_launch_change(worker.changes, change)
-        elif launch_unsettled(plan):
-            # Исход включения брошенного запуска неизвестен: сверка узнаёт, включилась ли кампания, но не повторяет
-            # включение — иначе кампания проваленного запуска заработала бы без присмотра.
-            worker.changes._metadata(change, abandoned=True)
-            worker.repository.save(change)
     if worker.repository.pending(business.id):
         await worker.changes.recover_pending(worker.resolve_adapter, business_id=business.id, now=worker.clock.now)
     for plan in worker.repository.rows(Plan, business.id):
@@ -1048,6 +979,11 @@ async def recover_launch(worker: Worker, business: Business) -> None:
             key=f"launch_unstopped:{attempt}" if failed else f"launch_stopped:{attempt}",
             target_id=plan.id,
         )
+    # Кампания, которую площадка проверяла во время остановки, могла не принять паузу черновика: после проверки её
+    # останавливает settle_review (у бизнеса до запуска — только паузы).
+    from app.services.sync import settle_review
+
+    await settle_review(worker, business)
 
 
 async def stop_interrupted(worker: Worker, business: Business, campaign_id: int) -> str:
@@ -1069,6 +1005,10 @@ async def stop_interrupted(worker: Worker, business: Business, campaign_id: int)
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign))).get(campaign.external_id)
         if state is None or state.status in STOPPED:
+            # Включение запуска применено (кампания на проверке или выключена площадкой после неё): цель — пауза.
+            if campaign.status == "active":
+                campaign.status = "paused_auto"
+                worker.repository.save(campaign)
             return "stopped"
         # Защитное действие: выполняется и в пробном режиме, ведь включал кампанию настоящий запуск.
         await worker.apply(

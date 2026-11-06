@@ -312,3 +312,28 @@ async def test_guard_margin_counts_only_campaigns_of_current_plan(monkeypatch) -
     await worker_for(world, vk).run("budget_guard", 1)
     assert world.business.status == "running"
     assert status(world.adapter, world.refs.campaign_id) == "active"
+
+
+async def test_late_spend_does_not_turn_owner_pause_into_budget_stop(monkeypatch) -> None:
+    """Владелец остановил рекламу, потом площадка уточнила расход до бюджета: страж не меняет паузу на «бюджет
+    израсходован», а новый месяц и «Продолжить» ведут себя как при обычной паузе."""
+    from app.services.screens import ScreensService
+
+    world = await make_world()
+    worker = world.worker()
+    await stop_all(world.business, worker=worker, actor="owner")
+    assert world.business.status == "paused"
+    spend = AsyncMock(return_value=({"direct": BUDGET_KOP}, {}))
+    monkeypatch.setattr("app.services.budget_guard.read_spend", spend)
+    await worker.run("budget_guard", 1)
+    assert world.business.status == "paused"
+    assert "израсходован" not in str(ScreensService(worker).status(world.business))
+    assert status(world.adapter, world.refs.campaign_id) == "paused_owner"
+    move_to(world, datetime(2026, 2, 1, 6, tzinfo=UTC))
+    spend.return_value = ({"direct": 0}, {})
+    await worker.run("month_rollover", 1)
+    assert world.business.status == "paused"
+    assert status(world.adapter, world.refs.campaign_id) == "paused_owner"
+    await ScreensService(worker).resume(world.business)
+    assert world.business.status == "running"
+    assert status(world.adapter, world.refs.campaign_id) == "active"

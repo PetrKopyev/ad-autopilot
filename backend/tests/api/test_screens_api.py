@@ -627,6 +627,9 @@ def test_vk_goal_can_be_set_and_reset(setup):
     assert saved.status_code == 200
     assert world.business.settings["vk_priced_goal_source_id"] == 4242
     assert world.business.settings["vk_priced_goal_name"] == "Запись онлайн"
+    # Настройки показывают сохранённую цель: её видно и после перезагрузки страницы.
+    for body in (saved.json(), client.get("/api/business").json()):
+        assert (body["vk_priced_goal_source_id"], body["vk_priced_goal_name"]) == (4242, "Запись онлайн")
     reset = client.put(
         "/api/business/settings",
         json={"auto_continue": True, "avg_check_kop": None, "vk_priced_goal_source_id": 0},
@@ -634,6 +637,7 @@ def test_vk_goal_can_be_set_and_reset(setup):
     assert reset.status_code == 200
     assert "vk_priced_goal_source_id" not in world.business.settings
     assert "vk_priced_goal_name" not in world.business.settings
+    assert client.get("/api/business").json()["vk_priced_goal_source_id"] is None
 
 
 @pytest.mark.parametrize("amount", [0, -1, 1_000_000_001])

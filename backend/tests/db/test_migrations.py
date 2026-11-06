@@ -42,7 +42,7 @@ def load_revision(name: str = "0001_initial"):
 
 
 LATER_COLUMNS = {
-    "campaigns": ("frozen_until", "created_at"),
+    "campaigns": ("frozen_until", "created_at", "review_since"),
     "ad_groups": ("frozen_until",),
     "targets": ("frozen_until",),
     "art_calls": ("operation_id", "seed", "created_at"),
@@ -374,6 +374,95 @@ def test_upgrade_with_data_backfills_keys_and_downgrade_keeps_rows(test_settings
         )
         command.downgrade(config, "base")
         assert inspect(connection).get_table_names() == ["alembic_version"]
+
+
+MODERATION_PENDING = "Площадка ещё проверяет объявление. Включим его, как только одобрит."
+
+
+@pytest.mark.db
+def test_moderation_wait_records_become_review_state_and_downgrade_restores_them(test_settings) -> None:
+    """0009: включение, ждавшее проверки pending-записью (три записи LAUNCH на проде), становится применённым, а его
+    кампания — «ждёт одобрения» (review_since); объявления остаются на проверке. Откат возвращает pending-запись и
+    прежние статусы; обычная pending-запись (неизвестный исход) миграцию не касается."""
+    with scratch_schema() as (connection, config):
+        command.upgrade(config, "0002_autopilot_additions")
+        ids = seed_0002(connection)
+        command.upgrade(config, "0008_campaign_review_since")
+        connection.execute(text("UPDATE businesses SET status = 'running'"))
+        connection.execute(text("UPDATE ads SET status = 'moderation'"))
+        since = "2026-11-03T10:00:00+00:00"
+        operations = [
+            {
+                "kind": "set_status",
+                "entity_type": entity,
+                "entity_id": external,
+                "field": "status",
+                "before": "paused_auto",
+                "after": "active",
+            }
+            for entity, external in (("ad", "a-1"), ("campaign", "c-1"))
+        ]
+        refs = {"campaign_id": "c-1", "groups": {}, "ads": {}, "targets": {}}
+        record = {
+            "business_id": ids["business"],
+            "actor": "owner",
+            "kind": "launch",
+            "platform": "direct",
+            "entity_type": "campaign",
+            "entity_id": "c-1",
+            "operations": operations,
+            "reason_code": "LAUNCH",
+            "reason_text": "Запустили рекламу.",
+            "status": "pending",
+        }
+        waiting = insert(
+            connection,
+            "change_log",
+            **record,
+            evidence={
+                "plan_id": 1,
+                "_service": {"refs": refs, "dry_run": False, "error": MODERATION_PENDING, "awaiting_since": since},
+            },
+        )
+        unknown = insert(
+            connection, "change_log", **record, evidence={"_service": {"refs": refs, "dry_run": False, "error": None}}
+        )
+        command.upgrade(config, "head")
+        assert_matches_metadata(connection)
+        rows = dict(
+            connection.execute(
+                text("SELECT id, status FROM change_log WHERE id IN (:a, :b)"), {"a": waiting, "b": unknown}
+            ).all()
+        )
+        assert rows == {waiting: "applied", unknown: "pending"}
+        service = connection.execute(
+            text("SELECT evidence -> '_service' FROM change_log WHERE id = :id"), {"id": waiting}
+        ).scalar()
+        assert service["error"] is None and service["review"] == ["a-1", "c-1"] and service["differences"] == []
+        campaign = connection.execute(
+            text("SELECT status, review_since FROM campaigns WHERE id = :id"), {"id": ids["campaign"]}
+        ).one()
+        assert campaign.status == "active" and campaign.review_since == datetime.fromisoformat(since)
+        assert connection.execute(text("SELECT status FROM ads WHERE id = :id"), {"id": ids["ad"]}).scalar() == (
+            "moderation"
+        )
+
+        command.downgrade(config, "0008_campaign_review_since")
+        restored = connection.execute(
+            text("SELECT status, evidence -> '_service' AS service FROM change_log WHERE id = :id"), {"id": waiting}
+        ).one()
+        assert restored.status == "pending"
+        assert restored.service == {
+            "refs": refs,
+            "dry_run": False,
+            "error": MODERATION_PENDING,
+            "awaiting_since": since,
+        }
+        assert connection.execute(
+            text("SELECT status, review_since FROM campaigns WHERE id = :id"), {"id": ids["campaign"]}
+        ).one() == ("active", None)
+        command.upgrade(config, "head")
+        assert_matches_metadata(connection)
 
 
 @pytest.mark.db

@@ -94,7 +94,10 @@ async def stop_all(
             try:
                 states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
                 state = states[campaign.external_id]
-                if state.status in {"paused_auto", "paused_owner", "archived"}:
+                # Кампания, которую площадка уже одобрила и выключила, а шаг модерации ещё не включил, локально ждёт
+                # включения: остановка меняет и эту цель.
+                waiting = campaign.review_since is not None and campaign.status == "active"
+                if state.status == "archived" or state.status in {"paused_auto", "paused_owner"} and not waiting:
                     continue
                 if actor == "owner":
                     stopped = worker.metadata(business).get("kill_switch_campaigns", [])
@@ -124,7 +127,10 @@ async def stop_all(
                 failed = True
         if failed:
             raise ChangeConflict("Не все площадки подтвердили остановку. Повторим в следующем тике.")
-        business.status = "budget_stop" if budget_stop else "paused"
+        if not (budget_stop and business.status == "paused"):
+            # Пауза владельца остаётся паузой: поздний расход, догнавший бюджет, не меняет её на «бюджет
+            # израсходован» — рекламу остановил владелец, и включает её тоже он.
+            business.status = "budget_stop" if budget_stop else "paused"
         worker.remember(business, pending_stop=None)
 
 

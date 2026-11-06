@@ -11,7 +11,7 @@ from app.domain.budget import MINIMUM_MARGIN, campaign_limits, plan_budget, stop
 from app.platforms.base import Operation, PlatformError
 from app.platforms.fake import FakeAdapter
 from app.services.budget_guard import budget_guard, read_spend, stop_all
-from app.services.changes import MODERATION_TIMEOUT, ChangeConflict
+from app.services.changes import ChangeConflict
 from app.services.experiments import group_available
 from app.services.optimize import NO_ACTIVE_ADS, rebalance_budget, snapshot
 from app.services.rollback import ConfirmationRequired, RollbackService
@@ -350,142 +350,9 @@ async def test_new_month_handles_platform_pause_without_author_and_never_resumes
 
 
 
-def lost_activation_record(world, key):
-    """Failed-запись запуска с MODERATION_TIMEOUT — включение, потерянное по границе модерации."""
-    return ChangeLog(
-        business_id=1,
-        actor="system",
-        kind="launch",
-        platform="direct",
-        entity_type="campaign",
-        entity_id=key,
-        operations=[
-            {
-                "kind": "set_status",
-                "entity_type": "campaign",
-                "entity_id": key,
-                "field": "status",
-                "before": "paused_owner",
-                "after": "active",
-            }
-        ],
-        reason_code="LAUNCH",
-        reason_params={},
-        reason_text="Тестовый запуск.",
-        evidence={"_service": {"error": MODERATION_TIMEOUT}},
-        status="failed",
-        created_at=world.clock.now,
-    )
-
-
-@pytest.mark.parametrize("platform_status", ["moderation", "paused_auto"])
-async def test_sync_resumes_campaign_after_moderation_timeout(monkeypatch, platform_status):
-    """В2 круга 7 + мелочь 1 круга 8: включение потерялось по границе модерации (запись failed с
-    MODERATION_TIMEOUT), а площадка потом одобрила объявления. Кампания в кабинете ещё draft/moderation
-    или уже OFF (paused_auto — Директ после одобрения): сверка статусов повторяет resume сама — владельцу
-    не нужно нажимать «Запустить» снова, хотя первое включение провалила граница."""
-    world = await make_world()
-    worker = world.worker()
-    key = world.refs.campaign_id
-    world.repository.save(lost_activation_record(world, key))
-    real = world.adapter.get_state
-
-    async def reviewing(refs):
-        states = await real(refs)
-        # Площадка отдаёт статус до одобрения; после применённого resume отвечает актуальным состоянием.
-        if world.adapter._states[key].status == "active":
-            return states
-        return {
-            key_: replace(state, status=platform_status) if state.entity_type == "campaign" else state
-            for key_, state in states.items()
-        }
-
-    monkeypatch.setattr(world.adapter, "get_state", reviewing)
-    # Кампания в кабинете ещё не включена (площадка отдаёт статус до одобрения).
-    world.adapter._states[key] = replace(world.adapter._states[key], status=platform_status)
-    from app.services.sync import sync_campaign_status
-
-    await sync_campaign_status(worker, world.business)
-    assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
-    # Пока новая запись pending, платформа занята и повторная сверка не дублирует включение.
-    await sync_campaign_status(worker, world.business)
-    assert len(world.changes(reason_code="MODERATION_RESUME")) == 1
-
-
-async def test_sync_does_not_rerun_lost_activation_after_successful_resume(monkeypatch):
-    """В2 круга 9: старая failed-запись с MODERATION_TIMEOUT не вечная. Потерянное включение повторили
-    (MODERATION_RESUME применён), потом счёт кончился и площадка отдала OFF (paused_auto): это обычная
-    внешняя пауза — EXTERNAL_PAUSE и owner_paused, без новой записи MODERATION_RESUME."""
-    world = await make_world()
-    worker = world.worker()
-    key = world.refs.campaign_id
-    world.repository.save(lost_activation_record(world, key))
-    world.repository.save(
-        ChangeLog(
-            business_id=1,
-            actor="system",
-            kind="resume",
-            platform="direct",
-            entity_type="campaign",
-            entity_id=key,
-            operations=[
-                {
-                    "kind": "set_status",
-                    "entity_type": "campaign",
-                    "entity_id": key,
-                    "field": "status",
-                    "before": "moderation",
-                    "after": "active",
-                }
-            ],
-            reason_code="MODERATION_RESUME",
-            reason_params={},
-            reason_text="Проверка закончена: включили кампанию снова.",
-            evidence={},
-            status="applied",
-            created_at=world.clock.now,
-        )
-    )
-    real = world.adapter.get_state
-
-    async def paused(refs):
-        states = await real(refs)
-        return {
-            key_: replace(state, status="paused_auto") if state.entity_type == "campaign" else state
-            for key_, state in states.items()
-        }
-
-    monkeypatch.setattr(world.adapter, "get_state", paused)
-    from app.services.sync import sync_campaign_status
-
-    await sync_campaign_status(worker, world.business)
-    assert not world.changes(status="failed", reason_code="MODERATION_RESUME")
-    assert world.changes(reason_code="EXTERNAL_PAUSE")
-    assert world.campaign.owner_paused
-
-
-async def test_sync_skips_ended_campaign_with_lost_activation(monkeypatch):
-    """В2 круга 9: кампания с State=ENDED и старой потерянной записью не включается и не дёргается
-    resume — месячный переход продлит её дату сам."""
-    world = await make_world()
-    worker = world.worker()
-    key = world.refs.campaign_id
-    world.repository.save(lost_activation_record(world, key))
-    real = world.adapter.get_state
-
-    async def ended(refs):
-        states = await real(refs)
-        return {
-            key_: replace(state, status="paused_auto", ended=True) if state.entity_type == "campaign" else state
-            for key_, state in states.items()
-        }
-
-    monkeypatch.setattr(world.adapter, "get_state", ended)
-    from app.services.sync import sync_campaign_status
-
-    await sync_campaign_status(worker, world.business)
-    assert not world.changes(reason_code="MODERATION_RESUME")
-    assert not world.changes(reason_code="EXTERNAL_PAUSE")
+async def test_scale_up_is_spaced_and_reverted_with_confirmation():
+    """SCALE_UP одной группы — не чаще раза в 72 часа; откат после дрейфа лимитов требует подтверждения, а после
+    него лимиты кампании пересчитываются из возвращённых лимитов групп."""
     world = await make_world()
     worker = world.worker()
     await world.advance(worker, days=20)

@@ -205,6 +205,8 @@ class Campaign(Base):
     period_cap_kop: Mapped[int] = mapped_column(BigInteger)
     owner_paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     frozen_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Площадка ещё проверяет сущности дерева кампании: статус — наша цель, sync.settle_review доводит её после проверки.
+    review_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created()
 
 

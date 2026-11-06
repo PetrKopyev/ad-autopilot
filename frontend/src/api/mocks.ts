@@ -359,6 +359,10 @@ export function mockSaveBudget(kopecks: number) {
 export function mockSaveBusinessSettings(autoContinue: boolean, average: number | null) {
   businessSettings.auto_continue = autoContinue; businessSettings.avg_check_kop = average;
 }
+export function mockSaveVkGoal(sourceId: number, name: string): BusinessSettings {
+  businessSettings.vk_priced_goal_source_id = sourceId || null; businessSettings.vk_priced_goal_name = sourceId ? name : null;
+  return mockBusinessSettings();
+}
 export function mockPauseAutopilot() { mockStopAll(); }
 function resumeAll() {
   paused = false;

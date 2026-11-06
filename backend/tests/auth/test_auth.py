@@ -771,3 +771,5 @@ def test_callback_error_is_a_page_not_json(client: TestClient) -> None:
     assert response.status_code == 400 and "text/html" in response.headers["content-type"]
     assert "Не удалось проверить вход" in response.text and 'href="/"' in response.text
     assert "<script>" not in response.text and response.headers["referrer-policy"] == "no-referrer"
+    # CSP default-src 'self' режет встроенные стили: страница без них.
+    assert "<style" not in response.text and "style=" not in response.text

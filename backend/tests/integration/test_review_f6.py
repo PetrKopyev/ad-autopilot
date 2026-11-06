@@ -159,7 +159,9 @@ async def test_pending_owner_stop_does_not_skip_budget_guard(monkeypatch):
     worker.remember(world.business, pending_stop={"actor": "owner"})
     monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": 10_000_000}, {})))
     await budget_guard(worker, world.business)
-    assert world.business.status == "budget_stop"
+    # Страж отработал и после остановки владельца, но пауза владельца остаётся паузой, а не «бюджет израсходован».
+    assert world.business.status == "paused"
+    assert world.ledger()[0].hard_stop_at == world.clock.now
     assert not worker.metadata(world.business)["pending_stop"]
 
 
@@ -280,11 +282,10 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
 
 
-async def test_rejected_ad_waits_for_launch_moderation_before_rewrite(monkeypatch):
-    """Пока включение после запуска ждёт проверки, правка текста упала бы в конфликт: отклонённое объявление
-    переписывается на опросе после проверки, а не теряет отметку навсегда."""
+async def test_rejected_ad_waits_for_unconfirmed_change_before_rewrite(monkeypatch):
+    """Пока площадка не подтвердила другое изменение, правка текста упала бы в конфликт: отклонённое объявление
+    переписывается на опросе после подтверждения, а не теряет отметку навсегда."""
     from app.platforms.base import ModerationInfo
-    from app.services.changes import MODERATION_PENDING
 
     world = await make_world()
     world.clock.advance(days=2)
@@ -304,7 +305,7 @@ async def test_rejected_ad_waits_for_launch_moderation_before_rewrite(monkeypatc
         operations=[],
         reason_code="LAUNCH",
         reason_text="Запустили рекламу.",
-        evidence={"_service": {"dry_run": False, "error": MODERATION_PENDING}},
+        evidence={"_service": {"dry_run": False}},
         status="pending",
         created_at=world.clock.now,
     )

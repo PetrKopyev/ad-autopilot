@@ -33,7 +33,6 @@ from app.platforms.base import AdPlatform, ExternalRefs, Operation, lead_count
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services.changes import (
     CLOSED_ACCOUNT,
-    MODERATION_PENDING,
     PENDING,
     ChangeConflict,
     ChangesRepository,
@@ -843,7 +842,7 @@ class Worker:
                     for change in recovered:
                         self.cache_context(change)
                     blocking = self.pending(business.id) if kind != "budget_guard" else []
-                    if blocking and not (kind in WHILE_MODERATION and all(map(awaiting_moderation_change, blocking))):
+                    if blocking:
                         raise ChangeConflict(PENDING)
                 await handlers()[kind](self, business)
                 run.status = "ok"
@@ -867,7 +866,9 @@ class Worker:
         business = self.repository.business(business_id)
         # Блокировку ждут шаги мастера: без брошенного запуска или несверенного включения её не берём.
         if business.status not in DRAFT_STATUSES or not (
-            any(map(launch_unsettled, self.repository.rows(Plan, business.id))) or self.pending(business.id)
+            any(map(launch_unsettled, self.repository.rows(Plan, business.id)))
+            or self.pending(business.id)
+            or any(item.review_since is not None for item in self.campaigns(business))
         ):
             return
         try:
@@ -936,19 +937,10 @@ class Worker:
             try:
                 await self.run(kind, business_id)
             except ChangeConflict as error:
-                # Ожидание площадки (проверка объявлений, несверенное изменение) — не авария: шаг повторится.
+                # Ожидание площадки (несверенное изменение) — не авария: шаг повторится.
                 logger.info("Worker job %s waits for business %s: %s", kind, business_id, error)
             except Exception:
                 logger.error("Worker job %s failed for business %s", kind, business_id)
-
-
-# Шаги, которые только читают площадку: им не мешает включение, которое ждёт проверки объявлений. Без них, пока
-# площадка проверяет объявления (до пяти дней), не собиралась бы статистика и не сверялась модерация.
-WHILE_MODERATION = frozenset({"sync_moderation", "sync_stats", "clients_survey"})
-
-
-def awaiting_moderation_change(change: ChangeLog) -> bool:
-    return (change.evidence.get("_service") or {}).get("error") == MODERATION_PENDING
 
 
 def schedule_key(kind: str, now: datetime) -> str:

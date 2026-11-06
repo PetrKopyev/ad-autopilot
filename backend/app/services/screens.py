@@ -9,6 +9,7 @@ from app.db.models import (
     AdGroup,
     BudgetLedger,
     Business,
+    Campaign,
     ChangeLog,
     Experiment,
     MarkingProfile,
@@ -23,7 +24,7 @@ from app.domain.rules import first_decision_days
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError, lead_count
 from app.services.budget_guard import STOPPED, closed_platforms, read_spend, stop_all
-from app.services.changes import ChangeConflict, wait_for_lock
+from app.services.changes import REVIEW, ChangeConflict, wait_for_lock
 from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
 from app.services.optimize import experiment_expire_date, rebalance_budget
@@ -249,6 +250,31 @@ class ScreensService:
                 "Рекламу можно возобновить с 1 числа или увеличить бюджет."
             )
 
+    async def undo_resume(self, business: Business, campaigns: list[Campaign]) -> None:
+        try:
+            for campaign in campaigns:
+                state = (
+                    await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
+                        self.worker.refs(campaign)
+                    )
+                )[campaign.external_id]
+                await self.worker.apply(
+                    business,
+                    campaign,
+                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "paused_owner")],
+                    actor="owner",
+                    kind="pause",
+                    reason_code="OWNER_STOP",
+                    reason_text="Рекламу не удалось включить целиком: эту кампанию остановили снова.",
+                    suffix="resume-undo",
+                )
+        except Exception:
+            # Площадка не подтвердила остановку: её доводит страж бюджета (pending_stop), как прерванную остановку.
+            self.worker.remember(
+                business,
+                pending_stop={"reason_code": "OWNER_STOP", "reason_params": {}, "budget_stop": False, "actor": "owner"},
+            )
+
     async def resume(self, business: Business) -> dict:
         business = self.repository.business(business.id)
         with self.repository.business_lock(business.id):
@@ -270,54 +296,68 @@ class ScreensService:
             stopped = set(meta.get("kill_switch_campaigns", []))
             held = set(self.worker.metadata(business).get("below_minimum", []))
             active = False
+            enabled = []
             campaigns = self.worker.current_campaigns(business)
-            for campaign in campaigns:
-                if (
-                    campaign.owner_paused
-                    or not campaign.daily_limit_kop
-                    or campaign.id in held
-                    or campaign.platform_account_id in revoked
-                ):
-                    continue
-                last = self.repository.last_status_change(
-                    business.id, campaign.platform, "campaign", campaign.external_id
-                )
-                state = (
-                    await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
-                        self.worker.refs(campaign)
+            try:
+                for campaign in campaigns:
+                    if (
+                        campaign.owner_paused
+                        or not campaign.daily_limit_kop
+                        or campaign.id in held
+                        or campaign.platform_account_id in revoked
+                    ):
+                        continue
+                    last = self.repository.last_status_change(
+                        business.id, campaign.platform, "campaign", campaign.external_id
                     )
-                )[campaign.external_id]
-                if state.status == "active":
+                    state = (
+                        await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
+                            self.worker.refs(campaign)
+                        )
+                    )[campaign.external_id]
+                    if state.status == "active":
+                        active = True
+                        continue
+                    owner_stop = (
+                        campaign.id in stopped
+                        and last is not None
+                        and last.reason_code == "OWNER_STOP"
+                        and last.actor == "owner"
+                    )
+                    protection_stop = (
+                        campaign.status == "paused_auto"
+                        and last is not None
+                        and last.actor == "system"
+                        and last.reason_code in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
+                    )
+                    # Кампанию остановили перед отключением кабинета; кабинет снова подключён — включаем.
+                    revoke_stop = last is not None and last.reason_code == "ACCOUNT_REVOKE"
+                    # Паузу, которую площадка не применила к черновику, после проверки довёл шаг модерации: это та же
+                    # наша остановка.
+                    review_stop = last is not None and last.reason_code == "MODERATION_SETTLE" and last.kind == "pause"
+                    stopped_by_us = owner_stop or protection_stop or revoke_stop or review_stop
+                    # Кампанию, остановленную, пока площадка её проверяла, включаем так же: включение дождётся
+                    # одобрения.
+                    if not stopped_by_us or state.status not in {"paused_owner", "paused_auto", *REVIEW}:
+                        continue
+                    await self.worker.apply(
+                        business,
+                        campaign,
+                        [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
+                        actor="owner",
+                        kind="resume",
+                        reason_code="OWNER_RESUME",
+                        reason_text="Вы возобновили рекламу после остановки.",
+                        suffix="resume",
+                    )
+                    enabled.append(campaign)
                     active = True
-                    continue
-                owner_stop = (
-                    campaign.id in stopped
-                    and last is not None
-                    and last.reason_code == "OWNER_STOP"
-                    and last.actor == "owner"
-                )
-                protection_stop = (
-                    campaign.status == "paused_auto"
-                    and last is not None
-                    and last.actor == "system"
-                    and last.reason_code in {"BUDGET_STOP", "MONTH_STOP", "SPEND_MISMATCH", "BUDGET_UPDATE_FAILED"}
-                )
-                # Кампанию остановили перед отключением кабинета; кабинет снова подключён — включаем.
-                revoke_stop = last is not None and last.reason_code == "ACCOUNT_REVOKE"
-                stopped_by_us = owner_stop or protection_stop or revoke_stop
-                if not stopped_by_us or state.status not in {"paused_owner", "paused_auto"}:
-                    continue
-                await self.worker.apply(
-                    business,
-                    campaign,
-                    [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
-                    actor="owner",
-                    kind="resume",
-                    reason_code="OWNER_RESUME",
-                    reason_text="Вы возобновили рекламу после остановки.",
-                    suffix="resume",
-                )
-                active = True
+            except Exception:
+                # «Продолжить» включает всё или ничего: включённые до сбоя кампании останавливаем снова, и бизнес
+                # остаётся на паузе — повторное нажатие включит все. Иначе они работали бы при бизнесе на паузе:
+                # без присмотра стража, а после одобрения проверки — не включились бы.
+                await self.undo_resume(business, enabled)
+                raise
             if active:
                 business.status = "running"
                 self.worker.remember(business, kill_switch=False, kill_switch_campaigns=[])
@@ -549,6 +589,9 @@ class ScreensService:
                 {"fields": owner_fields(business.description["fields"])} if business.description.get("fields") else None
             ),
             "auto_continue": business.auto_continue,
+            # Цель пикселя кабинета VK (save_settings): без неё автопилот не видит обращений из ВКонтакте.
+            "vk_priced_goal_source_id": (business.settings or {}).get("vk_priced_goal_source_id"),
+            "vk_priced_goal_name": (business.settings or {}).get("vk_priced_goal_name"),
             "marking": safe_marking,
             # Мастер настройки восстанавливает по ним пройденные шаги в новой вкладке и на другом устройстве.
             "metrica_counter_id": business.metrica_counter_id,

@@ -15,6 +15,7 @@
 .settings-accounts { display: grid; margin: 0; padding: 0; list-style: none; border: 1px solid var(--color-line); border-radius: var(--radius-small); }
 .settings-account { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 12px 14px; }
 .settings-account + .settings-account { border-top: 1px solid var(--color-line); }
+.settings-account > form { flex: 1 1 100%; border-top: 1px solid var(--color-line); padding-top: var(--space-3); }
 .settings-account__name { display: grid; gap: 6px; min-width: 0; }
 .settings-account__name h3 { display: flex; align-items: center; gap: var(--space-2); }
 .settings-account__name .platform-badge__dot { width: 8px; height: 8px; }

@@ -8,6 +8,7 @@ from app.db.models import BudgetLedger, Business
 from app.domain.explain import MONTHS
 from app.platforms.base import Operation, PlatformError
 from app.services.budget_guard import stop_all
+from app.services.changes import REVIEW
 from app.services.optimize import rebalance_budget
 from app.worker.clock import MOSCOW, today
 
@@ -47,7 +48,11 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         await stop_all(business, worker=worker, reason_code="MONTH_STOP", reason_text=reason_text)
         worker.remember(business, month=month.isoformat())
         return
-    was_stopped = business.status == "budget_stop"
+    # Остановку по бюджету помним до конца прохода: прерванный проход (площадка не подтвердила включение) повторяется
+    # уже при running, и без пометки кампании, остановленные по бюджету, не возобновились бы никогда.
+    was_stopped = business.status == "budget_stop" or bool(meta.get("month_resume"))
+    if was_stopped:
+        worker.remember(business, month_resume=month.isoformat())
     business.status = "running"
     worker.repository.save(business)
     # Кампании, закончившиеся по дате окончания (Direct State=ENDED): продлеваем дату и возобновляем до
@@ -88,12 +93,18 @@ async def month_rollover(worker: Worker, business: Business) -> None:
     await rebalance_budget(worker, business)
     held = set(worker.metadata(business).get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
-        if campaign.owner_paused or not campaign.daily_limit_kop or campaign.id in held:
+        if (
+            not was_stopped
+            or campaign.status != "paused_auto"
+            or campaign.owner_paused
+            or not campaign.daily_limit_kop
+            or campaign.id in held
+        ):
             continue
         adapter = worker.resolve_adapter(business.id, campaign.platform)
-        states = await adapter.get_state(worker.refs(campaign))
-        state = states[campaign.external_id]
-        if was_stopped and campaign.status == "paused_auto" and state.status in {"paused_auto", "paused_owner"}:
+        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        # Кампанию, остановленную, пока площадка её проверяла, включаем так же: включение снова дождётся одобрения.
+        if state.status in {"paused_auto", "paused_owner", *REVIEW}:
             await worker.apply(
                 business,
                 campaign,
@@ -104,4 +115,4 @@ async def month_rollover(worker: Worker, business: Business) -> None:
                 reason_params={"budget": business.month_budget_kop},
                 suffix="resume",
             )
-    worker.remember(business, month=month.isoformat())
+    worker.remember(business, month=month.isoformat(), month_resume=None)

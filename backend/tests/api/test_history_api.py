@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app.api import history
 from app.auth.sessions import CSRF_COOKIE, SESSION_COOKIE, get_repository
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Session, Target, User
-from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError
+from app.platforms.base import ExternalRefs, Operation, PlatformError
 from tests.services.test_onboarding import NOW, TODAY, make_world, onboard
 
 SESSION = "history-session"
@@ -181,8 +181,8 @@ def test_failed_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
 
 
 def test_pending_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
-    """В2 круга 4: откат остался pending (площадка проверяет включение объявления) — пересчёта нет:
-    до applied записи на площадке не подтверждена, лимиты групп в business не возвращены."""
+    """В2 круга 4: откат остался pending (площадка не ответила, прошёл ли он) — пересчёта нет: до applied записи
+    на площадке не подтверждена, лимиты групп в business не возвращены."""
     client, context = api
     change = scale_change(context.world)
     campaign = context.world.repository.rows(Campaign, business_id=context.world.business.id)[0]
@@ -195,10 +195,20 @@ def test_pending_scale_revert_does_not_rebalance(api, monkeypatch) -> None:
         *change.operations,
     ]
 
-    async def awaiting_moderation(operation):
-        raise AwaitingModeration(operation.entity_id)
+    apply, get_state = adapter.apply, adapter.get_state
+    sent = []
 
-    monkeypatch.setattr(adapter, "apply", awaiting_moderation)
+    async def silent_after_apply(refs):
+        if sent:
+            raise PlatformError("Площадка не ответила.")
+        return await get_state(refs)
+
+    async def remember(operation):
+        sent.append(operation)
+        await apply(operation)
+
+    monkeypatch.setattr(adapter, "apply", remember)
+    monkeypatch.setattr(adapter, "get_state", silent_after_apply)
     response = client.post(f"/api/history/{change.id}/revert")
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "pending"

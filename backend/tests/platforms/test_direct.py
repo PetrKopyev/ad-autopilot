@@ -1364,12 +1364,12 @@ async def test_draft_activation_other_resume_error_is_a_real_failure(adapter, ap
         ({"State": "OFF", "Status": "MODERATION"}, "moderation"),
         ({"State": "OFF", "Status": "REJECTED"}, "rejected"),
         ({"State": "ON", "Status": "MODERATION"}, "moderation"),
-        ({"State": "OFF", "Status": "ACCEPTED"}, "paused_owner"),
+        ({"State": "OFF", "Status": "ACCEPTED"}, "paused_auto"),
         ({"State": "SUSPENDED", "Status": "ACCEPTED"}, "paused_owner"),
         ({"State": "ON", "Status": "ACCEPTED"}, "active"),
         ({"State": "ARCHIVED", "Status": "ACCEPTED"}, "archived"),
         # keywords.get запрашивается без Status — там прежняя логика по State.
-        ({"State": "OFF"}, "paused_owner"),
+        ({"State": "OFF"}, "paused_auto"),
         ({"State": "ON"}, "active"),
     ],
 )
@@ -1382,6 +1382,14 @@ def test_campaign_pause_during_moderation_reads_as_pause(moderation_status):
     """В1 круга 7: остановленная кампания со статусом модерации — это пауза, а не «на проверке», иначе
     сверка остановки проваливалась бы до конца модерации, а страж бюджета падал на каждом ходу."""
     assert _status({"State": "SUSPENDED", "Status": moderation_status}, campaign=True) == "paused_owner"
+
+
+def test_accepted_off_ad_is_not_owner_pause():
+    """Одобренное объявление, которое ещё не включено (или стоит в выключенной кампании), Директ показывает
+    State=OFF: это не пауза владельца — после проверки sync.settle_review включает его. Пауза владельца — только
+    SUSPENDED."""
+    assert _status({"State": "OFF", "Status": "ACCEPTED"}) == "paused_auto"
+    assert _status({"State": "SUSPENDED", "Status": "ACCEPTED"}) == "paused_owner"
 
 
 def test_ended_campaign_is_not_owner_pause():

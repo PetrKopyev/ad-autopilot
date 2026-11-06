@@ -6,10 +6,10 @@ from collections.abc import Collection
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, StatsDaily
+from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
 from app.db.query import Window
 from app.platforms.base import Operation
-from app.services.changes import CLOSED_ACCOUNT, MODERATION_TIMEOUT, ChangeConflict
+from app.services.changes import CLOSED_ACCOUNT, REVIEW, ChangeConflict
 from app.worker.clock import today
 
 if TYPE_CHECKING:
@@ -162,7 +162,7 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                     )
                     # Генератор обязан вернуть уже проверенные текстовые операции; медицинские отказы не исправляем.
                     # В пробном режиме ИИ не зовём и ключ не отмечаем: владельцу остаётся уведомление об отказе.
-                    # Пока площадка не подтвердила другое изменение (включение после запуска ждёт проверки), правка
+                    # Пока площадка не подтвердила другое изменение (исход ответа неизвестен), правка
                     # текста упадёт в конфликт: переписываем на следующем опросе, ключ до тех пор не отмечаем.
                     reason = (info.reason or "").casefold()
                     if (
@@ -197,8 +197,117 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
             # иначе save(run) после сбоя сохранил бы статус active без даты одобрения.
             if polled:
                 worker.remember(business, *polled, approvals=approvals, rewritten=rewritten)
+    await settle_review(worker, business)
     if failure is not None:
         raise failure
+
+
+# Через сколько дней проверки площадкой владелец узнаёт, что она затянулась: модерация в выходные реально занимает
+# дольше суток, а статус вне известного набора (терминальный у VK, сбой площадки) выглядит как проверка бесконечно.
+REVIEW_NOTICE_AFTER = timedelta(days=5)
+PAUSED = {"paused_auto", "paused_owner"}
+
+
+async def settle_review(worker: Worker, business: Business) -> None:
+    """Единственный владелец состояния «площадка ещё проверяет» (Campaign.review_since): локальный статус кампании и
+    её объявлений — наша цель, и после проверки площадка приводится к ней. Включаем одобренное, но выключенное
+    (OFF) и отправляем на проверку черновики объявлений — только у работающего бизнеса без остановки; паузу, которую
+    площадка не применила к черновику, доводим всегда. SUSPENDED при цели «работает» — остановка в кабинете
+    (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены объявления) включаем снова,
+    когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся; кампания,
+    закончившаяся по дате окончания, ждёт продления (month_rollover)."""
+    pending = {change.platform for change in worker.repository.pending(business.id)}
+    for campaign in worker.campaigns(business):
+        if campaign.review_since is None or campaign.platform in pending:
+            continue
+        entities = worker.repository.local_entities(business.id, campaign.platform)
+        try:
+            adapter = worker.resolve_adapter(business.id, campaign.platform)
+            refs = worker.refs(campaign, entities)
+            states = await adapter.get_state(refs)
+        except CLOSED_ACCOUNT:
+            continue
+        rows = [("campaign", campaign)] + [
+            ("ad", entities[("ad", external_id)])
+            for external_id in refs.ads.values()
+            if ("ad", external_id) in entities
+        ]
+        approved = any(row.moderation_status == "approved" for kind, row in rows if kind == "ad")
+        reviewing, waiting = set(), False
+        outside, enables, pauses = [], [], []
+        for kind, row in rows:
+            state = states.get(row.external_id)
+            if state is None or row.status in {"archived", "rejected"} or state.status in {"archived", "rejected"}:
+                continue
+            target = "active" if row.status == "moderation" else row.status
+            if state.status in REVIEW:
+                reviewing.add(row.external_id)
+                # Черновик объявления не отправлен на проверку: включение отправит (Директ — moderate).
+                if target == "active" and state.status == "draft" and (kind == "ad" or approved):
+                    enables.append(Operation("set_status", kind, row.external_id, "status", state.status, "active"))
+            elif target == "active" and state.status == "paused_owner":
+                outside.append(Operation("set_status", kind, row.external_id, "status", target, "paused_owner"))
+            elif target == "active" and state.status != "active":
+                if state.ended:
+                    waiting = True
+                else:
+                    enables.append(Operation("set_status", kind, row.external_id, "status", state.status, "active"))
+            elif target in PAUSED and state.status == "active":
+                pauses.append(Operation("set_status", kind, row.external_id, "status", state.status, target))
+        status, settings = worker.repository.fresh_business_state(business.id)
+        meta = (settings or {}).get("_worker") or {}
+        if enables and (status != "running" or meta.get("kill_switch") or meta.get("pending_stop")):
+            enables, waiting = [], True
+        change = None
+        try:
+            if outside:
+                whole = any(op.entity_type == "campaign" for op in outside)
+                await worker.apply(
+                    business,
+                    campaign,
+                    outside,
+                    actor="external",
+                    kind="pause",
+                    reason_code="EXTERNAL_PAUSE" if whole else "EXTERNAL_AD_PAUSE",
+                    reason_text=None if whole else OUTSIDE_AD_PAUSE,
+                    suffix=f"external:{worker.clock.now.isoformat()}",
+                )
+                campaign.owner_paused = campaign.owner_paused or whole
+            # Остановка кампании — пауза, даже если заодно включаются её объявления: «Продолжить» читает её как нашу.
+            paused = not enables or any(op.entity_type == "campaign" for op in pauses)
+            if pauses or enables:
+                change = await worker.apply(
+                    business,
+                    campaign,
+                    pauses + enables,
+                    actor="system",
+                    kind="pause" if paused else "resume",
+                    reason_code="MODERATION_SETTLE",
+                    reason_text=REVIEW_PAUSED if paused else REVIEW_RESUMED,
+                    suffix=f"review:{worker.clock.now.isoformat()}",
+                    force=True,
+                )
+        except ChangeConflict:
+            continue
+        if change is not None and not change.evidence["_service"].get("review"):
+            reviewing -= {op.entity_id for op in enables}
+        if reviewing and campaign.status == "active" and campaign.review_since + REVIEW_NOTICE_AFTER < worker.clock.now:
+            worker.notice(
+                business,
+                "MODERATION_LONG",
+                f"Площадка больше {REVIEW_NOTICE_AFTER.days} дней проверяет объявления кампании «{campaign.name}». "
+                "Загляните в кабинет площадки: возможно, модератор ждёт ответа.",
+                key=f"review:{campaign.review_since.isoformat()}",
+                target_id=campaign.id,
+            )
+        if not (reviewing or waiting):
+            campaign.review_since = None
+        worker.repository.save(campaign)
+
+
+REVIEW_RESUMED = "Площадка закончила проверку объявлений: включили рекламу."
+OUTSIDE_AD_PAUSE = "Вы остановили объявление в кабинете площадки — автопилот его не включает."
+REVIEW_PAUSED = "Площадка закончила проверку объявлений: реклама остаётся остановленной, как и была."
 
 
 async def sync_campaign_status(worker: Worker, business: Business) -> None:
@@ -212,17 +321,11 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
     pending = {change.platform for change in worker.repository.pending(business.id)}
     skipped = pending | closed_platforms(worker, business)
     for campaign in worker.current_campaigns(business):
-        if campaign.platform in skipped:
+        # Кампанию, которую площадка ещё проверяет, сверяет settle_review: её статус — цель, а не факт.
+        if campaign.platform in skipped or campaign.review_since is not None:
             continue
         adapter = worker.resolve_adapter(business.id, campaign.platform)
         state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
-        if (
-            campaign.status == "active"
-            and state.status in {"draft", "moderation", "paused_auto"}
-            and not state.ended
-        ):
-            if await _resume_lost_activation(worker, business, campaign, state):
-                continue
         paused_outside = (
             state.status in {"paused_auto", "paused_owner"}
             and campaign.status == "active"
@@ -250,50 +353,3 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             campaign.frozen_until = worker.clock.now + timedelta(hours=get_domain_settings().owner_cooldown_hours)
             held.discard(campaign.id)
         worker.remember(business, campaign, below_minimum=sorted(held))
-
-
-async def _resume_lost_activation(worker: Worker, business: Business, campaign: Campaign, state) -> bool:
-    """В2 круга 7: сверка провалила ожидающее включение по границе модерации (5 дней), а площадка потом
-    одобрила объявления. Кампания локально «active», а на площадке ещё draft/moderation (Директ после
-    одобрения может отдать OFF, то есть paused_auto) — без повтора она так и осталась бы выключенной,
-    хотя владельцу обещано «включится автоматически». Повторяем resume: новая запись закроет очередь
-    платформы, пока она pending, сверка не дублирует. Возвращает, повторил ли resume."""
-    failed = worker.repository.rows(ChangeLog, business.id, platform=campaign.platform, status="failed")
-    lost_records = [
-        item
-        for item in failed
-        if any(
-            operation.get("entity_type") == "campaign"
-            and operation.get("entity_id") == campaign.external_id
-            and operation.get("field") == "status"
-            and operation.get("after") == "active"
-            for operation in item.operations
-        )
-        and MODERATION_TIMEOUT in (item.evidence or {}).get("_service", {}).get("error", "")
-    ]
-    if not lost_records:
-        return False
-    last_failed = max(lost_records, key=lambda item: item.id)
-    applied = worker.repository.last_status_change(business.id, campaign.platform, "campaign", campaign.external_id)
-    if applied is not None and applied.id > last_failed.id:
-        # В2 круга 9: после провала границы модерации статус кампании уже меняли применённой записью
-        # (успешный MODERATION_RESUME) — включение не потеряно, а OFF/ENDED у площадки — обычная пауза.
-        return False
-    try:
-        await worker.apply(
-            business,
-            campaign,
-            [Operation("set_status", "campaign", campaign.external_id, "status", state.status, "active")],
-            actor="system",
-            kind="resume",
-            reason_code="MODERATION_RESUME",
-            reason_text=(
-                "Площадка долго проверяла объявления, и первое включение не подтвердилось. "
-                "Проверка закончена: включили кампанию снова."
-            ),
-            suffix="moderation-resume",
-        )
-    except ChangeConflict:
-        # Площадка ещё проверяет объявления: запись осталась pending и доведётся сверкой, как обычное включение.
-        pass
-    return True
