@@ -351,11 +351,13 @@ class ScreensService:
                         continue
                 active = True
             # Кампанию, которой нет в кабинете, «Продолжить» не включит: она не держит кнопку у работающей рекламы.
+            missing.sort()
             if missing != self.worker.metadata(business).get("missing_campaigns", []):
                 self.worker.remember(business, missing_campaigns=missing)
             if active:
                 business.status = "running"
-                self.worker.remember(business, kill_switch=False, kill_switch_campaigns=sorted(stopped & set(failed)))
+                kept = stopped & (set(failed) | set(missing))
+                self.worker.remember(business, kill_switch=False, kill_switch_campaigns=sorted(kept))
             elif failure is not None:
                 raise failure
             held = set(self.worker.metadata(business).get("below_minimum", []))

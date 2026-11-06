@@ -305,9 +305,9 @@ async def optimize(worker: Worker, business: Business) -> None:
                 _, lifetime = await read_spend(
                     worker, business, campaigns=[item for item in campaigns if item.platform not in closed]
                 )
-            state = (await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign)))[
-                campaign.external_id
-            ]
+            state = await campaign_state(worker, business, campaign)
+            if state is None:
+                continue
             spent = lifetime.get(campaign.external_id, 0)
             daily = state.daily_limit_kop * share_after // share_before
             # VK не хранит лимит периода: на площадку уходит только дневной лимит (месяц закрывает страж бюджета).

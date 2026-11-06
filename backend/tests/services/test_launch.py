@@ -3634,6 +3634,55 @@ async def test_continue_skips_campaign_deleted_in_cabinet(tmp_path: Path) -> Non
     assert len(not_found(world)) == 1
 
 
+async def test_stop_platform_counts_campaign_deleted_in_cabinet_as_stopped(tmp_path: Path) -> None:
+    """Важно круга 15: удалённая в кабинете кампания не делает отзыв кабинета неудачным: тратить ей нечем."""
+    from time import monotonic
+
+    from app.services.budget_guard import stop_platform
+
+    adapter = Deleted()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    await launch(world, plan)
+    first, second = sorted(campaigns(world), key=lambda item: item.id)
+    adapter.gone = second.external_id
+    worker = recovery_worker(world, after=timedelta(hours=1), dry_run=False)
+    worker.step_key = "owner:revoke"
+    deadline = monotonic() + 60
+    stopped = await stop_platform(
+        world.business, worker=worker, platform="direct", reason_text="Остановили.", deadline=deadline
+    )
+    assert stopped is True and await platform_status(world, first) == "paused_owner"
+
+
+async def test_campaign_returned_to_cabinet_can_be_continued_again(tmp_path: Path) -> None:
+    """Важно круга 15: кампания пропала в кабинете, затем вернулась и стоит остановленной нами: она выходит из
+    missing_campaigns, кнопка «Продолжить» снова есть и включает её."""
+    from app.services.budget_guard import campaign_state, stop_all
+    from app.services.screens import ScreensService
+
+    adapter = Deleted()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    await launch(world, plan)
+    first, second = sorted(campaigns(world), key=lambda item: item.id)
+    await stop_all(world.business, worker=recovery_worker(world, dry_run=False), actor="owner")
+    adapter.gone = second.external_id
+    worker = recovery_worker(world, after=timedelta(hours=1), dry_run=False)
+    await ScreensService(worker).resume(world.business)
+    assert worker.metadata(world.business)["missing_campaigns"] == [second.id]
+    adapter.gone = None
+    worker = recovery_worker(world, after=timedelta(hours=2), dry_run=False)
+    state = await campaign_state(worker, world.business, second)
+    assert state is not None and state.status in {"paused_owner", "paused_auto"}
+    assert worker.metadata(world.business)["missing_campaigns"] == []
+    assert ScreensService(worker).resume_left(world.business, set()) is True
+    await ScreensService(worker).resume(world.business)
+    assert await platform_status(world, second) == "active"
+
+
 async def test_month_rollover_and_rebalance_skip_campaign_deleted_in_cabinet(tmp_path: Path) -> None:
     """Важно круга 14: удалённая в кабинете кампания не роняет шаги воркера каждый тик: новый месяц возобновляет
     остальные, пересчёт лимитов и сверка статусов идут дальше, уведомление одно."""

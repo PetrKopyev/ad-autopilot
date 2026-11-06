@@ -27,7 +27,11 @@ async def campaign_state(worker: Worker, business: Business, campaign: Campaign)
     прежнем): шаг идёт дальше без неё, а владельцу — одно уведомление на кампанию, сколько бы шагов её ни встречали."""
     states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
     state = states.get(campaign.external_id)
-    if state is None:
+    if state is not None:
+        missing = worker.metadata(business).get("missing_campaigns", [])
+        if campaign.id in missing:
+            worker.remember(business, missing_campaigns=sorted(set(missing) - {campaign.id}))
+    else:
         logger.warning("Кампания %s бизнеса %s не найдена на площадке %s", campaign.id, business.id, campaign.platform)
         worker.notice(
             business,
@@ -193,8 +197,9 @@ async def stop_platform(
             if monotonic() >= deadline:
                 raise TimeoutError
             try:
-                states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
-                state = states[campaign.external_id]
+                state = await campaign_state(worker, business, campaign)
+                if state is None:
+                    continue
                 if state.status in STOPPED and not awaiting_enable(campaign, state):
                     continue
                 change = await worker.apply(
