@@ -151,18 +151,20 @@ it('вход на шаг сайта берёт проверку из кэша, �
   fetchMock.mockImplementation(async (url, init) => {
     const check = new URL(String(url));
     return check.pathname === '/api/business/site-check'
-      ? new Response(JSON.stringify(site(check.search ? found : description)), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      ? new Response(JSON.stringify(site(init?.method === 'POST' ? found : description)), { status: 200, headers: { 'Content-Type': 'application/json' } })
       : answer(url, init);
   });
-  const checks = () => fetchMock.mock.calls.map(([url]) => new URL(String(url))).filter((url) => url.pathname === '/api/business/site-check').map((url) => url.search);
+  const checks = () => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === '/api/business/site-check')
+    .map(([url, init]) => `${init?.method ?? 'GET'} ${new URL(String(url)).search}`.trim());
   renderStep(3);
   const retry = await screen.findByRole('button', { name: copy.common.retry });
   await waitFor(() => expect(retry.hasAttribute('disabled')).toBe(false));
-  expect(checks()).toEqual(['']);
+  expect(checks()).toEqual(['GET']);
   fireEvent.click(retry);
-  await waitFor(() => expect(checks()).toEqual(['', '?refresh=1']));
+  // Повтор перечитывает сайт и тратит лимит — POST с CSRF, обычный вход — GET из кэша.
+  await waitFor(() => expect(checks()).toEqual(['GET', 'POST']));
   await waitFor(() => expect(retry.hasAttribute('disabled')).toBe(false));
-  expect(checks()).toEqual(['', '?refresh=1']);
+  expect(checks()).toEqual(['GET', 'POST']);
   // Повтор заполнил пустую цену и не тронул услуги, которые уже были в форме.
   const stored = JSON.parse(sessionStorage.getItem('ad-autopilot-setup-draft')!).description;
   expect([stored.services.value, stored.prices.value]).toEqual(['Маникюр', 'Маникюр — 1 500 ₽']);

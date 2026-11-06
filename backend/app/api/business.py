@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -14,7 +14,7 @@ from app.api.routing import ReleasingRoute, request_session
 from app.api.stats import CurrentBusiness, Today
 from app.auth.sessions import current_session, current_user, require_csrf
 from app.content.site_reader import read_site
-from app.db.models import Session, User
+from app.db.models import Business, Session, User
 from app.demo_flags import demo_enabled
 from app.platforms.base import PlatformError
 from app.platforms.metrica import MetricaError
@@ -137,10 +137,26 @@ async def site_check(
     business: CurrentBusiness,
     service: Service,
     today: Today,
-    refresh: bool = False,
 ) -> dict:
-    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта. refresh — кнопка
-    # повтора: сайт читается заново мимо кэша.
+    # Шаг мастера запрашивает проверку при каждом входе: лимит считает только настоящее чтение сайта.
+    return await check_site(request, session, business, service, today, refresh=False)
+
+
+@router.post("/business/site-check", dependencies=[Depends(require_csrf)])
+async def refresh_site_check(
+    request: Request,
+    session: Annotated[Session, Depends(current_session)],
+    business: CurrentBusiness,
+    service: Service,
+    today: Today,
+) -> dict:
+    # Кнопка повтора: сайт читается заново мимо кэша — это меняет описание и тратит лимит ИИ, поэтому POST с CSRF.
+    return await check_site(request, session, business, service, today, refresh=True)
+
+
+async def check_site(
+    request: Request, session: Session, business: Business, service: OnboardingService, today: date, *, refresh: bool
+) -> dict:
     with human_errors():
         return await service.site_check(
             business.id,

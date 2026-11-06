@@ -388,6 +388,8 @@ MODERATION_PENDING = "Площадка ещё проверяет объявле�
         ("owner", "paused_owner", "paused_owner"),
         ("missing", "paused_auto", "paused_auto"),
         ("changed", "active", "moderation"),
+        ("ads", "paused_auto", "moderation"),
+        ("ads_active", "active", "moderation"),
     ],
 )
 def test_moderation_wait_records_become_review_state_and_downgrade_restores_them(
@@ -396,7 +398,8 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
     """0009: включение, ждавшее проверки pending-записью (три записи LAUNCH на проде), становится применённым, а его
     кампания — «ждёт одобрения» (review_since — время записи); выключенные объявления — на проверке. Кампания
     остановленного бизнеса — на паузе, остановленная владельцем и его объявления — как были; запись ненайденной
-    кампании остаётся pending. Откат возвращает pending-запись и прежние статусы, если их с тех пор не меняли; обычная
+    кампании остаётся pending. Запись, которая включала только объявления, статус кампании не меняет, а ждёт одобрения
+    только работающая кампания. Откат возвращает pending-запись и прежние статусы, если их с тех пор не меняли; обычная
     pending-запись (неизвестный исход) миграцию не касается."""
     with scratch_schema() as (connection, config):
         command.upgrade(config, "0002_autopilot_additions")
@@ -409,7 +412,7 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
         )
         connection.execute(
             text("UPDATE campaigns SET status = :status"),
-            {"status": "paused_owner" if case == "owner" else "paused_auto"},
+            {"status": {"owner": "paused_owner", "ads_active": "active"}.get(case, "paused_auto")},
         )
         connection.execute(
             text("UPDATE ads SET status = :status"), {"status": "paused_owner" if case == "owner" else "paused_auto"}
@@ -425,6 +428,7 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
                 "after": "active",
             }
             for entity, external in (("ad", "a-1"), ("campaign", "c-1"))
+            if entity == "ad" or not case.startswith("ads")
         ]
         refs = {"campaign_id": "c-404" if case == "missing" else "c-1", "groups": {}, "ads": {}, "targets": {}}
         record = {
@@ -464,8 +468,9 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
         if case == "missing":
             assert service == awaiting and campaign.review_since is None
         else:
-            assert service["error"] is None and service["review"] == ["a-1", "c-1"] and service["differences"] == []
-            assert campaign.review_since == created
+            review = ["a-1"] if case.startswith("ads") else ["a-1", "c-1"]
+            assert service["error"] is None and service["review"] == review and service["differences"] == []
+            assert campaign.review_since == (None if case == "ads" else created)
         if case == "changed":
             # Воркер довёл кампанию после выкладки: откат её не трогает.
             connection.execute(text("UPDATE campaigns SET status = 'paused_owner'"))
@@ -475,7 +480,7 @@ def test_moderation_wait_records_become_review_state_and_downgrade_restores_them
             text("SELECT status, evidence -> '_service' AS service FROM change_log WHERE id = :id"), {"id": waiting}
         ).one()
         assert restored.status == "pending" and restored.service == awaiting
-        expected = {"owner": "paused_owner", "changed": "paused_owner"}.get(case, "paused_auto")
+        expected = {"owner": "paused_owner", "changed": "paused_owner", "ads_active": "active"}.get(case, "paused_auto")
         assert connection.execute(
             text("SELECT status, review_since FROM campaigns WHERE id = :id"), {"id": ids["campaign"]}
         ).one() == (expected, None)

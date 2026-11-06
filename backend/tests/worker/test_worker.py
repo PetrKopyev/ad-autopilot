@@ -361,6 +361,23 @@ async def test_month_stop_record_names_the_reason() -> None:
     )
 
 
+async def test_month_stop_during_owner_pause_names_owner_pause() -> None:
+    """D круга 14: реклама на паузе владельца, а продолжение выключено: запись месячной остановки называет паузу
+    владельца — реклама стояла бы и с включённым продолжением."""
+    from dataclasses import replace
+
+    world = await make_world(auto_continue=False)
+    worker = world.worker()
+    await stop_all(world.business, worker=worker, actor="owner")
+    key = world.refs.campaign_id
+    # Владелец включил кампанию в кабинете, пока реклама на паузе: остановка месяца её выключает.
+    world.adapter._states[key] = replace(world.adapter._states[key], status="active")
+    world.clock.advance(days=40)
+    await worker.run("month_rollover", 1)
+    (stop,) = world.changes(reason_code="MONTH_STOP")
+    assert stop.reason_text == "Остановили рекламу на всех площадках. Реклама на паузе: вы остановили её вручную."
+
+
 async def test_kill_switch_stops_all_and_blocks_autopilot() -> None:
     world = await make_world()
     worker = world.worker()

@@ -282,6 +282,28 @@ async def test_rejected_ad_is_rewritten_once_even_if_platform_still_reports_reje
     assert len(world.changes(reason_code="REJECTED_REWRITE")) == 1
 
 
+async def test_rewritten_ad_returns_campaign_to_review(monkeypatch):
+    """Мелочь 6 круга 14: отметку проверки кампании, все объявления которой отклонены, шаг модерации снимает;
+    исправленное объявление снова на проверке — отметка возвращается, и после одобрения его включит settle_review."""
+    from dataclasses import replace
+
+    from app.platforms.base import ModerationInfo
+
+    world = await make_world()
+    world.clock.advance(days=2)
+    ad = next(iter(world.ads.values()))
+    world.campaign.review_since = None
+
+    async def rejected(refs):
+        return [ModerationInfo(ad.external_id, "rejected", "Опечатка в тексте", world.clock.now)]
+
+    monkeypatch.setattr(world.adapter, "get_moderation", rejected)
+    world.adapter._states[ad.external_id] = replace(world.adapter._states[ad.external_id], status="moderation")
+    rewrite = AsyncMock(return_value=[Operation("update_ad_text", "ad", ad.external_id, "text", ad.text, "Исправлено")])
+    await sync_moderation(world.worker(rewrite_rejected=rewrite), world.business)
+    assert ad.status == "moderation" and world.campaign.review_since == world.clock.now
+
+
 async def test_rejected_ad_waits_for_unconfirmed_change_before_rewrite(monkeypatch):
     """Пока площадка не подтвердила другое изменение, правка текста упала бы в конфликт: отклонённое объявление
     переписывается на опросе после подтверждения, а не теряет отметку навсегда."""

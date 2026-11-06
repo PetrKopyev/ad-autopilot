@@ -192,6 +192,9 @@ async def sync_moderation(worker: Worker, business: Business) -> None:
                         )
                         if operations and not worker.proposed(business):
                             ad.status = "moderation"
+                            if campaign.review_since is None:
+                                campaign.review_since = worker.clock.now
+                                worker.repository.save(campaign)
         finally:
             # Статусы и отметки модерации кампании — одним commit, в том числе когда кампания опрошена не до конца:
             # иначе save(run) после сбоя сохранил бы статус active без даты одобрения.
@@ -246,7 +249,10 @@ async def settle_review(worker: Worker, business: Business) -> None:
                 continue
             target = "active" if row.status == "moderation" else row.status
             if state.status in REVIEW:
-                reviewing.add(row.external_id)
+                # Черновик, у которого отклонены все объявления, площадка не примет, пока их не исправят: ждать нечего,
+                # и отметка снимается — кампанию снова сверяет sync_campaign_status. Исправление вернёт отметку.
+                if not (kind == "campaign" and rejected):
+                    reviewing.add(row.external_id)
                 # Черновик объявления не отправлен на проверку: включение отправит (Директ — moderate).
                 if target == "active" and state.status == "draft" and (kind == "ad" or approved):
                     enables.append(Operation("set_status", kind, row.external_id, "status", state.status, "active"))
@@ -269,6 +275,8 @@ async def settle_review(worker: Worker, business: Business) -> None:
         if enables and (status != "running" or meta.get("kill_switch") or meta.get("pending_stop")):
             enables, waiting = [], True
         change = None
+        # Ключ записи — окно проверки и её операции: повтор шага в том же окне не пишет вторую такую же запись.
+        window = campaign.review_since.isoformat()
         try:
             if outside:
                 whole = any(op.entity_type == "campaign" for op in outside)
@@ -280,9 +288,11 @@ async def settle_review(worker: Worker, business: Business) -> None:
                     kind="pause",
                     reason_code="EXTERNAL_PAUSE" if whole else "EXTERNAL_AD_PAUSE",
                     reason_text=None if whole else OUTSIDE_AD_PAUSE,
-                    suffix=f"external:{worker.clock.now.isoformat()}",
+                    suffix=f"external:{window}:{','.join(sorted(op.entity_id for op in outside))}",
                 )
+                # Паузу владельца сохраняем сразу: следующая запись может упасть в конфликт.
                 campaign.owner_paused = campaign.owner_paused or whole
+                worker.repository.save(campaign)
             # Остановка кампании — пауза, даже если заодно включаются её объявления: «Продолжить» читает её как нашу.
             paused = not enables or any(op.entity_type == "campaign" for op in pauses)
             if pauses or enables:
@@ -294,13 +304,19 @@ async def settle_review(worker: Worker, business: Business) -> None:
                     kind="pause" if paused else "resume",
                     reason_code=SETTLE,
                     reason_text=REVIEW_PAUSED if paused else REVIEW_RESUMED,
-                    suffix=f"review:{worker.clock.now.isoformat()}",
+                    suffix=f"review:{window}:{'pause' if paused else 'resume'}:"
+                    + ",".join(sorted(op.entity_id for op in pauses + enables)),
                     force=True,
                 )
         except ChangeConflict:
             continue
-        if change is not None and not change.evidence["_service"].get("review"):
+        sent = set(change.evidence["_service"].get("review", ())) if change is not None else set()
+        if change is not None and not sent:
             reviewing -= {op.entity_id for op in enables}
+        if change is not None and not paused and {op.entity_id for op in enables} <= sent:
+            # Включение только отправило черновик на проверку: реклама заработает после одобрения.
+            change.reason_text = REVIEW_SENT
+            worker.repository.save(change)
         if rejected:
             # Черновик без одобренных объявлений площадка не примет никогда: это не долгая проверка.
             worker.notice(
@@ -328,6 +344,7 @@ async def settle_review(worker: Worker, business: Business) -> None:
 
 
 REVIEW_RESUMED = "Площадка закончила проверку объявлений: включили рекламу."
+REVIEW_SENT = "Отправили объявления на проверку площадке. Включим рекламу, как только она их одобрит."
 OUTSIDE_AD_PAUSE = "Вы остановили объявление в кабинете площадки — автопилот его не включает."
 REVIEW_PAUSED = "Площадка закончила проверку объявлений: реклама остаётся остановленной, как и была."
 
@@ -336,7 +353,7 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
     """Пауза и включение кампании в кабинете площадки. Площадка не говорит, кто остановил кампанию: что меняли мы,
     помнит локальный статус — его переписывает каждое применённое изменение."""
     from app.config import get_domain_settings
-    from app.services.budget_guard import closed_platforms
+    from app.services.budget_guard import campaign_state, closed_platforms
 
     held = set(worker.metadata(business).get("below_minimum", []))
     # Кабинет, который требует входа заново, спросить нечем: остальные площадки сверяются.
@@ -346,8 +363,9 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
         # Кампанию, которую площадка ещё проверяет, сверяет settle_review: её статус — цель, а не факт.
         if campaign.platform in skipped or campaign.review_since is not None:
             continue
-        adapter = worker.resolve_adapter(business.id, campaign.platform)
-        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        state = await campaign_state(worker, business, campaign)
+        if state is None:
+            continue
         paused_outside = (
             state.status in {"paused_auto", "paused_owner"}
             and campaign.status == "active"

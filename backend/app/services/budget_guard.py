@@ -12,14 +12,34 @@ from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import active_daily_limit, plan_budget
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.explain import explain, rubles
-from app.platforms.base import Operation
-from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
+from app.platforms.base import EntityState, Operation
+from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, awaiting_enable, wait_for_lock
 from app.worker.clock import today
 
 if TYPE_CHECKING:
     from app.worker.jobs import Worker
 
 logger = logging.getLogger(__name__)
+
+
+async def campaign_state(worker: Worker, business: Business, campaign: Campaign) -> EntityState | None:
+    """Состояние кампании на площадке. None — кампании нет в подключённом кабинете (удалена там или осталась в
+    прежнем): шаг идёт дальше без неё, а владельцу — одно уведомление на кампанию, сколько бы шагов её ни встречали."""
+    states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+    state = states.get(campaign.external_id)
+    if state is None:
+        logger.warning("Кампания %s бизнеса %s не найдена на площадке %s", campaign.id, business.id, campaign.platform)
+        worker.notice(
+            business,
+            "CAMPAIGN_NOT_FOUND",
+            explain(
+                "CAMPAIGN_NOT_FOUND",
+                campaign=campaign.name,
+                account=ACCOUNT_NAMES.get(campaign.platform, campaign.platform),
+            ),
+            key=f"campaign_not_found:{campaign.id}",
+        )
+    return state
 
 
 def closed_platforms(worker: Worker, business: Business) -> set[str]:
@@ -92,32 +112,13 @@ async def stop_all(
         failed = False
         for campaign in worker.campaigns(business):
             try:
-                states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-                state = states.get(campaign.external_id)
+                state = await campaign_state(worker, business, campaign)
                 if state is None:
-                    # Кампании нет в подключённом кабинете (удалена там или осталась в прежнем): остановить её
-                    # нечем, но это не повод бросать остановку остальных. Владельцу — одно уведомление на кампанию.
-                    logger.warning(
-                        "Кампания %s бизнеса %s не найдена на площадке %s при остановке",
-                        campaign.id,
-                        business.id,
-                        campaign.platform,
-                    )
-                    worker.notice(
-                        business,
-                        "CAMPAIGN_NOT_FOUND",
-                        explain(
-                            "CAMPAIGN_NOT_FOUND",
-                            campaign=campaign.name,
-                            account=ACCOUNT_NAMES.get(campaign.platform, campaign.platform),
-                        ),
-                        key=f"campaign_not_found:{campaign.id}",
-                    )
+                    # Остановить кампанию, которой нет в кабинете, нечем, но это не повод бросать остановку остальных.
                     continue
                 # Кампания, которую площадка уже одобрила и выключила, а шаг модерации ещё не включил, локально ждёт
                 # включения: остановка меняет и эту цель.
-                waiting = campaign.review_since is not None and campaign.status == "active"
-                if state.status == "archived" or state.status in {"paused_auto", "paused_owner"} and not waiting:
+                if state.status in STOPPED and not awaiting_enable(campaign, state):
                     continue
                 if actor == "owner":
                     stopped = worker.metadata(business).get("kill_switch_campaigns", [])
@@ -194,7 +195,7 @@ async def stop_platform(
             try:
                 states = await worker.resolve_adapter(business.id, platform).get_state(worker.refs(campaign))
                 state = states[campaign.external_id]
-                if state.status in STOPPED:
+                if state.status in STOPPED and not awaiting_enable(campaign, state):
                     continue
                 change = await worker.apply(
                     business,

@@ -117,6 +117,7 @@ def test_cities_lists_targetable_cities_for_logged_in_user(api) -> None:
             "/api/business/marking",
             {"subject_type": "ip", "inn": "526317984689", "name": "ИП", "phone": "89001234567"},
         ),
+        ("POST", "/api/business/site-check", None),
     ],
 )
 def test_business_changes_need_login_and_csrf(api, method, path, body) -> None:
@@ -132,6 +133,21 @@ def test_site_check_of_foreign_business_is_not_found(api) -> None:
     response = client.get("/api/business/site-check", params={"business_id": context.other.id})
     assert response.status_code == 404
     assert client.get("/api/business/site-check").status_code == 200
+
+
+def test_site_check_rereads_site_only_by_post(api, monkeypatch) -> None:
+    """G круга 14: повтор проверки перечитывает сайт и тратит лимит ИИ — только POST с CSRF, GET читает кэш."""
+    client, context = api
+    calls = []
+
+    async def site_check(*args, on_miss, refresh):
+        calls.append(refresh)
+        return {}
+
+    monkeypatch.setattr(context.world.onboarding, "site_check", site_check)
+    assert client.get("/api/business/site-check", params={"refresh": "true"}).status_code == 200
+    assert client.post("/api/business/site-check").status_code == 200
+    assert calls == [False, True]
 
 
 def test_site_check_is_rate_limited_per_user_and_ip(api, monkeypatch) -> None:
@@ -206,7 +222,7 @@ def test_site_check_retry_reads_site_again_and_spends_the_limit(api, monkeypatch
     assert client.get("/api/business/site-check").status_code == 200
     assert client.get("/api/business/site-check").status_code == 200
     assert len(reads) == 1
-    assert client.get("/api/business/site-check", params={"refresh": 1}).status_code == 200
+    assert client.post("/api/business/site-check").status_code == 200
     assert len(reads) == 2
     from app.api import limits
 

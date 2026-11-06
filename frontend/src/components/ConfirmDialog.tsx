@@ -14,8 +14,9 @@ export interface ConfirmDialogProps {
   cancel: string;
   busy: boolean;
   error?: string;
-  /** danger — остановка и отключение, accent — главное действие («Запустить рекламу»). */
-  tone?: 'danger' | 'accent';
+  /** danger — остановка и отключение, accent — главное действие («Запустить рекламу»), primary — безопасное
+   * («Продолжить рекламу»). */
+  tone?: 'danger' | 'accent' | 'primary';
   onConfirm: () => void;
   onClose: () => void;
 }

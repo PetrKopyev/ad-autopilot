@@ -3087,6 +3087,49 @@ async def test_all_ads_rejected_notifies_owner_instead_of_long_review(tmp_path: 
     assert not [row for row in settle_records(world) if row.kind == "resume"]
 
 
+async def test_all_ads_rejected_in_draft_campaign_ends_review(tmp_path: Path) -> None:
+    """Мелочь 6 круга 14: площадка отклонила все объявления кампании-черновика — черновик так и останется на проверке,
+    но ждать нечего: отметка проверки снимается (иначе кампанию не сверял бы sync_campaign_status), владелец получает
+    одно уведомление об отказе, кампания остаётся как есть."""
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": SlowModeration()}
+    )
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    for ad in ads_of(world):
+        ad.moderation_status, ad.status = "rejected", "rejected"
+    await settle(world)
+    assert campaign.review_since is None and campaign.status == "active"
+    assert await platform_status(world, campaign) == "draft"
+    assert [row.log[0]["reason_code"] for row in notices(world)] == ["MODERATION_ALL_REJECTED"]
+
+
+async def test_rebalance_pause_of_rejected_draft_does_not_restart_review(tmp_path: Path) -> None:
+    """Мелочь 6 круга 14: черновик, все объявления которого отклонены, снят с проверки; пересчёт лимитов ставит его на
+    паузу «показывать нечего», которую площадка черновику не применяет. Отметка проверки не возвращается: пересчёт не
+    держит под кампанию бюджет, а уведомление об отказе не повторяется."""
+    from app.services.optimize import NO_ACTIVE_ADS
+
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": DraftRefusesSuspend()}
+    )
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    for ad in ads_of(world):
+        ad.moderation_status, ad.status = "rejected", "rejected"
+    await settle(world)
+    assert campaign.review_since is None
+    for hours in (3, 5):
+        await recovery_worker(world, after=timedelta(hours=hours), dry_run=False).run(
+            "rebalance_budget", world.business.id, key=f"rejected-rebalance-{hours}"
+        )
+        await settle(world, hours=hours + 1)
+    (pause,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "BUDGET_REBALANCE"]
+    assert pause.reason_text == NO_ACTIVE_ADS and campaign.status == "paused_auto"
+    assert campaign.review_since is None and campaign.daily_limit_kop == 0
+    assert [row.log[0]["reason_code"] for row in notices(world)] == ["MODERATION_ALL_REJECTED"]
+
+
 async def test_stop_during_review_keeps_campaign_off_after_approval_and_continue_enables(tmp_path: Path) -> None:
     """(г) «Остановить» во время проверки: черновик Директ остановить не даёт — это не сбой остановки, цель —
     пауза. После одобрения кампания не включается (а если площадка включила её сама — останавливается), и
@@ -3188,6 +3231,23 @@ async def test_stop_after_approval_before_enable_changes_target_to_pause(tmp_pat
     assert campaign.status == "paused_owner"
     await settle(world)
     assert await platform_status(world, campaign) != "active" and campaign.review_since is None
+
+
+async def test_service_removed_after_approval_before_enable_keeps_campaign_off(tmp_path: Path) -> None:
+    """Важно 1 круга 14: услугу убрали, когда площадка уже одобрила и выключила её кампанию, а шаг модерации ещё не
+    включил: цель — пауза владельца, и шаг модерации кампанию не включает."""
+    adapter = AcceptedOff()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    await launch(world, plan)
+    removed = next(item for item in campaigns(world) if "Педикюр" in item.name)
+    adapter.accept()
+    approve(world)
+    await describe_services(world, recovery_worker(world, after=timedelta(minutes=5), dry_run=False), "Маникюр")
+    assert removed.status == "paused_owner"
+    await settle(world)
+    assert await platform_status(world, removed) != "active" and removed.review_since is None
 
 
 async def test_continue_during_review_waits_for_approval_again(tmp_path: Path) -> None:
@@ -3331,6 +3391,26 @@ async def test_rebalance_pause_during_review_is_not_undone_by_approval(tmp_path:
     assert await platform_status(world, campaign) == "paused_auto"
 
 
+async def test_rebalance_pause_after_approval_before_enable_keeps_campaign_off(tmp_path: Path) -> None:
+    """Важно 1 круга 14: площадка уже одобрила и выключила кампанию (ACCEPTED/OFF), шаг модерации её ещё не включил,
+    а пересчёт лимитов останавливает её (остатка меньше минимума площадки): цель становится паузой, и шаг модерации
+    кампанию не включает."""
+    adapter = ReviewMinimum()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    adapter.accept()
+    approve(world)
+    adapter.strict = True
+    await recovery_worker(world, after=timedelta(hours=1), dry_run=False).run(
+        "rebalance_budget", world.business.id, key="approved-rebalance"
+    )
+    assert campaign.status == "paused_auto"
+    await settle(world)
+    assert await platform_status(world, campaign) == "paused_auto" and campaign.review_since is None
+    assert not [row for row in settle_records(world) if row.kind == "resume"]
+
+
 async def test_rebalance_does_not_resume_settled_pause_of_campaign_with_nothing_to_show(tmp_path: Path) -> None:
     """Паузу «показывать нечего» (NO_ACTIVE_ADS) черновику после проверки довёл шаг модерации: пересчёт лимитов судит
     по исходной паузе и кампанию не включает — объявления включает владелец."""
@@ -3459,7 +3539,7 @@ async def test_continue_failed_on_second_campaign_resumes_the_rest_on_next_press
     first, second = sorted(campaigns(world), key=lambda item: item.id)
     adapter.fail = second.external_id
     result = await ScreensService(worker).resume(world.business)
-    assert result["warning"] == "Часть кампаний не включилась. Нажмите «Продолжить» ещё раз."
+    assert result["warning"] == "Часть кампаний не включилась. Нажмите «Продолжить рекламу» ещё раз."
     assert world.business.status == "running" and not worker.metadata(world.business).get("kill_switch")
     assert await platform_status(world, first) == "active" and await platform_status(world, second) == "paused_auto"
     last = world.repository.last_status_change(world.business.id, "direct", "campaign", second.external_id)
@@ -3515,3 +3595,157 @@ async def test_continue_with_unconfirmed_enable_is_not_an_error(tmp_path: Path) 
     await recovery_worker(world, after=timedelta(minutes=10)).run_business_due(world.business.id)
     (campaign,) = campaigns(world)
     assert record.status == "applied" and campaign.status == "active"
+
+
+class Deleted(FakeAdapter):
+    """Владелец удалил кампанию в кабинете площадки: её состояния площадка больше не отдаёт."""
+
+    gone: str | None = None
+
+    async def get_state(self, refs):
+        found = await super().get_state(refs)
+        return {key: state for key, state in found.items() if key != self.gone}
+
+
+def not_found(world: World) -> list[WorkerRun]:
+    return [row for row in notices(world) if row.log[0]["reason_code"] == "CAMPAIGN_NOT_FOUND"]
+
+
+async def test_continue_skips_campaign_deleted_in_cabinet(tmp_path: Path) -> None:
+    """Важно круга 14: кампанию удалили в кабинете, пока реклама стояла: «Продолжить» не падает, включает остальные,
+    владелец получает одно уведомление, а удалённая кампания не держит кнопку «Продолжить» у работающей рекламы."""
+    from app.services.budget_guard import stop_all
+    from app.services.screens import ScreensService
+
+    adapter = Deleted()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    await launch(world, plan)
+    first, second = sorted(campaigns(world), key=lambda item: item.id)
+    await stop_all(world.business, worker=recovery_worker(world, dry_run=False), actor="owner")
+    adapter.gone = second.external_id
+    worker = recovery_worker(world, after=timedelta(hours=1), dry_run=False)
+    result = await ScreensService(worker).resume(world.business)
+    assert world.business.status == "running" and result["warning"] is None and not result["resume_pending"]
+    assert await platform_status(world, first) == "active"
+    with pytest.raises(ChangeConflict, match="Реклама уже работает"):
+        await ScreensService(recovery_worker(world, after=timedelta(hours=2), dry_run=False)).resume(world.business)
+    assert len(not_found(world)) == 1
+
+
+async def test_month_rollover_and_rebalance_skip_campaign_deleted_in_cabinet(tmp_path: Path) -> None:
+    """Важно круга 14: удалённая в кабинете кампания не роняет шаги воркера каждый тик: новый месяц возобновляет
+    остальные, пересчёт лимитов и сверка статусов идут дальше, уведомление одно."""
+    from app.services.budget_guard import stop_all
+    from app.services.month import month_rollover
+    from app.services.optimize import rebalance_budget
+    from app.services.sync import sync_campaign_status
+
+    adapter = Deleted()
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": adapter}
+    )
+    await launch(world, plan)
+    first, second = sorted(campaigns(world), key=lambda item: item.id)
+    worker = recovery_worker(world, after=timedelta(hours=1), dry_run=False)
+    await stop_all(
+        world.business,
+        worker=worker,
+        budget_stop=True,
+        reason_code="BUDGET_STOP",
+        reason_params={"spent": 0, "budget": world.business.month_budget_kop, "margin": 0},
+    )
+    adapter.gone = second.external_id
+    worker.remember(world.business, month=(TODAY.replace(day=1) - timedelta(days=1)).replace(day=1).isoformat())
+    await month_rollover(worker, world.business)
+    assert world.business.status == "running" and await platform_status(world, first) == "active"
+    worker = recovery_worker(world, after=timedelta(hours=2), dry_run=False)
+    await rebalance_budget(worker, world.business)
+    await sync_campaign_status(worker, world.business)
+    assert len(not_found(world)) == 1
+
+
+class DraftAd(SlowModeration):
+    """Черновик объявления: включение только отправляет его на проверку (Директ — moderate)."""
+
+    async def apply(self, operation) -> None:
+        state = self._states.get(operation.entity_id)
+        if operation.entity_type == "ad" and operation.after == "active" and state and state.status == "draft":
+            raise AwaitingModeration(operation.entity_id)
+        await super().apply(operation)
+
+
+async def test_settle_that_only_sends_draft_to_review_says_so_and_is_written_once(tmp_path: Path) -> None:
+    """B круга 14: шаг модерации отправил черновик объявления на проверку — запись не «включили рекламу», а честно
+    «отправили на проверку»; повтор шага в том же окне проверки вторую запись не пишет."""
+    from app.services.sync import REVIEW_SENT
+
+    adapter = DraftAd()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    ad = ads_of(world)[0]
+    ad.status = "moderation"
+    adapter._states[ad.external_id] = replace(adapter._states[ad.external_id], status="draft")
+    await settle(world)
+    await settle(world, hours=2.5)
+    (record,) = settle_records(world)
+    assert record.kind == "resume" and record.reason_text == REVIEW_SENT
+    assert record.evidence["_service"]["review"] == [ad.external_id]
+
+
+async def test_owner_pause_from_cabinet_survives_conflict_of_next_settle_record(tmp_path: Path, monkeypatch) -> None:
+    """C круга 14: пауза в кабинете записана (EXTERNAL_PAUSE), а следующая запись шага модерации упала в конфликт:
+    отметка «остановил владелец» уже сохранена."""
+    adapter = AcceptedOff()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    first, second = ads_of(world)
+    adapter.accept()
+    approve(world)
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="paused_owner")
+    adapter._states[second.external_id] = replace(adapter._states[second.external_id], status="active")
+    second.status = "paused_auto"
+    from app.services.sync import settle_review
+
+    worker = recovery_worker(world, after=timedelta(hours=2), dry_run=False)
+    saved: list[bool] = []
+    save = worker.repository.save
+
+    def remember_owner_paused(*items):
+        saved.extend(item.owner_paused for item in items if item is campaign)
+        save(*items)
+
+    monkeypatch.setattr(worker.repository, "save", remember_owner_paused)
+    apply = worker.apply
+
+    async def conflict_after_first(*args, **kwargs):
+        if kwargs.get("reason_code") == "MODERATION_SETTLE":
+            raise ChangeConflict("Площадка занята.")
+        return await apply(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "apply", conflict_after_first)
+    await settle_review(worker, world.business)
+    assert True in saved
+
+
+async def test_continue_with_campaigns_stopped_in_cabinet_explains_why(tmp_path: Path) -> None:
+    """E круга 14: «Продолжить» не включило ни одной кампании — все остановлены в кабинете площадки: владелец видит,
+    почему, а не молчаливый ответ."""
+    from app.services.budget_guard import stop_all
+    from app.services.screens import ScreensService
+
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",))
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    await stop_all(world.business, worker=recovery_worker(world, dry_run=False), actor="owner")
+    campaign.owner_paused = True
+    result = await ScreensService(recovery_worker(world, after=timedelta(hours=1), dry_run=False)).resume(
+        world.business
+    )
+    assert world.business.status == "paused"
+    assert result["warning"] == (
+        "Реклама не включилась: кампании остановлены или удалены в кабинете площадки. "
+        "Включите их там и нажмите «Продолжить рекламу» ещё раз."
+    )

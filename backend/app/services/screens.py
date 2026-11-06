@@ -23,7 +23,7 @@ from app.domain.explain import PLURALS, explain_audience, explain_experiment, pl
 from app.domain.rules import first_decision_days
 from app.domain.types import ExperimentResult, Metrics, Verdict
 from app.platforms.base import Operation, PlatformError, lead_count
-from app.services.budget_guard import STOPPED, closed_platforms, read_spend, stop_all
+from app.services.budget_guard import STOPPED, campaign_state, closed_platforms, read_spend, stop_all
 from app.services.changes import REVIEW, ChangeConflict, wait_for_lock
 from app.services.launch import TITLES
 from app.services.onboarding import MAX_BUDGET_KOP, NotFound, OnboardingError, check_budget, owner_fields
@@ -286,9 +286,11 @@ class ScreensService:
         """У работающей рекламы остались кампании, которые «Продолжить» не включил. Включение, которого площадка ещё
         не подтвердила, доводит сверка: включать его снова не нужно."""
         stopped = set(self.worker.metadata(business).get("kill_switch_campaigns", []))
+        missing = set(self.worker.metadata(business).get("missing_campaigns", []))
         pending = {change.platform for change in self.repository.pending(business.id)}
         return any(
             campaign.status != "active"
+            and campaign.id not in missing
             and campaign.platform not in pending
             and self.stopped_by_us(business, campaign, stopped)
             for campaign in self.resumable(business, revoked)
@@ -315,13 +317,12 @@ class ScreensService:
             await rebalance_budget(self.worker, business, force=True)
             active = False
             stopped = set(self.worker.metadata(business).get("kill_switch_campaigns", []))
-            failed, failure = [], None
+            failed, failure, missing = [], None, []
             for campaign in self.resumable(business, revoked):
-                state = (
-                    await self.worker.resolve_adapter(business.id, campaign.platform).get_state(
-                        self.worker.refs(campaign)
-                    )
-                )[campaign.external_id]
+                state = await campaign_state(self.worker, business, campaign)
+                if state is None:
+                    missing.append(campaign.id)
+                    continue
                 if state.status == "active":
                     active = True
                     continue
@@ -349,6 +350,9 @@ class ScreensService:
                         failure = failure or conflict
                         continue
                 active = True
+            # Кампанию, которой нет в кабинете, «Продолжить» не включит: она не держит кнопку у работающей рекламы.
+            if missing != self.worker.metadata(business).get("missing_campaigns", []):
+                self.worker.remember(business, missing_campaigns=missing)
             if active:
                 business.status = "running"
                 self.worker.remember(business, kill_switch=False, kill_switch_campaigns=sorted(stopped & set(failed)))
@@ -357,11 +361,17 @@ class ScreensService:
             held = set(self.worker.metadata(business).get("below_minimum", []))
         warning = None
         if failed:
-            warning = "Часть кампаний не включилась. Нажмите «Продолжить» ещё раз."
+            warning = "Часть кампаний не включилась. Нажмите «Продолжить рекламу» ещё раз."
         elif not active and any(campaign.id in held for campaign in self.worker.current_campaigns(business)):
             warning = (
                 "Реклама не включилась: при текущем бюджете площадкам не хватает минимума. "
                 "Увеличьте бюджет в настройках."
+            )
+        elif not active and (missing or any(item.owner_paused for item in self.worker.current_campaigns(business))):
+            # Включать нечего: кампании остановлены в кабинете площадки (их автопилот не включает) или удалены там.
+            warning = (
+                "Реклама не включилась: кампании остановлены или удалены в кабинете площадки. "
+                "Включите их там и нажмите «Продолжить рекламу» ещё раз."
             )
         return self.status(business) | {"warning": warning}
 

@@ -286,6 +286,24 @@ async def test_awaiting_moderation_does_not_stop_remaining_operations(repository
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
 
 
+async def test_enabling_campaign_keeps_rejected_ad_rejected(repository, tree, monkeypatch):
+    """F круга 14: включение применено, а объявление площадка отклонила: локально оно остаётся отклонённым, не
+    «работает» — его переписывает сверка модерации."""
+    adapter, refs = tree
+    campaign, ad = local_tree(repository, refs, campaign="paused_auto", ad="rejected")
+    real_apply = adapter.apply
+
+    async def rejected_ad_stays(operation):
+        if operation.entity_type != "ad":
+            await real_apply(operation)
+
+    monkeypatch.setattr(adapter, "apply", rejected_ad_stays)
+    reviewing_states(adapter, monkeypatch, ad="rejected")
+    change = await launch_activation(ChangesService(repository, dry_run=False), adapter, refs)
+    assert change.status == "applied"
+    assert campaign.status == "active" and ad.status == "rejected"
+
+
 async def test_refused_pause_of_draft_campaign_is_applied_as_target(repository, tree, monkeypatch):
     """Директ не приостанавливает кампанию-черновик: она и так не крутится. Остановка не провалена: локально
     кампания на паузе (цель), отметка review_since — после проверки паузу доведёт sync.settle_review."""

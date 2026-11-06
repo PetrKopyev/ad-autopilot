@@ -49,6 +49,7 @@ from app.services.changes import (
     ChangeConflict,
     ChangesService,
     ServerBusy,
+    awaiting_enable,
 )
 from app.services.demo import configure_adapter
 from app.services.onboarding import DRAFT_STATUSES, NotFound, description_draft
@@ -357,7 +358,7 @@ class LaunchService:
             # В5 круга 7: повтор не снимает «Остановить всю рекламу» сам — иначе бизнес получал running
             # с зажатым kill_switch: «Продолжить» отвечало «уже работает», а автопилот был выключен.
             raise LaunchBlocked(
-                ["Реклама остановлена вами. Сначала нажмите «Продолжить» на главной, потом повторите запуск."]
+                ["Реклама остановлена вами. Сначала нажмите «Продолжить рекламу» на главной, потом повторите запуск."]
             )
         await self.settle_pending(plan, now)
         limits = self.retry_limits(business, plan, today)
@@ -1129,7 +1130,7 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
             continue
         status = states[campaign.external_id].status
         if gone and len(gone) == len(ids):
-            if status in STOPPED:
+            if status in STOPPED and not awaiting_enable(campaign, states[campaign.external_id]):
                 continue
             await worker.apply(
                 business,
@@ -1147,7 +1148,11 @@ async def sync_removed_services(worker: Worker, business: Business) -> None:
         pauses = [
             Operation("set_status", "ad", ad.external_id, "status", states[ad.external_id].status, "paused_owner")
             for ad in stale
-            if ad.external_id in states and states[ad.external_id].status not in STOPPED
+            if ad.external_id in states
+            and (
+                states[ad.external_id].status not in STOPPED
+                or awaiting_enable(campaign, states[ad.external_id], ad)
+            )
         ]
         if pauses:
             await worker.apply(

@@ -89,17 +89,22 @@ it('пустая форма: без подсказок браузера, оши�
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
   expect(block.getAllByText(copy.launchFlow.innError('ip'))).toHaveLength(1);
   expect(block.getAllByText(copy.setup.advertiser.phoneError)).toHaveLength(1);
+  expect(block.getAllByText(copy.setup.advertiser.nameError)).toHaveLength(1);
   expect(saveMarking).not.toHaveBeenCalled();
 });
 
-it('без ФИО — общая ошибка по-русски', async () => {
+it('без ФИО — ошибка у поля, а не общая', async () => {
   const block = await marking();
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
   fireEvent.change(block.getByRole('textbox', { name: copy.setup.advertiser.taxId }), { target: { value: '500100732259' } });
   fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.phone }), { target: { value: '+7 900 000-33-44' } });
   fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.fullName }), { target: { value: ' ' } });
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
-  expect(await block.findByText(copy.launchFlow.markingError)).toBeTruthy();
+  const name = block.getByRole('textbox', { name: copy.launchFlow.fullName });
+  expect(name.getAttribute('aria-invalid')).toBe('true');
+  expect(document.getElementById('settings-name-error')?.textContent).toBe(copy.setup.advertiser.nameError);
+  expect(block.getAllByText(copy.setup.advertiser.nameError)).toHaveLength(1);
+  expect(block.queryByText(copy.launchFlow.markingError)).toBeNull();
   expect(saveMarking).not.toHaveBeenCalled();
 });
 
@@ -114,6 +119,14 @@ it('подтверждение маркировки во ВКонтакте — 
   block = await marking();
   fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
   expect(block.getByRole('checkbox', { name: copy.launchFlow.confirmVk })).toBeTruthy();
+  // Отключённый или требующий входа кабинет VK — не подключён: подтверждать в нём нечего.
+  for (const status of ['revoked', 'needs_reauth'] as const) {
+    cleanup();
+    mockAccounts = [direct, { ...direct, id: 6, platform: 'vk', status }];
+    block = await marking();
+    fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+    expect(block.queryByRole('checkbox', { name: copy.launchFlow.confirmVk })).toBeNull();
+  }
 });
 
 it('без сохранённой маркировки сразу показывает форму', async () => {

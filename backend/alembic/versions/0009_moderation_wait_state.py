@@ -2,7 +2,10 @@
 действие сделано, площадка проверяет. Их кампании получают review_since (время записи, как sync_local), включённые
 объявления — статус moderation. Кампания остановленного бизнеса (не running, kill_switch) получает паузу: включение
 ждало одобрения после остановки; остановленная владельцем (owner_paused, paused_owner) и его остановленные объявления
-остаются как были. Запись, чья кампания не найдена, остаётся pending: её доводит recover_pending.
+остаются как были. Запись, которая включала только объявления (MODERATION_PENDING ставился на любое изменение, не
+только запуск), статус кампании не меняет, а review_since ставит работающей кампании: её объявления включит
+sync.settle_review после одобрения, у остановленной кампании выключенные объявления — норма. Запись, чья кампания не
+найдена, остаётся pending: её доводит recover_pending.
 
 Откат: записи с пометкой migrated_review снова pending с прежним текстом, а локальный статус возвращается прежний из
 пометки, если с тех пор его никто не менял. Точен откат только сразу после выкладки: позже работающий воркер уже довёл
@@ -67,7 +70,7 @@ def upgrade() -> None:
         running = row.business_status == "running" and not meta.get("kill_switch") and not meta.get("pending_stop")
         campaign = bind.execute(
             sa.text(
-                "SELECT id, status, owner_paused FROM campaigns WHERE business_id = :business "
+                "SELECT id, external_id, status, owner_paused FROM campaigns WHERE business_id = :business "
                 "AND platform = :platform AND external_id = :external"
             ),
             {"business": row.business_id, "platform": row.platform, "external": service["refs"]["campaign_id"]},
@@ -79,19 +82,26 @@ def upgrade() -> None:
             for ad in _ads(bind, row.business_id, row.platform, _enabled(row.operations, "ad"))
             if ad.status not in {"active", "moderation", "rejected", "paused_owner"}
         ]
+        enabled = campaign.external_id in _enabled(row.operations, "campaign")
         status = (
             campaign.status
-            if campaign.owner_paused or campaign.status == "paused_owner"
+            if not enabled or campaign.owner_paused or campaign.status == "paused_owner"
             else "active"
             if running
             else "paused_auto"
         )
-        previous = {"campaign": campaign.status, "ads": {str(ad.id): ad.status for ad in ads}, "set": status}
+        waits = enabled or campaign.status == "active"
+        previous = {
+            "campaign": campaign.status,
+            "ads": {str(ad.id): ad.status for ad in ads},
+            "set": status,
+            "review": waits,
+        }
         bind.execute(
             sa.text(
                 "UPDATE campaigns SET status = :status, review_since = COALESCE(review_since, :since) WHERE id = :id"
             ),
-            {"status": status, "since": row.created_at, "id": campaign.id},
+            {"status": status, "since": row.created_at if waits else None, "id": campaign.id},
         )
         for ad in ads:
             bind.execute(sa.text("UPDATE ads SET status = 'moderation' WHERE id = :id"), {"id": ad.id})
@@ -123,7 +133,8 @@ def downgrade() -> None:
         campaign = {"business": row.business_id, "platform": row.platform, "external": service["refs"]["campaign_id"]}
         where = "business_id = :business AND platform = :platform AND external_id = :external"
         # Ожидание снова держит pending-запись.
-        bind.execute(sa.text(f"UPDATE campaigns SET review_since = NULL WHERE {where}"), campaign)
+        if previous.get("review", True):
+            bind.execute(sa.text(f"UPDATE campaigns SET review_since = NULL WHERE {where}"), campaign)
         bind.execute(
             sa.text(f"UPDATE campaigns SET status = :previous WHERE {where} AND status = :status"),
             campaign | {"previous": previous["campaign"], "status": previous["set"]},

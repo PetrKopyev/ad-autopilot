@@ -100,6 +100,8 @@ it('объясняет, почему реклама не включилась п
   await show(0, 0);
   fireEvent.click(await screen.findByRole('button', { name: copy.home.resumeAll }));
   expect(resumeAutopilot).not.toHaveBeenCalled();
+  // Продолжить — безопасное действие: красная кнопка — только у остановки.
+  expect(screen.getByRole('button', { name: copy.home.resumeYes }).className).toContain('button--primary');
   fireEvent.click(screen.getByRole('button', { name: copy.home.resumeYes }));
   expect(screen.queryByRole('button', { name: copy.home.stopAll })).toBeNull();
   expect(await screen.findByText(warning)).toBeTruthy();

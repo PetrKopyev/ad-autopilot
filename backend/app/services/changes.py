@@ -42,6 +42,31 @@ REVIEW = frozenset({"pending", "moderation", "draft"})
 PAUSES = frozenset({"paused_auto", "paused_owner"})
 
 
+def awaiting_enable(campaign: Campaign, state: EntityState, row: Campaign | Ad | None = None) -> bool:
+    """Площадка одобрила и выключила кампанию (или её объявление), а шаг модерации ещё не включил: локальная цель —
+    работать, и остановка меняет её, хотя на площадке выключено. Иначе sync.settle_review включил бы остановленное."""
+    return (
+        campaign.review_since is not None
+        and campaign.status == "active"
+        and (row or campaign).status in {"active", "moderation"}
+        and state.status in PAUSES
+    )
+
+
+def rejected_draft_pause(
+    campaign: Campaign, entities: Mapping[tuple[str, str], object], reviewed: Sequence[Operation]
+) -> bool:
+    """Пауза черновика, все объявления которого отклонены: площадка не примет его, пока объявления не исправят, и
+    ждать проверки нечего — отметка держала бы под кампанию бюджет и повторяла уведомление об отказе."""
+    groups = {item.id for item in entities.values() if isinstance(item, AdGroup) and item.campaign_id == campaign.id}
+    ads = [item for item in entities.values() if isinstance(item, Ad) and item.ad_group_id in groups]
+    return (
+        bool(ads)
+        and all(ad.status == "rejected" for ad in ads)
+        and all(op.entity_type == "campaign" and op.after in PAUSES for op in reviewed)
+    )
+
+
 # Паузу, которую площадка не применила к черновику, после проверки доводит шаг модерации (sync.settle_review): это не
 # новая остановка, а исходная, и «почему остановлено» отвечает запись до неё.
 SETTLE = "MODERATION_SETTLE"
@@ -459,7 +484,11 @@ class ChangesRepository:
         review = set((change.evidence.get("_service") or {}).get("review", ()))
         if review:
             campaign = entities.get(("campaign", load_refs(change).campaign_id))
-            if isinstance(campaign, Campaign) and campaign.review_since is None:
+            if (
+                isinstance(campaign, Campaign)
+                and campaign.review_since is None
+                and not rejected_draft_pause(campaign, entities, [op for op in operations if op.entity_id in review])
+            ):
                 campaign.review_since = change.created_at
         for op in final_operations(operations):
             entity = entities.get((op.entity_type, op.entity_id))

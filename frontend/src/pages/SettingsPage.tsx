@@ -235,9 +235,10 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   const [marking, setMarking] = useState<Marking>(() => markingForm(stored));
   const [innTouched, setInnTouched] = useState(false);
   const [phoneTouched, setPhoneTouched] = useState(false);
+  const [nameTouched, setNameTouched] = useState(false);
   const accounts = useSession().data?.accounts ?? [];
   // Подтверждать маркировку можно только в подключённом кабинете; Директ — основная площадка, он есть всегда.
-  const platforms = (['direct', 'vk'] as const).filter((platform) => platform === 'direct' || accounts.some((item) => item.platform === platform));
+  const platforms = (['direct', 'vk'] as const).filter((platform) => platform === 'direct' || accounts.some((item) => item.platform === platform && item.status === 'ok'));
   const set = (patch: Partial<Marking>) => setMarking((value) => ({ ...value, ...patch }));
   const innOk = validInn(marking.inn) && (marking.subject_type === 'ooo' ? 10 : 12) === marking.inn.length;
   const showInnError = (innTouched || !!marking.inn) && !innOk;
@@ -246,16 +247,14 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   // Передача данных — по площадкам: кабинет принял данные сам или ждёт заполнения владельцем.
   const transmission = stored?.transmission;
   const phoneError = phoneTouched && phoneDigits(marking.phone).length !== 10 ? copy.setup.advertiser.phoneError : undefined;
+  const nameError = nameTouched && !marking.name.trim() ? copy.setup.advertiser.nameError : undefined;
   function edit() {
-    section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setPhoneTouched(false); setEditing(true);
+    section.clear(); setMarking(markingForm(stored)); setInnTouched(false); setPhoneTouched(false); setNameTouched(false); setEditing(true);
   }
   function submit() {
-    setInnTouched(true); setPhoneTouched(true);
-    // Ошибки ИНН и телефона показываются у полей: в общей строке они бы повторились.
-    if (!innOk || phoneDigits(marking.phone).length !== 10) { section.clear(); return; }
-    if (!marking.name.trim()) {
-      void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
-    }
+    setInnTouched(true); setPhoneTouched(true); setNameTouched(true);
+    // Ошибки ИНН, названия и телефона показываются у полей: в общей строке они бы повторились.
+    if (!innOk || !marking.name.trim() || phoneDigits(marking.phone).length !== 10) { section.clear(); return; }
     void section.run(async () => {
       const result = await saveMarking(marking);
       setStored(maskMarking(marking, result));
@@ -271,7 +270,8 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
           <input id="settings-inn" className="input mono" required inputMode="numeric" maxLength={12} value={marking.inn} aria-invalid={showInnError}
             aria-describedby={describedBy('settings-inn', undefined, showInnError)} onBlur={() => setInnTouched(true)} onChange={(event) => set({ inn: event.target.value.trim() })} /></Field>
       </div>
-      <Field id="settings-name" label={copy.launchFlow.fullName}><input id="settings-name" className="input" required value={marking.name} onChange={(event) => set({ name: event.target.value })} /></Field>
+      <Field id="settings-name" label={copy.launchFlow.fullName} error={nameError}><input id="settings-name" className="input" required value={marking.name} aria-invalid={!!nameError}
+        aria-describedby={describedBy('settings-name', undefined, !!nameError)} onChange={(event) => set({ name: event.target.value })} /></Field>
       <Field id="settings-phone" label={copy.launchFlow.phone} error={phoneError}><PhoneInput id="settings-phone" className="input" required placeholder="+7 (999) 123-45-67" value={marking.phone}
         aria-invalid={!!phoneError} aria-describedby={describedBy('settings-phone', undefined, !!phoneError)} onChange={(phone) => set({ phone })} /></Field>
       <p className="notice">{copy.launchFlow.markingOverwrite}</p>

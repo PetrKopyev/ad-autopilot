@@ -406,7 +406,7 @@ export function HomePage() {
     {summary && !prelaunch && <Sources summary={summary} />}
     <ConfirmDialog open={asking} title={copy.screens.stopTitle} confirm={copy.screens.confirmStop} confirming={copy.screens.stopping} cancel={copy.screens.cancel}
       busy={stopping} error={stopError} onConfirm={() => void stop()} onClose={() => setAsking(false)}><p>{copy.screens.stopDescription}</p></ConfirmDialog>
-    <ConfirmDialog open={askingResume} title={copy.home.resumeTitle} confirm={copy.home.resumeYes} confirming={copy.home.resumingAll} cancel={copy.home.resumeNo}
+    <ConfirmDialog open={askingResume} title={copy.home.resumeTitle} confirm={copy.home.resumeYes} confirming={copy.home.resumingAll} cancel={copy.home.resumeNo} tone="primary"
       busy={resuming} error={resumeError || undefined} onConfirm={resume} onClose={() => setAskingResume(false)}><p>{copy.home.resumeDescription}</p></ConfirmDialog>
   </div>;
 }

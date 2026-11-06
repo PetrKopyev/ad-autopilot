@@ -40,8 +40,8 @@ from app.domain.types import (
     total_metrics,
 )
 from app.platforms.base import Operation, PlatformError, lead_count
-from app.services.budget_guard import closed_platforms, read_spend
-from app.services.changes import REVIEW, ChangeConflict, budget_operations
+from app.services.budget_guard import campaign_state, closed_platforms, read_spend
+from app.services.changes import REVIEW, ChangeConflict, awaiting_enable, budget_operations
 from app.services.experiments import completed_hypotheses, experiment_settings, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
@@ -137,9 +137,10 @@ async def snapshot(
     }
     group_snapshots = []
     for group in groups:
-        if group.external_id not in states or group.campaign_id not in campaign_map:
+        campaign = campaign_map.get(group.campaign_id)
+        # Кампании, удалённой в кабинете, площадка не отдаёт: её группы не работают.
+        if group.external_id not in states or campaign is None or campaign.external_id not in states:
             continue
-        campaign = campaign_map[group.campaign_id]
         siblings = [item for item in groups if item.campaign_id == campaign.id]
         equal = campaign.daily_limit_kop // len(siblings)
         group_snapshots.append(
@@ -492,8 +493,9 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         for campaign in campaigns:
             if campaign.platform != limit.platform or campaign.platform in closed:
                 continue
-            states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-            state = states[campaign.external_id]
+            state = await campaign_state(worker, business, campaign)
+            if state is None:
+                continue
             own = {group.external_id for group in local_groups if group.campaign_id == campaign.id}
             active = {group.id for group in platform_groups if group.id in own and group.id in live}
             desired_daily = sum(daily[group_id] for group_id in active)
@@ -532,7 +534,11 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                                 "set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto"
                             )
                         ]
-                        if state.status in {"active", *REVIEW}
+                        # Черновик, который уже на паузе по нашей цели, повторно не останавливаем: запись в журнале
+                        # на каждом пересчёте ничего не меняла бы.
+                        if state.status == "active"
+                        or (state.status in REVIEW and campaign.status == "active")
+                        or awaiting_enable(campaign, state)
                         else [],
                         reason_code="BUDGET_REBALANCE",
                         kind="pause",

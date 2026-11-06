@@ -5,7 +5,7 @@
 .settings-hint .icon { width: 18px; height: 18px; margin-top: 1px; color: var(--color-success); }
 .settings textarea.input { min-height: 84px; }
 .settings .actions .button { flex: 0 1 auto; overflow-wrap: normal; }
-.settings-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); }
+.settings-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 
 .settings .check { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; font-weight: 700; cursor: pointer; }
 .settings .check input { flex: 0 0 20px; width: 20px; height: 20px; margin: 0; accent-color: var(--color-ink); cursor: pointer; }

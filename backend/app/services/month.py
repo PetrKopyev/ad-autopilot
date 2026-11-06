@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from app.db.models import BudgetLedger, Business
 from app.domain.explain import MONTHS
 from app.platforms.base import Operation, PlatformError
-from app.services.budget_guard import stop_all
+from app.services.budget_guard import campaign_state, stop_all
 from app.services.changes import REVIEW
 from app.services.optimize import rebalance_budget
 from app.worker.clock import MOSCOW, today
@@ -40,10 +40,11 @@ async def month_rollover(worker: Worker, business: Business) -> None:
         return
     if not business.auto_continue or meta.get("kill_switch") or business.status == "paused":
         # Запись называет причину остановки: владелец иначе не поймёт, почему реклама выключилась 1-го числа.
+        # Пауза владельца важнее настройки: реклама стояла бы и с включённым продолжением.
         reason_text = (
-            "Остановили рекламу на всех площадках. Продолжение в следующем месяце выключено в настройках."
-            if not business.auto_continue
-            else "Остановили рекламу на всех площадках. Реклама на паузе: вы остановили её вручную."
+            "Остановили рекламу на всех площадках. Реклама на паузе: вы остановили её вручную."
+            if meta.get("kill_switch") or business.status == "paused"
+            else "Остановили рекламу на всех площадках. Продолжение в следующем месяце выключено в настройках."
         )
         await stop_all(business, worker=worker, reason_code="MONTH_STOP", reason_text=reason_text)
         worker.remember(business, month=month.isoformat())
@@ -61,8 +62,8 @@ async def month_rollover(worker: Worker, business: Business) -> None:
     held_before = set(meta.get("below_minimum", []))
     for campaign in worker.current_campaigns(business):
         adapter = worker.resolve_adapter(business.id, campaign.platform)
-        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
-        if not state.ended:
+        state = await campaign_state(worker, business, campaign)
+        if state is None or not state.ended:
             continue
         if hasattr(adapter, "extend_end_date"):
             try:
@@ -101,10 +102,9 @@ async def month_rollover(worker: Worker, business: Business) -> None:
             or campaign.id in held
         ):
             continue
-        adapter = worker.resolve_adapter(business.id, campaign.platform)
-        state = (await adapter.get_state(worker.refs(campaign)))[campaign.external_id]
+        state = await campaign_state(worker, business, campaign)
         # Кампанию, остановленную, пока площадка её проверяла, включаем так же: включение снова дождётся одобрения.
-        if state.status in {"paused_auto", "paused_owner", *REVIEW}:
+        if state is not None and state.status in {"paused_auto", "paused_owner", *REVIEW}:
             await worker.apply(
                 business,
                 campaign,
