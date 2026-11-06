@@ -251,8 +251,8 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
   }
   function submit() {
     setInnTouched(true); setPhoneTouched(true);
-    if (!innOk) { void section.run(() => Promise.reject(new Error(innError))); return; }
-    if (phoneDigits(marking.phone).length !== 10) { void section.run(() => Promise.reject(new Error(copy.setup.advertiser.phoneError))); return; }
+    // Ошибки ИНН и телефона показываются у полей: в общей строке они бы повторились.
+    if (!innOk || phoneDigits(marking.phone).length !== 10) { section.clear(); return; }
     if (!marking.name.trim()) {
       void section.run(() => Promise.reject(new Error(copy.launchFlow.markingError))); return;
     }
@@ -263,7 +263,7 @@ function MarkingBlock({ business }: { business: BusinessSettings }) {
     }, labels.markingSaved);
   }
   return <Block id="marking" title={copy.settings.marking} hint={labels.markingHint}>
-    {editing ? <form className="page-stack" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    {editing ? <form className="page-stack" noValidate onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <div className="settings-pair">
         <Field id="settings-subject" label={copy.setup.advertiser.type}><select id="settings-subject" className="input" value={marking.subject_type} onChange={(event) => set({ subject_type: event.target.value as Marking['subject_type'] })}>
           {Object.entries(copy.launchFlow.subjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>

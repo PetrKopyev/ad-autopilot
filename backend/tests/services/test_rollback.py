@@ -27,12 +27,14 @@ from app.platforms.fake import FakeAdapter
 from app.services.changes import ChangeConflict, ChangesRepository, ChangesService, ServerBusy, load_operations
 from app.services.rollback import (
     NOTHING_TO_REVERT,
+    TURN_ON,
     ConfirmationRequired,
     RollbackService,
     can_revert,
     inverse_operations,
     reverts_by_experiment,
     superseded,
+    turns_on,
     turns_on_replaced,
 )
 from tests.platforms.test_direct import DirectServer, configuration
@@ -836,6 +838,58 @@ async def test_launch_info_record_without_operations_is_not_revertable(client, r
 
 
 @pytest.mark.parametrize(
+    "kind,reason_code",
+    [
+        ("launch", "LAUNCH"),
+        ("resume", "OWNER_RESUME"),
+        ("resume", "BUDGET_RESUME"),
+        ("resume", "MONTH_RESUME"),
+        ("resume", "MODERATION_SETTLE"),
+        ("resume", "SERVICE_RETURNED"),
+    ],
+)
+async def test_turning_ads_on_is_not_reverted_by_journal(client, repository, tree, kind, reason_code):
+    """Важно 1 круга 13: откат запуска или возобновления остановил бы кампании при бизнесе «работает», и
+    «Продолжить» их не включило бы. Кнопки нет, сервер отвечает 409 с подсказкой про «Остановить»;
+    прочие откатываемые записи — как раньше."""
+    http, resolver, _ = client
+    adapter, refs = tree
+    await adapter.apply(Operation("set_status", "campaign", refs.campaign_id, "status", "active", "paused_auto"))
+    start = Operation("set_status", "campaign", refs.campaign_id, "status", "paused_auto", "active")
+    turned_on = await applied(
+        repository,
+        adapter,
+        refs,
+        operations=[start],
+        kind=kind,
+        reason_code=reason_code,
+        reason_params={"budget": 4_000_000},
+    )
+    ad = await applied(repository, adapter, refs)
+    repository.history.return_value = ([ad, turned_on], 2)
+    repository.get_owned.return_value = turned_on
+    resolver.return_value = adapter
+    items = http.get("/api/history").json()["items"]
+    assert [(item["can_revert"], item["turns_on"]) for item in items] == [(True, False), (False, True)]
+    response = http.post(f"/api/history/{turned_on.id}/revert", headers={"X-CSRF-Token": "test-csrf"})
+    assert response.status_code == 409 and response.json()["detail"] == TURN_ON
+    assert (await adapter.get_state(refs))[refs.campaign_id].status == "active"
+
+
+@pytest.mark.parametrize("reason_code", ["SERVICE_RETURNED", "MODERATION_SETTLE"])
+async def test_turning_only_ads_on_reverts_as_usual(client, repository, tree, reason_code):
+    """Возврат услуги или доводка после проверки, включившие только объявления, — не включение рекламы:
+    отменяются как обычно."""
+    http, _, _ = client
+    adapter, refs = tree
+    start = Operation("set_status", "ad", refs.ads["control"], "status", "paused_owner", "active")
+    returned = await applied(repository, adapter, refs, operations=[start], kind="resume", reason_code=reason_code)
+    repository.history.return_value = ([returned], 1)
+    (item,) = http.get("/api/history").json()["items"]
+    assert (item["can_revert"], item["turns_on"]) == (True, False)
+
+
+@pytest.mark.parametrize(
     "kind,reason_code,evidence,expected",
     [
         # Записи проверок откатываются по связанному эксперименту, хотя собственных операций у них нет.
@@ -968,6 +1022,21 @@ def test_turns_on_replaced_tolerates_old_operations_without_keys():
     new = ChangeLog(id=2, kind="pause", platform="fake", operations=[{"entity_id": "c1"}, stop])
     assert not turns_on_replaced(old, {("fake", "c1")})
     assert turns_on_replaced(new, {("fake", "c1")})
+
+
+def test_moderation_settle_turns_on_only_when_campaign_is_enabled():
+    """Доводка после проверки — включение рекламы, только если включает кампанию; пауза кампании и включение одних
+    объявлений откатываются как обычно."""
+    campaign = {"entity_type": "campaign", "entity_id": "c1", "field": "status", "after": "active"}
+    ad = {"entity_type": "ad", "entity_id": "a1", "field": "status", "after": "active"}
+    paused = campaign | {"after": "paused_owner"}
+
+    def settle(kind, *operations):
+        return ChangeLog(kind=kind, reason_code="MODERATION_SETTLE", operations=list(operations))
+
+    assert turns_on(settle("resume", ad, campaign))
+    assert not turns_on(settle("resume", ad))
+    assert not turns_on(settle("pause", paused, ad))
 
 
 async def test_launch_foreign_stops_record_reverts_to_previous_statuses(repository):

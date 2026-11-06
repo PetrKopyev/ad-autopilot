@@ -42,7 +42,7 @@ async function show(spent: number, reported: number) {
   vi.mocked(getSummary).mockResolvedValue({
     business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: reported, impressions: 0, clicks: 0, leads: 0,
     ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
-    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, quiet_weeks: 0, unknown_weeks: 4 },
     budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: spent, reported_kop: reported, remaining_kop: 3_000_000 - spent, days_remaining: 5, platforms: [] },
   } satisfies Summary);
   render(<MemoryRouter><HomePage /></MemoryRouter>);
@@ -207,7 +207,7 @@ it('кампания без ряда по дням показывается бе
 it('отменяет изменение из журнала только после подтверждения', async () => {
   const entry: HistoryEntry = { id: 7, business_id: 1, created_at: '2026-10-27T09:00:00Z', actor: 'autopilot', kind: 'budget', platform: 'direct',
     entity_type: 'campaign', entity_id: '1', reason_code: null, reason_text: 'Обращение здесь дешевле всего.', evidence: { budget_kop: 105_000 }, status: 'applied',
-    reverts_id: null, can_revert: true, revert_warning: 'Дневной бюджет вернётся к 820 ₽.' };
+    reverts_id: null, can_revert: true, revert_warning: 'Дневной бюджет вернётся к 820 ₽.', turns_on: false };
   vi.mocked(getHistoryPage).mockResolvedValue({ items: [entry], total: 1, page: 1, page_size: 5 });
   vi.mocked(revertChange).mockResolvedValue({ ...entry, id: 8, kind: 'revert', reverts_id: 7 });
   await show(0, 0);
@@ -248,7 +248,7 @@ it('до запуска нет остановки и переключателя:
   vi.mocked(getSummary).mockResolvedValue({
     business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
     ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
-    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, quiet_weeks: 0, unknown_weeks: 4 },
     budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
   } satisfies Summary);
   vi.mocked(getAds).mockResolvedValueOnce({ items: [], campaigns: [] });
@@ -287,7 +287,7 @@ it('до запуска неподтверждённая маркировка �
   vi.mocked(getSummary).mockResolvedValue({
     business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
     ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
-    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, quiet_weeks: 0, unknown_weeks: 4 },
     budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
   } satisfies Summary);
   render(<MemoryRouter><HomePage /></MemoryRouter>);
@@ -304,7 +304,7 @@ it('подтверждённая и переданная маркировка н
   vi.mocked(getSummary).mockResolvedValue({
     business_id: 1, from: '2026-10-01', to: '2026-10-27', incomplete_days: [], cost_kop: 0, impressions: 0, clicks: 0, leads: 0,
     ctr: null, cost_per_click_kop: null, cost_per_lead_kop: null, clients: null, cost_per_client_kop: null, is_incomplete: false, sources: [],
-    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, unknown_weeks: 4 },
+    clients_window: { from: '2026-09-22', to: '2026-10-19', clients: null, cost_kop: 0, cost_per_client_kop: null, answered_weeks: 0, quiet_weeks: 0, unknown_weeks: 4 },
     budget: { month: '2026-10-01', budget_kop: 3_000_000, spent_kop: 0, reported_kop: 0, remaining_kop: 3_000_000, days_remaining: 5, platforms: [] },
   } satisfies Summary);
   render(<MemoryRouter><HomePage /></MemoryRouter>);

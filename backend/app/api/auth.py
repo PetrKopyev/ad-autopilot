@@ -18,12 +18,13 @@ from starlette.concurrency import run_in_threadpool
 from app.api.limits import accounts_check_limit, demo_login_limit, yandex_start_limit
 from app.api.routing import ReleasingRoute, request_session
 from app.auth import yandex
-from app.auth.revoke import revoke_tokens
+from app.auth.revoke import Revocation, revoke_refused, revoke_tokens
 from app.auth.sessions import (
     CSRF_COOKIE,
     OAUTH_COOKIE,
     SESSION_COOKIE,
     STATE_TTL,
+    OtherAccount,
     Repository,
     clear_cookies,
     create_session,
@@ -312,7 +313,7 @@ async def yandex_callback(
     error: Annotated[str | None, Query(max_length=256)] = None,
 ) -> Response:
     """Сюда браузер приходит переходом от Яндекса, а не запросом приложения: ошибка показывается страницей
-    с понятным текстом и ссылкой «Войти заново», а не голым JSON с code= в адресе."""
+    с понятным текстом и ссылкой в приложение, а не голым JSON с code= в адресе."""
     try:
         return await _yandex_callback(request, repository, session, state, resume, code, error)
     except HTTPException as failure:
@@ -332,7 +333,7 @@ def callback_error_page(status: int, message: str) -> HTMLResponse:
 CALLBACK_ERROR_PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Вход не удался — Автопилот рекламы</title></head>
-<body><main><h1>Вход не удался</h1><p>{message}</p><p><a href="/">Войти заново</a></p></main></body></html>"""
+<body><main><h1>Вход не удался</h1><p>{message}</p><p><a href="/">Вернуться в приложение</a></p></main></body></html>"""
 
 
 async def _yandex_callback(
@@ -378,8 +379,17 @@ async def _yandex_callback(
         repository.save_session(new_session, request.cookies.get(SESSION_COOKIE))
         set_session_cookies(response, new_session)
         response.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
-    elif repository.save_account(business_id, profile["login"], tokens).status == "ok":
-        resume(business_id, "direct")
+    else:
+        try:
+            account = repository.save_account(business_id, profile["login"], tokens)
+        except OtherAccount:
+            # Кабинет не подключён: выданный для него токен нам не нужен, если тем же логином не подключён
+            # кабинет другого бизнеса — Яндекс мог отдать тот же токен.
+            if not repository.shares_direct_login(profile["login"]):
+                await revoke_refused(request.app.state.http, [Revocation("direct", tokens["access_token"])])
+            raise
+        if account.status == "ok":
+            resume(business_id, "direct")
     return response
 
 

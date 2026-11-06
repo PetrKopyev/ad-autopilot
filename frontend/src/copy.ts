@@ -14,6 +14,15 @@ const status = {
   ready: 'Готово',
 } as const;
 
+type ClientWeeks = { answered_weeks: number; quiet_weeks: number; unknown_weeks: number };
+/** Из каких недель окна сложилась цена клиента: с ответом и без обращений входят, без ответа — нет. */
+function clientWeeks({ answered_weeks: answered, quiet_weeks: quiet, unknown_weeks: unknown }: ClientWeeks): string {
+  const total = answered + quiet + unknown;
+  const parts = ([[answered, 'с ответом'], [quiet, 'без обращений'], [unknown, 'без ответа']] as const)
+    .filter(([count]) => count).map(([count, label]) => `${count} ${label}`);
+  return `За ${total} ${plural(total, 'неделю', 'недели', 'недель')}: ${parts.join(', ')}.`;
+}
+
 export const copy = {
   launchFlow: {
     loading: 'Загружаем…',
@@ -386,8 +395,7 @@ export const copy = {
     budgetTile: 'Бюджет месяца',
     budgetLeft: (left: string) => `Осталось ${left}. Лимиты на площадке держат расход в пределах бюджета.`,
     periodSpent: (cost: string) => `Расход за период — ${cost}`,
-    clientsHint: (answered: number, total: number) => answered === 0 ? 'Появятся после ваших ответов о клиентах.'
-      : `По вашим ответам: ${answered} ${plural(answered, 'неделя', 'недели', 'недель')} из ${total}.`,
+    clientsHint: (weeks: ClientWeeks) => weeks.answered_weeks === 0 ? 'Появятся после ваших ответов о клиентах.' : clientWeeks(weeks),
     needYou: 'Нужно от вас',
     changeBudget: 'Изменить бюджет',
     clientsWhy: 'По ответам считаем цену клиента.',
@@ -546,6 +554,7 @@ export const copy = {
     why: 'Почему',
     noRevertBudget: 'Это защита бюджета, отменить нельзя.',
     noRevertRevert: 'Это отмена изменения, откатить её нельзя.',
+    noRevertTurnOn: 'Это включение рекламы, отдельно его не отменить. Остановить рекламу можно кнопкой «Остановить» на главной.',
     today: (date: string) => `Сегодня, ${date}`,
     yesterday: (date: string) => `Вчера, ${date}`,
     count: (count: number) => `${count} ${plural(count, 'запись', 'записи', 'записей')}`,
@@ -701,10 +710,9 @@ export const copy = {
     recentDays: (days: number) => `последние ${days} ${plural(days, 'день', 'дня', 'дней')}`,
     noClients: 'Клиентов пока не знаем',
     clientsWindow: 'Клиенты — за четыре завершённые недели, по вашим ответам.',
-    answeredWeeks: (answered: number, unknown: number) => answered === 0
+    answeredWeeks: (weeks: ClientWeeks) => weeks.answered_weeks === 0
       ? 'Вы пока не ответили ни за одну из этих недель — ответы даёте в разделе «Клиенты».'
-      : unknown === 0 ? `Ответы есть за все ${answered} ${plural(answered, 'неделю', 'недели', 'недель')}.`
-        : `Ответы есть за ${answered} ${plural(answered, 'неделю', 'недели', 'недель')} из ${answered + unknown}.`,
+      : clientWeeks(weeks),
     noPrice: 'Пока не рассчитана',
     heartbeatMissing: 'Проверки ещё не было',
     heartbeatStale: 'Автопилот давно не проверял рекламу. Проверьте подключение в настройках.',

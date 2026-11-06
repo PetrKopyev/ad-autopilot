@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.auth.vk import API_URL, account_credentials
+from app.auth.vk import API_URL, account_credentials, key_client_id
 from app.db.models import PlatformAccount
 from app.platforms.base import AuthExpired
 
@@ -39,13 +39,6 @@ def revocation(account: PlatformAccount) -> Revocation | None:
     except AuthExpired:
         return None
     return Revocation("vk", client_id=credentials["client_id"], client_secret=credentials["client_secret"])
-
-
-def key_client_id(account: PlatformAccount) -> str | None:
-    try:
-        return account_credentials(account)[1].get("client_id")
-    except AuthExpired:
-        return None
 
 
 def same_vk_access(account: PlatformAccount, other: PlatformAccount) -> bool:
@@ -93,6 +86,15 @@ async def revoke_tokens(http: httpx.AsyncClient, revocations: list[Revocation], 
                 response.status_code,
                 error_code(response),
             )
+
+
+async def revoke_refused(http: httpx.AsyncClient, revocations: list[Revocation]) -> None:
+    """Отзыв токенов кабинета, который не подключили (OtherAccount): сбой отзыва любого рода не должен подменять
+    ответ «это другой кабинет» ошибкой сервера."""
+    try:
+        await revoke_tokens(http, revocations)
+    except Exception as error:
+        logger.warning("Token revocation of refused account failed: %s", type(error).__name__)
 
 
 def error_code(response: httpx.Response) -> str:

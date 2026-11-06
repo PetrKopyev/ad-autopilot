@@ -86,11 +86,9 @@ class ClientAnswer:
     week_end: date
     leads: int
     clients: int | None
-    spend: int = 0
 
     def __post_init__(self) -> None:
         nonnegative_int(self.leads, "leads")
-        nonnegative_int(self.spend, "spend")
         if self.clients is not None:
             nonnegative_int(self.clients, "clients")
             if self.clients > self.leads:

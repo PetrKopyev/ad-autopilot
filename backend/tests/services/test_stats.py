@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from dataclasses import asdict, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -150,7 +150,7 @@ def test_clients_use_only_answered_weeks_and_matching_cost() -> None:
         survey(TODAY, 10),
     ]
     rows = [stats_row(date=item.week_start) for item in surveys]
-    result = aggregate_clients(rows, surveys, TODAY)
+    result = aggregate_clients(rows, surveys, TODAY, [1, 2])
     assert result["clients"] == 5
     assert result["cost_kop"] == 3003
     assert result["cost_per_client_kop"] == 601
@@ -164,21 +164,52 @@ def test_clients_use_only_answered_weeks_and_matching_cost() -> None:
 def test_unknown_clients_differ_from_zero(
     clients: int | None, answered_at: datetime | None, expected: int | None
 ) -> None:
-    result = aggregate_clients([], [survey(date(2026, 10, 19), clients, answered_at)], TODAY)
+    result = aggregate_clients([], [survey(date(2026, 10, 19), clients, answered_at)], TODAY, [1])
     assert result["clients"] == expected
     assert result["cost_per_client_kop"] is None
 
 
 def test_historical_clients_ignore_later_answers() -> None:
-    result = aggregate_clients([], [survey(date(2026, 10, 12), 5)], date(2026, 10, 19))
+    result = aggregate_clients([], [survey(date(2026, 10, 12), 5)], date(2026, 10, 19), [1])
     assert result["clients"] is None
 
 
 def test_client_answer_date_is_taken_in_moscow() -> None:
     # 22:00 UTC 18 октября — уже 19 октября по Москве: на 18-е ответа ещё не было.
     late = survey(date(2026, 10, 5), 5, datetime(2026, 10, 18, 22, tzinfo=UTC))
-    assert aggregate_clients([], [late], date(2026, 10, 18))["clients"] is None
-    assert aggregate_clients([], [late], date(2026, 10, 19))["clients"] == 5
+    assert aggregate_clients([], [late], date(2026, 10, 18), [1])["clients"] is None
+    assert aggregate_clients([], [late], date(2026, 10, 19), [1])["clients"] == 5
+
+
+def test_unsettled_days_follow_settlement_days_setting(monkeypatch) -> None:
+    """Ревью 22be3cd: неустоявшиеся дни статистики считаются по settlement_days настроек, а не по зашитым 2 дням."""
+    from app.domain.settings import DEFAULT_SETTINGS
+
+    monkeypatch.setattr("app.services.stats.DEFAULT_SETTINGS", replace(DEFAULT_SETTINGS, settlement_days=3))
+    day = TODAY - timedelta(days=2)
+    assert aggregate([stats_row(date=day)], [1], TODAY)["incomplete_days"] == [day]
+    assert aggregate([stats_row(date=day - timedelta(days=1))], [1], TODAY)["incomplete_days"] == []
+    daily = aggregate_daily([], day - timedelta(days=1), day, [1], TODAY)
+    assert [item["is_incomplete"] for item in daily] == [False, True]
+
+
+def test_quiet_week_is_settled_and_was_not_asked_about() -> None:
+    """Ревью круга 13: тихая неделя (без обращений, расход входит в цену) — только устоявшаяся и без вопроса.
+    Неделя с неустоявшимися днями ещё досчитывает обращения, а вопрос с обращениями значит, что они были по
+    прежним целям, — такие недели неизвестны, а не «0 клиентов»."""
+    as_of = date(2026, 10, 27)
+    answered = survey(date(2026, 10, 5), 1)
+    asked = LeadsSurvey(business_id=1, week_start=date(2026, 9, 28), leads_count=3, clients_count=None)
+    rows = [
+        stats_row(date=date(2026, 10, 5), cost_kop=500_000, conversions={"1": 2}),
+        stats_row(date=date(2026, 9, 28), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 12), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 19), cost_kop=500_000, conversions={}),
+        stats_row(date=date(2026, 10, 24), cost_kop=500_000, conversions={}, is_settled=False),
+    ]
+    result = aggregate_clients(rows, [answered, asked], as_of, [1])
+    assert (result["answered_weeks"], result["quiet_weeks"], result["unknown_weeks"]) == (1, 1, 2)
+    assert result["cost_kop"] == 1_000_000 and result["cost_per_client_kop"] == 1_000_000
 
 
 def test_month_budget_uses_snapshots_without_double_counting(rows: list[StatsRow]) -> None:

@@ -400,6 +400,11 @@ class VkAccountRepository:
         client_id: str = "",
         client_secret: str = "",
     ) -> PlatformAccount:
+        from app.auth.sessions import OtherAccount, replaces_account
+
+        if replaces_account(self.db, account, session.account_id):
+            self.db.rollback()
+            raise OtherAccount
         if account is None:
             account = PlatformAccount(business_id=business_id, platform="vk")
             self.db.add(account)
@@ -425,8 +430,32 @@ class VkAccountRepository:
         self.db.commit()
         return account
 
+    def shares_access(self, login: str, auth_mode: str, client_id: str = "") -> bool:
+        """Подключён ли где-то кабинет с тем же доступом VK (revoke.same_vk_access): отзыв снял бы и его токены."""
+        from app.auth.sessions import account_login
+
+        rows = self.db.scalars(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == "vk",
+                PlatformAccount.status != "revoked",
+                PlatformAccount.auth_mode == auth_mode,
+            )
+        )
+        return any(
+            account_login("vk", row.external_login or "") == account_login("vk", login)
+            and (auth_mode != "manual_key" or key_client_id(row) == client_id)
+            for row in rows
+        )
+
     def release(self) -> None:
         self.db.commit()
+
+
+def key_client_id(account: PlatformAccount) -> str | None:
+    try:
+        return account_credentials(account)[1].get("client_id")
+    except AuthExpired:
+        return None
 
 
 def account_credentials(account: PlatformAccount) -> tuple[AuthSession, dict[str, Any]]:

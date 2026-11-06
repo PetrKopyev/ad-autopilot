@@ -76,7 +76,7 @@ function Tiles({ summary, daily }: { summary: Summary; daily: Daily['items'] | n
         && <Sparkline values={prices} dashed={daily!.map((day) => day.is_incomplete)} connect tone="info" />}
       hint={summary.cost_per_lead_kop === null ? copy.screens.noPrice : copy.screens.dates(displayDate(summary.from), displayDate(summary.to))} />
     <MetricTile label={copy.home.clients} value={window.clients === null ? '—' : window.clients.toLocaleString('ru-RU')}
-      hint={copy.home.clientsHint(window.answered_weeks, window.answered_weeks + window.unknown_weeks)} />
+      hint={copy.home.clientsHint(window)} />
     <MetricTile label={copy.home.clientPrice} value={window.cost_per_client_kop === null ? '—' : formatMoney(window.cost_per_client_kop)}
       hint={window.cost_per_client_kop === null ? copy.screens.noPrice : copy.screens.dates(displayDate(window.from), displayDate(window.to))} />
   </section>;

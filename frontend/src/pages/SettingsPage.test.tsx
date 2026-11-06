@@ -77,7 +77,29 @@ it('неполный телефон: ошибка у поля, как в мас�
   const phone = block.getByRole('textbox', { name: copy.launchFlow.phone });
   expect(phone.getAttribute('aria-invalid')).toBe('true');
   expect(document.getElementById('settings-phone-error')?.textContent).toBe(copy.setup.advertiser.phoneError);
+  expect(block.getAllByText(copy.setup.advertiser.phoneError)).toHaveLength(1);
   expect(block.queryByText(copy.launchFlow.markingError)).toBeNull();
+  expect(saveMarking).not.toHaveBeenCalled();
+});
+
+it('пустая форма: без подсказок браузера, ошибки по-русски у полей и по одной', async () => {
+  const block = await marking({ ...business, marking: null });
+  const form = block.getByRole('button', { name: copy.settingsScreen.save }).closest('form') as HTMLFormElement;
+  expect(form.noValidate).toBe(true);
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(block.getAllByText(copy.launchFlow.innError('ip'))).toHaveLength(1);
+  expect(block.getAllByText(copy.setup.advertiser.phoneError)).toHaveLength(1);
+  expect(saveMarking).not.toHaveBeenCalled();
+});
+
+it('без ФИО — общая ошибка по-русски', async () => {
+  const block = await marking();
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.markingEdit }));
+  fireEvent.change(block.getByRole('textbox', { name: copy.setup.advertiser.taxId }), { target: { value: '500100732259' } });
+  fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.phone }), { target: { value: '+7 900 000-33-44' } });
+  fireEvent.change(block.getByRole('textbox', { name: copy.launchFlow.fullName }), { target: { value: ' ' } });
+  fireEvent.click(block.getByRole('button', { name: copy.settingsScreen.save }));
+  expect(await block.findByText(copy.launchFlow.markingError)).toBeTruthy();
   expect(saveMarking).not.toHaveBeenCalled();
 });
 

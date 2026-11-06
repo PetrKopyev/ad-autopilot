@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Ad, BudgetLedger, Business, LeadsSurvey, StatsDaily
+from app.domain.settings import DEFAULT_SETTINGS
 from app.platforms.base import lead_count
 from app.worker.clock import MOSCOW
 
@@ -44,7 +45,7 @@ def aggregate(rows: Iterable[StatsRow], goal_ids: Sequence[int], today: date) ->
         impressions += row.impressions
         clicks += row.clicks
         leads += lead_count(row.conversions, goal_ids)
-        if not row.is_settled or row.date > today - timedelta(days=2):
+        if not row.is_settled or row.date > today - timedelta(days=DEFAULT_SETTINGS.settlement_days):
             incomplete_days.add(row.date)
         sources[row.platform] = max(sources.get(row.platform, row.fetched_at), row.fetched_at)
     return {
@@ -95,7 +96,7 @@ def aggregate_daily(
     for offset in range((date_to - date_from).days + 1):
         day = date_from + timedelta(days=offset)
         metrics = aggregate(groups[day], goal_ids, today)
-        if day > today - timedelta(days=2):
+        if day > today - timedelta(days=DEFAULT_SETTINGS.settlement_days):
             metrics.update(is_incomplete=True, incomplete_days=[day])
         result.append({"date": day, **metrics})
     return result
@@ -107,22 +108,38 @@ def client_window(as_of: date) -> tuple[date, date]:
     return week_start - timedelta(weeks=4), week_start - timedelta(days=1)
 
 
-def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], as_of: date) -> dict:
+def aggregate_clients(
+    rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], as_of: date, goal_ids: Sequence[int]
+) -> dict:
+    """Цена клиента за окно client_window — одна на «Клиентах» и «Статистике». Тихая неделя — без обращений,
+    известна точно: клиентов 0, её расход входит в цену (quiet_weeks). Неделя с обращениями без ответа (или с ответом
+    «не знаю») неизвестна: её расход нельзя делить на клиентов отвеченных недель, она исключается (unknown_weeks).
+    Тихой не считается неделя с неустоявшимися днями — обращения ещё досчитываются — и неделя, о которой спрашивали
+    (обращения были по прежним целям). Пока нет ни одного ответа, клиентов не знаем (None)."""
     date_from, date_to = client_window(as_of)
+    surveys = [survey for survey in surveys if date_from <= survey.week_start <= date_to]
     answers = {
         survey.week_start: survey.clients_count
         for survey in surveys
-        if date_from <= survey.week_start <= date_to
-        and survey.answered_at is not None
+        if survey.answered_at is not None
         and survey.clients_count is not None
         and survey.answered_at.astimezone(MOSCOW).date() <= as_of
     }
-    # Расход неизвестных недель нельзя делить на клиентов из отвеченных недель.
-    cost_kop = sum(
-        row.cost_kop
-        for row in rows
-        if date_from <= row.date <= date_to and row.date - timedelta(days=row.date.weekday()) in answers
-    )
+    asked = {survey.week_start for survey in surveys if survey.leads_count}
+    settled_before = as_of - timedelta(days=DEFAULT_SETTINGS.settlement_days)
+    spend: dict[date, int] = defaultdict(int)
+    leads: dict[date, int] = defaultdict(int)
+    unsettled: set[date] = set()
+    for row in rows:
+        if date_from <= row.date <= date_to:
+            week = row.date - timedelta(days=row.date.weekday())
+            spend[week] += row.cost_kop
+            leads[week] += lead_count(row.conversions, goal_ids)
+            if not row.is_settled or row.date > settled_before:
+                unsettled.add(week)
+    unknown = {week for week in spend.keys() | asked if leads[week] or week in asked | unsettled} - answers.keys()
+    quiet = spend.keys() - answers.keys() - unknown
+    cost_kop = sum(spend[week] for week in answers.keys() | quiet)
     clients = sum(answers.values()) if answers else None
     return {
         "from": date_from,
@@ -131,7 +148,8 @@ def aggregate_clients(rows: Iterable[StatsRow], surveys: Iterable[LeadsSurvey], 
         "cost_kop": cost_kop,
         "cost_per_client_kop": money_per(cost_kop, clients) if clients is not None else None,
         "answered_weeks": len(answers),
-        "unknown_weeks": 4 - len(answers),
+        "quiet_weeks": len(quiet),
+        "unknown_weeks": len(unknown),
     }
 
 
@@ -235,6 +253,7 @@ class StatsService:
             self.repository.rows(business.id, clients_from, clients_to),
             self.repository.surveys(business.id, clients_from, clients_to),
             as_of,
+            business.lead_goal_ids,
         )
         metrics.update(clients=clients["clients"], cost_per_client_kop=clients["cost_per_client_kop"])
         budget = aggregate_budget(

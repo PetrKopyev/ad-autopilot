@@ -5,7 +5,7 @@ import logging
 import re
 import secrets
 import shutil
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime
@@ -264,16 +264,22 @@ def campaign_platform(key: str) -> str:
     return key.split(":")[0]
 
 
-def direct_batches(groups: list[dict], limit: PlatformLimit, minimum: dict[str, int], today: date) -> list[list[dict]]:
+def direct_batches(
+    groups: list[dict],
+    limit: PlatformLimit,
+    minimum: dict[str, int],
+    today: date,
+    kept: list[list[str]] | None = None,
+) -> list[list[dict]]:
     """Группы Директа по кампаниям: кампания на услугу, если лимит Директа даёт каждой не меньше недельного минимума
-    площадки, иначе кампаний меньше и в одной идут несколько услуг."""
+    площадки, иначе кампаний меньше и в одной идут несколько услуг. kept — id групп кампаний прошлой попытки."""
 
     def fits(part: PlatformLimit) -> bool:
         weekly = weekly_limit(part.daily_limit, part.remaining_cap, today)
         return meets_minimum(part, minimum) and weekly >= minimum.get("weekly_limit_kop", 0)
 
     by_id = {str(group["id"]): group for group in groups}
-    return [[by_id[id_] for id_ in batch] for batch in campaign_batches(limit, list(by_id), fits)]
+    return [[by_id[id_] for id_ in batch] for batch in campaign_batches(limit, list(by_id), fits, kept or ())]
 
 
 def campaign_units(
@@ -282,10 +288,14 @@ def campaign_units(
     limits: dict[str, PlatformLimit],
     minimums: dict[str, dict[str, int]],
     today: date,
+    created: Collection[str] = (),
 ) -> dict[str, tuple[list[dict], PlatformLimit]]:
     """Кампании запуска: ключ, группы плана и лимиты. VK — одна кампания на площадку; Директ — «direct:номер» по
-    кампании на услугу (direct_batches). Повтор запуска берёт раскладку прошлой попытки (launch.batches), запуск,
-    начатый до кампаний по услугам, и план до групп по услугам (у групп нет service) — одну кампанию «direct»."""
+    кампании на услугу (direct_batches). Повтор запуска сохраняет кампании, созданные на площадке прошлой попыткой
+    (created — ключи launch.campaigns с external_id), а остальные услуги раскладывает заново — по
+    сегодняшним лимиту и дню недели: раскладка четверга в воскресенье дала бы кампаниям лимит ниже минимума Директа.
+    Запуск, начатый до кампаний по услугам, и план до групп по услугам (у групп нет service) — одна кампания
+    «direct». Минимум каждой кампании сверяет запуск (services.launch.units_below_minimum)."""
     launch = plan.payload.get("launch", {})
     saved = launch.get("batches") or ({"direct": []} if "direct" in launch.get("campaigns", {}) else {})
     units = {}
@@ -294,13 +304,18 @@ def campaign_units(
         if platform != "direct" or "direct" in saved or any("service" not in group for group in groups):
             units[platform] = (groups, limits[platform])
             continue
-        keys = sorted(key for key in saved if campaign_platform(key) == "direct")
-        batches = (
-            [[group for group in groups if group["id"] in saved[key]] for key in keys]
-            if keys
-            else direct_batches(groups, limits[platform], minimums[platform], today)
+        kept = {key: saved[key] for key in sorted(saved) if campaign_platform(key) == "direct" and key in created}
+        taken = {str(id_) for ids in kept.values() for id_ in ids}
+        fresh = direct_batches(
+            [group for group in groups if str(group["id"]) not in taken],
+            limits[platform],
+            minimums[platform],
+            today,
+            [[str(id_) for id_ in ids] for ids in kept.values()],
         )
-        keys = keys or [f"direct:{index + 1}" for index in range(len(batches))]
+        batches = [[group for group in groups if group["id"] in ids] for ids in kept.values()] + fresh
+        free = [key for key in (f"direct:{index + 1}" for index in range(len(batches))) if key not in kept]
+        keys = [*kept, *free[: len(fresh)]]
         parts = split_campaign_limits(limits[platform], [[group["id"] for group in batch] for batch in batches])
         units |= {key: (batch, part) for key, batch, part in zip(keys, batches, parts, strict=True)}
     return units

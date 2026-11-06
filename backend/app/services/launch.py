@@ -118,6 +118,18 @@ def below_minimum(platform: str, limit: PlatformLimit, minimum: dict[str, int], 
     return None
 
 
+def units_below_minimum(
+    units: dict[str, tuple[list[dict], PlatformLimit]], minimums: dict[str, dict[str, int]], today: date
+) -> str | None:
+    """Почему площадка не примет лимит одной из кампаний запуска: у Директа лимит площадки делится между
+    кампаниями по услугам, и check_platforms, сверяющий лимит всей площадки, этого не видит."""
+    for key, (_, limit) in units.items():
+        platform = campaign_platform(key)
+        if reason := below_minimum(platform, limit, minimums[platform], today):
+            return reason
+    return None
+
+
 def campaign_name(business: Business, key: str, groups: list[dict]) -> str:
     services = [group["service"] for group in groups if group.get("service")]
     if ":" not in key or not services:
@@ -259,18 +271,21 @@ class LaunchService:
                     raise LaunchBlocked(reasons)
                 limits = budget_limits(business, platforms, today, self.domain)
                 adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
+                units = campaign_units(plan, platforms, limits, minimums, today, self.created_keys(plan))
+                if reason := units_below_minimum(units, minimums, today):
+                    raise LaunchBlocked([reason])
             except LaunchBlocked:
                 # Повтора не будет: созданное прошлой попыткой останавливается сейчас, а не ждёт воркера.
                 if unsettled:
                     await self.stop_failed(plan, plan.payload["launch"].get("reason"), self.adapters(plan), now)
                 raise
-            units = campaign_units(plan, platforms, limits, minimums, today)
             self.save_launch(
                 plan,
                 started_at=now.isoformat(),
                 error=None,
                 reason=None,
                 batches={key: [group["id"] for group in groups] for key, (groups, _) in units.items()},
+                campaigns=self.laid_out(plan, units),
             )
             try:
                 created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
@@ -347,8 +362,22 @@ class LaunchService:
         await self.settle_pending(plan, now)
         limits = self.retry_limits(business, plan, today)
         adapters, geo, minimums = await self.check_platforms(business, platforms, limits, today)
-        units = campaign_units(plan, platforms, limits, minimums, today)
-        self.save_launch(plan, started_at=now.isoformat(), error=None, reason=None)
+        units = campaign_units(plan, platforms, limits, minimums, today, self.created_keys(plan))
+        if reason := units_below_minimum(units, minimums, today):
+            raise LaunchBlocked([reason])
+        self.save_launch(
+            plan,
+            started_at=now.isoformat(),
+            error=None,
+            reason=None,
+            campaigns=self.laid_out(plan, units),
+            batches={
+                key: ids
+                for key, ids in plan.payload["launch"].get("batches", {}).items()
+                if campaign_platform(key) not in platforms
+            }
+            | {key: [group["id"] for group in groups] for key, (groups, _) in units.items()},
+        )
         try:
             created, create_failures = await self.create_paused(business, plan, units, adapters, geo)
             failures, awaiting = await self.activate(
@@ -473,6 +502,29 @@ class LaunchService:
             except PlatformError as error:
                 raise LaunchBlocked([f"{TITLES[platform]}: {error}"]) from error
         return adapters, geo, minimums
+
+    def created_keys(self, plan: Plan) -> set[str]:
+        """Кампании плана, созданные на площадке: повтор запуска сохраняет их состав (campaign_units)."""
+        return {
+            key
+            for key, campaign_id in plan.payload.get("launch", {}).get("campaigns", {}).items()
+            if (campaign := self.repository.campaign(campaign_id)) is not None and campaign.external_id
+        }
+
+    def laid_out(self, plan: Plan, units: dict[str, tuple[list[dict], PlatformLimit]]) -> dict[str, int]:
+        """Кампании прошлой попытки для новой раскладки. Кампания по услугам Директа, не созданная на площадке,
+        переиспользуется, только если под её ключом те же услуги: её строки собраны под прежние, иначе create_paused
+        заведёт новую. Забытая строка без external_id воркеру не видна (Worker.campaigns)."""
+        launch = plan.payload.get("launch", {})
+        created = self.created_keys(plan)
+        saved = launch.get("batches", {})
+        return {
+            key: campaign_id
+            for key, campaign_id in launch.get("campaigns", {}).items()
+            if ":" not in key
+            or key in created
+            or (key in units and saved.get(key) == [group["id"] for group in units[key][0]])
+        }
 
     def save_launch(self, plan: Plan, status: str | None = None, **values: object) -> None:
         payload = dict(plan.payload)

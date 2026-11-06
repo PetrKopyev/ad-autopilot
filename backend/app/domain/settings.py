@@ -34,7 +34,6 @@ class DomainSettings:
     prior_leads: int = 10
     min_reference_units: int = 3
     check_reference_min_leads: int = 10
-    client_window_weeks: int = 4
     budget_reserve: Decimal = Decimal("0.08")
     daily_average_multiplier: Decimal = Decimal("1.3")
     direct_share: Decimal = Decimal("0.7")

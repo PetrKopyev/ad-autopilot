@@ -6,7 +6,7 @@ import pytest
 from cryptography.fernet import InvalidToken
 from integration.harness import BUDGET_KOP, make_world
 
-from app.db.models import BudgetLedger, Campaign, ChangeLog
+from app.db.models import BudgetLedger, Campaign, ChangeLog, WorkerRun
 from app.domain.budget import stop_margin
 from app.platforms.base import AuthExpired, PlatformError
 from app.platforms.fake import FakeAdapter
@@ -89,6 +89,63 @@ async def test_stop_all_with_platform_refusal_stops_others_and_retries_next_tick
     assert worker.metadata(world.business)["pending_stop"] is None
 
 
+async def test_stop_all_skips_campaign_missing_on_platform_and_stops_others() -> None:
+    """Ревью круга 13: кампании нет в подключённом кабинете (осталась в прежнем или удалена там; Директ тогда
+    отвечает без неё) — остановка на ней не зацикливается: остальные кампании остановлены, бизнес в budget_stop,
+    а не «не все площадки подтвердили» на каждом тике."""
+    world = await make_world()
+    get_state = world.adapter.get_state
+
+    async def without_gone(refs):
+        return {} if refs.campaign_id == "gone-in-other-account" else await get_state(refs)
+
+    world.adapter.get_state = without_gone
+    world.repository.save(
+        Campaign(
+            business_id=1,
+            platform="direct",
+            name="Автопилот: Маникюр — Самара",
+            external_id="gone-in-other-account",
+            status="active",
+            owner_paused=False,
+            daily_limit_kop=100_000,
+            period_cap_kop=3_000_000,
+        )
+    )
+    vk, campaign = await with_vk(world)
+    worker = worker_for(world, vk)
+    await stop_all(
+        world.business,
+        worker=worker,
+        budget_stop=True,
+        reason_code="BUDGET_STOP",
+        reason_params={"spent": BUDGET_KOP, "budget": BUDGET_KOP, "margin": 0},
+    )
+    assert status(world.adapter, world.refs.campaign_id) == "paused_auto"
+    assert status(vk, campaign.external_id) == "paused_auto"
+    assert world.business.status == "budget_stop"
+    # Владельцу — одно уведомление о кампании, сколько бы тиков страж её ни встречал.
+    for _ in range(2):
+        world.clock.advance(hours=0.5)
+        await stop_all(
+            world.business,
+            worker=worker,
+            budget_stop=True,
+            reason_code="BUDGET_STOP",
+            reason_params={"spent": BUDGET_KOP, "budget": BUDGET_KOP, "margin": 0},
+        )
+    (notice,) = [
+        row
+        for row in world.repository.rows(WorkerRun, kind="notification")
+        if row.log[0]["reason_code"] == "CAMPAIGN_NOT_FOUND"
+    ]
+    assert notice.log[0]["text"] == (
+        "Кампании «Автопилот: Маникюр — Самара» нет в подключённом кабинете Яндекс Директа, и остановить её мы не "
+        "можем. Проверьте кампанию «Автопилот: Маникюр — Самара» в кабинете площадки и остановите её там, если она "
+        "работает."
+    )
+
+
 async def test_vk_token_expiring_mid_tick_keeps_pending_until_reconnect() -> None:
     world = await make_world()
     vk, campaign = await with_vk(world)
@@ -135,6 +192,24 @@ async def test_spend_equal_to_budget_stops_and_is_recorded(monkeypatch) -> None:
     ledger = world.ledger()[0]
     assert ledger.spent_kop == BUDGET_KOP and ledger.hard_stop_at == world.clock.now
     assert world.changes(reason_code="BUDGET_STOP", status="applied")
+
+
+async def test_budget_stop_is_notified_once_not_every_guard_tick(monkeypatch) -> None:
+    """Мелочь 7 круга 13: после остановки по бюджету страж каждые 30 минут видит тот же перерасход — уведомление
+    об остановке одно, а не новое на каждом шаге."""
+    world = await make_world()
+    monkeypatch.setattr("app.services.budget_guard.read_spend", AsyncMock(return_value=({"direct": BUDGET_KOP}, {})))
+    worker = world.worker()
+    for _ in range(3):
+        await worker.run("budget_guard", 1)
+        world.clock.advance(hours=0.5)
+    assert world.business.status == "budget_stop"
+    notices = [
+        row
+        for row in world.repository.rows(WorkerRun, kind="notification")
+        if row.log[0]["reason_code"] == "BUDGET_STOP"
+    ]
+    assert len(notices) == 1
 
 
 async def test_reverting_owner_stop_resumes_business() -> None:

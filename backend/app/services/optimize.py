@@ -797,16 +797,35 @@ async def experiments_tick(worker: Worker, business: Business) -> None:
             if audience
             else explain_experiment(result, control_metrics, variant_metrics)
         )
-        # Готовый текст содержит все параметры эксперимента и сохраняется единым откатываемым изменением.
-        change = await worker.apply(
-            business,
-            campaign,
-            [Operation("set_status", "ad", loser, "status", "active", "paused_auto")],
-            kind="experiment_verdict",
-            reason_code="EXPERIMENT_VERDICT",
-            reason_text=text,
-            suffix=f"experiment:{experiment.id}",
-        )
+        if any(ad.active for ad in ads if ad.group_id == control.group_id and ad.id != loser):
+            # Готовый текст содержит все параметры эксперимента и сохраняется единым откатываемым изменением.
+            change = await worker.apply(
+                business,
+                campaign,
+                [Operation("set_status", "ad", loser, "status", "active", "paused_auto")],
+                kind="experiment_verdict",
+                reason_code="EXPERIMENT_VERDICT",
+                reason_text=text,
+                suffix=f"experiment:{experiment.id}",
+            )
+        else:
+            # Победителя с тех пор остановили: проигравший — последнее работающее объявление группы, и его
+            # остановка выключила бы всю группу. Вывод записываем, объявления не трогаем.
+            change = ChangeLog(
+                business_id=business.id,
+                actor="autopilot",
+                kind="experiment_verdict",
+                platform=campaign.platform,
+                entity_type="group",
+                entity_id=control.group_id,
+                operations=[],
+                reason_code="EXPERIMENT_VERDICT",
+                reason_params={},
+                reason_text=f"{text} Проигравший вариант не остановили: других работающих объявлений в группе нет.",
+                evidence={},
+                status="applied",
+                created_at=worker.clock.now,
+            )
         evidence = {
             "experiment_id": experiment.id,
             "control": asdict(control_metrics),

@@ -9,7 +9,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from app.db.models import Business, PlatformAccount, User
+from app.db.models import Business, Campaign, PlatformAccount, User
 from app.services.changes import ChangeConflict, ServerBusy
 
 from .conftest import FakeRepository, hash_token
@@ -300,6 +300,82 @@ def test_partial_permissions_require_reauth_and_reconnect_updates_account(
         (repository.accounts[1].business_id, "direct")
     ]
     assert repository.accounts[1].refresh_token_enc is None
+
+
+def test_other_direct_account_does_not_replace_account_with_our_campaigns(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """Важно 4 круга 13 и ревью: вход в другой кабинет Директа, когда у бизнеса есть наши кампании в прежнем, —
+    отказ страницей, даже если прежний отключён (иначе его кампании остались бы в бизнесе без кабинета); строка
+    кабинета не меняется, токен другого кабинета отзывается. Тот же логин подключается как раньше."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="direct", external_id="701"))
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
+    mock_yandex.post("https://oauth.yandex.ru/token").respond(json={"access_token": "other"})
+    for status in ("ok", "revoked"):
+        repository.accounts[1].status = status
+        response = callback(client, start(client, "direct")["state"], f"other-code-{status}")
+        assert response.status_code == 409 and "text/html" in response.headers["content-type"]
+        assert "подключите прежний кабинет" in response.text and "<style>" not in response.text
+        assert repository.accounts[1].external_login == "advertiser"
+        assert b"access_token=other" in mock_yandex.routes["revoke"].calls.last.request.content
+    assert mock_yandex.routes["revoke"].call_count == 2
+    repository.accounts[1].status = "ok"
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    assert callback(client, start(client, "direct")["state"], "same-code").status_code == 303
+    assert repository.accounts[1].access_token_enc == "other"
+    assert mock_yandex.routes["revoke"].call_count == 2
+
+
+def test_same_direct_login_in_other_spelling_is_same_account(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """Ревью 22be3cd: логин Яндекса хранится как есть, а сравнивается без регистра и пробелов, точка — то же,
+    что дефис: «Ivan.Petrov» и «ivan-petrov» — один кабинет, подключается заново. Кампании в архиве другой
+    кабинет не блокируют."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "Ivan.Petrov"})
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    assert repository.accounts[1].external_login == "Ivan.Petrov"
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="direct", external_id="701", status="active"))
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": " ivan-petrov "})
+    assert callback(client, start(client, "direct")["state"], "same-code").status_code == 303
+    assert repository.accounts[1].external_login == " ivan-petrov "
+    repository.campaigns[0].status = "archived"
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "other-advertiser"})
+    assert callback(client, start(client, "direct")["state"], "other-code").status_code == 303
+    assert repository.accounts[1].external_login == "other-advertiser"
+
+
+def test_refused_direct_token_is_kept_when_login_serves_other_business_and_revoke_errors_stay_409(
+    client: TestClient,
+    repository: FakeRepository,
+    mock_yandex: respx.MockRouter,
+) -> None:
+    """Ревью 22be3cd: Яндекс при новом входе того же пользователя часто отдаёт тот же токен — если этот логин
+    подключён к другому бизнесу, отказ токен не отзывает. Сбой отзыва любого рода не превращает 409 в 500."""
+    login(client, repository)
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "advertiser"})
+    assert callback(client, start(client, "direct")["state"]).status_code == 303
+    repository.campaigns.append(Campaign(id=1, business_id=1, platform="direct", external_id="701", status="active"))
+    repository.businesses[9] = Business(id=9, user_id=7)
+    repository.accounts[9] = PlatformAccount(
+        id=9, business_id=9, platform="direct", auth_mode="oauth", external_login="other-advertiser", status="ok"
+    )
+    mock_yandex.get("https://login.yandex.ru/info").respond(json={"id": "200", "login": "Other.Advertiser"})
+    assert callback(client, start(client, "direct")["state"], "shared-code").status_code == 409
+    assert mock_yandex.routes["revoke"].call_count == 0
+    repository.accounts[9].status = "revoked"
+    mock_yandex.routes["revoke"].mock(side_effect=RuntimeError("отзыв упал"))
+    response = callback(client, start(client, "direct")["state"], "failing-code")
+    assert response.status_code == 409 and "подключите прежний кабинет" in response.text
+    assert mock_yandex.routes["revoke"].call_count == 1
 
 
 def test_disconnect_requires_csrf_and_ownership(

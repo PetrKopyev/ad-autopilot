@@ -5,6 +5,7 @@ from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Experiment
 from app.domain.explain import undone
 from app.platforms.base import AdPlatform, EntityState, Operation
 from app.services.changes import (
+    SETTLE,
     ChangeConflict,
     ChangesRepository,
     ChangesService,
@@ -62,6 +63,32 @@ def turns_on_replaced(change: ChangeLog, replaced: Collection[tuple[str, str]]) 
 SUPERSEDED = "Статус этой рекламы с тех пор уже меняли: возобновить или остановить её можно на главной."
 
 NOTHING_TO_REVERT = "Эта запись информационная: она ничего не меняла, откатывать нечего."
+
+# Записи включения рекламы: откат одной из них остановил бы кампании, а бизнес остался бы «работает», и «Продолжить»
+# их уже не включило бы. Остановить рекламу можно на главной. Новый код включения добавляется сюда; журнал
+# получает признак в turns_on (api.history), фронт своего списка не держит.
+TURNS_ON = {"LAUNCH", "OWNER_RESUME", "BUDGET_RESUME", "MONTH_RESUME"}
+# Коды, которые включают кампанию только в части записей: включение объявлений откатывается как обычно.
+TURNS_ON_CAMPAIGN = {"SERVICE_RETURNED"}
+TURN_ON = "Это включение рекламы, отдельно его не отменить. Остановить рекламу можно кнопкой «Остановить» на главной."
+
+
+def turns_on(change: ChangeLog) -> bool:
+    return (
+        change.reason_code in TURNS_ON
+        or (
+            change.reason_code in TURNS_ON_CAMPAIGN
+            and any(op.get("entity_type") == "campaign" and op.get("field") == "status" for op in change.operations)
+        )
+        or (
+            # Доводка после проверки площадкой включает кампанию только в части записей; пауза откатывается как обычно.
+            change.reason_code == SETTLE
+            and any(
+                (op.get("entity_type"), op.get("field"), op.get("after")) == ("campaign", "status", "active")
+                for op in change.operations
+            )
+        )
+    )
 
 
 def reverts_by_experiment(change: ChangeLog) -> bool:
@@ -126,6 +153,7 @@ def can_revert(
         and change.kind != "revert"
         # Записи о маркировке информационные: операций нет, откатывать нечего.
         and change.kind != "marking"
+        and not turns_on(change)
         # Информационные записи без операций (например, о пересозданном содержимом кабинета) не откатываются:
         # обратных операций не существует, и откат упал бы с ошибкой. Исключение — записи проверок объявлений.
         and (bool(change.operations) or reverts_by_experiment(change))
@@ -272,6 +300,8 @@ class RollbackService:
                     raise ChangeConflict(NOTHING_TO_REVERT)
                 if budget_protection(original, business):
                     raise ChangeConflict("Это защита бюджета, отменить нельзя.")
+                if turns_on(original):
+                    raise ChangeConflict(TURN_ON)
                 if turns_on_replaced(original, replaced):
                     raise ChangeConflict(REPLACED)
                 if original.id in overridden:

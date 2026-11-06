@@ -13,6 +13,7 @@ from app.content.art import ART_COST_KOP
 from app.db.models import Ad, AdGroup, ArtCall, ChangeLog, Experiment, LLMCall, StatsDaily, Target, WorkerRun
 from app.domain.experiments import evaluate_experiment
 from app.domain.types import AdSnapshot, DaySpend, ExperimentDesign, Verdict
+from app.platforms.base import Operation
 from app.services.changes import ChangeConflict
 from app.services.experiments import completed_hypotheses, create_experiment
 from app.services.onboarding import AiLimits, Blocked
@@ -392,6 +393,43 @@ async def test_tick_on_deadline_day_evaluates_data_before_expiry(experiment_worl
     assert change.reason_code == "EXPERIMENT_VERDICT"
     states = await world.adapter.get_state(world.refs)
     assert states[world.ads["borderline-1"].external_id].status == "paused_auto"
+
+
+async def test_verdict_does_not_stop_last_working_ad_of_group(experiment_world):
+    """Мелочь 6 круга 13: победителя с тех пор остановили — проигравший остаётся последним работающим объявлением
+    группы, вывод его не останавливает (иначе встала бы вся группа), но проверку закрывает."""
+    world = experiment_world
+    experiment = running_experiment(world)
+    for ad_id, clicks, leads in (
+        (experiment.control_ad_id, 100, 30),
+        (experiment.variant_ad_id, 300, 90),
+    ):
+        for offset, impressions in ((-1, 1_000_000), (1, 10_000), (3, 1_000_000)):
+            world.repository.save(
+                StatsDaily(
+                    business_id=world.business.id,
+                    platform="direct",
+                    campaign_id=world.campaign.id,
+                    ad_id=ad_id,
+                    date=(world.clock.now + timedelta(days=offset)).date(),
+                    cost_kop=10_000,
+                    impressions=impressions,
+                    clicks=clicks,
+                    conversions={"1": leads},
+                    is_settled=True,
+                )
+            )
+    group = world.ads["borderline-1"].ad_group_id
+    for ad in world.ads.values():
+        if ad.ad_group_id == group and ad.id != experiment.control_ad_id:
+            await world.adapter.apply(Operation("set_status", "ad", ad.external_id, "status", "active", "paused_owner"))
+    world.clock.advance(days=14)
+    await experiments_tick(world.worker(), world.business)
+    assert (experiment.status, experiment.verdict) == ("concluded", "variant_wins")
+    (change,) = world.changes(kind="experiment_verdict")
+    assert change.operations == [] and "не остановили" in change.reason_text
+    states = await world.adapter.get_state(world.refs)
+    assert states[world.ads["borderline-1"].external_id].status == "active"
 
 
 async def test_tick_expired_test_stops_variant_like_no_difference_verdict(experiment_world):

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import active_daily_limit, plan_budget
 from app.domain.budget import budget_guard as decide_guard
-from app.domain.explain import rubles
+from app.domain.explain import explain, rubles
 from app.platforms.base import Operation
 from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, wait_for_lock
 from app.worker.clock import today
@@ -93,7 +93,27 @@ async def stop_all(
         for campaign in worker.campaigns(business):
             try:
                 states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
-                state = states[campaign.external_id]
+                state = states.get(campaign.external_id)
+                if state is None:
+                    # Кампании нет в подключённом кабинете (удалена там или осталась в прежнем): остановить её
+                    # нечем, но это не повод бросать остановку остальных. Владельцу — одно уведомление на кампанию.
+                    logger.warning(
+                        "Кампания %s бизнеса %s не найдена на площадке %s при остановке",
+                        campaign.id,
+                        business.id,
+                        campaign.platform,
+                    )
+                    worker.notice(
+                        business,
+                        "CAMPAIGN_NOT_FOUND",
+                        explain(
+                            "CAMPAIGN_NOT_FOUND",
+                            campaign=campaign.name,
+                            account=ACCOUNT_NAMES.get(campaign.platform, campaign.platform),
+                        ),
+                        key=f"campaign_not_found:{campaign.id}",
+                    )
+                    continue
                 # Кампания, которую площадка уже одобрила и выключила, а шаг модерации ещё не включил, локально ждёт
                 # включения: остановка меняет и эту цель.
                 waiting = campaign.review_since is not None and campaign.status == "active"
@@ -238,6 +258,8 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
     from app.config import get_domain_settings
 
     domain = get_domain_settings()
+    # После остановки страж каждые 30 минут видит тот же перерасход: уведомляем один раз — когда остановил.
+    already_stopped = business.status == "budget_stop"
     pending_stop = worker.metadata(business).get("pending_stop")
     if pending_stop:
         try:
@@ -311,7 +333,8 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             budget_stop=True,
             reason_params={"spent": result.spent, "budget": business.month_budget_kop, "margin": result.stop_margin},
         )
-        worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
+        if not already_stopped:
+            worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
     elif business.status == "running":
         await balance_notice(worker, business)
 

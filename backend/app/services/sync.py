@@ -233,7 +233,11 @@ async def settle_review(worker: Worker, business: Business) -> None:
             for external_id in refs.ads.values()
             if ("ad", external_id) in entities and campaign.status == "active"
         ]
-        approved = any(row.moderation_status == "approved" for kind, row in rows if kind == "ad")
+        ads = [row for kind, row in rows if kind == "ad"]
+        approved = any(row.moderation_status == "approved" for row in ads)
+        # Все объявления отклонены: показывать нечего, и включённая кампания была бы записью «включили рекламу»
+        # впустую — владелец узнаёт об отказе из MODERATION_ALL_REJECTED.
+        rejected = bool(ads) and all(row.status == "rejected" for row in ads)
         reviewing, waiting = set(), False
         outside, enables, pauses = [], [], []
         for kind, row in rows:
@@ -249,13 +253,18 @@ async def settle_review(worker: Worker, business: Business) -> None:
             elif target == "active" and state.status == "paused_owner":
                 outside.append(Operation("set_status", kind, row.external_id, "status", target, "paused_owner"))
             elif target == "active" and state.status != "active":
+                if kind == "campaign" and rejected:
+                    continue
                 if state.ended:
                     waiting = True
                 else:
                     enables.append(Operation("set_status", kind, row.external_id, "status", state.status, "active"))
             elif target in PAUSED and state.status == "active":
                 pauses.append(Operation("set_status", kind, row.external_id, "status", state.status, target))
-        status, settings = worker.repository.fresh_business_state(business.id)
+        fresh = worker.repository.fresh_business_state(business.id)
+        if fresh is None:
+            return
+        status, settings = fresh
         meta = (settings or {}).get("_worker") or {}
         if enables and (status != "running" or meta.get("kill_switch") or meta.get("pending_stop")):
             enables, waiting = [], True
@@ -292,8 +301,7 @@ async def settle_review(worker: Worker, business: Business) -> None:
             continue
         if change is not None and not change.evidence["_service"].get("review"):
             reviewing -= {op.entity_id for op in enables}
-        ads = [row for kind, row in rows if kind == "ad"]
-        if ads and all(row.status == "rejected" for row in ads):
+        if rejected:
             # Черновик без одобренных объявлений площадка не примет никогда: это не долгая проверка.
             worker.notice(
                 business,

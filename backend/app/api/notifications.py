@@ -17,6 +17,7 @@ LIMIT = 20
 NOTICES = {
     "BUDGET_STOP": ("Реклама остановлена: бюджет месяца почти израсходован", "danger"),
     "SPEND_MISMATCH": ("Площадка показывает больший расход, чем мы ждали", "danger"),
+    "CAMPAIGN_NOT_FOUND": ("Не получилось остановить кампанию", "warning"),
     "MODERATION_REJECTED": ("Площадка не пропустила объявление", "warning"),
     "MODERATION_ALL_REJECTED": ("Кампания не показывается: все объявления отклонены", "danger"),
     "MODERATION_LONG": ("Площадка долго проверяет объявления", "warning"),

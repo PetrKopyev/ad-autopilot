@@ -13,6 +13,8 @@ export interface HistoryEntry {
   reason_code: string | null;
   reason_text: string; evidence: Record<string, unknown>; status: 'proposed' | 'pending' | 'applied' | 'failed' | 'reverted';
   reverts_id: number | null; can_revert: boolean; revert_warning: string | null;
+  /** Включение рекламы: из журнала не отменяется, рекламу останавливают на главной (список кодов — на сервере). */
+  turns_on: boolean;
 }
 export interface HistoryPage { items: HistoryEntry[]; total: number; page: number; page_size: number }
 export interface HistoryFilter { platform: '' | 'direct' | 'vk'; actor: '' | HistoryEntry['actor'] }
@@ -40,6 +42,7 @@ export function noRevertHint(entry: HistoryEntry): string | null {
   if (entry.can_revert) return null;
   if (entry.kind === 'revert') return labels.noRevertRevert;
   if (entry.reason_code && budgetProtectionCodes.has(entry.reason_code)) return labels.noRevertBudget;
+  if (entry.turns_on) return labels.noRevertTurnOn;
   return null;
 }
 // Старт сравнения двух вариантов сервер пишет запуском объявления-варианта; владельцу это не «Запуск рекламы».
