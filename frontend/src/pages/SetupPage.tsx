@@ -148,7 +148,7 @@ export function SetupPage() {
     setCity((value) => value || 'Москва');
     setBudget((value) => value || '50000');
     setMarking((value) => savedMarking || value.inn || value.name || value.phone ? value
-      : { ...value, subject_type: 'ip', inn: '526317984689', name: 'Демо-салон', phone: '+7 (900) 123-45-67' });
+      : { ...value, subject_type: 'ip', inn: '001234567887', name: 'Демо-салон', phone: '+7 (900) 123-45-67' });
   }, [demo, restoring, savedMarking]);
   // Расчёт к бюджету — с сервера, по тем же правилам, что план и запуск; пока сумму вводят, запрос ждёт паузы.
   const typedBudget = current === 1 ? rublesToKopecks(budget) : null;

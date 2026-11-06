@@ -141,7 +141,7 @@ async def make_world(
         MarkingProfile(
             business_id=1,
             subject_type="ip",
-            inn_enc="526317984689",
+            inn_enc="001234567887",
             name="ИП Иванов",
             phone_enc="+79001231122",
             confirmed_in_platform={"direct": True},

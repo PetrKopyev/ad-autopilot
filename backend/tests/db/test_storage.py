@@ -790,7 +790,7 @@ async def test_wizard_steps_read_business_changed_by_other_session_on_postgres(d
     service.save_description(business_id, {"services": {"value": "Маникюр"}}, True, NOW)
     saved = other.execute(stored).one().description["fields"]["services"]
     assert (saved["quote"], saved["verified"]) == ("Маникюр — 1 500 ₽.", True)
-    service.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    service.save_marking(business_id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True})
     # Бизнес удалён в другом процессе: маркировка не пишется в удалённый профиль.
     other.execute(delete(Business).where(Business.id == business_id))
     with pytest.raises(NotFound):

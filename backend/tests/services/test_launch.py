@@ -2912,10 +2912,10 @@ async def test_interrupted_new_month_pass_still_resumes_budget_stopped_campaign(
 
     monkeypatch.setattr(worker, "apply", refuse)
     with pytest.raises(ChangeConflict):
-        await worker.run("month_rollover", world.business.id, key="r12-month-1")
+        await worker.run("month_rollover", world.business.id, key="interrupted-month-1")
     assert world.business.status == "running"
     monkeypatch.setattr(worker, "apply", apply)
-    await worker.run("month_rollover", world.business.id, key="r12-month-2")
+    await worker.run("month_rollover", world.business.id, key="interrupted-month-2")
     (campaign,) = campaigns(world)
     assert (await states(world, campaign))[campaign.external_id].status == "active"
 
@@ -3798,3 +3798,141 @@ async def test_continue_with_campaigns_stopped_in_cabinet_explains_why(tmp_path:
         "Реклама не включилась: кампании остановлены или удалены в кабинете площадки. "
         "Включите их там и нажмите «Продолжить рекламу» ещё раз."
     )
+
+
+class AcceptedOffWithoutMoney(AcceptedOff):
+    """Проверка закончена, но на счёте нет денег: Директ принимает resume, а кампания остаётся выключенной (OFF)."""
+
+    async def apply(self, operation) -> None:
+        if self.accepted and operation.entity_type == "campaign" and operation.after == "active":
+            return
+        await super().apply(operation)
+
+
+async def test_approved_campaign_left_off_by_platform_leaves_review(tmp_path: Path) -> None:
+    """Кампания одобрена, но площадка оставила её выключенной (нет денег на счёте): включение после проверки не
+    повторяется каждый час, отметка проверки снимается — кампанию сверяет sync_campaign_status, а в журнале не остаётся
+    «включили рекламу» у неудавшегося включения."""
+    from app.services.sync import REVIEW_RESUMED, sync_campaign_status
+
+    adapter = AcceptedOffWithoutMoney()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    adapter.accept()
+    approve(world)
+    await settle(world)
+    await settle(world, hours=3)
+    (resume,) = [row for row in settle_records(world) if row.kind == "resume"]
+    assert resume.status == "failed" and resume.reason_text != REVIEW_RESUMED
+    assert campaign.review_since is None
+    await sync_campaign_status(recovery_worker(world, after=timedelta(hours=4), dry_run=False), world.business)
+    assert [row.reason_code for row in world.repository.rows(ChangeLog) if row.actor == "external"] == [
+        "EXTERNAL_PAUSE"
+    ]
+
+
+async def test_revert_of_pause_made_during_review_enables_after_approval(tmp_path: Path) -> None:
+    """Откат паузы, сделанной, пока площадка проверяла кампанию-черновик: вернуть «черновик» нельзя, цель отката —
+    работающая кампания, и включение ждёт одобрения."""
+    from app.services.rollback import RollbackService
+
+    adapter = AcceptedOffRefusesSuspend()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    worker = recovery_worker(world, after=timedelta(minutes=5), dry_run=False)
+    worker.step_key = "owner"
+    pause = await worker.apply(
+        world.business,
+        campaign,
+        [Operation("set_status", "campaign", campaign.external_id, "status", "active", "paused_owner")],
+        actor="owner",
+        kind="pause",
+        reason_code="OWNER_PAUSE",
+        reason_text="Вы остановили кампанию.",
+    )
+    assert pause.status == "applied" and campaign.status == "paused_owner"
+    revert = await RollbackService(worker.repository, dry_run=False).revert(
+        pause.id, business_id=world.business.id, adapter=adapter, now=worker.clock.now
+    )
+    assert revert.status == "applied"
+    assert campaign.status == "active" and campaign.review_since is not None
+    adapter.accept()
+    approve(world)
+    await settle(world)
+    assert await platform_status(world, campaign) == "active" and campaign.review_since is None
+
+
+async def test_pause_of_draft_enabled_by_platform_is_settled_by_budget_guard(tmp_path: Path) -> None:
+    """Остановка черновика на проверке записана целью; если площадка после одобрения включила кампанию сама, страж
+    бюджета (раз в 30 минут) доводит паузу, не дожидаясь часового шага модерации, и запись не дублируется."""
+    from app.services.budget_guard import stop_all
+
+    adapter = AcceptedOffRefusesSuspend()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    await stop_all(
+        world.business, worker=recovery_worker(world, after=timedelta(minutes=5), dry_run=False), actor="owner"
+    )
+    assert campaign.status == "paused_owner" and campaign.review_since is not None
+    adapter.accept()
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="active")
+    await recovery_worker(world, after=timedelta(minutes=40), dry_run=False).run(
+        "budget_guard", world.business.id, key="draft-pause-guard"
+    )
+    assert await platform_status(world, campaign) != "active" and campaign.review_since is None
+    await settle(world)
+    assert [row.kind for row in settle_records(world)] == ["pause"]
+
+
+class DraftFailsSecondCreate(DraftCampaign):
+    """Первая кампания создана черновиком, создание второй упало; остановить черновик Директ не даёт."""
+
+    attempts = 0
+
+    async def create_campaign_tree(self, plan_part):
+        self.attempts += 1
+        if self.attempts == 2:
+            raise PlatformError("Директ не ответил.", status_code=503)
+        return await super().create_campaign_tree(plan_part)
+
+
+async def test_failed_launch_counts_draft_campaign_as_stopped(tmp_path: Path) -> None:
+    """Запуск не удался, а созданная кампания осталась черновиком: остановить его площадка не даёт, но он и так не
+    показывается — владелец не видит ложного «не удалось остановить»."""
+    world, plan = await ready_with_services(
+        tmp_path, ["Маникюр", "Педикюр"], platforms=("direct",), adapters={"direct": DraftFailsSecondCreate()}
+    )
+    with pytest.raises(LaunchFailed) as error:
+        await launch(world, plan)
+    assert launch_module.NOT_STOPPED not in str(error.value)
+    (campaign,) = [item for item in campaigns(world) if item.external_id]
+    assert await platform_status(world, campaign) == "draft" and campaign.status == "paused_auto"
+
+
+async def test_rebalance_restores_limits_of_campaign_back_from_zero_daily_limit(tmp_path: Path) -> None:
+    """Площадка выключила кампанию (на счёте нет денег): это пауза вне автопилота, пересчёт обнуляет её дневной лимит.
+    Счёт пополнили — кампания снова работает, и следующий пересчёт возвращает лимиты одной применённой записью, не выше
+    запусковых."""
+    adapter = FakeAdapter()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    launched = campaign.daily_limit_kop, campaign.period_cap_kop
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="paused_auto")
+    await recovery_worker(world, after=timedelta(hours=7), dry_run=False).run(
+        "rebalance_budget", world.business.id, key="off-by-platform"
+    )
+    assert campaign.daily_limit_kop == 0
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="active")
+    await recovery_worker(world, after=timedelta(hours=31), dry_run=False).run(
+        "rebalance_budget", world.business.id, key="on-again"
+    )
+    state = (await states(world, campaign))[campaign.external_id]
+    assert campaign.status == "active" and 0 < campaign.daily_limit_kop == state.daily_limit_kop
+    assert campaign.period_cap_kop == state.period_cap_kop <= launched[1]
+    (restored,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "BUDGET_REBALANCE"]
+    assert restored.status == "applied"
+    assert {op["field"] for op in restored.operations} == {"daily_limit_kop", "period_cap_kop"}

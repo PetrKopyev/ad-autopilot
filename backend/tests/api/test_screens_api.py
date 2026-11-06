@@ -557,10 +557,10 @@ def test_experiment_arms_carry_own_text_and_missing_ad_is_empty(setup):
         "confirmed_in_platform": {"direct": True},
         "transmission": {"direct": None, "vk": None},
         "saved": True,
-        "inn_masked": "•••4689",
+        "inn_masked": "•••7887",
         "phone_masked": "+7•••1122",
     }
-    assert "526317984689" not in client.get("/api/business").text
+    assert "001234567887" not in client.get("/api/business").text
     assert "9001231122" not in client.get("/api/business").text
 
 

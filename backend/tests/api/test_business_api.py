@@ -115,7 +115,7 @@ def test_cities_lists_targetable_cities_for_logged_in_user(api) -> None:
         (
             "PUT",
             "/api/business/marking",
-            {"subject_type": "ip", "inn": "526317984689", "name": "ИП", "phone": "89001234567"},
+            {"subject_type": "ip", "inn": "001234567887", "name": "ИП", "phone": "89001234567"},
         ),
         ("POST", "/api/business/site-check", None),
     ],

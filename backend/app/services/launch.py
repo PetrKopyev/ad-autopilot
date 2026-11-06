@@ -873,8 +873,15 @@ class LaunchService:
                     Operation("set_status", "campaign", campaign.external_id, "status", "active", "paused_auto")
                 )
             except PlatformError:
-                stopped = False
-                continue
+                # Черновик площадка остановить не даёт, но он и так не показывается.
+                try:
+                    states = await adapters[platform].get_state(ExternalRefs(campaign.external_id, {}, {}, {}))
+                except PlatformError:
+                    states = {}
+                state = states.get(campaign.external_id)
+                if state is None or state.status != "draft":
+                    stopped = False
+                    continue
             campaign.status = "paused_auto"
         self.repository.commit()
         return stopped
@@ -897,7 +904,8 @@ class LaunchService:
             for row in groups:
                 row.status = "active"
             for ad in ads:
-                ad.status = "moderation"
+                if ad.status not in {"active", "rejected"}:
+                    ad.status = "moderation"
         for platform in platforms:
             self.repository.save_ledger(
                 BudgetLedger(

@@ -466,7 +466,7 @@ def test_saves_waiting_for_business_lock_do_not_hold_a_connection(small_pool, mo
     app.state.platform_adapters = SimpleNamespace(metrica=lambda business_id: None)
     with db_session.SessionLocal() as db:
         business_id = db.get(Asset, asset_id).business_id
-    marking = {"subject_type": "ip", "inn": "526317984689", "name": "ИП Иванов", "phone": "89001234567"}
+    marking = {"subject_type": "ip", "inn": "001234567887", "name": "ИП Иванов", "phone": "89001234567"}
     saves = [
         ("POST", "/api/business", {"site_url": "example.test", "city": "Москва", "month_budget_kop": 5_000_000}),
         ("PUT", "/api/business/description", {"description": {"services": {"value": "Стрижка"}}, "approved": False}),

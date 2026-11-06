@@ -215,6 +215,7 @@ async def test_reverted_hypothesis_stays_completed_after_freeze_expires():
         evidence={"experiment_id": experiment.id},
     )
     experiment.change_id = change.id
+    second = world.ads["borderline-2"].status
     await RollbackService(world.repository, dry_run=False).revert(
         change.id,
         business_id=world.business.id,
@@ -226,8 +227,8 @@ async def test_reverted_hypothesis_stays_completed_after_freeze_expires():
     proposal = await create_experiment(world.worker(dry_run=True), world.business, control_snapshot(world), design())
     assert proposal.reason_params["hypothesis"] == "image"
     # Откат вывода не трогает второе плечо: раньше оно записывалось «остановленным владельцем», теперь
-    # остаётся в своём статусе (это объявление ещё на модерации).
-    assert world.ads["borderline-2"].status == "moderation"
+    # остаётся в своём статусе.
+    assert world.ads["borderline-2"].status == second
 
 
 async def test_fake_restart_skips_jobs_and_notifies_once():

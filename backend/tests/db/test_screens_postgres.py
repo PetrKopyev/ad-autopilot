@@ -27,7 +27,7 @@ def test_settings_show_saved_marking_masked(db_session) -> None:
         MarkingProfile(
             business_id=world.business.id,
             subject_type="ip",
-            inn_enc="526317984689",
+            inn_enc="001234567887",
             name="ИП Иванов",
             phone_enc="+79001231122",
             confirmed_in_platform={"direct": True},
@@ -43,7 +43,7 @@ def test_settings_show_saved_marking_masked(db_session) -> None:
         "confirmed_in_platform": {"direct": True},
         "transmission": {"direct": None, "vk": None},
         "saved": True,
-        "inn_masked": "•••4689",
+        "inn_masked": "•••7887",
         "phone_masked": "+7•••1122",
     }
 

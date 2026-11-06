@@ -551,7 +551,7 @@ async def onboard(world: World, *, marking: bool = True, confirmed: dict | None 
     await world.onboarding.save_metrica(business_id, COUNTER, [1])
     if marking:
         world.onboarding.save_marking(
-            business_id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", confirmed or {"direct": True, "vk": True}
+            business_id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", confirmed or {"direct": True, "vk": True}
         )
 
 
@@ -560,12 +560,12 @@ def world(tmp_path: Path) -> World:
     return make_world(tmp_path)
 
 
-@pytest.mark.parametrize("inn", ["7707083893", "526317984689"])
+@pytest.mark.parametrize("inn", ["7707083893", "001234567887"])
 def test_valid_inn(inn: str) -> None:
     assert valid_inn(inn)
 
 
-@pytest.mark.parametrize("inn", ["7707083894", "526317984688", "000000000000", "123", "77070838931", "77070838a3", ""])
+@pytest.mark.parametrize("inn", ["7707083894", "001234567888", "000000000000", "123", "77070838931", "77070838a3", ""])
 def test_invalid_inn(inn: str) -> None:
     assert not valid_inn(inn)
 
@@ -1011,7 +1011,7 @@ async def test_wizard_steps_are_not_saved_while_business_is_locked(world: World,
     with pytest.raises(ChangeConflict):
         await world.onboarding.save_metrica(business_id, COUNTER, [1])
     with pytest.raises(ChangeConflict):
-        world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+        world.onboarding.save_marking(business_id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True})
     assert world.business.description["fields"] == fields and world.business.description_approved_at is None
     assert world.business.metrica_counter_id is None and world.repository.marking(business_id) is None
 
@@ -1033,7 +1033,7 @@ async def test_description_and_marking_wait_for_lock(world: World, monkeypatch) 
 
     monkeypatch.setattr(world.repository, "business_lock", released_on_second_try)
     world.onboarding.save_description(business_id, {"services": {"value": "Педикюр"}}, True, NOW)
-    world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+    world.onboarding.save_marking(business_id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True})
     assert len(attempts) == 4 and world.business.description["fields"]["services"]["value"] == "Педикюр"
     assert world.repository.marking(business_id).name == "ИП Иванов"
 
@@ -1122,7 +1122,7 @@ async def test_one_save_waits_for_lock_per_business_and_others_get_409(world: Wo
     for save in (
         lambda: world.onboarding.save_description(business_id, {"services": {"value": "Стрижка"}}, True, NOW),
         lambda: world.onboarding.save_marking(
-            business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True}
+            business_id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True}
         ),
     ):
         with pytest.raises(ChangeConflict, match=SAVING):
@@ -1168,7 +1168,7 @@ async def test_wizard_steps_of_deleted_business_are_not_found(world: World) -> N
     with pytest.raises(NotFound):
         await world.onboarding.save_metrica(business_id, COUNTER, [1])
     with pytest.raises(NotFound):
-        world.onboarding.save_marking(business_id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True})
+        world.onboarding.save_marking(business_id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True})
     assert world.repository.marking(business_id) is None
 
 
@@ -1433,12 +1433,12 @@ async def test_site_counter_must_match_selected_one(world: World) -> None:
 @pytest.mark.parametrize(
     ("subject", "inn", "name", "phone"),
     [
-        ("ip", "526317984688", "ИП Иванов", "89001234567"),
-        ("ooo", "526317984689", "ООО Ромашка", "89001234567"),
+        ("ip", "001234567888", "ИП Иванов", "89001234567"),
+        ("ooo", "001234567887", "ООО Ромашка", "89001234567"),
         ("ip", "7707083893", "ИП Иванов", "89001234567"),
-        ("ip", "526317984689", "", "89001234567"),
-        ("ip", "526317984689", "ИП Иванов", "123"),
-        ("company", "526317984689", "ИП Иванов", "89001234567"),
+        ("ip", "001234567887", "", "89001234567"),
+        ("ip", "001234567887", "ИП Иванов", "123"),
+        ("company", "001234567887", "ИП Иванов", "89001234567"),
     ],
 )
 async def test_invalid_marking_is_rejected(world: World, subject: str, inn: str, name: str, phone: str) -> None:
@@ -1488,7 +1488,7 @@ async def test_transmit_marking_demo_fake_accepts_without_requests(world: World)
 @pytest.mark.parametrize(
     ("subject", "inn", "api_type"),
     [
-        ("ip", "526317984689", "ip"),
+        ("ip", "001234567887", "ip"),
         ("ooo", "7707083893", "ooo"),
         ("selfemployed", "001234567887", "self_employed"),
         ("person", "001234567887", "individual"),
@@ -1516,12 +1516,12 @@ async def test_transmit_marking_api_refusal_keeps_save_and_asks_to_fill_in_cabin
     vk = MarkingApiStub()
     world.onboarding.fresh = lambda business_id, platform: {"direct": direct, "vk": vk}[platform]
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", {"direct": True}
     )
     result = await world.onboarding.transmit_marking(world.business.id, NOW)
     assert result == {"direct": "marking_manual_required", "vk": "marking_transmitted"}
     profile = world.repository.marking(world.business.id)
-    assert profile.inn_enc == "526317984689" and profile.subject_type == "ip"
+    assert profile.inn_enc == "001234567887" and profile.subject_type == "ip"
     records = world.repository.rows(ChangeLog, kind="marking")
     assert len(records) == 1
     record = records[0]
@@ -1538,7 +1538,7 @@ async def test_transmit_marking_unsupported_fields_give_platform_instruction(wor
     direct = MarkingApiStub(instruction=instruction)
     world.onboarding.fresh = lambda business_id, platform: direct
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", {"direct": True}
     )
     result = await world.onboarding.transmit_marking(world.business.id, NOW)
     assert result == {"direct": "marking_manual_required", "vk": "marking_manual_required"}
@@ -1554,7 +1554,7 @@ async def test_transmit_marking_closed_account_is_manual_required(world: World) 
 
     world.onboarding.fresh = closed
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", {"direct": True}
     )
     result = await world.onboarding.transmit_marking(world.business.id, NOW)
     assert result == {"direct": "marking_manual_required", "vk": "marking_manual_required"}
@@ -1564,7 +1564,7 @@ async def test_transmit_marking_closed_account_is_manual_required(world: World) 
 async def test_transmit_marking_without_accounts_is_noop(tmp_path: Path) -> None:
     world = make_world(tmp_path, platforms=())
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", {"direct": True}
     )
     assert await world.onboarding.transmit_marking(world.business.id, NOW) == {}
     assert world.repository.marking(world.business.id).transmission == {}
@@ -1575,7 +1575,7 @@ async def test_transmit_marking_skips_accounts_not_connected(world: World) -> No
     vk = world.repository.rows(PlatformAccount, business_id=world.business.id, platform="vk")[0]
     vk.status = "revoked"
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "8 900 123-45-67", {"direct": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "8 900 123-45-67", {"direct": True}
     )
     result = await world.onboarding.transmit_marking(world.business.id, NOW)
     assert result == {"direct": "marking_transmitted"}

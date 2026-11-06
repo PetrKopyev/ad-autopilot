@@ -72,6 +72,9 @@ async def drop_tokens(
     пользователя у client_id, поэтому, если тем же доступом подключён другой бизнес, отзыв не делаем."""
     if accounts.shares_access(session.account_id, auth_mode, client_id):
         return
+    if auth_mode != "manual_key" and not session.account_id:
+        # Без user_id VK удалил бы токены владельца нашего приложения, а не пользователя.
+        return
     item = (
         Revocation("vk", client_id=client_id, client_secret=client_secret)
         if auth_mode == "manual_key"

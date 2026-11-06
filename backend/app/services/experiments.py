@@ -447,7 +447,7 @@ async def launch_variant(worker, business, campaign, group, control, change, des
 AUDIENCE_AGES = (25, 54)
 
 
-# В демо бюджет 30–50 тыс. ₽ в месяц: группе не набрать 700 ₽ в день, и приёмщик не увидел бы проверку аудиторий.
+# В демо бюджет 30–50 тыс. ₽ в месяц: группе не набрать 700 ₽ в день, и в демо проверку аудиторий не было бы видно.
 DEMO_AUDIENCE_MIN_DAILY_BUDGET = 10_000
 
 

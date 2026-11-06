@@ -1681,6 +1681,54 @@ async def test_service_budget_update_after_restart_converts_lifetime_cap_and_ext
         assert (state.daily_limit_kop, state.period_cap_kop) == (150_000, 1_300_000)
 
 
+async def test_budget_update_of_campaign_with_zero_daily_limit_uses_final_limits(api):
+    """Кампания с нулевым дневным лимитом в базе (пересчёт обнулил его, пока площадка держала её выключенной):
+    пересчёт меняет кэп и дневной лимит одной записью. Каждая операция ведёт к итоговой недельной сумме — иначе первая
+    считала бы неделю от нулевого дневного лимита и площадка отказывала бы с «Бюджет исчерпан» на каждом проходе."""
+    from app.db.models import Campaign
+    from app.services.changes import ChangesService
+    from tests.services.test_changes import MemoryRepository
+
+    day = date(2026, 11, 6)
+    now = datetime(2026, 11, 6, 12, tzinfo=UTC)
+    server = DirectServer()
+    repository = MemoryRepository()
+    repository.current_business.settings = {"_worker": {"started_on": "2026-11-05"}}
+    campaign = Campaign(id=1, external_id="1", status="active", daily_limit_kop=0, period_cap_kop=50_702)
+    repository.entities = {("campaign", "1"): campaign}
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    async with DirectAdapter("test-only", config=configuration()) as direct:
+        direct._today = lambda: day
+        server.rows["campaigns"] = [
+            {
+                "Id": 1,
+                "Name": "Салон",
+                "State": "ON",
+                "Status": "ACCEPTED",
+                "UnifiedCampaign": direct._campaign_settings(50_702),
+            }
+        ]
+        direct.get_stats = AsyncMock(return_value=[])
+        change = await ChangesService(repository, dry_run=False).apply_change(
+            business_id=1,
+            adapter=direct,
+            refs=ExternalRefs("1", {}, {}, {}),
+            actor="system",
+            kind="budget",
+            platform="direct",
+            reason_code="BUDGET_REBALANCE",
+            reason_text="Пересчитали бюджет.",
+            now=now,
+            operations=[
+                Operation("set_budget", "campaign", "1", "period_cap_kop", 50_702, 39_549),
+                Operation("set_budget", "campaign", "1", "daily_limit_kop", 0, 13_183),
+            ],
+        )
+        weekly = server.rows["campaigns"][0]["UnifiedCampaign"]["BiddingStrategy"]["Search"]["WbMaximumClicks"]
+        assert change.status == "applied" and weekly["WeeklySpendLimit"] == direct._to_api(39_549)
+    assert (campaign.daily_limit_kop, campaign.period_cap_kop) == (13_183, 39_549)
+
+
 async def test_invalid_mutation_result_does_not_confirm_marking(adapter, api):
     api.post(f"{V5}/clients").mock(
         side_effect=[

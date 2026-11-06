@@ -962,7 +962,7 @@ async def test_readiness_reflects_blockers(world: World) -> None:
     assert not plan["ready_to_launch"] and not plan["marking_confirmed"]
     assert any("маркировку" in reason for reason in plan["blockers"])
     world.onboarding.save_marking(
-        world.business.id, "ip", "526317984689", "ИП Иванов", "89001234567", {"direct": True, "vk": True}
+        world.business.id, "ip", "001234567887", "ИП Иванов", "89001234567", {"direct": True, "vk": True}
     )
     plan = await world.plans.get_plan(world.business.id, NOW, TODAY)
     assert plan["ready_to_launch"] and plan["marking_confirmed"] and plan["blockers"] == []

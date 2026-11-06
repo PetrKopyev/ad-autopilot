@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def moderation_key(platform: str, external_id: str) -> str:
-    """Ключ approvals и rewritten в settings["_worker"]; до F13 ключом был голый внешний id."""
+    """Ключ approvals и rewritten в settings["_worker"]; раньше ключом был голый внешний id."""
     return f"{platform}:{external_id}"
 
 
@@ -211,17 +211,23 @@ REVIEW_NOTICE_AFTER = timedelta(days=5)
 PAUSED = {"paused_auto", "paused_owner"}
 
 
-async def settle_review(worker: Worker, business: Business) -> None:
+async def settle_review(worker: Worker, business: Business, *, pauses_only: bool = False) -> None:
     """Единственный владелец состояния «площадка ещё проверяет» (Campaign.review_since): локальный статус кампании и её
     объявлений — наша цель, и после проверки площадка приводится к ней. Включаем одобренное, но выключенное (OFF) и
     отправляем на проверку черновики объявлений — только у работающего бизнеса без остановки и только в кампании, чья
     цель — работать; паузу, которую площадка не применила к черновику, доводим всегда. SUSPENDED при цели «работает» —
     остановка в кабинете (EXTERNAL_PAUSE). Кампанию-черновик (Директ v501 не включает её, пока не одобрены объявления)
     включаем снова, когда одобрено хотя бы одно её объявление. Пока что-то в дереве на проверке, отметка остаётся;
-    кампания, закончившаяся по дате окончания, ждёт продления (month_rollover)."""
+    кампания, закончившаяся по дате окончания, ждёт продления (month_rollover). pauses_only — только кампании, чья
+    цель — пауза: их страж бюджета доводит раз в 30 минут, не дожидаясь часового шага модерации."""
     pending = {change.platform for change in worker.repository.pending(business.id)}
     for campaign in worker.campaigns(business):
-        if campaign.review_since is None or campaign.platform in pending:
+        if (
+            campaign.review_since is None
+            or campaign.platform in pending
+            or pauses_only
+            and campaign.status not in PAUSED
+        ):
             continue
         entities = worker.repository.local_entities(business.id, campaign.platform)
         try:
@@ -277,6 +283,11 @@ async def settle_review(worker: Worker, business: Business) -> None:
         change = None
         # Ключ записи — окно проверки и её операции: повтор шага в том же окне не пишет вторую такую же запись.
         window = campaign.review_since.isoformat()
+        # Остановка кампании — пауза, даже если заодно включаются её объявления: «Продолжить» читает её как нашу.
+        paused = not enables or any(op.entity_type == "campaign" for op in pauses)
+        suffix = f"review:{window}:{'pause' if paused else 'resume'}:" + ",".join(
+            sorted(op.entity_id for op in pauses + enables)
+        )
         try:
             if outside:
                 whole = any(op.entity_type == "campaign" for op in outside)
@@ -293,8 +304,6 @@ async def settle_review(worker: Worker, business: Business) -> None:
                 # Паузу владельца сохраняем сразу: следующая запись может упасть в конфликт.
                 campaign.owner_paused = campaign.owner_paused or whole
                 worker.repository.save(campaign)
-            # Остановка кампании — пауза, даже если заодно включаются её объявления: «Продолжить» читает её как нашу.
-            paused = not enables or any(op.entity_type == "campaign" for op in pauses)
             if pauses or enables:
                 change = await worker.apply(
                     business,
@@ -304,12 +313,18 @@ async def settle_review(worker: Worker, business: Business) -> None:
                     kind="pause" if paused else "resume",
                     reason_code=SETTLE,
                     reason_text=REVIEW_PAUSED if paused else REVIEW_RESUMED,
-                    suffix=f"review:{window}:{'pause' if paused else 'resume'}:"
-                    + ",".join(sorted(op.entity_id for op in pauses + enables)),
+                    suffix=suffix,
                     force=True,
                 )
         except ChangeConflict:
-            continue
+            change = worker.repository.change_by_key(business.id, f"{worker.step_key}:{campaign.id}:{suffix}")
+            if paused or change is None or change.status != "failed":
+                continue
+            # Проверка закончена, а площадка оставила выключенным (State=OFF: например, на счёте нет денег): повтор
+            # каждый час ничего не даст, а с отметкой кампанию не сверяли бы sync_campaign_status и balance_notice.
+            change.reason_text = REVIEW_RESUME_FAILED
+            worker.repository.save(change)
+            change = None
         sent = set(change.evidence["_service"].get("review", ())) if change is not None else set()
         if change is not None and not sent:
             reviewing -= {op.entity_id for op in enables}
@@ -344,6 +359,10 @@ async def settle_review(worker: Worker, business: Business) -> None:
 
 
 REVIEW_RESUMED = "Площадка закончила проверку объявлений: включили рекламу."
+REVIEW_RESUME_FAILED = (
+    "Площадка закончила проверку объявлений, но реклама не включилась — например, на счёте нет денег. "
+    "Проверьте счёт и кампанию в кабинете площадки."
+)
 REVIEW_SENT = "Отправили объявления на проверку площадке. Включим рекламу, как только она их одобрит."
 OUTSIDE_AD_PAUSE = "Вы остановили объявление в кабинете площадки — автопилот его не включает."
 REVIEW_PAUSED = "Площадка закончила проверку объявлений: реклама остаётся остановленной, как и была."

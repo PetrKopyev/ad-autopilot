@@ -543,14 +543,13 @@ async def budget_operations(repository, business, adapter, refs, operations, now
         row.cost_kop for row in rows if row.campaign_id == refs.campaign_id and row.date == day
     )
     refs = replace(refs, budget_context=context.copy())
-    prepared = []
+    # Директ хранит одну недельную сумму на оба лимита: каждая операция записи ставит итоговую. Промежуточная пара
+    # (новый кэп при старом дневном лимите) могла дать ноль — «Бюджет исчерпан» — или неделю выше итоговой.
     for op in operations:
         if op.kind == "set_budget":
             context[op.field] = op.after
-            context["weekly_limit_kop"] = adapter._context_weekly(context)
-            op = replace(op, budget_context=context.copy())
-        prepared.append(op)
-    return refs, prepared
+    context["weekly_limit_kop"] = adapter._context_weekly(context)
+    return refs, [replace(op, budget_context=context.copy()) if op.kind == "set_budget" else op for op in operations]
 
 
 class ChangesService:

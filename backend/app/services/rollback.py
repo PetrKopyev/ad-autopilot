@@ -1,10 +1,13 @@
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.db.models import Ad, AdGroup, Campaign, ChangeLog, Experiment
 from app.domain.explain import undone
 from app.platforms.base import AdPlatform, EntityState, Operation
 from app.services.changes import (
+    PAUSES,
+    REVIEW,
     SETTLE,
     ChangeConflict,
     ChangesRepository,
@@ -186,7 +189,11 @@ def inverse_operations(operations: Sequence[Operation], states: Mapping[str, Ent
             archived.add(op.entity_id)
             continue
         if op.invertible:
-            result.append(op.inverse())
+            inverse = op.inverse()
+            if op.field == "status" and op.before in REVIEW and op.after in PAUSES:
+                # Вернуть на проверку площадка не даёт: откат паузы черновика — включение, и оно дождётся одобрения.
+                inverse = replace(inverse, after="active")
+            result.append(inverse)
             continue
         if op.entity_type != "ad":
             raise ValueError("Для этой необратимой операции безопасный откат не поддерживается.")

@@ -317,6 +317,24 @@ def test_refused_vk_account_keeps_tokens_shared_with_other_business(client, repo
     assert revoke.call_count == 0
 
 
+async def test_refused_oauth_tokens_without_user_id_are_not_revoked(monkeypatch) -> None:
+    """Без user_id VK удалил бы токены владельца нашего приложения, а не пользователя: отзыв не делаем."""
+    from types import SimpleNamespace
+
+    from app.api import vk as api
+
+    calls = []
+
+    async def revoke_refused(http, items) -> None:
+        calls.append(items)
+
+    monkeypatch.setattr(api, "revoke_refused", revoke_refused)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(http=None)))
+    accounts = SimpleNamespace(shares_access=lambda *args: False)
+    await api.drop_tokens(request, accounts, AuthSession("", "token"), "oauth")
+    assert calls == []
+
+
 def test_vk_revoke_failure_keeps_refusal_409(client, repository, vk_api) -> None:
     """Сбой отзыва токенов отказанного кабинета VK любого рода — по-прежнему страница 409, не 500."""
     revoke = vk_api.post(VK_REVOKE).mock(side_effect=RuntimeError("отзыв упал"))

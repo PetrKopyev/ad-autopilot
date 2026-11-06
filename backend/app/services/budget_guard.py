@@ -343,6 +343,11 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
     elif business.status == "running":
         await balance_notice(worker, business)
+    from app.services.sync import settle_review
+
+    # Остановку черновика площадка не применяет: включи она кампанию после одобрения сама, реклама тратила бы до
+    # часового шага модерации.
+    await settle_review(worker, business, pauses_only=True)
 
 
 async def balance_notice(worker: Worker, business: Business) -> None:

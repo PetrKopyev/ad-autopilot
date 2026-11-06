@@ -111,7 +111,7 @@ def test_body_of_exactly_the_limit_passes_and_one_byte_more_does_not() -> None:
 
 
 def test_large_photo_streamed_without_length_gets_photo_limit_text() -> None:
-    # Ревью: 12 МБ фото без Content-Length получали 400 «Invalid multipart data» вместо понятного 413.
+    # Раньше 12 МБ фото без Content-Length получали 400 «Invalid multipart data» вместо понятного 413.
     from app.api.plan import MAX_UPLOAD, TOO_LARGE
     from app.main import app as application
 

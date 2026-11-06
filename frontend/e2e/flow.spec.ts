@@ -28,7 +28,7 @@ for (const width of [390, 1280]) {
     await page.getByRole('checkbox', { name: copy.launchFlow.approved }).check();
     await page.getByRole('button', { name: copy.common.next, exact: true }).click();
     await expect(page).toHaveURL(/\/setup\/5$/);
-    await page.getByLabel(copy.setup.advertiser.taxId, { exact: true }).fill('526317984689');
+    await page.getByLabel(copy.setup.advertiser.taxId, { exact: true }).fill('001234567887');
     await page.getByLabel(copy.launchFlow.fullName, { exact: true }).fill('Демонстрационный салон');
     await page.getByLabel(copy.launchFlow.phone, { exact: true }).fill('+7 900 123-45-67');
     await page.getByRole('checkbox', { name: copy.launchFlow.confirmDirect }).check();

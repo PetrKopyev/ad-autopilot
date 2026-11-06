@@ -130,14 +130,14 @@ it('409 на шаге описания показывает текст серв�
 it('409 на шаге маркировки показывает текст сервера и оставляет данные рекламодателя', async () => {
   conflictOn('/api/business/marking', busy);
   renderStep(5);
-  fireEvent.change(await screen.findByLabelText(copy.setup.advertiser.taxId), { target: { value: '526317984689' } });
+  fireEvent.change(await screen.findByLabelText(copy.setup.advertiser.taxId), { target: { value: '001234567887' } });
   fireEvent.change(screen.getByLabelText(copy.launchFlow.fullName), { target: { value: 'ИП Иванов' } });
   fireEvent.change(screen.getByLabelText(copy.launchFlow.phone), { target: { value: '+7 900 123-45-67' } });
   fireEvent.click(screen.getByRole('checkbox', { name: copy.launchFlow.confirmDirect }));
   fireEvent.click(screen.getByRole('button', { name: copy.plan.title }));
   expect((await screen.findByRole('alert')).textContent).toContain(busy);
   expect(screen.getByTestId('path').textContent).toBe('/setup/5');
-  expect((screen.getByLabelText(copy.setup.advertiser.taxId) as HTMLInputElement).value).toBe('526317984689');
+  expect((screen.getByLabelText(copy.setup.advertiser.taxId) as HTMLInputElement).value).toBe('001234567887');
   expect((screen.getByLabelText(copy.launchFlow.fullName) as HTMLInputElement).value).toBe('ИП Иванов');
   expect((screen.getByLabelText(copy.launchFlow.phone) as HTMLInputElement).value).toBe('+7 (900) 123-45-67');
   expect((screen.getByRole('checkbox', { name: copy.launchFlow.confirmDirect }) as HTMLInputElement).checked).toBe(true);
@@ -576,7 +576,7 @@ it('пустое поле бюджета просит бюджет, а не «с
   expect(calls()).not.toContain('POST /api/business');
 });
 
-it('в демо шаг 1 предзаполняет сайт, город и бюджет: поле сайта не пустое, как в сценарии приёмки', async () => {
+it('в демо шаг 1 предзаполняет сайт, город и бюджет: поле сайта не пустое', async () => {
   // Как на живом стенде: конфигурация демо приходит от сервера, бизнеса ещё нет.
   fetchMock.mockImplementation(async (url) => {
     const answers: Record<string, unknown> = {

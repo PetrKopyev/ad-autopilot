@@ -163,7 +163,7 @@ def launch(client):
             "/api/business/marking",
             json={
                 "subject_type": "ip",
-                "inn": "526317984689",
+                "inn": "001234567887",
                 "name": "Демо-салон",
                 "phone": "+7 900 123-45-67",
                 "confirmed_in_platform": {"direct": True},

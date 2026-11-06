@@ -21,6 +21,6 @@ if [ -n "$current" ] && [ "$current" != "${subnet:-172.31.250.0/24}" ]; then
     # Сеть старого стенда с другой подсетью compose сам не пересоздаёт: убираем контейнеры и сеть, тома остаются.
     dc down
 fi
-# Старые api и worker не должны писать в базу, пока migrate меняет схему (DEPLOY.md, раздел 8).
+# Старые api и worker не должны писать в базу, пока migrate меняет схему (DEPLOY.md, раздел 9).
 dc stop api worker
 dc up -d "$@"

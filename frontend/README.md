@@ -1,9 +1,15 @@
-# Каркас интерфейса
+# Интерфейс
 
-React 18, TypeScript, Vite и React Router. Команды: `npm run dev`, `npm run build`, `npm run preview`. Зависимости перечислены с точными версиями в `package.json`.
+Веб-интерфейс сервиса «Автопилот рекламы»: React 18, TypeScript, Vite, React Router. Мастер запуска рекламы, «Ваш план», «Реклама», «Статистика», «История», «Клиенты», «Настройки», страница «Данные и политика» (`/policy`). Зависимости закреплены в `package.json`.
 
-Маршруты: `/`, `/login`, `/setup` и `/setup/1`–`/setup/5`, `/plan`, `/ads`, `/statistics`, `/history`, `/clients`, `/settings`, `/connect/vk`, `/platform-error`, `/policy`. Неизвестные адреса показывают страницу ошибки. Экраны пока служат заглушками; подключение кабинетов и запуск рекламы недоступны.
+Запуск и проверки:
 
-Тексты находятся в `src/copy.ts`, токены и адаптивные стили — в `src/styles.css`. Общие компоненты экспортируются из `src/components/index.ts`. `Money` и `BudgetRing` принимают суммы в целых копейках в пределах безопасного целого JavaScript; форматирование рублей не использует дробные вычисления.
+```sh
+npm ci
+npm run dev       # dev-сервер, /api проксируется на http://localhost:8000
+npm run build
+npm test          # vitest
+npm run e2e       # Playwright против поднятого стенда, см. корневой README
+```
 
-`api<T>('/api/...', options)` отправляет JSON и cookie только на текущий сайт. Для изменяющих запросов читает cookie `csrftoken` и передаёт её в `X-CSRFToken`. Имена можно настроить через `createApiClient`. Пустой ответ возвращает `undefined`; ошибки имеют тип `ApiError` с понятным сообщением и HTTP-статусом. Передайте `signal`, чтобы отменить запрос. Vite проксирует `/api` на `http://localhost:8000`.
+Тексты находятся в `src/copy.ts`, токены и адаптивные стили — в `src/styles.css`, общие компоненты — в `src/components/index.ts`. Запросы к API идут через `api<T>('/api/...')`: только на текущий сайт, с cookie и заголовком `X-CSRFToken` для изменяющих запросов. Стенд целиком (демо и боевой) описан в [корневом README](../README.md) и [docs/DEPLOY.md](../docs/DEPLOY.md).
