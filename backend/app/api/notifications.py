@@ -21,6 +21,7 @@ NOTICES = {
     "MODERATION_REJECTED": ("Площадка не пропустила объявление", "warning"),
     "MODERATION_ALL_REJECTED": ("Кампания не показывается: все объявления отклонены", "danger"),
     "MODERATION_LONG": ("Площадка долго проверяет объявления", "warning"),
+    "CAMPAIGN_OFF_BY_PLATFORM": ("Площадка не включила кампанию", "warning"),
     "ANOMALY": ("Перестали приходить обращения", "warning"),
     "NOT_SHOWING": ("Объявление не показывается", "warning"),
     "CAMPAIGN_EXTEND_FAILED": ("Не получилось продлить кампанию в Директе", "warning"),

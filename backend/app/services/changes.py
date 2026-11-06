@@ -652,7 +652,8 @@ class ChangesService:
                     # Площадка ещё проверяет объявление: включение ждёт одобрения, остальные операции идут дальше.
                     continue
                 except PlatformError:
-                    self._metadata(change, error="Площадка ответила ошибкой.")
+                    # Признак остаётся после сверки: отказ площадки отличает сбой от принятого запроса без эффекта.
+                    self._metadata(change, error="Площадка ответила ошибкой.", refused=True)
                     break
         await self._reconcile(change, adapter, now=now)
         return change

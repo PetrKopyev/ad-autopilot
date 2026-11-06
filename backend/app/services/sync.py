@@ -6,7 +6,7 @@ from collections.abc import Collection
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from app.db.models import Ad, AdGroup, Business, Campaign, StatsDaily
+from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, StatsDaily
 from app.db.query import Window
 from app.platforms.base import Operation
 from app.services.changes import CLOSED_ACCOUNT, REVIEW, SETTLE, ChangeConflict
@@ -278,11 +278,17 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
             return
         status, settings = fresh
         meta = (settings or {}).get("_worker") or {}
+        window = campaign.review_since.isoformat()
+        off = meta.get("resumed_off", {})
+        current = states.get(campaign.external_id)
+        if enables and off.get(str(campaign.id)) == window and current is not None and current.status == "paused_auto":
+            # Площадка приняла включение, но держит кампанию выключенной (нет денег на счёте): повтор ничего не изменит,
+            # кампания заработает сама, когда площадка её включит.
+            enables, waiting = [], True
         if enables and (status != "running" or meta.get("kill_switch") or meta.get("pending_stop")):
             enables, waiting = [], True
         change = None
         # Ключ записи — окно проверки и её операции: повтор шага в том же окне не пишет вторую такую же запись.
-        window = campaign.review_since.isoformat()
         # Остановка кампании — пауза, даже если заодно включаются её объявления: «Продолжить» читает её как нашу.
         paused = not enables or any(op.entity_type == "campaign" for op in pauses)
         suffix = f"review:{window}:{'pause' if paused else 'resume'}:" + ",".join(
@@ -318,13 +324,40 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
                 )
         except ChangeConflict:
             change = worker.repository.change_by_key(business.id, f"{worker.step_key}:{campaign.id}:{suffix}")
-            if paused or change is None or change.status != "failed":
+            if change is None or change.status != "failed":
                 continue
-            # Проверка закончена, а площадка оставила выключенным (State=OFF: например, на счёте нет денег): повтор
-            # каждый час ничего не даст, а с отметкой кампанию не сверяли бы sync_campaign_status и balance_notice.
-            change.reason_text = REVIEW_RESUME_FAILED
-            worker.repository.save(change)
-            change = None
+            repeated = repeated_failure(worker, business, campaign, suffix, change)
+            if repeated:
+                # Страж бюджета и шаг модерации повторяют доводку каждые полчаса: свежего провала того же окна
+                # в журнале достаточно.
+                worker.repository.remove(change)
+            service = change.evidence["_service"]
+            if (
+                paused
+                or service.get("refused")
+                or not any(
+                    item["entity_id"] == campaign.external_id and item["current"] == "paused_auto"
+                    for item in service.get("differences", ())
+                )
+            ):
+                # Площадка отказала (сбой, лимит запросов) или не включилось объявление: повторим следующим шагом,
+                # отметка проверки остаётся.
+                continue
+            # Площадка приняла включение, а кампания осталась выключенной (State=OFF: например, на счёте нет денег).
+            # Это не остановка владельцем: отметка остаётся, повтор не нужен — площадка включит кампанию сама.
+            if not repeated:
+                change.reason_text = REVIEW_RESUME_FAILED
+                worker.repository.save(change)
+            worker.notice(
+                business,
+                "CAMPAIGN_OFF_BY_PLATFORM",
+                f"Площадка одобрила кампанию «{campaign.name}», но не включила её — например, на счёте нет денег. "
+                "Проверьте счёт и кампанию в кабинете площадки: реклама пойдёт, как только площадка её включит.",
+                key=f"resumed_off:{window}",
+                target_id=campaign.id,
+            )
+            worker.remember(business, resumed_off=off | {str(campaign.id): window})
+            change, waiting = None, True
         sent = set(change.evidence["_service"].get("review", ())) if change is not None else set()
         if change is not None and not sent:
             reviewing -= {op.entity_id for op in enables}
@@ -355,13 +388,33 @@ async def settle_review(worker: Worker, business: Business, *, pauses_only: bool
             )
         if not (reviewing or waiting):
             campaign.review_since = None
+            if str(campaign.id) in off:
+                worker.remember(business, resumed_off={key: off[key] for key in off if key != str(campaign.id)})
         worker.repository.save(campaign)
+
+
+FAILURE_REPEAT = timedelta(hours=24)
+
+
+def repeated_failure(worker: Worker, business: Business, campaign: Campaign, suffix: str, change) -> bool:
+    """Такая же доводка того же окна проверки уже проваливалась за последние сутки."""
+    tail = f":{campaign.id}:{suffix}"
+    return any(
+        row.id != change.id and row.evidence.get("worker_key", "").endswith(tail)
+        for row in worker.repository.rows(
+            ChangeLog,
+            business.id,
+            status="failed",
+            reason_code=SETTLE,
+            created_at=Window(worker.clock.now - FAILURE_REPEAT),
+        )
+    )
 
 
 REVIEW_RESUMED = "Площадка закончила проверку объявлений: включили рекламу."
 REVIEW_RESUME_FAILED = (
-    "Площадка закончила проверку объявлений, но реклама не включилась — например, на счёте нет денег. "
-    "Проверьте счёт и кампанию в кабинете площадки."
+    "Площадка закончила проверку объявлений и приняла включение, но кампанию пока не показывает — например, на счёте "
+    "нет денег. Реклама пойдёт, как только площадка её включит."
 )
 REVIEW_SENT = "Отправили объявления на проверку площадке. Включим рекламу, как только она их одобрит."
 OUTSIDE_AD_PAUSE = "Вы остановили объявление в кабинете площадки — автопилот его не включает."

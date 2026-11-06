@@ -12,7 +12,7 @@ from cryptography.fernet import InvalidToken
 
 from app.content.images import run_decoding
 from app.db.models import Ad, ArtCall, BudgetLedger, Business, Campaign, ChangeLog, LLMCall, Plan, WorkerRun
-from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError
+from app.platforms.base import AwaitingModeration, ExternalRefs, Operation, PlatformError, RateLimited
 from app.platforms.direct import DirectAdapter, weekly_limit
 from app.platforms.fake import FakeAdapter, VirtualClock
 from app.services import launch as launch_module
@@ -3809,11 +3809,11 @@ class AcceptedOffWithoutMoney(AcceptedOff):
         await super().apply(operation)
 
 
-async def test_approved_campaign_left_off_by_platform_leaves_review(tmp_path: Path) -> None:
-    """Кампания одобрена, но площадка оставила её выключенной (нет денег на счёте): включение после проверки не
-    повторяется каждый час, отметка проверки снимается — кампанию сверяет sync_campaign_status, а в журнале не остаётся
-    «включили рекламу» у неудавшегося включения."""
-    from app.services.sync import REVIEW_RESUMED, sync_campaign_status
+async def test_approved_campaign_left_off_by_platform_is_not_owner_pause(tmp_path: Path) -> None:
+    """Кампания одобрена, площадка приняла включение, но оставила её выключенной (нет денег на счёте): это не остановка
+    владельцем — ни EXTERNAL_PAUSE, ни owner_paused. Владелец получает одно понятное уведомление, в журнале нет
+    «включили рекламу», включение не повторяется каждый час, а пополненный счёт снимает отметку проверки."""
+    from app.services.sync import REVIEW_RESUME_FAILED, sync_campaign_status
 
     adapter = AcceptedOffWithoutMoney()
     world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
@@ -3824,12 +3824,47 @@ async def test_approved_campaign_left_off_by_platform_leaves_review(tmp_path: Pa
     await settle(world)
     await settle(world, hours=3)
     (resume,) = [row for row in settle_records(world) if row.kind == "resume"]
-    assert resume.status == "failed" and resume.reason_text != REVIEW_RESUMED
-    assert campaign.review_since is None
+    assert resume.status == "failed" and resume.reason_text == REVIEW_RESUME_FAILED
+    assert campaign.review_since is not None
     await sync_campaign_status(recovery_worker(world, after=timedelta(hours=4), dry_run=False), world.business)
-    assert [row.reason_code for row in world.repository.rows(ChangeLog) if row.actor == "external"] == [
-        "EXTERNAL_PAUSE"
-    ]
+    assert not [row for row in world.repository.rows(ChangeLog) if row.actor == "external"]
+    assert campaign.status == "active" and not campaign.owner_paused
+    assert [row.log[0]["reason_code"] for row in notices(world)] == ["CAMPAIGN_OFF_BY_PLATFORM"]
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="active")
+    await settle(world, hours=5)
+    assert campaign.review_since is None and len(settle_records(world)) == 1
+    assert (
+        "resumed_off" not in world.business.settings["_worker"] or not world.business.settings["_worker"]["resumed_off"]
+    )
+
+
+class ResumeRefusedOnce(AcceptedOff):
+    """После проверки Директ один раз отвечает на включение кампании ошибкой: лимит запросов."""
+
+    refused = False
+
+    async def apply(self, operation) -> None:
+        if self.accepted and not self.refused and operation.entity_type == "campaign" and operation.after == "active":
+            self.refused = True
+            raise RateLimited()
+        await super().apply(operation)
+
+
+async def test_refused_resume_after_review_is_retried_next_step(tmp_path: Path) -> None:
+    """Площадка отказала во включении после проверки (лимит запросов, сбой): это не «выключена площадкой» — отметка
+    проверки остаётся, следующий шаг включает кампанию."""
+    adapter = ResumeRefusedOnce()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    adapter.accept()
+    approve(world)
+    await settle(world)
+    assert campaign.review_since is not None and await platform_status(world, campaign) == "paused_auto"
+    assert not notices(world)
+    await settle(world, hours=3)
+    assert await platform_status(world, campaign) == "active" and campaign.review_since is None
+    assert [row.status for row in settle_records(world)] == ["failed", "applied"]
 
 
 async def test_revert_of_pause_made_during_review_enables_after_approval(tmp_path: Path) -> None:
@@ -3936,3 +3971,35 @@ async def test_rebalance_restores_limits_of_campaign_back_from_zero_daily_limit(
     (restored,) = [row for row in world.repository.rows(ChangeLog) if row.reason_code == "BUDGET_REBALANCE"]
     assert restored.status == "applied"
     assert {op["field"] for op in restored.operations} == {"daily_limit_kop", "period_cap_kop"}
+
+
+class SuspendFails(AcceptedOffRefusesSuspend):
+    """Директ не отвечает на остановку кампании."""
+
+    async def apply(self, operation) -> None:
+        if self.accepted and operation.entity_type == "campaign" and operation.after in {"paused_owner", "paused_auto"}:
+            raise PlatformError("Директ временно недоступен.", status_code=503)
+        await super().apply(operation)
+
+
+async def test_failed_draft_pause_is_logged_once_per_review_window(tmp_path: Path) -> None:
+    """Доводка паузы черновика проваливается раз за разом (страж каждые 30 минут и шаг модерации): попытки идут, а в
+    журнале одна неудачная запись этого окна проверки."""
+    from app.services.budget_guard import stop_all
+
+    adapter = SuspendFails()
+    world, plan = await ready_with_services(tmp_path, ["Маникюр"], platforms=("direct",), adapters={"direct": adapter})
+    await launch(world, plan)
+    (campaign,) = campaigns(world)
+    await stop_all(
+        world.business, worker=recovery_worker(world, after=timedelta(minutes=5), dry_run=False), actor="owner"
+    )
+    adapter.accept()
+    adapter._states[campaign.external_id] = replace(adapter._states[campaign.external_id], status="active")
+    for minutes in (40, 70, 100):
+        await recovery_worker(world, after=timedelta(minutes=minutes), dry_run=False).run(
+            "budget_guard", world.business.id, key=f"failing-pause-{minutes}"
+        )
+    await settle(world, hours=2)
+    assert [(row.kind, row.status) for row in settle_records(world)] == [("pause", "failed")]
+    assert campaign.review_since is not None
