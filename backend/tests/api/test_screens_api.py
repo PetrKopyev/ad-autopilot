@@ -287,6 +287,7 @@ def test_status_contract_heartbeat_and_platform_error(setup):
         "needs_attention",
         "has_plan",
         "first_decisions",
+        "held_by_minimum",
         "marking",
     }
     assert response["last_check_at"] is not None
@@ -371,6 +372,41 @@ def test_status_tells_when_first_decisions_come(setup):
     assert "Увеличьте бюджет" in client.get("/api/autopilot/status").json()["first_decisions"]
     world.business.status = "paused"
     assert client.get("/api/autopilot/status").json()["first_decisions"] is None
+
+
+def test_status_explains_when_all_campaigns_held_by_minimum(setup):
+    """Все кампании стоят из-за минимума площадки: главная называет причину и что делать, а не срок решений.
+    Текст зависит от площадки остановленных кампаний — проект может быть и только с VK."""
+    client, world = setup
+    world.business.status = "running"
+    world.business.settings = world.business.settings | {"_worker": {"below_minimum": [world.campaign.id]}}
+    response = client.get("/api/autopilot/status").json()
+    assert response["held_by_minimum"] is True
+    assert response["first_decisions"] == (
+        "Реклама остановлена: при таком бюджете не хватает минимума площадки «Яндекс Директ» "
+        "(366 ₽ в неделю на кампанию). Увеличьте бюджет в настройках — или оставьте как есть: кампании "
+        "снова включатся при пересчёте лимитов, когда бюджета хватит на минимум, — после увеличения "
+        "бюджета или с 1-го числа следующего месяца."
+    )
+    world.business.settings = world.business.settings | {"_worker": {"below_minimum": []}}
+    assert client.get("/api/autopilot/status").json()["held_by_minimum"] is False
+
+
+def test_status_explains_vk_minimum_when_only_vk_campaigns_held(setup):
+    """Остановлены только кампании VK: баннер называет ВКонтакте и её дневной минимум, а не Директ с 366 ₽."""
+    client, world = setup
+    world.business.status = "running"
+    world.campaign.platform = "vk"
+    world.repository.save(world.campaign)
+    world.business.settings = world.business.settings | {"_worker": {"below_minimum": [world.campaign.id]}}
+    response = client.get("/api/autopilot/status").json()
+    assert response["held_by_minimum"] is True
+    assert response["first_decisions"] == (
+        "Реклама остановлена: при таком бюджете не хватает минимума площадки «ВКонтакте» "
+        "(300 ₽ в день на кампанию). Увеличьте бюджет в настройках — или оставьте как есть: кампании "
+        "снова включатся при пересчёте лимитов, когда бюджета хватит на минимум, — после увеличения "
+        "бюджета или с 1-го числа следующего месяца."
+    )
 
 
 def test_ads_period_metrics_and_contract(setup):
@@ -735,6 +771,104 @@ def test_budget_below_vk_minimum_is_saved_with_warning_and_vk_resumes_after_rais
     assert world.adapter._states[world.refs.campaign_id].status == "active"
     assert world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
     assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+def test_budget_below_direct_minimum_is_saved_with_warning_about_direct_campaigns(setup):
+    """Снижение бюджета ниже минимума существующих кампаний Директа сохраняется с предупреждением о них,
+    а не только о ВКонтакте: иначе владелец узнаёт о выходных паузах из журнала, когда реклама уже стоит."""
+    from unittest.mock import AsyncMock
+
+    client, world = setup
+    world.business.status = "running"
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 36_600_000})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 3_000_000})
+    assert response.status_code == 200, response.text
+    assert response.json()["warning"] == (
+        "При таком бюджете кампании Директа не набирают недельный минимум площадки "
+        "(366 000 ₽ на кампанию): они остановлены и включатся при пересчёте лимитов, когда бюджета хватит "
+        "на минимум, — после увеличения бюджета или с 1-го числа. "
+        "Без остановок — от 15 415 800 ₽ в месяц."
+    )
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+
+
+def test_budget_raise_above_minimum_brings_no_direct_minimum_warning(setup, monkeypatch):
+    """Повышение бюджета до суммы, набирающей минимум, не получает предупреждение о паузах Директа:
+    увеличение действует завтра, а до него кампания стоит по старому бюджету."""
+    from unittest.mock import AsyncMock
+
+    client, world = setup
+    world.business.status = "running"
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 36_600_000})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 3_000_000})
+    assert response.status_code == 200, response.text
+    assert response.json()["warning"]
+    # Порог «бюджета без остановок» фиксируем: проверяем здесь саму ветку, а не пересчёт порога.
+    monkeypatch.setattr("app.services.screens.budget_minimum", lambda *args, **kwargs: 5_000_000)
+    response = client.put("/api/business/budget", json={"month_budget_kop": 10_000_000})
+    assert response.status_code == 200, response.text
+    assert response.json()["warning"] is None
+
+
+def test_budget_warning_threshold_counts_all_direct_campaigns(setup):
+    """«Без остановок — от N ₽» считает каждую кампанию Директа: с тремя кампаниями порог втрое выше,
+    иначе владелец ставит бюджет по заниженному обещанию, а кампании стоят и не включатся."""
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from app.db.models import AdGroup
+
+    client, world = setup
+    world.business.status = "running"
+
+    async def add_direct_campaigns():
+        for index, plan_id in ((2, "direct-2"), (3, "direct-3")):
+            refs = await world.adapter.create_campaign_tree(replace(world.adapter.scenario.plan, id=plan_id))
+            campaign = Campaign(
+                business_id=world.business.id,
+                platform="direct",
+                external_id=refs.campaign_id,
+                status="active",
+                owner_paused=False,
+                daily_limit_kop=100_000,
+                period_cap_kop=3_000_000,
+            )
+            world.repository.save(campaign)
+            group_external = next(iter(refs.groups.values()))
+            world.repository.save(
+                AdGroup(
+                    id=300 + index,
+                    campaign_id=campaign.id,
+                    external_id=group_external,
+                    theme="Услуга",
+                    geo={"city": "Москва"},
+                    status="active",
+                ),
+                *(
+                    Ad(
+                        id=3000 + i,
+                        ad_group_id=300 + index,
+                        external_id=ad_id,
+                        title="Заголовок",
+                        text="Текст",
+                        status="active",
+                        moderation_status="approved",
+                    )
+                    for i, ad_id in enumerate(refs.ads.values())
+                ),
+            )
+
+    asyncio.run(add_direct_campaigns())
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 36_600_000})
+    response = client.put("/api/business/budget", json={"month_budget_kop": 3_000_000})
+    assert response.status_code == 200, response.text
+    assert response.json()["warning"] == (
+        "При таком бюджете кампании Директа не набирают недельный минимум площадки "
+        "(366 000 ₽ на кампанию): они остановлены и включатся при пересчёте лимитов, когда бюджета хватит "
+        "на минимум, — после увеличения бюджета или с 1-го числа. "
+        "Без остановок — от 46 247 300 ₽ в месяц."
+    )
+    assert len(world.business.settings["_worker"]["below_minimum"]) == 3
 
 
 def test_revoked_account_is_named_and_stops_running_status(setup):

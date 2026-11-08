@@ -25,6 +25,7 @@ NOTICES = {
     "ANOMALY": ("Перестали приходить обращения", "warning"),
     "NOT_SHOWING": ("Объявление не показывается", "warning"),
     "CAMPAIGN_EXTEND_FAILED": ("Не получилось продлить кампанию в Директе", "warning"),
+    "PLATFORM_MINIMUM_PAUSE": ("Реклама остановлена: бюджета не хватает на минимум площадки", "warning"),
     "DIRECT_REAUTH": ("Переподключите Яндекс Директ", "warning"),
     "BALANCE_LOW": ("На счёте площадки заканчиваются деньги", "danger"),
     "DEMO_STATE_LOST": ("Демо нужно начать заново", "warning"),

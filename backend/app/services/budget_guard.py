@@ -12,7 +12,7 @@ from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import active_daily_limit, plan_budget
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.explain import explain, rubles
-from app.platforms.base import EntityState, Operation
+from app.platforms.base import EntityState, Operation, StatRow
 from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, awaiting_enable, wait_for_lock
 from app.worker.clock import today
 
@@ -58,10 +58,16 @@ def closed_platforms(worker: Worker, business: Business) -> set[str]:
 
 
 async def read_spend(
-    worker: Worker, business: Business, *, tolerate_errors: bool = False, campaigns: list[Campaign] | None = None
+    worker: Worker,
+    business: Business,
+    *,
+    tolerate_errors: bool = False,
+    campaigns: list[Campaign] | None = None,
+    report_rows: dict[str, list[StatRow]] | None = None,
 ) -> tuple[dict[str, int], dict[str, int]]:
     """Расход по дате клика до сейчас, включая два неустоявшихся дня. campaigns — кампании бизнеса, если шаг их уже
-    прочитал."""
+    прочитал. report_rows — если передан, заполняется сырыми строками отчёта по кампаниям: минимум площадки в пересчёте
+    считается по ним же, а не читает тот же отчёт заново на каждую кампанию."""
     day = today(worker.clock)
     month = day.replace(day=1)
     spent, lifetime = {}, {}
@@ -83,6 +89,8 @@ async def read_spend(
             if row.campaign_id not in known:
                 continue
             lifetime[row.campaign_id] = lifetime.get(row.campaign_id, 0) + row.cost_kop
+            if report_rows is not None:
+                report_rows.setdefault(row.campaign_id, []).append(row)
         total = sum(row.cost_kop for row in rows if row.date >= month and row.campaign_id in known)
         # Только строки за сегодня по часам воркера: вчерашняя дата отчёта — ещё не сегодняшний расход.
         stats_today = sum(row.cost_kop for row in rows if row.date == day and row.campaign_id in known)

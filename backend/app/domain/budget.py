@@ -167,18 +167,25 @@ def budget_minimum(
     platforms: Sequence[str],
     settings: DomainSettings = DEFAULT_SETTINGS,
     minimums: Mapping[str, Mapping[str, int]] = PLATFORM_MINIMUMS,
+    campaigns: Mapping[str, int] | None = None,
 ) -> int:
     """Наименьший бюджет месяца, кратный 100 ₽, с которым лимиты каждой площадки при запуске в худший день не ниже её
     минимума. Худший день — последний день 31-дневного месяца (WORST_DAY): дневной лимит меньше всего, а недельный
     лимит Директа равен одному дневному. Порог не зависит от текущего месяца и дня недели, запуск с ним проходит в любой
     день. VK нужен запас MINIMUM_MARGIN: её дневной лимит падает в течение дня после расхода, и без запаса кампания у
-    порога чередовала бы паузы и возобновления."""
+    порога чередовала бы паузы и возобновления. campaigns — число кампаний на каждой площадке (по умолчанию одна):
+    минимум умножается на него, потому что каждая кампания должна набрать свой минимум."""
+
+    def scaled(platform: str) -> Mapping[str, int]:
+        minimum = minimums.get(platform, {})
+        count = max(1, (campaigns or {}).get(platform, 1))
+        return minimum if count == 1 else {key: value * count for key, value in minimum.items()}
 
     def enough(steps: int) -> bool:
         limits = launch_limits(steps * MINIMUM_STEP_KOP, platforms, WORST_DAY, settings)
         return all(
-            meets_minimum(limits[platform], minimums.get(platform, {}), MINIMUM_MARGIN)
-            and limits[platform].remaining_cap >= minimums.get(platform, {}).get("weekly_limit_kop", 0)
+            meets_minimum(limits[platform], scaled(platform), MINIMUM_MARGIN)
+            and limits[platform].remaining_cap >= scaled(platform).get("weekly_limit_kop", 0)
             for platform in platforms
         )
 

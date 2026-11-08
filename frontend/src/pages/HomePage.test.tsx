@@ -175,6 +175,19 @@ it('кабинет отключили — кампании остановлен�
   expect(document.querySelector('.home-state--success')).toBeNull();
 });
 
+it('все кампании стоят из-за минимума площадки: главная называет причину и советует, а не обещает срок решений', async () => {
+  const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
+    image_url: null, status: 'paused_auto', reason: 'минимум площадки', metrics: metrics(0, 0) };
+  vi.mocked(getAds).mockResolvedValue({ items: [ad], campaigns: [{ id: 1, platform: 'direct', name: 'Кампания 1', status: 'paused_auto', daily: [] }] });
+  const line = 'Реклама остановлена: при таком бюджете не хватает минимума площадки «Яндекс Директ» (366 ₽ в неделю на кампанию).';
+  vi.mocked(getAutopilotStatus).mockResolvedValue({ status: 'running', last_check_at: '2026-10-27T10:01:00Z', auto_continue: true, has_plan: true,
+    needs_attention: [], held_by_minimum: true, first_decisions: line });
+  await show(0, 0);
+  expect(await screen.findByText(copy.home.noShowsMinimum)).toBeTruthy();
+  expect(screen.queryByText(copy.home.noShows)).toBeNull();
+  expect(screen.getByText(line)).toBeTruthy();
+});
+
 it('один из кабинетов отключён: главная называет его и не пишет «Всё идёт по плану»', async () => {
   const ad: Ad = { id: 1, platform: 'direct', campaign_id: 1, campaign_name: 'Кампания 1', group_id: 1, group_name: 'Группа', title: 'Заголовок', text: 'Текст',
     image_url: null, status: 'active', reason: null, metrics: metrics(0, 0) };

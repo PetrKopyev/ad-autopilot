@@ -140,6 +140,8 @@ class ScreensService:
             # План собран (plan_ready) или уже запущен: до запуска экраны ведут в план, а не в мастер.
             "has_plan": business.status != "draft",
             "first_decisions": self.first_decisions(business) if status == "running" else None,
+            # Все кампании действующего плана стоят из-за минимума площадки: главная объясняет причину и что делать.
+            "held_by_minimum": status == "running" and self.held_by_minimum(business),
             # Маркировка: что подтверждено галочкой и что площадки приняли сами (инструкция — в настройках).
             "marking": None
             if (marking := next(iter(self.repository.rows(MarkingProfile, business.id)), None)) is None
@@ -151,9 +153,35 @@ class ScreensService:
             },
         }
 
+    def held_by_minimum(self, business: Business) -> bool:
+        """Все кампании действующего плана остановлены из-за минимума площадки, а не кабинета или месячного бюджета."""
+        held = set(self.worker.metadata(business).get("below_minimum", []))
+        campaigns = self.worker.current_campaigns(business)
+        return bool(campaigns) and all(campaign.id in held for campaign in campaigns)
+
     def first_decisions(self, business: Business) -> str | None:
         """Срок до первых решений по цене — из порогов автопилота и того, сколько кликов объявления набирают сейчас."""
         from app.config import get_domain_settings
+
+        if self.held_by_minimum(business):
+            held = set(self.worker.metadata(business).get("below_minimum", []))
+            held_platforms = sorted(
+                {campaign.platform for campaign in self.worker.current_campaigns(business) if campaign.id in held}
+            )
+
+            # Минимум и название площадки — из реально остановленных кампаний: проект может быть и только с VK.
+            def requirement(platform: str) -> str:
+                minimum = PLATFORM_MINIMUMS[platform]
+                amount = rubles(minimum.get("weekly_limit_kop") or daily_minimum(minimum))
+                period = "в неделю" if "weekly_limit_kop" in minimum else "в день"
+                return f"площадки «{TITLES[platform]}» ({amount} ₽ {period} на кампанию)"
+
+            requirements = " и ".join(requirement(platform) for platform in held_platforms)
+            return (
+                f"Реклама остановлена: при таком бюджете не хватает минимума {requirements}. Увеличьте бюджет "
+                "в настройках — или оставьте как есть: кампании снова включатся при пересчёте лимитов, когда "
+                "бюджета хватит на минимум, — после увеличения бюджета или с 1-го числа следующего месяца."
+            )
 
         domain = get_domain_settings()
         campaigns = {row.id for row in self.worker.current_campaigns(business)}
@@ -661,15 +689,35 @@ class ScreensService:
                     await stop_all(business, worker=self.worker, budget_stop=True, reason_code="BUDGET_UPDATE_FAILED")
                 raise
             held = set(self.worker.metadata(business).get("below_minimum", []))
-            vk_held = any(
-                campaign.platform == "vk" and campaign.id in held
-                for campaign in self.worker.current_campaigns(business)
-            )
+            held_campaigns = [campaign for campaign in self.worker.current_campaigns(business) if campaign.id in held]
             warning = None
-            if vk_held and amount < budget_minimum(("direct", "vk"), get_domain_settings()):
-                minimum = daily_minimum(minimums.get("vk", PLATFORM_MINIMUMS["vk"]))
+            if any(campaign.platform == "direct" for campaign in held_campaigns):
+                current = self.worker.current_campaigns(business)
+                platforms = tuple(sorted({campaign.platform for campaign in current}))
+                campaign_counts = {
+                    platform: sum(1 for c in current if c.platform == platform) for platform in platforms
+                }
+                live_minimums = minimums or {
+                    platform: dict(PLATFORM_MINIMUMS.get(platform, {})) for platform in platforms
+                }
+                minimum = rubles(live_minimums["direct"].get("weekly_limit_kop", 0))
+                stable = budget_minimum(platforms, get_domain_settings(), live_minimums, campaign_counts)
+                # Предупреждение только пока и новый бюджет минимум не набирает: увеличение действует
+                # завтра, и при достаточной сумме кампании включатся сами — писать про паузы неправда.
+                # Порог честный: минимум умножается на число кампаний площадки, каждая должна набрать свой.
+                if amount < stable:
+                    warning = (
+                        f"При таком бюджете кампании Директа не набирают недельный минимум площадки "
+                        f"({minimum} ₽ на кампанию): они остановлены и включатся при пересчёте лимитов, "
+                        "когда бюджета хватит на минимум, — после увеличения бюджета или с 1-го числа. "
+                        f"Без остановок — от {rubles(stable)} ₽ в месяц."
+                    )
+            elif any(campaign.platform == "vk" for campaign in held_campaigns) and amount < budget_minimum(
+                ("direct", "vk"), get_domain_settings()
+            ):
+                minimum = rubles(daily_minimum(minimums.get("vk", PLATFORM_MINIMUMS["vk"])))
                 warning = (
-                    f"Площадка ВКонтакте остановлена: при таком бюджете ей не хватает минимума {rubles(minimum)} ₽ "
+                    f"Площадка ВКонтакте остановлена: при таком бюджете ей не хватает минимума {minimum} ₽ "
                     "в день."
                 )
         return self.business(business) | {"warning": warning}

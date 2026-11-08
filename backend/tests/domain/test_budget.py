@@ -268,6 +268,14 @@ def test_one_step_below_direct_minimum_misses_it_on_the_worst_day():
     assert launch_limits(1_540_000, ("direct",), WORST_DAY)["direct"].remaining_cap < 36_600
 
 
+def test_budget_minimum_counts_campaigns_on_platform():
+    """Порог «без остановок» умножается на число кампаний площадки: каждая должна набрать свой минимум."""
+    assert budget_minimum(("direct",), campaigns={"direct": 1}) == 1_550_000
+    assert budget_minimum(("direct",), campaigns={"direct": 3}) == 4_630_000
+    three = launch_limits(4_630_000, ("direct",), WORST_DAY)["direct"]
+    assert three.remaining_cap >= 3 * 36_600
+
+
 @pytest.mark.parametrize(
     "limit,minimum,margin,expected",
     [

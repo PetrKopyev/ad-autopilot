@@ -89,6 +89,19 @@ def test_interrupted_launch_is_shown_as_danger(setup):
     assert item["text"] == "Запуск рекламы не завершился. Всё остановили."
 
 
+def test_minimum_pause_notice_reaches_owner(setup):
+    client, repository = setup
+    repository.save(
+        notice(1, "PLATFORM_MINIMUM_PAUSE", "Кампания «А» остановлена: при таком бюджете она не набирает минимум.")
+    )
+    (item,) = client.get("/api/notifications").json()
+    assert (item["kind"], item["title"], item["level"]) == (
+        "PLATFORM_MINIMUM_PAUSE",
+        "Реклама остановлена: бюджета не хватает на минимум площадки",
+        "warning",
+    )
+
+
 @pytest.mark.parametrize(
     "code,title,level",
     [

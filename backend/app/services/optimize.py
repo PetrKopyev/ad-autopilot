@@ -39,9 +39,9 @@ from app.domain.types import (
     Verdict,
     total_metrics,
 )
-from app.platforms.base import Operation, PlatformError, lead_count
+from app.platforms.base import Operation, PlatformError, StatRow, lead_count
 from app.services.budget_guard import campaign_state, closed_platforms, read_spend
-from app.services.changes import REVIEW, ChangeConflict, awaiting_enable, budget_operations
+from app.services.changes import REVIEW, ChangeConflict, awaiting_enable
 from app.services.experiments import completed_hypotheses, experiment_settings, group_available, testing_groups
 from app.services.sync import approved_at, shared_ids, sync_campaign_status
 from app.worker.clock import MOSCOW, today
@@ -415,25 +415,54 @@ async def below_platform_minimum(
     daily: int,
     cap: int,
     limits: dict[str, int],
-) -> int | None:
-    """Минимум площадки, который новые лимиты не набирают: недельный у Директа, дневной у остальных; иначе None.
+    *,
+    lifetime: int = 0,
+    remaining: int = 0,
+    rows: Sequence[StatRow] | None = None,
+) -> tuple[int | None, int | None]:
+    """Минимум площадки, который новые лимиты не набирают: (минимум, None) — кампанию остановить;
+    (None, дневной) — неделю можно добрать до минимума поднятием дневного лимита на её остаток,
+    пауза не нужна; (None, None) — лимиты набирают минимум.
 
-    Недельный лимит Директа считается так же, как перед Campaigns.update (budget_operations): с расходом этой недели."""
-    from app.platforms.direct import DirectAdapter
+    Недельный минимум (Директ): неделя, которую поставят с новой парой лимитов, считается по формуле
+    адаптера (direct._context_weekly) — с расходом этой недели, без двойного счёта сегодняшнего дня.
+    Предел поднятия — остаток месяца: кэп с запасом 1/1,25 не даст неделе вырасти выше него, поэтому темп
+    добираем, а не паузим до понедельника. rows — сырые строки отчёта этого пересчёта (read_spend читает их
+    одним запросом на все кампании): с тем же снимком, что и lifetime, без повторного запроса на кампанию."""
+    from app.platforms.direct import budget_end
 
-    adapter = worker.resolve_adapter(business.id, campaign.platform)
-    if not isinstance(adapter, DirectAdapter):
-        if meets_minimum(PlatformLimit(campaign.platform, cap, daily, cap), limits):
-            return None
-        return limits.get("daily_limit_kop", limits.get("day", 0))
-    if not any(op.kind == "set_budget" for op in operations):
-        return None
     minimum = limits.get("weekly_limit_kop", 0)
-    _, prepared = await budget_operations(
-        worker.repository, business, adapter, worker.refs(campaign), operations, worker.clock.now
-    )
-    weekly = next(op for op in reversed(prepared) if op.budget_context).budget_context["weekly_limit_kop"]
-    return minimum if weekly < minimum else None
+    adapter = worker.resolve_adapter(business.id, campaign.platform)
+    if not minimum:
+        if meets_minimum(PlatformLimit(campaign.platform, cap, daily, cap), limits):
+            return (None, None)
+        return (limits.get("daily_limit_kop", limits.get("day", 0)), None)
+    if not any(op.kind == "set_budget" for op in operations):
+        return (None, None)
+    day = today(worker.clock)
+    month = day.replace(day=1)
+    if rows is None:
+        started = date.fromisoformat(business.settings.get("_worker", {}).get("started_on", month.isoformat()))
+        rows = await adapter.get_stats(min(month, started), day, "campaign", campaign_ids={campaign.external_id})
+    week = day - timedelta(days=day.weekday())
+    spent_before_week = sum(row.cost_kop for row in rows if row.date < week)
+    spent_week = sum(row.cost_kop for row in rows if row.date >= week)
+    spent_today = sum(row.cost_kop for row in rows if row.date == day)
+    days_left = (budget_end(day) - day).days + 1
+    weekly = min(cap - spent_before_week, spent_week + min(daily * days_left, cap) - spent_today)
+    if weekly >= minimum:
+        return (None, None)
+    # Потолок кэпа при любом темпе: если и он ниже минимума, остаток месяца минимум не покрывает — пауза.
+    cap_room = lifetime + int(Decimal(remaining) / CAP_MULTIPLIER) - spent_before_week
+    if cap_room < minimum:
+        return (minimum, None)
+    # Темп добираем до минимума: расходом недели и кэпом. Платформенная неделя не выше дневного лимита,
+    # поэтому с запасом требуем дневной и от минимума. Ветки «темп уже достаточен» и «поднятие не набирает
+    # минимум» недостижимы: fuzz на 200 000 случаев не нашёл ни одной (0 ложных пауз при cap_room >= минимума).
+    needed = -(-(minimum - spent_week + spent_today) // days_left)
+    cap_needed = -(-(minimum + spent_before_week - lifetime) // days_left)
+    raised = max(needed, cap_needed)
+    return (None, raised)
 
 
 async def platform_minimums(worker: Worker, business: Business, platform: str) -> dict[str, int]:
@@ -455,9 +484,14 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
     month = day.replace(day=1)
     meta = worker.metadata(business)
     # Площадку с отключённым кабинетом спросить нечем: её расход — из BudgetLedger, лимиты её кампаний не меняем.
+    # Строки отчёта идут дальше в проверку минимума площадки: тот же снимок, что и в lifetime, без повторных запросов.
     closed = closed_platforms(worker, business)
+    report_rows: dict[str, list[StatRow]] = {}
     spent, lifetime = await read_spend(
-        worker, business, campaigns=[item for item in worker.campaigns(business) if item.platform not in closed]
+        worker,
+        business,
+        campaigns=[item for item in worker.campaigns(business) if item.platform not in closed],
+        report_rows=report_rows,
     )
     for ledger in worker.repository.rows(BudgetLedger, business.id, month=month):
         spent[ledger.platform] = max(spent.get(ledger.platform, 0), ledger.spent_kop)
@@ -515,19 +549,61 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         group.external_id for group in local_groups if group.campaign_id in reviewing and group.status == "active"
     }
     funded = {group.campaign_id for group in local_groups if group.external_id in live}
+    # Число funded-кампаний площадки: минимум считается на каждую кампанию,
+    # поэтому словарь один и у share_floors, и у blocked.
+    campaign_counts = {
+        platform: sum(1 for item in campaigns if item.platform == platform and item.id in funded)
+        for platform in platforms
+    }
     # Перенос между площадками не опускает ни одну кампанию площадки ниже её минимума.
     floors = share_floors(
         sum(limit.daily_limit for limit in budget_plan(shares).limits),
         minimums,
-        {
-            platform: sum(1 for item in campaigns if item.platform == platform and item.id in funded)
-            for platform in platforms
-        },
+        campaign_counts,
     )
     if not worker.proposed(business):
         # Перенос бюджета между площадками по цене обращения — решение автопилота: в пробном режиме доли не меняются.
         shares = rebalance_platform_shares(shares, prices, (worker.clock.now - previous).days, domain, floors)
-    plan = budget_plan(shares)
+    plan_full = budget_plan(shares)
+    held_before = set(meta.get("below_minimum", []))
+    # Платформа, чьи кампании все стоят по минимуму и чья доля при этом не набирает даже этот минимум, не тратит
+    # бюджет этот пересчёт: доля уходит платформам, которые работают. Доли в памяти не меняются — отпущенная
+    # платформа вернёт свою долю сама, когда бюджета хватит на её минимум (проверка по полному плану ниже).
+    # Порог тот же, что у share_floors: разрешённая доля площадки (до деления на 1,25) должна покрывать минимум
+    # каждой её funded-кампании с запасом кэпа — иначе площадка получит долю и тут же встанет на паузу.
+    blocked = (
+        {
+            platform
+            for platform in platforms
+            if all(campaign.id in held_before for campaign in campaigns if campaign.platform == platform)
+            and next((limit.daily_limit for limit in plan_full.limits if limit.platform == platform), 0)
+            < ceil(daily_floor(minimums[platform], MINIMUM_MARGIN) * CAP_MULTIPLIER * max(1, campaign_counts[platform]))
+        }
+        if not worker.proposed(business)
+        else set()
+    )
+    previous_released = set(meta.get("share_released", []))
+    # plan_released — перенос доли в плане этого пересчёта. Перенос — решение автопилота: в пробном режиме
+    # доли не двигаются, но состояние отпускания (released) не пересчитываем — иначе вход в DRY_RUN «вернул»
+    # бы долю в журнале и стёр память, а выход снова «отпустил» (ложные пары записей на переключение).
+    # Полный стоп всех платформ — не «возврат»: получателя нет, доля просто не переносится, и прежнее
+    # состояние сохраняется, чтобы запись о возврате появилась один раз и правдиво, когда бюджета
+    # реально хватит на минимум (для VK это и есть момент возобновления).
+    if worker.proposed(business):
+        plan_released, released = set(), previous_released
+    else:
+        plan_released = blocked if blocked != set(platforms) else set()
+        released = plan_released if plan_released else (previous_released if blocked == set(platforms) else set())
+    if plan_released:
+        kept = [platform for platform in platforms if platform not in plan_released]
+        total = sum(shares[platform] for platform in kept)
+        plan_shares = (
+            {platform: shares[platform] / total for platform in kept}
+            | {platform: Decimal(0) for platform in plan_released}
+        )
+    else:
+        plan_shares = shares
+    plan = budget_plan(plan_shares)
     group_limits = {group.id: group.daily_limit for group in groups}
     held = set(meta.get("below_minimum", []))
     # Изменение, которое площадка не подтвердила, не обрывает пересчёт остальных кампаний и продление дат: шаг
@@ -580,31 +656,71 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 for field, before, after in budget_fields
                 if before != after
             ]
-            minimum = (
+            below = (
                 await below_platform_minimum(
-                    worker, business, campaign, operations, desired_daily, total_cap, minimums[campaign.platform]
+                    worker,
+                    business,
+                    campaign,
+                    operations,
+                    desired_daily,
+                    total_cap,
+                    minimums[campaign.platform],
+                    lifetime=lifetime.get(campaign.external_id, 0),
+                    remaining=sum(caps[group_id] for group_id in active),
+                    rows=report_rows.get(campaign.external_id),
                 )
                 if desired_daily
-                else None
+                else (None, None)
             )
+            minimum, raised_daily = below
+            raise_note = None
+            if raised_daily:
+                # Неделя добирается до минимума площадки поднятием темпа на её остаток: кэп с запасом 1/1,25
+                # покрывает минимум, значит месячный бюджет не тронут — пауза до понедельника не нужна.
+                authorized = ceil(raised_daily * CAP_MULTIPLIER)
+                desired_daily, total_cap = campaign_limits(
+                    authorized,
+                    sum(caps[group_id] for group_id in active),
+                    day,
+                    lifetime.get(campaign.external_id, 0),
+                )
+                budget_fields = [
+                    ("period_cap_kop", state.period_cap_kop, total_cap),
+                    ("daily_limit_kop", state.daily_limit_kop, desired_daily),
+                ]
+                operations = [
+                    Operation("set_budget", "campaign", campaign.external_id, field, before, after)
+                    for field, before, after in budget_fields
+                    if before != after
+                ]
+                minimum = None
+                weekly_minimum = rubles(minimums[campaign.platform]["weekly_limit_kop"])
+                raise_note = (
+                    f"Неделя вышла бы меньше минимума площадки ({weekly_minimum} ₽): "
+                    "подняли темп на остаток недели до минимума. "
+                    "Месячный бюджет не тронут: остаток пересчитаем завтра."
+                )
             if not desired_daily or minimum:
                 if campaign.frozen_until is not None and campaign.frozen_until > worker.clock.now:
                     continue
+                # Черновик, который уже на паузе по нашей цели, повторно не останавливаем: запись в журнале
+                # на каждом пересчёте ничего не меняла бы.
+                pause_operations = (
+                    [
+                        Operation(
+                            "set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto"
+                        )
+                    ]
+                    if state.status == "active"
+                    or (state.status in REVIEW and campaign.status == "active")
+                    or awaiting_enable(campaign, state)
+                    else []
+                )
                 try:
                     await worker.apply(
                         business,
                         campaign,
-                        [
-                            Operation(
-                                "set_status", "campaign", campaign.external_id, "status", state.status, "paused_auto"
-                            )
-                        ]
-                        # Черновик, который уже на паузе по нашей цели, повторно не останавливаем: запись в журнале
-                        # на каждом пересчёте ничего не меняла бы.
-                        if state.status == "active"
-                        or (state.status in REVIEW and campaign.status == "active")
-                        or awaiting_enable(campaign, state)
-                        else [],
+                        pause_operations,
                         reason_code="BUDGET_REBALANCE",
                         kind="pause",
                         actor="system",
@@ -624,6 +740,24 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     continue
                 if minimum:
                     held.add(campaign.id)
+                    # Уведомление — только о паузе, реально применённой в этом пересчёте: уже стоящей кампании
+                    # сообщать нечего, а остановленная владельцем стоит по его решению, а не по минимуму.
+                    # Пауза по минимуму в пробном режиме настоящая, поэтому уведомление не зависит от proposed.
+                    if pause_operations and not campaign.owner_paused and state.status != "paused_owner":
+                        limit_text = (
+                            f"недельный минимум площадки ({rubles(minimum)} ₽)"
+                            if campaign.platform == "direct"
+                            else f"дневной минимум площадки ({rubles(minimum)} ₽)"
+                        )
+                        worker.notice(
+                            business,
+                            "PLATFORM_MINIMUM_PAUSE",
+                            f"Кампания «{campaign.name}» остановлена: при таком бюджете она не набирает "
+                            f"{limit_text}. Включим её при пересчёте лимитов; чтобы остановки не повторялись, "
+                            "увеличьте бюджет в настройках.",
+                            key=f"minimum:{day.isoformat()}:{campaign.id}",
+                            target_id=campaign.id,
+                        )
                 else:
                     campaign.daily_limit_kop = 0
                     worker.repository.save(campaign)
@@ -662,6 +796,13 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                 )
             ):
                 continue
+            # Замороженную кампанию автопилот не включает и не останавливает: решение о статусе за
+            # владельцем (откат или включение в кабинете) до конца заморозки. Лимиты пересчитываются
+            # как обычно — они не спорят с решением владельца, а запись «по минимуму» остаётся:
+            # возобновление придёт на пересчёт после заморозки.
+            frozen = campaign.frozen_until is not None and campaign.frozen_until > worker.clock.now
+            if resume and frozen:
+                resume = False
             if resume:
                 # Кампанию останавливал только недостаток бюджета: лимиты снова его набирают.
                 operations.append(
@@ -676,31 +817,85 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
                     kind="resume" if resume else "budget",
                     actor="system",
                     reason_text=(
-                        "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
-                        if campaign.id in held
-                        else "Снова есть работающие объявления: пересчитали лимиты и возобновили кампанию."
-                        if last.reason_text == NO_ACTIVE_ADS
-                        else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+                        raise_note
+                        or (
+                            "Бюджета снова хватает на минимум площадки: пересчитали лимиты и возобновили кампанию."
+                            if campaign.id in held
+                            else "Снова есть работающие объявления: пересчитали лимиты и возобновили кампанию."
+                            if last.reason_text == NO_ACTIVE_ADS
+                            else "Дневного бюджета снова хватает: пересчитали лимиты и возобновили кампанию."
+                        )
                     )
                     if resume
-                    else "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
+                    else raise_note or "Пересчитали лимиты от остатка бюджета и оставшихся дней месяца.",
                 )
             except ChangeConflict as error:
                 conflict = error
                 await extend(campaign)
                 continue
-            held.discard(campaign.id)
+            if resume:
+                held.discard(campaign.id)
             # Лимиты уже применены: сохраняем их даже при ошибке продления кампании.
             campaign.daily_limit_kop, campaign.period_cap_kop = desired_daily, total_cap
             worker.repository.save(campaign)
             await extend(campaign)
         ledger = worker.repository.find(BudgetLedger, business_id=business.id, platform=limit.platform, month=month)
         ledger = ledger or BudgetLedger(business_id=business.id, platform=limit.platform, month=month, spent_kop=0)
-        ledger.allocated_kop = plan.authorized * int(shares[limit.platform] * 1_000_000) // 1_000_000
+        ledger.allocated_kop = plan.authorized * int(plan_shares[limit.platform] * 1_000_000) // 1_000_000
         ledger.period_cap_kop = int(Decimal(limit.remaining_cap) / CAP_MULTIPLIER)
         ledger.spent_kop = max(ledger.spent_kop, spent.get(limit.platform, 0))
         ledger.spent_at = worker.clock.now
         worker.repository.save(ledger)
+    # Отпущенная платформа остаётся «по минимуму» в памяти сама: все её кампании уже в held и в этом пересчёте
+    # из него не выходят — долю с нулевым лимитом они не набирают и возобновления не получают.
+    if released != previous_released:
+        from app.services.launch import TITLES
+
+        if released:
+            names = " и ".join(TITLES[platform] for platform in sorted(released))
+            # Получатель доли — только платформа, которая реально её тратит: kept-платформа с работающей
+            # (funded и не по минимуму) кампанией. Кабинет отключён или все кампании стоят — долю в плане она
+            # получила, но не тратит: в записи её не называем.
+            receivers = [
+                platform
+                for platform in platforms
+                if platform not in released
+                and any(
+                    campaign.id in funded and campaign.id not in held
+                    for campaign in campaigns
+                    if campaign.platform == platform
+                )
+            ]
+            if receivers:
+                receiver_names = " и ".join(TITLES[platform] for platform in receivers)
+                reason_text = (
+                    f"{names} не набирает минимум площадки при текущем бюджете: доля её бюджета временно ушла "
+                    f"в {receiver_names}. Вернём долю, когда бюджета снова хватит на минимум."
+                )
+            else:
+                reason_text = (
+                    f"{names} не набирает минимум площадки при текущем бюджете: её доля в этом пересчёте "
+                    "не тратится. Вернём долю, когда бюджета снова хватит на минимум."
+                )
+        else:
+            names = " и ".join(TITLES[platform] for platform in sorted(previous_released))
+            reason_text = f"Бюджета снова хватает на минимум площадки {names}: доля бюджета возвращена ей."
+        worker.repository.save(
+            ChangeLog(
+                business_id=business.id,
+                actor="system",
+                kind="budget",
+                platform=None,
+                entity_type="business",
+                entity_id=str(business.id),
+                operations=[],
+                reason_code="BUDGET_REBALANCE",
+                reason_text=reason_text,
+                evidence={},
+                status="applied",
+                created_at=worker.clock.now,
+            )
+        )
     worker.remember(
         business,
         started_on=meta.get("started_on", day.isoformat()),
@@ -710,6 +905,7 @@ async def rebalance_budget(worker: Worker, business: Business, *, force: bool = 
         else previous.isoformat(),
         group_limits=group_limits,
         below_minimum=sorted(held),
+        share_released=sorted(released),
     )
     if conflict is not None:
         raise conflict

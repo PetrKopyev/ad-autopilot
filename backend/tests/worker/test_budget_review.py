@@ -524,7 +524,7 @@ async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_
     world = await make_world()
     world.clock.advance(days=2)
     worker = world.worker()
-    below = AsyncMock(return_value=30_000)
+    below = AsyncMock(return_value=(30_000, None))
     monkeypatch.setattr("app.services.optimize.below_platform_minimum", below)
     world.business.month_budget_kop -= 100_000
     await rebalance_budget(worker, world.business)
@@ -532,7 +532,7 @@ async def test_rebalance_stops_campaign_below_platform_minimum_and_resumes_when_
     assert "меньше минимума площадки (300 ₽)" in pause.reason_text
     assert world.campaign.status == "paused_auto" and world.campaign.daily_limit_kop > 0
     assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
-    below.return_value = None
+    below.return_value = (None, None)
     world.clock.advance(days=1)
     world.business.month_budget_kop += 50_000
     worker.step_key = "rebalance_budget:next"
@@ -796,7 +796,7 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
         await below_platform_minimum(
             worker, repository.current_business, campaign, operations, 20_000, 500_000, {"weekly_limit_kop": 30_000}
         )
-        == 30_000
+        == (30_000, None)
     )
     # Расход 100 ₽ уже сегодня: потолок недели — 200 ₽ (один день по 200 ₽), сегодняшний расход не
     # прибавляем сверху дважды. 200 ₽ — ниже минимума 300 ₽.
@@ -807,7 +807,7 @@ async def test_direct_minimum_check_uses_weekly_limit_with_spend_of_this_week():
         await below_platform_minimum(
             worker, repository.current_business, campaign, operations, 20_000, 500_000, {"weekly_limit_kop": 30_000}
         )
-        == 30_000
+        == (30_000, None)
     )
     await adapter.aclose()
 
@@ -823,9 +823,13 @@ async def test_vk_minimum_check_holds_daily_and_campaign_limits_at_platform_mini
     operations = [Operation("set_budget", "campaign", "1", "daily_limit_kop", 40_000, 29_999)]
     minimum = {"daily_limit_kop": 30_000, "period_cap_kop": 30_000}
     assert (
-        await below_platform_minimum(worker, Business(id=1), campaign, operations, 29_999, 500_000, minimum) == 30_000
+        await below_platform_minimum(worker, Business(id=1), campaign, operations, 29_999, 500_000, minimum)
+        == (30_000, None)
     )
-    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 30_000, 500_000, minimum) is None
+    assert await below_platform_minimum(worker, Business(id=1), campaign, operations, 30_000, 500_000, minimum) == (
+        None,
+        None,
+    )
 
 
 async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch):
@@ -837,6 +841,347 @@ async def test_rebalance_pauses_vk_campaign_below_its_daily_minimum(monkeypatch)
     (pause,) = world.changes(reason_code="BUDGET_REBALANCE", kind="pause")
     assert "Дневной бюджет кампании меньше минимума площадки (1 000 000 ₽ в день)" in pause.reason_text
     assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+
+
+async def test_direct_week_below_minimum_raises_pace_instead_of_pause_when_month_room_allows():
+    """Последний день недели: неделя из плана меньше минимума Директа, а остаток месяца минимум покрывает.
+    Темп поднимается ровно до минимума — кампания продолжает показы, а не ждёт понедельника на паузе."""
+    world = await make_world()
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 2_000_000})
+    world.clock.advance(days=3)  # запуск в четверг: теперь воскресенье, до конца недели один день
+    await rebalance_budget(world.worker(), world.business)
+    assert not world.changes(kind="pause")
+    assert world.adapter._states[world.refs.campaign_id].status == "active"
+    (change,) = world.changes(reason_code="BUDGET_REBALANCE")
+    assert "подняли темп на остаток недели до минимума" in change.reason_text
+    assert world.business.settings["_worker"]["below_minimum"] == []
+
+
+async def test_direct_week_below_minimum_pauses_when_month_room_does_not_cover_minimum():
+    """Минимум выше любого кэпа из остатка месяца: поднять темп нечем — кампанию останавливают до пересчёта."""
+    world = await make_world()
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 9_000_000})
+    world.clock.advance(days=3)
+    await rebalance_budget(world.worker(), world.business)
+    (pause,) = world.changes(kind="pause")
+    assert "До конца недели остаток бюджета меньше минимума площадки (90 000 ₽)" in pause.reason_text
+    assert world.business.settings["_worker"]["below_minimum"] == [world.campaign.id]
+
+
+async def test_pause_below_minimum_notifies_owner_only_when_pause_is_applied():
+    """О паузе по минимуму владелец узнаёт из уведомления, а не только из журнала: уведомление одно и
+    только о паузе, реально применённой в этом пересчёте — пока кампания стоит, повторные пересчёты
+    (в том же дне и в следующие дни) его не дублируют."""
+    world = await vk_world(10**8)
+    await rebalance_next_day(world, 10**8)
+    runs = world.repository.rows(WorkerRun, world.business.id, kind="notification")
+    assert len(runs) == 1
+    assert runs[0].log[0]["reason_code"] == "PLATFORM_MINIMUM_PAUSE"
+    assert "дневной минимум площадки (1 000 000 ₽)" in runs[0].log[0]["text"]
+    worker = world.worker()
+    worker.step_key = "rebalance_budget:again"
+    await rebalance_budget(worker, world.business)
+    assert len(world.repository.rows(WorkerRun, world.business.id, kind="notification")) == 1
+    await rebalance_next_day(world, 10**8)
+    assert len(world.repository.rows(WorkerRun, world.business.id, kind="notification")) == 1
+
+
+async def test_platform_stuck_at_minimum_releases_share_and_gets_it_back_when_budget_recovers():
+    """Платформа, чьи кампании все стоят по минимуму и чья доля не набирает даже минимум, отдаёт долю
+    работающей платформе; доля возвращается сама, когда бюджета снова хватает на её минимум."""
+    world = await make_world()
+    vk = FakeAdapter(clock=world.clock)
+    vk_refs = await vk.create_campaign_tree(replace(vk.scenario.plan, id="vk"))
+    vk_campaign = Campaign(
+        business_id=1,
+        platform="vk",
+        external_id=vk_refs.campaign_id,
+        status="active",
+        owner_paused=False,
+        daily_limit_kop=100_000,
+        period_cap_kop=3_000_000,
+    )
+    world.repository.save(vk_campaign)
+    vk_group_id = next(iter(vk_refs.groups.values()))
+    world.repository.save(
+        AdGroup(
+            id=101,
+            campaign_id=vk_campaign.id,
+            external_id=vk_group_id,
+            theme="Услуга",
+            geo={"city": "Москва"},
+            status="active",
+        ),
+        *(
+            Ad(
+                id=1000 + index,
+                ad_group_id=101,
+                external_id=ad_id,
+                title="Заголовок",
+                text="Текст",
+                status="active",
+                moderation_status="approved",
+            )
+            for index, ad_id in enumerate(vk_refs.ads.values())
+        ),
+    )
+    vk.min_budgets = AsyncMock(return_value={"daily_limit_kop": 10**8, "period_cap_kop": 0})
+
+    def worker():
+        item = world.worker()
+        item.resolve_adapter = lambda business_id, platform: world.adapter if platform == "direct" else vk
+        item.step_key = f"rebalance_budget:{world.clock.now.isoformat()}"
+        return item
+
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    direct_daily_before = world.campaign.daily_limit_kop
+
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    settings = world.business.settings["_worker"]
+    assert settings["share_released"] == ["vk"]
+    assert settings["below_minimum"] == [vk_campaign.id]
+    assert world.campaign.daily_limit_kop > direct_daily_before
+    (release_note,) = [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "временно ушла" in change.reason_text
+    ]
+    assert "ВКонтакте" in release_note.reason_text and "Яндекс Директ" in release_note.reason_text
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+
+    world.business.month_budget_kop = 10**8
+    vk.min_budgets.return_value = {"daily_limit_kop": 300_000}
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    settings = world.business.settings["_worker"]
+    assert settings["share_released"] == []
+    assert settings["below_minimum"] == []
+    assert vk._states[vk_refs.campaign_id].status == "active"
+    (restore_note,) = [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in change.reason_text
+    ]
+    assert "ВКонтакте" in restore_note.reason_text
+
+
+async def two_platform_world(vk_minimum: int):
+    """Мир с работающими кампаниями Директа и VK: минимум VK — vk_minimum коп в день."""
+    world = await make_world()
+    vk = FakeAdapter(clock=world.clock)
+    vk_refs = await vk.create_campaign_tree(replace(vk.scenario.plan, id="vk"))
+    vk_campaign = Campaign(
+        business_id=1,
+        platform="vk",
+        external_id=vk_refs.campaign_id,
+        status="active",
+        owner_paused=False,
+        daily_limit_kop=100_000,
+        period_cap_kop=3_000_000,
+    )
+    world.repository.save(vk_campaign)
+    vk_group_id = next(iter(vk_refs.groups.values()))
+    world.repository.save(
+        AdGroup(
+            id=101,
+            campaign_id=vk_campaign.id,
+            external_id=vk_group_id,
+            theme="Услуга",
+            geo={"city": "Москва"},
+            status="active",
+        ),
+        *(
+            Ad(
+                id=1000 + index,
+                ad_group_id=101,
+                external_id=ad_id,
+                title="Заголовок",
+                text="Текст",
+                status="active",
+                moderation_status="approved",
+            )
+            for index, ad_id in enumerate(vk_refs.ads.values())
+        ),
+    )
+    vk.min_budgets = AsyncMock(return_value={"daily_limit_kop": vk_minimum})
+
+    def worker():
+        item = world.worker()
+        item.resolve_adapter = lambda business_id, platform: world.adapter if platform == "direct" else vk
+        item.step_key = f"rebalance_budget:{world.clock.now.isoformat()}"
+        return item
+
+    return world, vk, vk_refs, vk_campaign, worker
+
+
+async def test_vk_share_released_in_band_budget_and_returned_only_with_real_resume():
+    """Полоса «разрешённой дневной доли 345–431 ₽»: VK не набирает минимум даже со своей долей и должна
+    отпустить её в Директ (порог как у share_floors — минимум на кампанию с запасом кэпа), а не стоять
+    на паузе и держать долю. Запись о возврате доли появляется только вместе с реальным возобновлением VK."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "active"
+    # Запуск со 100 000 ₽, затем снижение до 45 000 ₽: доля VK в разрешённом виде (≈36 000 коп)
+    # не набирает минимум с запасом кэпа (300 ₽ × 1,15 × 1,25 = 43 125 коп).
+    world.business.month_budget_kop = 4_500_000
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    direct_daily_with_vk_share = world.campaign.daily_limit_kop
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    settings = world.business.settings["_worker"]
+    assert settings["share_released"] == ["vk"]
+    assert world.campaign.daily_limit_kop > direct_daily_with_vk_share
+    (release_note,) = [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "временно ушла" in change.reason_text
+    ]
+    assert "ВКонтакте" in release_note.reason_text and "Яндекс Директ" in release_note.reason_text
+    # VK ещё стоит: записи о возврате доли быть не должно.
+    assert not [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in change.reason_text
+    ]
+    # Бюджет подняли, но VK пока не включилась: записи о возврате доли всё ещё нет.
+    world.business.month_budget_kop = 5_000_000
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    assert not [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in change.reason_text
+    ]
+
+
+async def test_vk_share_returned_together_with_real_resume_when_budget_recovers():
+    """30 000 → 50 000 ₽: бюджета снова хватает на минимум VK — доля возвращается вместе с реальным
+    возобновлением кампании, а не раньше него."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.business.month_budget_kop = 3_000_000
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    world.business.month_budget_kop = 5_000_000
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "active"
+    settings = world.business.settings["_worker"]
+    assert settings["share_released"] == []
+    (restore_note,) = [
+        change for change in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in change.reason_text
+    ]
+    assert "ВКонтакте" in restore_note.reason_text
+
+
+async def test_dry_run_keeps_platform_share_and_still_notifies_about_real_pause():
+    """Пробный режим: перенос доли между площадками — решение автопилота и не применяется, поэтому доля VK
+    не уходит в Директ; пауза по минимуму при этом настоящая — уведомление уходит и в пробном режиме."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.business.month_budget_kop = 3_000_000
+    world.business.settings = world.business.settings | {"dry_run": True}
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    before = (await world.adapter.get_state(world.refs))[world.refs.campaign_id].daily_limit_kop
+    runs = world.repository.rows(WorkerRun, world.business.id, kind="notification")
+    assert len(runs) == 1
+    assert runs[0].log[0]["reason_code"] == "PLATFORM_MINIMUM_PAUSE"
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    after = (await world.adapter.get_state(world.refs))[world.refs.campaign_id].daily_limit_kop
+    settings = world.business.settings["_worker"]
+    assert settings["share_released"] == []
+    # Доля VK (≈18 000 коп) не перенеслась в Директ: лимит вырос только на обычный дрейф пересчёта
+    # собственной доли (~2 600 коп), а не на скачок с долей.
+    assert after - before < 10_000
+    assert not [change for change in world.changes(reason_code="BUDGET_REBALANCE") if "ушла" in change.reason_text]
+
+
+async def test_both_platforms_held_keeps_released_without_false_restore_entry():
+    """Обе платформы стоят по минимуму (снижение бюджета, конец месяца, вырос минимум площадки): переноса
+    и получателя нет — доля не «возвращается». Журнал молчит, meta share_released сохраняется, чтобы
+    запись о возврате появилась один раз и правдиво, когда бюджета реально хватит на минимум."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.adapter.min_budgets = AsyncMock(return_value={"weekly_limit_kop": 36_600})
+    world.business.month_budget_kop = 3_000_000
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    assert world.business.settings["_worker"]["share_released"] == ["vk"]
+    # Минимум Директа резко вырос (изменение на площадке): теперь обе платформы не набирают минимум.
+    world.adapter.min_budgets.return_value = {"weekly_limit_kop": 10**9}
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    settings = world.business.settings["_worker"]
+    assert set(settings["below_minimum"]) == {world.campaign.id, vk_campaign.id}
+    assert settings["share_released"] == ["vk"]  # состояние «не переносится», а не «возвращена»
+    assert not [c for c in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in c.reason_text]
+    assert world.adapter._states[world.refs.campaign_id].status == "paused_auto"
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    # Бюджет восстановили: VK реально возобновляется, и запись о возврате доли появляется один раз.
+    world.business.month_budget_kop = 10**8
+    world.adapter.min_budgets.return_value = {"weekly_limit_kop": 36_600}
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    (restore,) = [c for c in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in c.reason_text]
+    assert "ВКонтакте" in restore.reason_text
+    assert world.business.settings["_worker"]["share_released"] == []
+    assert vk._states[vk_refs.campaign_id].status == "active"
+
+
+async def test_dry_run_toggle_keeps_released_state_and_journal_quiet():
+    """Вход в DRY_RUN при отпущенной доле: состояние отпускания не пересчитывается — записи «доля возвращена»
+    нет (VK всё ещё ниже минимума и стоит), meta share_released сохраняется; выход из DRY_RUN тоже без
+    ложных записей — пар «ушла/возвращена» на каждое переключение режима не копится."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.business.month_budget_kop = 3_000_000
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    assert world.business.settings["_worker"]["share_released"] == ["vk"]
+    release_entries = len(
+        [c for c in world.changes(reason_code="BUDGET_REBALANCE") if "ушла" in c.reason_text]
+    )
+    world.business.settings = world.business.settings | {"dry_run": True}
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    assert world.business.settings["_worker"]["share_released"] == ["vk"]  # память не стёрта
+    assert not [c for c in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in c.reason_text]
+    world.business.settings = world.business.settings | {"dry_run": False}
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert world.business.settings["_worker"]["share_released"] == ["vk"]
+    assert len([c for c in world.changes(reason_code="BUDGET_REBALANCE") if "ушла" in c.reason_text]) == release_entries
+    assert not [c for c in world.changes(reason_code="BUDGET_REBALANCE") if "возвращена" in c.reason_text]
+
+
+async def test_frozen_campaign_is_not_resumed_by_rebalance():
+    """Замороженная откатом владельца кампания не включается автопилотом: при восстановлении бюджета
+    решение о статусе за владельцем до конца заморозки. Лимиты пересчитываются как обычно — они не
+    спорят с решением владельца, а запись «по минимуму» остаётся до возобновления после заморозки."""
+    world, vk, vk_refs, vk_campaign, worker = await two_platform_world(30_000)
+    world.business.month_budget_kop = 3_000_000
+    for _ in range(3):
+        world.clock.advance(days=1)
+        await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"
+    vk_campaign.frozen_until = world.clock.now + timedelta(days=2)
+    world.repository.save(vk_campaign)
+    world.business.month_budget_kop = 10**8
+    world.clock.advance(days=1)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "paused_auto"  # замороженную не включили
+    assert not world.changes(reason_code="BUDGET_REBALANCE", kind="resume")
+    assert world.changes(reason_code="BUDGET_REBALANCE", kind="budget")  # лимиты пересчитали как обычно
+    assert vk_campaign.id in world.business.settings["_worker"]["below_minimum"]
+    # Заморозка кончилась: пересчёт возобновляет кампанию сам, бюджета уже хватает на минимум.
+    world.clock.advance(days=2)
+    await rebalance_budget(worker(), world.business)
+    assert vk._states[vk_refs.campaign_id].status == "active"
+    assert vk_campaign.id not in world.business.settings["_worker"]["below_minimum"]
 
 
 async def test_vk_rebalance_sends_only_daily_limit_and_keeps_internal_period_cap():

@@ -301,7 +301,7 @@ export function HomePage() {
   const allChecking = status?.status === 'running' && !!ads.data?.items.length
     && !ads.data.items.some((ad) => shownStatus(ad, ads.data!.campaigns) === 'active')
     && ads.data.items.some((ad) => shownStatus(ad, ads.data!.campaigns) === 'moderation');
-  const statusText = noShows ? copy.home.noShows : allChecking ? copy.home.checkingAds : status?.status === 'running' ? working
+  const statusText = noShows ? (status?.held_by_minimum ? copy.home.noShowsMinimum : copy.home.noShows) : allChecking ? copy.home.checkingAds : status?.status === 'running' ? working
     : status?.status === 'budget_stop' ? (status.auto_continue ? copy.home.exhausted : copy.screens.exhaustedPaused)
       : status?.status === 'draft' ? copy.screens.draft : copy.home.pausedLine;
   const platformTrouble = !!status?.needs_attention.some((item) => item.id === 'platform' || item.id.startsWith('revoked_'));
