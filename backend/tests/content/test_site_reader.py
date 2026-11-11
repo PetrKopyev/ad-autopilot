@@ -17,6 +17,7 @@ from app.content.site_reader import (
     SiteReadResult,
     decode,
     extract_description,
+    find_gtm_containers,
     find_metrica_counters,
     is_public_ip,
     parse_html,
@@ -448,17 +449,275 @@ async def test_redirect_loop_is_bounded() -> None:
 @pytest.mark.parametrize(
     "html, expected",
     [
-        ('<script src="https://mc.yandex.ru/metrika/tag.js"></script><script>ym(1234,"init",{});</script>', [1234]),
+        ('<script src="https://mc.yandex.ru/metrika/tag.js"></script><script>ym(123456,"init",{});</script>', [123456]),
         ('<img src="https://mc.yandex.ru/watch/5678">', [5678]),
         ("<script>var yaCounter9876 = new Ya.Metrika({id:9876});</script>", [9876]),
         ("<script>new Ya.Metrika2({id:8765});</script>", [8765]),
         ('<script src="https://mc.yandex.ru/metrika/tag.js"></script>', []),
         ('<script src="https://mc.yandex.ru/metrika/tag.js"></script><script>ym(0,"init",{});</script>', []),
         ("<p>Номер заказа 87654321</p>", []),
+        # Конструктор сайтов: счётчики в JS-конфиге страницы (города → id, ключи не берём).
+        (
+            '<script>window.config={yandexCityMetric:{"1":81575,"2":22246063,"15":88091110}};</script>',
+            [81575, 22246063, 88091110],
+        ),
+        # Плоский сериализованный массив настроек: только число сразу после id контейнера GTM.
+        ('<script>var s=["x","GTM-NTZDZQP4","71565343","3788057","bea560b1722b9860"];</script>', [71565343]),
+        # Тот же массив с id контейнера в нижнем регистре — счётчик всё равно находится.
+        ('<script>var s=["gtm-ntzdzqp4","71565343"];</script>', [71565343]),
+        # ym(..., "init") с коротким числом — не id: даты и индексы не берём.
+        ('<script>ym(5,"init",{});</script>', []),
+        ('<p>Статья про настройку: ym(5, "init") и всё.</p>', []),
+        ('<script>ym(12345,"init",{});</script>', [12345]),
+        # Значения в конфиге конструктора — индексы массива, а не id: короткие числа не берём.
+        ('<script>{"custom_css":39,"metrics_yandex_metric":9691,"slider":7}</script>', []),
+        # Современная прямая вставка tag.js без вызова ym(..., "init") рядом.
+        ('<script src="https://mc.yandex.ru/metrika/tag.js?id=123456"></script>', [123456]),
+        ('<script src="https://mc.yandex.ru/metrika/tag.js?clickmap=true&id=654321"></script>', [654321]),
+        ('<script src="https://mc.yandex.com/metrika/tag.js?id=45678"></script>', [45678]),
+        # Строковое значение yandexMetric; пустое — не счётчик.
+        ('<script>settings={yandexMetric:"456789"};</script>', [456789]),
+        ('<script>settings={yandexMetric:\'456789\'};</script>', [456789]),
+        ('<script>settings={yandexMetric:""};</script>', []),
     ],
 )
 def test_counter_patterns(html: str, expected: list[int]) -> None:
     assert find_metrica_counters(html) == expected
+
+
+@pytest.mark.parametrize(
+    "html, expected",
+    [
+        (
+            '<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-NTZDZQP4"></iframe></noscript>',
+            ["GTM-NTZDZQP4"],
+        ),
+        (
+            "<script>j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;})(window,document,'script',"
+            "'dataLayer','GTM-NTZDZQP4');</script>",
+            ["GTM-NTZDZQP4"],
+        ),
+        (
+            '<script src="https://www.googletagmanager.com/gtm.js?l=dataLayer&id=GTM-ABC1234"></script>',
+            ["GTM-ABC1234"],
+        ),
+        ("<p>Сайт без менеджера тегов</p>", []),
+        # Id контейнера в конфиге без загрузчика googletagmanager — не контейнер страницы.
+        ('<script>gtm:{id:"GTM-WSP53KL",enabled:false}</script>', []),
+        # Нижний регистр id — тоже контейнер: сайты пишут и так.
+        (
+            "<script>j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer',"
+            "'gtm-abc1234');</script>",
+            ["gtm-abc1234"],
+        ),
+    ],
+)
+def test_gtm_container_patterns(html: str, expected: list[str]) -> None:
+    assert find_gtm_containers(html) == expected
+
+
+GTM_SNIPPET = (
+    "<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});"
+    "var j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;"
+    "j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;})(window,document,'script','dataLayer','GTM-NTZDZQP4');"
+    "</script>"
+)
+
+
+async def test_gtm_container_is_scanned_for_metrica_counters() -> None:
+    """Метрика через custom HTML в контейнере GTM: gtm.js читается один раз и прогоняется через детектор,
+    robots.txt чужого хоста не читаем."""
+    requests: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            assert request.headers["user-agent"] == "AdAutopilotBot/0.1"
+            return httpx.Response(200, text='var a = 1; ym(12345, "init", {});')
+        return httpx.Response(200, text=GTM_SNIPPET, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.counter_ids == [12345]
+    assert result.can_launch
+    assert requests.count("https://www.googletagmanager.com/gtm.js?id=GTM-NTZDZQP4") == 1
+    assert not any("googletagmanager.com/robots.txt" in url for url in requests)
+
+
+async def test_duplicate_gtm_containers_are_scanned_once() -> None:
+    requests: list[str] = []
+    html = GTM_SNIPPET + '<a href="/services">Услуги</a>'
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            return httpx.Response(200, text='ym(12345, "init", {});')
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.counter_ids == [12345]
+    assert requests.count("https://www.googletagmanager.com/gtm.js?id=GTM-NTZDZQP4") == 1
+
+
+async def test_gtm_fetch_errors_are_skipped() -> None:
+    """Контейнер GTM недоступен: сайт читается как без счётчика, остальное работает."""
+    requests: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            raise httpx.ReadTimeout("gtm timeout")
+        return httpx.Response(200, text=GTM_SNIPPET, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.pages
+    assert result.counter_ids == []
+    assert not result.can_launch
+    assert requests.count("https://www.googletagmanager.com/gtm.js?id=GTM-NTZDZQP4") == 1
+
+
+class CountingStream(httpx.AsyncByteStream):
+    """Тело ответа, которое считает, сколько раз его реально читали."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.iterations = 0
+
+    async def __aiter__(self):
+        self.iterations += 1
+        yield self.body
+
+
+async def test_gtm_not_found_body_is_not_read() -> None:
+    """404 от gtm.js: тело не читаем (до лимита 4 МБ впустую), контейнер просто пропускается."""
+    requests: list[str] = []
+    stream = CountingStream(b"x" * 100_000)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            return httpx.Response(404, stream=stream)
+        return httpx.Response(200, text=GTM_SNIPPET, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.pages
+    assert result.counter_ids == []
+    assert stream.iterations == 0
+
+
+async def test_only_first_two_gtm_containers_are_scanned() -> None:
+    """Кэп контейнеров: враждебная страница с кучей GTM-id не превращает проверку в очередь запросов."""
+    requests: list[str] = []
+    containers = ("GTM-AAAA001", "GTM-AAAA002", "GTM-AAAA003")
+    html = "".join(
+        f'<noscript><iframe src="https://www.googletagmanager.com/ns.html?id={container}"></iframe></noscript>'
+        for container in containers
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            container = request.url.params["id"]
+            counter = 100_000 + containers.index(container) + 1
+            return httpx.Response(200, text=f'ym({counter}, "init", {{}});')
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    gtm_requests = [url for url in requests if "googletagmanager.com/gtm.js" in url]
+    assert len(gtm_requests) == 2
+    assert result.counter_ids == [100_001, 100_002]
+
+
+async def test_gtm_redirect_to_other_host_is_rejected() -> None:
+    """gtm.js отвечает редиректом на посторонний хост: hop отвергнут разрешённым списком, контейнер пропущен,
+    запрос туда не уходит."""
+    requests: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            return httpx.Response(302, headers={"location": "https://evil.example/gtm.js?id=GTM-NTZDZQP4"})
+        return httpx.Response(200, text=GTM_SNIPPET, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.pages
+    assert result.counter_ids == []
+    assert not result.can_launch
+    assert not any("evil.example" in url for url in requests)
+
+
+async def test_gtm_container_on_subpage_is_scanned() -> None:
+    """Контейнер встретился только на подстранице: он тоже досканируется."""
+    requests: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            return httpx.Response(200, text='ym(77777, "init", {});')
+        if request.url.path == "/services":
+            return httpx.Response(200, text=GTM_SNIPPET, headers={"content-type": "text/html"})
+        return httpx.Response(
+            200,
+            text='<a href="/services">Услуги</a><p>Салон красоты в Самаре.</p>',
+            headers={"content-type": "text/html"},
+        )
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.counter_ids == [77777]
+    assert result.can_launch
+
+
+async def test_lowercase_gtm_container_is_scanned() -> None:
+    """Id контейнера в нижнем регистре: детектится и сканируется (GTM принимает любой регистр)."""
+    requests: list[str] = []
+    snippet = GTM_SNIPPET.replace("GTM-NTZDZQP4", "gtm-ntzdzqp4")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        if request.url.host == "www.googletagmanager.com":
+            return httpx.Response(200, text='ym(88888, "init", {});')
+        return httpx.Response(200, text=snippet, headers={"content-type": "text/html"})
+
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert result.counter_ids == [88888]
+    assert "https://www.googletagmanager.com/gtm.js?id=gtm-ntzdzqp4" in requests
+
+
+async def test_constructor_page_up_to_four_megabytes_is_read() -> None:
+    """Страница конструктора сайтов больше старого лимита 1,5 МБ, но в новом 4 МБ: читается, счётчик из
+    JS-конфига найден, запуск не блокируется."""
+    block = "<p>Меню доставки еды, роллы и пицца.</p>"
+    html = (
+        '<script>window.config={yandexCityMetric:{"1":81575,"2":22246063}};</script>'
+        + block * 40_000
+        + "<p>Самара, ул. Примерная, д. 1</p>"
+    ).encode()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        return httpx.Response(200, content=html, headers={"content-type": "text/html"})
+
+    assert 1_500_000 < len(html) < MAX_BYTES
+    result = await read_site("https://salon.example", transport=httpx.MockTransport(handle))
+    assert len(result.pages) == 1
+    assert result.counter_ids == [81575, 22246063]
+    assert result.can_launch
 
 
 def test_html_boundaries_entities_and_hidden_content() -> None:

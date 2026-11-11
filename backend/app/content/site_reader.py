@@ -18,10 +18,15 @@ from app.content.verify import DescriptionDraft, OwnerQuestion, verify_descripti
 ROBOT_NAME = "AdAutopilotBot"
 USER_AGENT = f"{ROBOT_NAME}/0.1"
 TIMEOUT = 6.0
-MAX_BYTES = 1_500_000
+# Конструкторы сайтов (доставка еды и т.п.) отдают HTML с большим JS-конфигом: страницы до 4 МБ читаем целиком,
+# иначе проверка сайта падает там, где счётчик на самом деле стоит.
+MAX_BYTES = 4_000_000
 MAX_TEXT = 80_000
 MAX_REDIRECTS = 3
 MAX_PAGES = 5
+# Больше двух контейнеров GTM не сканируем: иначе враждебная страница превратит проверку сайта
+# в длинную очередь исходящих запросов.
+MAX_GTM_CONTAINERS = 2
 MIN_SITE_TEXT = 80
 ALLOWED_PORTS = (80, 443)
 TRANSITION_NETWORKS = tuple(
@@ -82,6 +87,7 @@ class Page:
     text: str
     links: list[tuple[str, str]] = field(default_factory=list)
     counter_ids: list[int] = field(default_factory=list)
+    gtm_ids: list[str] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
 
@@ -329,13 +335,23 @@ class SiteFetcher:
             self.robots[origin] = robots
         return self.robots[origin]
 
-    async def get(self, url: str, *, html: bool = True) -> tuple[str, int, str]:
+    async def get(
+        self,
+        url: str,
+        *,
+        html: bool = True,
+        site_scope: bool = True,
+        allowed_hosts: set[str] | None = None,
+    ) -> tuple[str, int, str]:
         for _ in range(MAX_REDIRECTS + 1):
             checked = safe_url(url)
-            if not checked or not same_site(checked, self.root):
+            if not checked or (site_scope and not same_site(checked, self.root)):
                 raise FetchError("Недопустимый URL или переход на другой домен")
+            # Каждый hop, включая стартовый URL и цели редиректа, обязан остаться в разрешённых хостах.
+            if allowed_hosts is not None and (urlsplit(checked).hostname or "") not in allowed_hosts:
+                raise FetchError("Хост вне разрешённого списка")
             url = checked
-            if html and not (await self.load_robots(url)).allows(url):
+            if html and site_scope and not (await self.load_robots(url)).allows(url):
                 raise FetchError("Страница запрещена robots.txt")
             async with self.client.stream(
                 "GET", url, headers={"Accept-Encoding": "identity"}, follow_redirects=False
@@ -351,6 +367,9 @@ class SiteFetcher:
                     raise FetchError("Сжатый ответ не поддерживается")
                 if html and (response.status_code != 200 or "html" not in content_type):
                     raise FetchError("Сайт не вернул HTML")
+                if not html and response.status_code != 200:
+                    # Тело не-HTML ответа с ошибкой не нужно: не читаем его до лимита размера впустую.
+                    return url, response.status_code, ""
                 length = response.headers.get("content-length")
                 if length is not None and int(length) > MAX_BYTES:
                     raise FetchError("Страница превышает ограничение размера")
@@ -358,10 +377,32 @@ class SiteFetcher:
                 return url, response.status_code, decode(content, content_type)
         raise FetchError("Слишком много редиректов")
 
+    async def load_gtm_counters(self, container: str) -> list[int]:
+        """Счётчики Метрики из контейнера GTM (частая установка — custom HTML тег): ответ gtm.js прогоняется
+        через тот же детектор. Запрос без same_site и robots — хост из разрешённого списка, но через safe_url
+        и PublicOnlyBackend клиента с его лимитами; любая ошибка — контейнер пропускаем."""
+        if not re.fullmatch(r"GTM-[A-Z0-9]{4,}", container, re.IGNORECASE):
+            return []
+        url = f"https://www.googletagmanager.com/gtm.js?id={container}"
+        parts = urlsplit(url)
+        if (parts.hostname or "") not in GTM_HOSTS or not parts.path.startswith("/gtm.js"):
+            return []
+        if not re.fullmatch(r"id=GTM-[A-Z0-9]{4,}", parts.query, re.IGNORECASE):
+            return []
+        try:
+            _, status, body = await asyncio.wait_for(
+                self.get(url, html=False, site_scope=False, allowed_hosts=GTM_HOSTS), TIMEOUT * 2
+            )
+        except (FetchError, httpx.HTTPError, TimeoutError, ValueError):
+            return []
+        if status != 200:
+            return []
+        return find_metrica_counters(body)
+
     async def load(self, url: str) -> Page | None:
         try:
             final_url, _, html = await asyncio.wait_for(self.get(url), TIMEOUT * 2)
-            # Разбор полутора мегабайт HTML на чистом Python — до секунды: в цикле событий он остановил бы всех.
+            # Разбор нескольких мегабайт HTML на чистом Python — секунды: в цикле событий он остановил бы всех.
             return await asyncio.to_thread(parse_html, final_url, html)
         except (FetchError, httpx.HTTPError, TimeoutError, ValueError):
             return None
@@ -407,11 +448,41 @@ class _PageParser(HTMLParser):
 
 def find_metrica_counters(html: str) -> list[int]:
     ids = re.findall(r"mc\.yandex\.(?:ru|com|com\.tr)/watch/(\d+)", html, re.IGNORECASE)
-    if re.search(r"mc\.yandex\.(?:ru|com|com\.tr)/metrika", html, re.IGNORECASE):
-        ids += re.findall(r"\bym\(\s*['\"]?(\d+)['\"]?\s*,\s*['\"]init['\"]", html)
+    # ym(..., "init") без ссылки на mc.yandex тоже считаем: так счётчик выглядит внутри контейнера GTM
+    # и в собственных скриптах сайта. Короткие числа (даты, индексы) — не id: разрядность как у прочих паттернов.
+    ids += re.findall(r"\bym\(\s*['\"]?(\d{5,15})['\"]?,\s*['\"]init['\"]", html)
     ids += re.findall(r"\byaCounter(\d+)\s*=\s*new\s+Ya\.Metrika", html)
     ids += re.findall(r"new\s+Ya\.Metrika2?\s*\(\s*\{\s*id\s*:\s*(\d+)", html)
+    # Прямая вставка tag.js без вызова ym(..., "init") в том же HTML.
+    ids += re.findall(r"mc\.yandex\.[\w.]+/metrika/tag\.js\?[^\"']*?\bid=(\d{5,15})", html, re.IGNORECASE)
+    # Конструкторы сайтов (доставка еды, формат «WEB-30.02» и подобные) грузят счётчики из JS-конфига
+    # страницы. Короткие числа (меньше пяти знаков) в таких конфигах — индексы массивов, не id: не берём.
+    for config in re.findall(r"\byandexCityMetric\s*:\s*\{([^}]*)\}", html):
+        ids += re.findall(r":\s*(\d{5,15})", config)
+    ids += re.findall(r"\byandexMetric\s*:\s*[\"'](\d{5,15})[\"']", html)
+    # Плоский сериализованный массив настроек: число-строка сразу после id контейнера GTM — основной счётчик.
+    ids += re.findall(r"\"GTM-[A-Z0-9]+\"\s*,\s*\"(\d{5,15})\"", html, re.IGNORECASE)
     return sorted({int(counter) for counter in ids if len(counter) <= 15 and int(counter) > 0})
+
+
+GTM_HOSTS = {"googletagmanager.com", "www.googletagmanager.com"}
+GTM_CONTAINER = re.compile(r"\bGTM-[A-Z0-9]{4,}\b", re.IGNORECASE)
+
+
+def find_gtm_containers(html: str) -> list[str]:
+    """Id контейнеров GTM из загрузчиков googletagmanager: ?id= в самом URL либо аргумент стандартного
+    сниппета с конкатенацией ('gtm.js?id='+…,'GTM-XXXX'). Метрика через custom HTML контейнера —
+    частая установка, поэтому контейнер досканируем отдельно."""
+    containers: set[str] = set()
+    for match in re.finditer(r"googletagmanager\.com/(?:gtm\.js|ns\.html)\?[^\"'<>\s]+", html, re.IGNORECASE):
+        containers.update(GTM_CONTAINER.findall(match.group(0)))
+    for match in re.finditer(
+        r"googletagmanager\.com/gtm\.js\?[^\"'<>\s]*['\"][^<]{0,400}?\b(GTM-[A-Z0-9]{4,})\b",
+        html,
+        re.IGNORECASE,
+    ):
+        containers.add(match.group(1))
+    return sorted(containers)
 
 
 def _phone(value: str) -> str | None:
@@ -447,6 +518,7 @@ def parse_html(url: str, html: str) -> Page:
         text=text,
         links=links,
         counter_ids=find_metrica_counters(html),
+        gtm_ids=find_gtm_containers(html),
         phones=sorted({phone for value in phones if (phone := _phone(value))}),
         emails=sorted({email.lower() for email in emails}),
     )
@@ -511,6 +583,12 @@ async def read_site(url: str, *, transport: httpx.AsyncBaseTransport | None = No
                 pages.append(page)
                 seen.add(page.url)
                 pending.extend(link for link in pick_subpages(page) if link not in seen and link not in pending)
+        # Метрика через GTM (custom HTML тег): контейнеры из загрузчиков страниц досканируем один раз каждый,
+        # но не больше MAX_GTM_CONTAINERS — перебор контейнеров не должен растягивать проверку сайта.
+        for container in sorted({container for page in pages for container in page.gtm_ids})[:MAX_GTM_CONTAINERS]:
+            counters = await fetcher.load_gtm_counters(container)
+            if counters:
+                first.counter_ids = sorted(set(first.counter_ids) | set(counters))
         return SiteReadResult(pages)
 
 
