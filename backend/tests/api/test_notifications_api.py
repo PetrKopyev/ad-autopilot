@@ -108,6 +108,7 @@ def test_minimum_pause_notice_reaches_owner(setup):
         ("MODERATION_LONG", "Площадка долго проверяет объявления", "warning"),
         ("MODERATION_ALL_REJECTED", "Кампания не показывается: все объявления отклонены", "danger"),
         ("CAMPAIGN_OFF_BY_PLATFORM", "Площадка не включила кампанию", "warning"),
+        ("ACCOUNT_EMPTY", "Средства на счёте площадки закончились", "danger"),
     ],
 )
 def test_review_notices_reach_owner(setup, code, title, level):

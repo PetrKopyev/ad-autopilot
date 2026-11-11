@@ -1147,7 +1147,8 @@ class DirectAdapter:
             {
                 "SelectionCriteria": {"Ids": [int(refs.campaign_id)]},
                 # Status нужен: у кампании-черновика и кампании на модерации State="OFF", отличие — в Status.
-                "FieldNames": ["Id", "Name", "State", "Status"],
+                # StatusClarification — причина остановки площадкой: пустой счёт — не пауза владельца.
+                "FieldNames": ["Id", "Name", "State", "Status", "StatusClarification"],
                 f"{kind}FieldNames": ["BiddingStrategy"],
             },
         )
@@ -1180,6 +1181,7 @@ class DirectAdapter:
                 period_cap_kop=period,
                 targeting={"weekly_limits_kop": budgets},
                 ended=item.get("State") == "ENDED",
+                payment_paused="Средства на счете закончились" in (item.get("StatusClarification") or ""),
             )
         if refs.groups:
             groups = await self._get(

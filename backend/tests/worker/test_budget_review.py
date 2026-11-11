@@ -1417,23 +1417,155 @@ async def test_low_balance_is_notified_once_until_the_account_is_topped_up():
     worker = world.worker()
     world.adapter.balance_kop = world.campaign.daily_limit_kop - 1
 
-    def notices():
+    def notices(code):
         rows = world.repository.rows(WorkerRun, world.business.id, kind="notification")
-        return [row.log[0]["text"] for row in rows if row.log[0]["reason_code"] == "BALANCE_LOW"]
+        return [row.log[0]["text"] for row in rows if row.log[0]["reason_code"] == code]
 
     for _ in range(2):
         world.clock.advance(hours=0.5)
         await budget_guard(worker, world.business)
-    (text,) = notices()
+    (text,) = notices("BALANCE_LOW")
     assert text.startswith("На счёте Яндекс Директа осталось") and "Пополните счёт" in text
+    # Ноль — отдельный эпизод: ACCOUNT_EMPTY, а не второй BALANCE_LOW; повторные тики на нуле молчат.
+    world.adapter.balance_kop = 0
+    for _ in range(2):
+        world.clock.advance(hours=0.5)
+        await budget_guard(worker, world.business)
+    assert len(notices("BALANCE_LOW")) == 1
+    (empty_text,) = notices("ACCOUNT_EMPTY")
+    assert "закончились деньги" in empty_text and "включится сама" in empty_text
+    # Пополнение закрывает оба эпизода; новый ноль срабатывает заново — ровно одним ACCOUNT_EMPTY.
     world.adapter.balance_kop = world.campaign.daily_limit_kop
     world.clock.advance(hours=0.5)
     await budget_guard(worker, world.business)
-    assert world.business.settings["_worker"]["balance_low"] == {}
+    settings = world.business.settings["_worker"]
+    assert settings["balance_low"] == {} and settings["balance_empty"] == {}
     world.adapter.balance_kop = 0
     world.clock.advance(hours=0.5)
     await budget_guard(worker, world.business)
-    assert len(notices()) == 2
+    assert len(notices("BALANCE_LOW")) == 1
+    assert len(notices("ACCOUNT_EMPTY")) == 2
+
+
+async def test_partial_top_up_closes_empty_episode_but_keeps_low():
+    """Частичное пополнение (0 < x < дневного) закрывает эпизод пустого счёта, но не «низкий остаток»:
+    повторный ноль шлёт ACCOUNT_EMPTY заново, BALANCE_LOW не дублируется."""
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    worker = world.worker()
+    daily = world.campaign.daily_limit_kop
+
+    def notices(code):
+        rows = world.repository.rows(WorkerRun, world.business.id, kind="notification")
+        return [row.log[0]["text"] for row in rows if row.log[0]["reason_code"] == code]
+
+    world.adapter.balance_kop = daily - 1
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert len(notices("BALANCE_LOW")) == 1
+    world.adapter.balance_kop = 0
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert len(notices("ACCOUNT_EMPTY")) == 1
+    # Частичное пополнение: уведомлений нет; «пусто» закрыто, «низкий остаток» жив.
+    world.adapter.balance_kop = daily // 2
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert len(notices("BALANCE_LOW")) == 1 and len(notices("ACCOUNT_EMPTY")) == 1
+    settings = world.business.settings["_worker"]
+    assert settings["balance_low"] and settings["balance_empty"] == {}
+    # Снова ноль: второй ACCOUNT_EMPTY, BALANCE_LOW всё ещё один.
+    world.adapter.balance_kop = 0
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    assert len(notices("BALANCE_LOW")) == 1
+    assert len(notices("ACCOUNT_EMPTY")) == 2
+
+
+async def test_zero_balance_without_low_notifies_account_empty_only():
+    """Ноль без предыдущего «низкого остатка»: одно уведомление ACCOUNT_EMPTY, а не два подряд."""
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    world.adapter.balance_kop = 0
+    world.clock.advance(hours=0.5)
+    await budget_guard(world.worker(), world.business)
+    rows = world.repository.rows(WorkerRun, world.business.id, kind="notification")
+    assert [row.log[0]["reason_code"] for row in rows] == ["ACCOUNT_EMPTY"]
+    settings = world.business.settings["_worker"]
+    assert settings["balance_empty"] and settings["balance_low"]
+
+
+async def test_payment_pause_by_platform_is_recorded_with_money_text_by_guard():
+    """Площадка остановила кампанию из-за пустого счёта: тик стража (не суточный пересчёт) записывает паузу
+    с текстом про деньги — не «вы остановили» — и ставит paused_owner/owner_paused."""
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    state = world.adapter._states[world.refs.campaign_id]
+    world.adapter._states[world.refs.campaign_id] = replace(state, status="paused_auto", payment_paused=True)
+    world.clock.advance(hours=0.5)
+    await budget_guard(world.worker(), world.business)
+    (pause,) = world.changes(reason_code="EXTERNAL_PAUSE_PAYMENT")
+    assert pause.reason_text == (
+        "Площадка остановила показы: на счёте площадки закончились деньги. "
+        "Пополните счёт в кабинете площадки — реклама включится сама."
+    )
+    assert world.campaign.status == "paused_auto" and world.campaign.owner_paused
+
+
+async def test_platform_error_from_status_sync_does_not_fail_guard_tick():
+    """Transient-ошибка площадки в сверке статусов не роняет тик стража: ledger и решение стража уже
+    сохранены, settle_review отрабатывает, сверку догоняет следующий тик."""
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    worker = world.worker()
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+    good_ledger = [row.spent_at for row in world.ledger()]
+    assert good_ledger
+
+    original = world.adapter.get_state
+
+    async def failing_get_state(refs):
+        raise PlatformError("Директ недоступен.", status_code=503)
+
+    world.adapter.get_state = failing_get_state
+    worker.step_key = "budget_guard:fail"
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)  # не падает
+    assert [row.spent_at for row in world.ledger()] != good_ledger  # ledger шага сохранился
+    assert world.business.status == "running"
+
+    world.adapter.get_state = original
+    worker.step_key = "budget_guard:recover"
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)  # сверка догоняется без ошибки
+    assert world.business.status == "running"
+
+
+async def test_closed_account_from_status_sync_does_not_fail_guard_tick():
+    """Кабинет «закрылся» посреди тика (InvalidToken): страж не падает, бизнес остаётся running,
+    сверку догонит следующий тик."""
+    from cryptography.fernet import InvalidToken
+
+    from app.services.budget_guard import budget_guard
+
+    world = await make_world()
+    worker = world.worker()
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)
+
+    async def failing_get_state(refs):
+        raise InvalidToken("токен не расшифровывается")
+
+    world.adapter.get_state = failing_get_state
+    worker.step_key = "budget_guard:closed"
+    world.clock.advance(hours=0.5)
+    await budget_guard(worker, world.business)  # не падает
+    assert world.business.status == "running"
 
 
 async def test_unknown_balance_or_platform_error_does_not_notify(monkeypatch, caplog):

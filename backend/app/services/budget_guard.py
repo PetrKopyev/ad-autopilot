@@ -12,7 +12,7 @@ from app.db.models import BudgetLedger, Business, Campaign
 from app.domain.budget import active_daily_limit, plan_budget
 from app.domain.budget import budget_guard as decide_guard
 from app.domain.explain import explain, rubles
-from app.platforms.base import EntityState, Operation, StatRow
+from app.platforms.base import EntityState, ExternalRefs, Operation, StatRow
 from app.services.changes import CLOSED_ACCOUNT, LOCK_WAIT_SECONDS, ChangeConflict, awaiting_enable, wait_for_lock
 from app.worker.clock import today
 
@@ -22,10 +22,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def campaign_state(worker: Worker, business: Business, campaign: Campaign) -> EntityState | None:
+async def campaign_state(
+    worker: Worker, business: Business, campaign: Campaign, *, refs: ExternalRefs | None = None
+) -> EntityState | None:
     """Состояние кампании на площадке. None — кампании нет в подключённом кабинете (удалена там или осталась в
-    прежнем): шаг идёт дальше без неё, а владельцу — одно уведомление на кампанию, сколько бы шагов её ни встречали."""
-    states = await worker.resolve_adapter(business.id, campaign.platform).get_state(worker.refs(campaign))
+    прежнем): шаг идёт дальше без неё, а владельцу — одно уведомление на кампанию, сколько бы шагов её ни встречали.
+    refs — готовые внешние ссылки: лёгкий запрос только кампании, когда группы, объявления и таргеты не нужны."""
+    states = await worker.resolve_adapter(business.id, campaign.platform).get_state(
+        refs if refs is not None else worker.refs(campaign)
+    )
     state = states.get(campaign.external_id)
     if state is not None:
         missing = worker.metadata(business).get("missing_campaigns", [])
@@ -350,7 +355,25 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
             worker.notice(business, result.reason_code, "Реклама остановлена. Проверьте расход и остаток бюджета.")
     elif business.status == "running":
         await balance_notice(worker, business)
-    from app.services.sync import settle_review
+    from app.services.sync import settle_review, sync_campaign_status
+
+    # Внешний статус кампаний сверяем каждые 30 минут, а не раз в сутки пересчётом: остановка из-за пустого
+    # счёта не должна сутки выглядеть в интерфейсе как «Работает». Сбой сверки (площадка занята или transient-ошибка)
+    # не ломает тик: ledger и решение стража уже сохранены, сверку догонит следующий тик, settle_review отработает.
+    if business.status == "running" and not worker.metadata(business).get("kill_switch"):
+        try:
+            await sync_campaign_status(worker, business)
+        except ChangeConflict:
+            logger.info("Сверка статусов кампаний бизнеса %s отложена: площадка занята.", business.id)
+        except CLOSED_ACCOUNT as error:
+            # Сбой сверки, включая закрытие кабинета посреди тика, не роняет тик: сверку догонит следующий.
+            # В журнал — только тип и текст ошибки, без токена и тела запроса.
+            logger.warning(
+                "Сверка статусов кампаний бизнеса %s не удалась: %s: %s",
+                business.id,
+                type(error).__name__,
+                error,
+            )
 
     # Остановку черновика площадка не применяет: включи она кампанию после одобрения сама, реклама тратила бы до
     # часового шага модерации.
@@ -358,9 +381,12 @@ async def budget_guard(worker: Worker, business: Business, *, reconcile: bool = 
 
 
 async def balance_notice(worker: Worker, business: Business) -> None:
-    """Денег на счёте площадки меньше дневного лимита её кампаний: одно уведомление, пока счёт не пополнят."""
+    """Денег на счёте площадки меньше дневного лимита её кампаний: одно уведомление, пока счёт не пополнят.
+    Нулевой баланс — отдельный эпизод (ACCOUNT_EMPTY): показы уже остановились, BALANCE_LOW при нуле не шлём."""
     low = worker.metadata(business).get("balance_low", {})
-    current = {}
+    empty = worker.metadata(business).get("balance_empty", {})
+    current: dict[str, str] = {}
+    current_empty: dict[str, str] = {}
     campaigns = [item for item in worker.current_campaigns(business) if item.status == "active"]
     for platform in sorted({item.platform for item in campaigns}):
         daily = sum(item.daily_limit_kop for item in campaigns if item.platform == platform)
@@ -374,9 +400,34 @@ async def balance_notice(worker: Worker, business: Business) -> None:
             )
             if platform in low:
                 current[platform] = low[platform]
+            if platform in empty:
+                current_empty[platform] = empty[platform]
             continue
-        if balance is None or balance >= daily:
+        if balance is None:
+            # Площадка не сообщает остаток: прежнее состояние эпизодов сохраняется, как при ошибке.
+            if platform in low:
+                current[platform] = low[platform]
+            if platform in empty:
+                current_empty[platform] = empty[platform]
             continue
+        if balance >= daily:
+            # Пополнили (или кампании на паузе и тратить нечему): оба эпизода закрыты, новый ноль — новое уведомление.
+            continue
+        if balance == 0:
+            # В current[platform] добавляем без уведомления: цикл low должен сработать заново после пополнения.
+            current[platform] = low.get(platform, worker.clock.now.isoformat())
+            current_empty[platform] = empty.get(platform, worker.clock.now.isoformat())
+            if platform not in empty:
+                worker.notice(
+                    business,
+                    "ACCOUNT_EMPTY",
+                    f"На счёте {ACCOUNT_NAMES[platform]} закончились деньги — площадка остановила показы. "
+                    "Пополните счёт в кабинете площадки: реклама включится сама, как только деньги поступят.",
+                    key=f"balance_empty:{platform}:{current_empty[platform]}",
+                )
+            continue
+        # Положительный баланс ниже дневного: эпизод low живёт дальше (платформа остаётся в current),
+        # а эпизод «пусто» закрыт — платформа не попадает в current_empty: снова ноль даст ACCOUNT_EMPTY.
         current[platform] = low.get(platform, worker.clock.now.isoformat())
         if platform not in low:
             worker.notice(
@@ -386,5 +437,5 @@ async def balance_notice(worker: Worker, business: Business) -> None:
                 f"({rubles(daily)} ₽). Пополните счёт в кабинете площадки, иначе показы остановятся.",
                 key=f"balance_low:{platform}:{current[platform]}",
             )
-    if current != low:
-        worker.remember(business, balance_low=current)
+    if current != low or current_empty != empty:
+        worker.remember(business, balance_low=current, balance_empty=current_empty)

@@ -207,6 +207,9 @@ class EntityState:
     # Кампания закончилась по дате окончания (Direct State=ENDED): не пауза владельца, месячный переход
     # продлевает дату и возобновляет кампанию.
     ended: bool = False
+    # Площадка остановила показы из-за пустого счёта (Direct StatusClarification «Средства на счете
+    # закончились»): владелец не останавливал, площадка включит сама. Используется только для текста журнала.
+    payment_paused: bool = False
 
     def __post_init__(self) -> None:
         for name in ("daily_limit_kop", "period_cap_kop"):

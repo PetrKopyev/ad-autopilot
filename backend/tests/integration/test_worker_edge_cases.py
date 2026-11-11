@@ -181,8 +181,17 @@ async def test_owner_stop_bypasses_unrelated_pending_change():
 
 
 async def test_guard_uses_local_daily_limits_without_state_requests(monkeypatch):
+    """Остановка по бюджету считается по локальным лимитам: полный снимок с группами и объявлениями стражу
+    не нужен, сверке внешних статусов хватает лёгкого запроса одной кампании."""
     world = await make_world()
-    monkeypatch.setattr(world.adapter, "get_state", AsyncMock(side_effect=AssertionError("лишний запрос")))
+    original = world.adapter.get_state
+
+    async def get_state(refs):
+        if refs.groups or refs.ads or refs.targets:
+            raise AssertionError("лишний запрос")
+        return await original(refs)
+
+    monkeypatch.setattr(world.adapter, "get_state", get_state)
     await budget_guard(world.worker(), world.business)
     assert world.business.status == "running"
 

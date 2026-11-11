@@ -28,6 +28,7 @@ NOTICES = {
     "PLATFORM_MINIMUM_PAUSE": ("Реклама остановлена: бюджета не хватает на минимум площадки", "warning"),
     "DIRECT_REAUTH": ("Переподключите Яндекс Директ", "warning"),
     "BALANCE_LOW": ("На счёте площадки заканчиваются деньги", "danger"),
+    "ACCOUNT_EMPTY": ("Средства на счёте площадки закончились", "danger"),
     "DEMO_STATE_LOST": ("Демо нужно начать заново", "warning"),
     "LAUNCH_INTERRUPTED": ("Запуск рекламы не завершился", "danger"),
     "EXPERIMENT_GENERATION_FAILED": ("Проверку двух вариантов не запустили", "warning"),

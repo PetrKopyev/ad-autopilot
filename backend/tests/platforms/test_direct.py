@@ -1734,6 +1734,24 @@ async def test_service_confirms_direct_auto_pause_and_preserves_local_author(ada
     assert (await adapter.get_state(refs))[refs.campaign_id].status == "paused_owner"
 
 
+async def test_direct_state_marks_payment_pause_from_status_clarification(adapter, api, plan):
+    """StatusClarification «Средства на счете закончились» → payment_paused: журнал отличит остановку
+    из-за пустого счёта от паузы владельца. Без уточнения — обычная пауза."""
+    server = DirectServer()
+    api.post(url__regex=r"https://api\.direct\.yandex\.com/json/v501/.*").mock(side_effect=server)
+    refs = await adapter.create_campaign_tree(plan)
+    row = server.rows["campaigns"][0]
+    row["State"] = "OFF"
+    row["StatusClarification"] = "Средства на счете закончились. Дата окончания кампании 16.11.2026"
+    state = (await adapter.get_state(refs))[refs.campaign_id]
+    assert state.status == "paused_auto" and state.payment_paused
+    # SUSPENDED с той же причиной тоже помечается: причина важнее вида остановки.
+    row["State"] = "SUSPENDED"
+    assert (await adapter.get_state(refs))[refs.campaign_id].payment_paused
+    row["StatusClarification"] = ""
+    assert not (await adapter.get_state(refs))[refs.campaign_id].payment_paused
+
+
 @pytest.mark.parametrize("include_vat,weekly_micros", [(True, 900_000 * 10_000), (False, 737_704 * 10_000)])
 async def test_service_budget_update_after_restart_converts_lifetime_cap_and_extends_end_date(
     api, include_vat, weekly_micros

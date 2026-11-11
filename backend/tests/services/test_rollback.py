@@ -916,6 +916,34 @@ def test_empty_operations_records_revert_only_by_experiment(kind, reason_code, e
     assert can_revert(change) is expected
 
 
+def test_payment_pause_record_is_not_reverted():
+    """Остановку из-за пустого счёта не откатываем: пока счёт пуст, площадка остановит кампанию снова,
+    а после пополнения включит её сама (EXTERNAL_RESUME). Обычная пауза в кабинете откатываема, как раньше."""
+    operation = asdict(Operation("set_status", "campaign", "c-1", "status", "active", "paused_owner"))
+    payment = ChangeLog(
+        id=1,
+        business_id=1,
+        kind="pause",
+        platform="fake",
+        reason_code="EXTERNAL_PAUSE_PAYMENT",
+        operations=[operation],
+        evidence={},
+        status="applied",
+    )
+    usual = ChangeLog(
+        id=2,
+        business_id=1,
+        kind="pause",
+        platform="fake",
+        reason_code="EXTERNAL_PAUSE",
+        operations=[operation],
+        evidence={},
+        status="applied",
+    )
+    assert can_revert(payment) is False
+    assert can_revert(usual) is True
+
+
 async def test_history_does_not_offer_to_turn_on_campaign_of_replaced_plan(client, repository, tree):
     """Остановку кампании прежнего плана не вернуть: откат включил бы рекламу, за которой никто не следит. Остановку
     действующей кампании вернуть можно."""

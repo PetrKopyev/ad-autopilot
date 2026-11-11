@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from app.db.models import Ad, AdGroup, Business, Campaign, ChangeLog, StatsDaily
 from app.db.query import Window
-from app.platforms.base import Operation
+from app.platforms.base import ExternalRefs, Operation
 from app.services.changes import CLOSED_ACCOUNT, REVIEW, SETTLE, ChangeConflict
 from app.worker.clock import today
 
@@ -436,7 +436,8 @@ REVIEW_PAUSED = "Площадка закончила проверку объяв
 
 async def sync_campaign_status(worker: Worker, business: Business) -> None:
     """Пауза и включение кампании в кабинете площадки. Площадка не говорит, кто остановил кампанию: что меняли мы,
-    помнит локальный статус — его переписывает каждое применённое изменение."""
+    помнит локальный статус — его переписывает каждое применённое изменение. Зовётся стражем бюджета каждые 30 минут
+    (чтобы остановка из-за пустого счёта не ждала суточного пересчёта) и пересчётом лимитов."""
     from app.config import get_domain_settings
     from app.services.budget_guard import campaign_state, closed_platforms
 
@@ -448,7 +449,10 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
         # Кампанию, которую площадка ещё проверяет, сверяет settle_review: её статус — цель, а не факт.
         if campaign.platform in skipped or campaign.review_since is not None:
             continue
-        state = await campaign_state(worker, business, campaign)
+        # Лёгкий запрос: сверке нужны только статус и дата окончания кампании, без групп, объявлений и таргетов.
+        state = await campaign_state(
+            worker, business, campaign, refs=ExternalRefs(campaign.external_id, {}, {}, {})
+        )
         if state is None:
             continue
         paused_outside = (
@@ -470,7 +474,19 @@ async def sync_campaign_status(worker: Worker, business: Business) -> None:
             [Operation("set_status", "campaign", campaign.external_id, "status", campaign.status, state.status)],
             actor="external",
             kind="pause" if paused_outside else "resume",
-            reason_code="EXTERNAL_PAUSE" if paused_outside else "EXTERNAL_RESUME",
+            # Остановка из-за пустого счёта — не «вы остановили»: площадка включит кампанию сама после пополнения.
+            # Код не из TEMPLATES: текст передаём готовым, шаблон его бы перекрыл.
+            reason_code=(
+                "EXTERNAL_PAUSE_PAYMENT"
+                if paused_outside and state.payment_paused
+                else ("EXTERNAL_PAUSE" if paused_outside else "EXTERNAL_RESUME")
+            ),
+            reason_text=(
+                "Площадка остановила показы: на счёте площадки закончились деньги. "
+                "Пополните счёт в кабинете площадки — реклама включится сама."
+            )
+            if paused_outside and state.payment_paused
+            else None,
             suffix=f"external:{worker.clock.now.isoformat()}",
         )
         campaign.owner_paused = paused_outside
